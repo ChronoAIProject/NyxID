@@ -28,6 +28,7 @@ const nodes = (n: any): E[] =>
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
+  cornerWindow = false,
   android = undefined as (typeof androidCases)[number] | undefined,
 } = {}) {
   let options: any;
@@ -71,7 +72,9 @@ function setup({
     },
   };
   let fontScale = 1;
+  const corner = {value:cornerWindow};
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceQuickRailContext:corner},
     "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
@@ -966,8 +969,8 @@ for (const scenario of androidCases) {
   });
 }
 
-test("a live text-size change remounts the crew transcript so every row re-measures", () => {
-  const f = setup();
+test("on the Duo a live text-size change remounts the crew transcript so every row re-measures", () => {
+  const f = setup({cornerWindow:true});
   const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
   const before = list().key;
   f.h.render();
@@ -985,8 +988,21 @@ test("scrolling the crew transcript dismisses the keyboard and never swallows a 
   f.h.unmount();
 });
 
-test("an idle crew composer on a phone may collapse to one row, like private chats", () => {
-  const f = setup();
+test("only an idle folded Duo crew composer may collapse to one row, like private chats", () => {
+  const ordinary = setup();
+  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  ordinary.h.unmount();
+  const f = setup({cornerWindow:true});
   assert.equal(f.input().props.compactWhenIdle, true);
+  f.h.unmount();
+});
+
+
+test("P9 ordinary crew transcript keeps its base identity across text size changes", () => {
+  const f=setup();
+  const list=()=>nodes(f.h.value()).find(n=>n.type === "FlatList")!;
+  const before=list().key;
+  f.setFontScale(3.12);
+  assert.equal(list().key,before);
   f.h.unmount();
 });

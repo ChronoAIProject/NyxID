@@ -528,6 +528,8 @@ pub struct QuickAccessResponse {
     pub items: Vec<QuickAccessItemResponse>,
     /// False while the person still has the default list.
     pub customized: bool,
+    /// Unknown stored entries were omitted; replacement needs a newer client/server.
+    pub has_unsupported_entries: bool,
 }
 
 impl From<crate::models::user::QuickAccessItem> for QuickAccessItemResponse {
@@ -555,6 +557,7 @@ fn quick_access_response(
     QuickAccessResponse {
         items: items.into_iter().map(Into::into).collect(),
         customized,
+        has_unsupported_entries: false,
     }
 }
 
@@ -564,12 +567,15 @@ pub async fn get_quick_access(
     auth_user: AuthUser,
 ) -> AppResult<Json<QuickAccessResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
-    let saved = crate::services::user_preferences_service::read_quick_access(
-        &state.db,
-        &auth_user.user_id.to_string(),
-    )
-    .await?;
-    Ok(Json(quick_access_response(saved)))
+    let (saved, has_unsupported_entries) =
+        crate::services::user_preferences_service::read_quick_access_with_compatibility(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+    let mut response = quick_access_response(saved);
+    response.has_unsupported_entries = has_unsupported_entries;
+    Ok(Json(response))
 }
 
 /// PUT /api/v1/users/me/quick-access
@@ -3172,6 +3178,166 @@ mod export_http_tests {
             fixture.request(&[bearer(&fixture.human_token)]).await.0,
             StatusCode::TOO_MANY_REQUESTS
         );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn p6_existing_preference_writers_preserve_quick_access_and_future_fields() {
+        use crate::models::user::{
+            SavedServiceView, ServiceViewPreferences, ServiceViewsPreferences,
+        };
+        use crate::services::{analytics_consent_service, user_preferences_service as preferences};
+        use mongodb::bson::{Document, doc};
+        let db = crate::test_utils::connect_test_database("quick_access_rolling_writers")
+            .await
+            .expect("Mongo required");
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let expected = doc! {"items":[{"kind":"agent","id":Uuid::new_v4().to_string()}], "future_rail_setting":"keep"};
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &owner},
+                doc! {"$set":{
+                    "profile_config.quick_access": &expected, "profile_config.future_setting":"keep"
+                }},
+            )
+            .await
+            .unwrap();
+        let filters: ServiceViewPreferences = serde_json::from_value(serde_json::json!({
+        "search":"$literal", "organization_ids":[], "service_group_ids":[], "source":"all", "state":"all", "service_type":"all", "show_auto_connected":false
+    })).unwrap();
+        preferences::save_service_views(
+            &db,
+            &owner,
+            ServiceViewsPreferences {
+                views: vec![SavedServiceView {
+                    id: "one".into(),
+                    name: "One".into(),
+                    filters: filters.clone(),
+                }],
+                default_id: Some("one".into()),
+            },
+        )
+        .await
+        .unwrap();
+        preferences::save_services_view(&db, &owner, filters)
+            .await
+            .unwrap();
+        analytics_consent_service::set(&db, &owner, false)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let _ = crate::handlers::users::complete_onboarding(
+            axum::extract::State(state),
+            crate::test_utils::test_auth_user(&owner),
+            axum::Json(crate::handlers::users::CompleteOnboardingRequest {
+                key: "ai_services".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let profile = row.get_document("profile_config").unwrap();
+        assert_eq!(profile.get_document("quick_access").unwrap(), &expected);
+        assert_eq!(profile.get_str("future_setting").unwrap(), "keep");
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mixed_version_quick_access_tests {
+    use super::*;
+    use crate::test_utils::*;
+    use mongodb::bson::{self, Document, doc};
+
+    #[tokio::test]
+    async fn m2622_08_partial_read_refuses_replacement_preserves_raw_unknowns_and_allows_reset() {
+        let db = connect_test_database("quick_access_mixed_version")
+            .await
+            .expect("MongoDB required");
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&id, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let raw = doc! { "items": [
+            { "kind": "destination", "id": "plugins" },
+            { "kind": "destination", "id": "future_destination" },
+            { "kind": "future_workflow", "id": "opaque", "future_config": { "preserve": true } }
+        ] };
+        let bytes = bson::to_vec(&raw).unwrap();
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &id},
+                doc! {"$set":{"profile_config.quick_access": &raw}},
+            )
+            .await
+            .unwrap();
+        // Actual model serde is intentionally tolerant; it silently hides both
+        // future entries, so the HTTP flag must be grounded in raw BSON.
+        let typed = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(typed.profile_config.quick_access.unwrap().items.len(), 1);
+        let state = test_app_state(db.clone());
+        let Json(read) = get_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert_eq!(read.items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["has_unsupported_entries"],
+            true
+        );
+        let result = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let stored = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_vec(
+                stored
+                    .get_document("profile_config")
+                    .unwrap()
+                    .get_document("quick_access")
+                    .unwrap()
+            )
+            .unwrap(),
+            bytes
+        );
+        let Json(reset) = reset_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert!(!reset.customized);
+        assert_eq!(
+            serde_json::to_value(&reset).unwrap()["has_unsupported_entries"],
+            false
+        );
+        let Json(saved) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert!(saved.customized);
         db.drop().await.unwrap();
     }
 }

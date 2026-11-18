@@ -1,3 +1,4 @@
+import { localizedToast } from "../../i18n/localizedToast";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import type { ServiceConnection } from "../services/serviceContracts";
@@ -245,7 +246,7 @@ export function ActivityScreen() {
 
       const isGrant = decision === "APPROVE" && approvalMode === "grant";
       setActiveSegment("pending");
-      setToast({
+      setToast(localizedToast(() => ({
         message: decision === "APPROVE" ? translateApp("Approved")
             : translateApp("Denied"),
         kind: "success",
@@ -257,10 +258,10 @@ export function ActivityScreen() {
               },
             }
           : {}),
-      });
+      })));
     },
     onError: (error, { id }) => {
-      setToast({ message: getDecisionErrorMessage(error), kind: "error" });
+      setToast(localizedToast(() => ({ message: getDecisionErrorMessage(error), kind: "error" })));
     },
     onSettled: (_, __, { id }) => {
       setMutatingIds((prev) => {
@@ -279,10 +280,10 @@ export function ActivityScreen() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
-      setToast({ message: translateApp("Revoked"), kind: "success" });
+      setToast(localizedToast(() => ({ message: translateApp("Revoked"), kind: "success" })));
     },
     onError: () => {
-      setToast({ message: translateApp("Failed to revoke. Try again."), kind: "error" });
+      setToast(localizedToast(() => ({ message: translateApp("Failed to revoke. Try again."), kind: "error" })));
     },
     onSettled: (_, __, { id }) => {
       setMutatingIds((prev) => {
@@ -503,10 +504,10 @@ export function ActivityScreen() {
     if (online) {
       await handleRefresh("user");
     } else {
-      setToast({
+      setToast(localizedToast(() => ({
         message: translateApp("Still offline — will retry when connected"),
         kind: "error",
-      });
+      })));
     }
   }, [recheckConnection, handleRefresh]);
 

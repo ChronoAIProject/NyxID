@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { ApiError } from "../../lib/api/ApiError";
 import {
@@ -41,9 +41,7 @@ export function createBillingApi(request: BillingRequest) {
     },
     async usage(period: BillingPeriod, signal?: AbortSignal) {
       const result = await read(`/billing/usage?period=${billingPeriodSchema.parse(period)}`, usageSchema, signal);
-      if (result.kind === "ready" && result.data.period !== period) throw new Error(
-          translateApp("The server returned a different usage period"),
-        );
+      if (result.kind === "ready" && result.data.period !== period) throw localizedError("The server returned a different usage period");
       return result;
     },
     grants(ownerId?: string, signal?: AbortSignal) {

@@ -1,3 +1,5 @@
+import { appLocale, setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
+import { translate } from "../../i18n/translate";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -65,6 +67,8 @@ function setup({
     emailAuthEnabled: emailEnabled,
     socialProviders: providers,
   };
+  let keyboardVisible = false;
+  const announcements: string[] = [];
   const calls: LoginInput[] = [];
   const sessions: Session[] = [];
   const socialUrls: string[] = [];
@@ -88,6 +92,7 @@ function setup({
   });
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language: appLocale(), t: translateApp }) },
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         registrationUrls.push(url);
@@ -128,7 +133,8 @@ function setup({
         ].map((name) => [name, name]),
       ),
       Platform: { OS: platform },
-      Keyboard: { metrics: () => undefined },
+      AccessibilityInfo: {announceForAccessibility: (message: string) => announcements.push(message)},
+      Keyboard: { metrics: () => keyboardVisible ? { screenY: 500 } : undefined },
       StyleSheet: { create: (styles: unknown) => styles },
       AppState: {
         currentState: "active",
@@ -260,6 +266,8 @@ function setup({
     social,
     change,
     calls,
+    announcements,
+    showKeyboard: () => { keyboardVisible = true; },
     sessions,
     socialUrls,
     registrationUrls,
@@ -914,4 +922,38 @@ test("sign-in delegates idle, ready, pending and MFA submits to the shared prima
   assert.equal(screen.submit().props.disabled, true);
   screen.change("Authenticator code", "012345");
   assert.equal(screen.submit().props.disabled, false);
+});
+
+for (const platform of ["ios", "android"] as const) test(`P11 wrong password is inline, announced and reachable with keyboard open (${platform})`, async (t) => {
+  const screen = setup({platform}); t.after(screen.harness.unmount);
+  const scroller=elements(screen.harness.value()).find(e=>e.type==="KeyboardScrollView")!;
+  const scrolls: unknown[]=[];
+  scroller.props.revealController.current={reveal:(view:unknown)=>scrolls.push(view)};
+  screen.showKeyboard(); screen.change("Email","reviewer@example.test"); screen.change("Password","wrong");
+  screen.setLogin(async()=>{throw new Error("Invalid email or password");});
+  screen.submit().props.onPress(); await screen.harness.settle();
+  const all=elements(screen.harness.value()); const alert=all.find(e=>e.props.accessibilityRole==="alert" && textContent(e).includes("Invalid email or password"));
+  assert.ok(alert,"login failure must be an accessible alert"); assert.equal(alert.props.accessibilityLiveRegion,"assertive");
+  assert.ok(all.indexOf(alert)<all.indexOf(screen.submit()),"error sits immediately above the sign-in action");
+  assert.ok(all.indexOf(alert)>all.indexOf(screen.input("Password")));
+  alert.props.ref.current={measureInWindow:(cb:any)=>cb(20,650,350,48)};
+  alert.props.onLayout();
+  assert.deepEqual(scrolls,[alert.props.ref.current],"banner delegates to the shared measured keyboard viewport");
+  assert.deepEqual(screen.announcements,platform==="ios"?["Invalid email or password"]:[]);
+  screen.harness.render(); assert.match(textContent(screen.harness.value()),/Invalid email or password/);
+  screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Invalid email or password/);
+});
+
+
+test("P1-6 retained login error follows language changes without resubmitting or changing input", async (t) => {
+  const screen = setup(); t.after(() => {screen.harness.unmount();setAppTranslationLanguage('en');});
+  screen.change("Email", "reviewer@example.test");screen.change("Password", "wrong");
+  screen.setLogin(async()=>{throw new ApiError({statusCode:401,errorCode:2000,errorKey:'authentication_failed',message:'Authentication failed: Invalid email or password'});});
+  screen.submit().props.onPress();await screen.harness.settle();
+  for (const language of ['zh-CN','zh-TW','en'] as const) {
+    setAppTranslationLanguage(language);screen.harness.render();
+    const alert=elements(screen.harness.value()).find(e=>e.props.accessibilityRole==='alert');
+    assert.ok(alert);assert.equal(textContent(alert).trim(),translate(language,'Invalid email or password'));
+    assert.equal(screen.calls.length,1);assert.equal(screen.input(translate(language,'Email')).props.value,'reviewer@example.test');
+  }
 });

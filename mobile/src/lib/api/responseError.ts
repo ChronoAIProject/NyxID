@@ -1,6 +1,5 @@
 import { ApiError } from "./ApiError";
 import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
-import { translateApp } from "../../i18n/appTranslation";
 
 export type ErrorHeaders = { get(name: string): string | null };
 export const TEMPORARILY_UNAVAILABLE =
@@ -94,7 +93,8 @@ export function buildApiError(
     errorCode: 0,
     statusCode: status,
     hasErrorEnvelope: false,
-    message: translateApp(message),
+    message,
+    sourceMessage: message,
     ...diagnostics,
   });
 }

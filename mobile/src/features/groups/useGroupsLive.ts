@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
 import { onlineManager, useQueryClient } from "@tanstack/react-query";
@@ -30,9 +30,7 @@ const session = createGroupLiveSession({
           AppState.currentState !== "active" ||
           !onlineManager.isOnline()
         )
-          throw new Error(
-            translateApp("Crew notification subscription is inactive."),
-          );
+          throw localizedError("Crew notification subscription is inactive.");
         return requestAuthenticatedResponse("/assistant/nyxagent/live", {
           method: "GET",
           headers: { Accept: "text/event-stream" },

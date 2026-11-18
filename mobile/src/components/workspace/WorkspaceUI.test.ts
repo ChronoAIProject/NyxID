@@ -25,8 +25,11 @@ const flatten = (style: unknown): Record<string, any> =>
       ? (style as Record<string, any>)
       : {};
 
-function load(floatingInset = 0, fullScreen = false) {
+function load(floatingInset = 0, fullScreen = false, cornerWindow = false) {
   const h = hookHarness<E>({
+    "./WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: cornerWindow },
+    },
     "./workspaceFloatingInset": {
       useRailScrollIndicator: () =>
         floatingScrollIndicatorProps(floatingInset, fullScreen),
@@ -118,7 +121,7 @@ test("every page's content sits in a RailInsetView: the rail inset animates on t
   {
     const { h, ui } = load(66);
     h.mount(() =>
-      ui.WorkspacePage({ title: "Automations", scroll: false, children: "Rows" }),
+      ui.WorkspacePage({ title: "Automations", scroll: false, children: "Rows", }),
     );
     const inset = nodes(h.value()).find((n) => n.type === "RailInsetView")!;
     assert.equal(inset.props.ownPaddingRight, 20);
@@ -146,15 +149,20 @@ test("every page's content sits in a RailInsetView: the rail inset animates on t
 test("the page scroller spreads the shared rail scroll props: indicator clear of the rail, or at the window edge in full screen with no top inset", () => {
   for (const [inset, fullScreen, expected] of [
     [0, false, {}],
-    [66, false, { scrollIndicatorInsets: { right: 4 }, automaticallyAdjustsScrollIndicatorInsets: false }],
-    [66, true, { scrollIndicatorInsets: { right: 0 }, automaticallyAdjustsScrollIndicatorInsets: false }],
+    [66, false, { scrollIndicatorInsets: { right: 4 }, automaticallyAdjustsScrollIndicatorInsets: false, },],
+    [66, true, { scrollIndicatorInsets: { right: 0 }, automaticallyAdjustsScrollIndicatorInsets: false, },],
   ] as const) {
     const { h, ui } = load(inset, fullScreen);
     h.mount(() => ui.WorkspacePage({ title: "Automations", children: "Rows" }));
     const scroller = nodes(h.value()).find((n) => n.type === "ScrollView")!;
     for (const [key, value] of Object.entries(expected))
-      assert.equal(JSON.stringify(scroller.props[key]), JSON.stringify(value), `${inset} ${fullScreen} ${key}`);
-    assert.equal(scroller.props.contentInset, undefined, "content keeps its natural top");
+      assert.equal(JSON.stringify(scroller.props[key]), JSON.stringify(value), `${inset} ${fullScreen} ${key}`,
+      );
+    assert.equal(
+      scroller.props.contentInset,
+      undefined,
+      "content keeps its natural top",
+    );
     h.unmount();
   }
 });
@@ -168,10 +176,10 @@ test("cards have no rail inset of their own: their container provides it", () =>
   h.unmount();
 });
 
-test("every page's large title grows like the header bar, takes two lines at most and then ends in an ellipsis", () => {
+test("Duo page's large title grows like the header bar, takes two lines at most and then ends in an ellipsis", () => {
   assert.equal(WORKSPACE_TITLE_MAX_FONT_SCALE, 1.25);
   assert.equal(WORKSPACE_TITLE_MAX_LINES, 2);
-  const { h, ui } = load();
+  const { h, ui } = load(0, false, true);
   h.mount(() =>
     ui.WorkspacePage({
       title: "Group participants and agents",
@@ -187,16 +195,42 @@ test("every page's large title grows like the header bar, takes two lines at mos
   assert.equal(title.props.ellipsizeMode, "tail");
   // The same cap as the header bar, so no title word outgrows the line and
   // breaks inside itself; growth is capped, never shrunk to fit.
-  assert.equal(title.props.maxFontSizeMultiplier, WORKSPACE_TITLE_MAX_FONT_SCALE);
+  assert.equal(
+    title.props.maxFontSizeMultiplier,
+    WORKSPACE_TITLE_MAX_FONT_SCALE,
+  );
   assert.equal(title.props.adjustsFontSizeToFit, undefined);
   h.unmount();
   // Live text-size changes re-measure the title (DynamicTypeText), and the
   // header bar shares the cap constant.
-  const page = readFileSync(new URL("./WorkspaceUI.tsx", import.meta.url), "utf8");
-  assert.match(page, /DynamicTypeText as Text/);
+  const page = readFileSync(
+    new URL("./WorkspaceUI.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    page,
+    /numberOfLines=\{\s*cornerSensor\s*\?\s*WORKSPACE_TITLE_MAX_LINES\s*:\s*titleNumberOfLines\s*\}/,
+  );
   const bar = readFileSync(
     new URL("./WorkspacePageHeader.tsx", import.meta.url),
     "utf8",
   );
   assert.match(bar, /maxFontSizeMultiplier=\{WORKSPACE_TITLE_MAX_FONT_SCALE\}/);
+});
+
+test("P9 ordinary page title retains uncapped base scaling and caller wrapping", () => {
+  const { h, ui } = load();
+  h.mount(() =>
+    ui.WorkspacePage({
+      title: "Ordinary title",
+      titleNumberOfLines: 3,
+      children: "Body",
+    }),
+  );
+  const title = nodes(h.value()).find(
+    (n) => n.props.accessibilityRole === "header",
+  )!;
+  assert.equal(title.props.maxFontSizeMultiplier, undefined);
+  assert.equal(title.props.numberOfLines, 3);
+  h.unmount();
 });

@@ -482,7 +482,8 @@ test("the composer field and its placeholder line scale together at every Dynami
     // RN scales lineHeight by the same multiplier as fontSize.
     assert.equal(field.height, composerInputMinHeight(fontScale));
     assert.ok(
-      field.height >= line.top + line.lineHeight * fontScale + field.paddingBottom,
+      field.height >=
+        line.top + line.lineHeight * fontScale + field.paddingBottom,
       `placeholder fits the empty field at ${fontScale}x`,
     );
     assert.equal(line.lineHeight, field.lineHeight);
@@ -494,16 +495,13 @@ test("the composer field and its placeholder line scale together at every Dynami
     assert.equal(typedField.minHeight, composerInputMinHeight(fontScale));
     typed.harness.unmount();
   }
-  // A live text-size change must re-measure the overlay (DynamicTypeText remounts it).
+  // P9: retain the base native paragraph identity outside the Duo.
   const source = readFileSync(
     new URL("./AssistantMentionInput.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /DynamicTypeText as Text/);
-  assert.doesNotMatch(
-    source,
-    /import \{[^}]*\bText\b[^}]*\} from "react-native"/,
-  );
+  assert.doesNotMatch(source, /DynamicTypeText as Text/);
+  assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
 });
 
 test("a whitespace-only draft collapses once unfocused, keeping its whitespace, cursor and one native input", () => {
@@ -537,7 +535,11 @@ test("a whitespace-only draft collapses once unfocused, keeping its whitespace, 
   view.harness.flush();
   assert.equal(compact(), true, "unfocused with only whitespace: one row");
   assert.equal(view.input().props.value, "  \n\n ", "the draft is not trimmed");
-  assert.equal(view.writes.at(-1), "  \n\n ", "no write discards the whitespace");
+  assert.equal(
+    view.writes.at(-1),
+    "  \n\n ",
+    "no write discards the whitespace",
+  );
   // One line: the field is pinned and the prompt shows over it.
   assert.equal(inputStyle(view.input()).height, composerInputMinHeight(1));
   assert.ok(prompt());
@@ -574,7 +576,11 @@ test("the collapse rule reads trimmed text only while unfocused and idle", async
   assert.equal(composerCompact(true, false, " \n\t "), true);
   assert.equal(composerCompact(true, true, " "), false, "focused");
   assert.equal(composerCompact(true, false, " a "), false, "text");
-  assert.equal(composerCompact(false, false, " "), false, "attachments, uploads or dictation");
+  assert.equal(
+    composerCompact(false, false, " "),
+    false,
+    "attachments, uploads or dictation",
+  );
 });
 
 test("an idle phone composer is one row until it is focused or holds a draft, keeping one native input", () => {
@@ -599,7 +605,9 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
         elements(view.harness.flush()).find(
           (n) => n.props.testID === "chat-composer-input-frame",
         )!.props.style,
-      ].flat(Infinity).filter(Boolean),
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
     );
   const placeholder = () =>
     Object.assign(
@@ -608,7 +616,9 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
         elements(view.harness.flush()).find(
           (n) => n.type === "Text" && n.props.children === "Message NyxBot",
         )!.props.style,
-      ].flat(Infinity).filter(Boolean),
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
     );
   const key = view.input().key;
   assert.equal(compact(), true, "unfocused and empty");
@@ -642,6 +652,10 @@ test("an idle phone composer is one row until it is focused or holds a draft, ke
       return { type: "Toolbar", props: { children: [mention] } };
     },
   });
-  assert.equal(layouts.at(-1).compact, false, "wide/persistent layouts never collapse");
+  assert.equal(
+    layouts.at(-1).compact,
+    false,
+    "wide/persistent layouts never collapse",
+  );
   optedOut.harness.unmount();
 });

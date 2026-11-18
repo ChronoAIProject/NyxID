@@ -73,6 +73,7 @@ function setup(reduced = false, width = 402, height = 874) {
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
+      Platform: {OS: "ios"},
       View: "View",
       Pressable: "Pressable",
       useWindowDimensions: () => dimensions,
@@ -712,7 +713,7 @@ test("desktop rotation and portrait return retarget the sidebar without losing i
 test("a wide window exposes a bounded sidebar beside the same fully accessible navigator", () => {
   const x = setup(false, 1024, 768);
   assert.equal(x.find("workspace-sidebar-base").props.style[1].width, 300);
-  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300);
+  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300,);
   assert.equal(x.style().transform[0].translateX, 0);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   assert.equal(
@@ -752,7 +753,7 @@ test("resize out of an opening drawer fences old completion and keeps the naviga
   opening.complete(true);
   x.render();
   assert.equal(x.offset(), 0);
-  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300);
+  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300,);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   assert.equal(
     x.find("workspace-slab-content").props.accessibilityElementsHidden,
@@ -771,7 +772,7 @@ test("resize out of an opening drawer fences old completion and keeps the naviga
   x.set({ visible: false, presented: false });
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   x.rotate(744, 1133);
-  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 0);
+  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 0,);
   assert.equal(x.find("workspace-sidebar-base").props.style[1].width, 360);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "none");
   assert.equal(x.style().transform[0].translateX, 0);
@@ -799,7 +800,7 @@ test("Settings suspends both wide columns and returns without changing layout or
     x.find("workspace-slab-content").props.accessibilityElementsHidden,
     false,
   );
-  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300);
+  assert.equal(x.find("workspace-content-slab").props.style[2].read().marginLeft, 300,);
   assert.equal(
     x.focus.some((event) => event[0] === "focus"),
     false,
@@ -867,7 +868,7 @@ test("a critical write blocks revealing but never swipe, sliver, Android Back or
 // sidebar), ordinary iPhone portrait/landscape, iPads.
 const RAIL_WINDOWS = [
   { name: "folded Duo", width: 466, height: 678, right: 83, rail: true },
-  { name: "folded Duo landscape", width: 678, height: 466, right: 104, rail: true },
+  { name: "folded Duo landscape", width: 678, height: 466, right: 104, rail: true, },
   { name: "unfolded Duo", width: 951, height: 669, right: 104, rail: true },
   { name: "iPhone portrait", width: 402, height: 874, right: 0, rail: false },
   { name: "iPhone landscape", width: 874, height: 402, right: 62, rail: false },
@@ -894,7 +895,7 @@ function railSetup(reduced = false) {
   const insetProvider = () => parentOf(columnProvider());
   const motionProvider = () => parentOf(insetProvider());
   const provider = () => parentOf(motionProvider());
-  return { ...x, rails, provider, motionProvider, insetProvider, columnProvider };
+  return { ...x, rails, provider, motionProvider, insetProvider, columnProvider, };
 }
 
 test("the quick rail exists on every corner-sensor window (folded and unfolded Duo), never on ordinary iPhones or iPads", () => {
@@ -919,14 +920,23 @@ test("the quick rail exists on every corner-sensor window (folded and unfolded D
         false,
       );
     }
-    assert.equal(x.provider().props.value, window.rail, `${window.name} context`);
+    assert.equal(x.provider().props.value, window.rail, `${window.name} context`,
+    );
     // Rail mode: content keeps clear of the rail column where it exists.
-    assert.equal(x.insetProvider().props.value, window.rail ? 66 : 0, window.name);
+    assert.equal(
+      x.insetProvider().props.value,
+      window.rail ? 66 : 0,
+      window.name,
+    );
     const motion = x.motionProvider().props.value;
     if (window.rail) {
       assert.equal(motion.inset, 66);
       assert.equal(motion.fullScreen, false);
-      assert.deepEqual(Object.keys(motion).sort(), ["fullScreen", "inset", "progress"]);
+      assert.deepEqual(Object.keys(motion).sort(), [
+        "fullScreen",
+        "inset",
+        "progress",
+      ]);
       assert.equal(motion.progress.value, 0);
     } else assert.equal(motion, null, window.name);
     // The status column never gets a backdrop: only the capsules show.
@@ -939,11 +949,17 @@ test("the quick rail exists on every corner-sensor window (folded and unfolded D
   const signedOut = railSetup();
   signedOut.window(466, 678, { right: 83 });
   signedOut.set({ enabled: false });
-  assert.equal(signedOut.all().some((n) => n.props.testID === "workspace-quick-rail"), false);
+  assert.equal(
+    signedOut.all().some((n) => n.props.testID === "workspace-quick-rail"),
+    false,
+  );
   signedOut.harness.unmount();
   const omitted = setup(false, 466, 678);
   omitted.window(466, 678, { right: 83 });
-  assert.equal(omitted.all().some((n) => n.props.testID === "workspace-quick-rail"), false);
+  assert.equal(
+    omitted.all().some((n) => n.props.testID === "workspace-quick-rail"),
+    false,
+  );
   omitted.harness.unmount();
 });
 
@@ -968,10 +984,16 @@ test("the rail's column clears the expanded camera status cluster, bounded by th
   assert.equal(678 - style.bottom, 640);
   assert.equal(host.props.pointerEvents, "box-none");
   const order = x.all();
-  assert.ok(order.indexOf(x.child) < order.indexOf(host), "page content reads first");
+  assert.ok(
+    order.indexOf(x.child) < order.indexOf(host),
+    "page content reads first",
+  );
   // Outside the sliding slab: the drawer's slide never moves the rail, and
   // a touch on it still blurs a focused composer.
-  assert.equal(elements(x.find("workspace-content-slab") as Element).includes(host), false);
+  assert.equal(
+    elements(x.find("workspace-content-slab") as Element).includes(host),
+    false,
+  );
   assert.equal(typeof host.props.onTouchStart, "function");
   assert.equal(typeof host.props.onTouchEnd, "function");
   x.status(0);
@@ -983,7 +1005,8 @@ test("Full screen gives the rail column to the content in one 250ms UI-thread tr
   for (const reduced of [false, true]) {
     const x = railSetup(reduced);
     x.window(466, 678, { right: 83 });
-    const frame = () => Object.assign({}, ...[x.find("workspace-quick-rail").props.style].flat());
+    const frame = () =>
+      Object.assign({}, ...[x.find("workspace-quick-rail").props.style].flat());
     const before = { frame: frame(), timings: x.timings.length };
     x.rails.at(-1)!.onToggle();
     x.render();
@@ -992,7 +1015,11 @@ test("Full screen gives the rail column to the content in one 250ms UI-thread tr
     const motion = x.motionProvider().props.value;
     assert.equal(motion.fullScreen, true);
     if (reduced) {
-      assert.equal(x.timings.length, before.timings, "Reduce Motion swaps at once");
+      assert.equal(
+        x.timings.length,
+        before.timings,
+        "Reduce Motion swaps at once",
+      );
       assert.equal(motion.progress.value, 1);
     } else {
       // One 250ms ease-out on the slab's curve drives the content's inset,
@@ -1010,7 +1037,10 @@ test("Full screen gives the rail column to the content in one 250ms UI-thread tr
     assert.equal(x.provider().props.value, true);
     assert.deepEqual(frame(), before.frame);
     assert.equal(frame().top, 160);
-    assert.equal(x.find("workspace-quick-rail").props.pointerEvents, "box-none");
+    assert.equal(
+      x.find("workspace-quick-rail").props.pointerEvents,
+      "box-none",
+    );
     assert.equal(
       x.all().some((n) => n.props.testID === "workspace-status-column-fade"),
       false,
@@ -1043,7 +1073,10 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
     assert.ok(Math.abs(951 - frame().right - frame().width / 2 - (951 - 48)) <= 0.5);
     assert.equal(host().props.pointerEvents, "box-none");
     const order = x.all();
-    assert.ok(order.indexOf(x.child) < order.indexOf(host()), "page content reads first");
+    assert.ok(
+      order.indexOf(x.child) < order.indexOf(host()),
+      "page content reads first",
+    );
     // Headers read the rail, so they keep only More (same as folded).
     assert.equal(x.provider().props.value, true);
     const slab = () => x.find("workspace-content-slab").props.style[2].read();
@@ -1056,7 +1089,11 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
       assert.equal(slab().marginLeft, collapsed ? 0 : 300);
       assert.equal(sidebar().props.pointerEvents, collapsed ? "none" : "auto");
       assert.deepEqual(frame(), { ...frame(), top: 108, right: 20, width: 56 });
-      assert.equal(x.insetProvider().props.value, 66, "content keeps clear of the rail");
+      assert.equal(
+        x.insetProvider().props.value,
+        66,
+        "content keeps clear of the rail",
+      );
     }
     // Full screen: the same toggle, the group hidden, content to the margin,
     // no backdrop behind the 108–152pt idle restore capsule.
@@ -1065,7 +1102,11 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
     assert.deepEqual(x.railWrites, [true], "the same saved per-device choice");
     assert.equal(x.rails.at(-1)!.fullScreen, true);
     assert.equal(x.insetProvider().props.value, 0);
-    assert.equal(x.provider().props.value, true, "the header keeps the same controls");
+    assert.equal(
+      x.provider().props.value,
+      true,
+      "the header keeps the same controls",
+    );
     assert.equal(frame().top, 108, "the toggle stays at its spot");
     if (!reduced) assert.equal(x.timings.at(-1)!.config.duration, 250);
     assert.equal(
@@ -1073,7 +1114,11 @@ test("unfolded Duo: the same rail sits on the status column under its measured c
       false,
     );
     x.set({ sidebarCollapsed: false });
-    assert.equal(x.insetProvider().props.value, 0, "full screen survives the sidebar");
+    assert.equal(
+      x.insetProvider().props.value,
+      0,
+      "full screen survives the sidebar",
+    );
     x.rails.at(-1)!.onToggle();
     x.render();
     assert.equal(x.insetProvider().props.value, 66);
@@ -1118,16 +1163,22 @@ test("a focused chat's bar controls reach the rail in both modes (the column hid
   // Ordinary iPhones have no rail: nothing reaches a rail or the clearance.
   const phone = railSetup();
   phone.window(402, 874, { right: 0 });
-  phone.columnProvider().props.value(Symbol("chat"), { leading: {}, identity: {}, more: {} });
+  phone
+    .columnProvider()
+    .props.value(Symbol("chat"), { leading: {}, identity: {}, more: {} });
   phone.render();
   assert.equal(phone.motionProvider().props.value, null);
-  assert.equal(phone.all().some((n) => n.props.testID === "workspace-quick-rail"), false);
+  assert.equal(
+    phone.all().some((n) => n.props.testID === "workspace-quick-rail"),
+    false,
+  );
   phone.harness.unmount();
 });
 
-test("wide windows hide and show the persistent sidebar with one UI-thread animation; restoring the saved choice does not animate", () => {
+test("Duo wide windows hide and show the persistent sidebar with one UI-thread animation; restoring the saved choice does not animate", () => {
   for (const reduced of [false, true]) {
     const x = setup(reduced, 1194, 834);
+    x.window(1194, 834, { right: 83 });
     const slab = () => x.find("workspace-content-slab").props.style[2].read();
     const sidebar = () => x.find("workspace-sidebar-base");
     // The saved choice arrives with the restore: applied at once.
@@ -1152,7 +1203,10 @@ test("wide windows hide and show the persistent sidebar with one UI-thread anima
   // Narrow windows ignore it: the drawer is unaffected.
   const narrow = setup(false, 390, 844);
   narrow.set({ sidebarCollapsed: true, sidebarRestored: true });
-  assert.equal(narrow.find("workspace-content-slab").props.style[2].read().marginLeft, 0);
+  assert.equal(
+    narrow.find("workspace-content-slab").props.style[2].read().marginLeft,
+    0,
+  );
   narrow.harness.unmount();
 });
 
@@ -1190,4 +1244,19 @@ test("a tap anywhere in the slab blurs a focused chat composer without taking th
   assert.equal(blurs, 1);
   chatComposerFocus.blurred(input);
   x.harness.unmount();
+});
+
+test("P9 ordinary wide windows retain the visible base sidebar even with a saved Duo choice", () => {
+  const x = setup(false, 1194, 834);
+  try {
+    x.set({ sidebarCollapsed: true, sidebarRestored: true });
+    assert.equal(
+      x.find("workspace-content-slab").props.style[2].read().marginLeft,
+      300,
+    );
+    assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+    assert.equal(x.find("workspace-slab-body").props.onTouchEnd, undefined);
+  } finally {
+    x.harness.unmount();
+  }
 });

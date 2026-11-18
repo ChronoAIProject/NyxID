@@ -2,8 +2,7 @@ import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../i18n/appTranslation";
 import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
-import { DynamicTypeText as Text } from "./DynamicTypeText";
+import { Text,  Pressable, StyleSheet, View } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -134,7 +133,7 @@ export function HistorySectionHeader({ title }: { title: string }) {
   const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <Text accessibilityRole="header" style={styles.sectionHeader}>
-      {title}
+      {title.toUpperCase()}
     </Text>
   );
 }
@@ -163,7 +162,8 @@ const createStyles = (c: ThemeColors) =>
     meta: { ...typeScale.small, color: c.textMuted },
     value: { ...typeScale.label, flexShrink: 0 },
     sectionHeader: {
-      ...typeScale.groupLabel,
+      ...typeScale.small,
+      letterSpacing: 0.6,
       color: c.textMuted,
       paddingHorizontal: spacing.xxl,
     },

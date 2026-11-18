@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AssistantRightPanel } from "./AssistantRightPanel";
 import {
@@ -36,10 +38,7 @@ import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
 import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceAgentPicker } from "../../components/workspace/WorkspaceAgentPicker";
-import {
-  ChatHeaderActions,
-  type ChatHeaderLayout,
-} from "./ChatHeaderActions";
+import { ChatHeaderActions } from "./ChatHeaderActions";
 import { workspaceSidebarLayout } from "../../components/workspace/workspacePushState";
 import { NotificationBell } from "../notifications/NotificationBell";
 import {
@@ -98,7 +97,6 @@ import {
   WorkspaceHeaderVisibility,
 } from "../../app/WorkspaceHeader";
 import {
-  openScannerSheetAction,
   openWorkspaceSheetAction,
   openWorkspacePageAction,
   workspaceNavigateAction,
@@ -216,13 +214,13 @@ function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
       if (error) reject(error);
       else resolve();
     };
-    const aborted = () => finish(new Error(translateApp("Voice start was cancelled.")));
+    const aborted = () => finish(localizedError("Voice start was cancelled."));
     try {
       // Keep the text input mounted until Android confirms the IME is hidden,
       // before the voice WebView can take focus away from that input.
       subscription = Keyboard.addListener("keyboardDidHide", () => finish());
       timeout = setTimeout(
-        () => finish(new Error(translateApp("Voice could not open. Try again."))),
+        () => finish(localizedError("Voice could not open. Try again.")),
         1500,
       );
       signal.addEventListener("abort", aborted, { once: true });
@@ -230,7 +228,7 @@ function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
       else if (!Keyboard.isVisible()) finish();
       else Keyboard.dismiss();
     } catch {
-      finish(new Error(translateApp("Voice could not open. Try again.")));
+      finish(localizedError("Voice could not open. Try again."));
     }
   });
 }
@@ -254,7 +252,7 @@ async function createVoiceDraft(
       "name" in cause &&
       cause.name === "VoiceRequestTimeoutError"
     )
-      throw new Error(translateApp("Voice could not open. Try again."));
+      throw localizedError("Voice could not open. Try again.");
     throw cause;
   } finally {
     signal.removeEventListener("abort", cancel);
@@ -276,7 +274,6 @@ export function AssistantScreen({
   // The Duo's rail (folded or unfolded) carries New chat, Notifications, Scan
   // QR and Recent chats, and this chat's bar controls (it has no bar there).
   const quickRail = useContext(WorkspaceQuickRailContext);
-  const headerLayout: ChatHeaderLayout = narrowHeader ? "narrow" : "wide";
   const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
@@ -318,7 +315,7 @@ export function AssistantScreen({
     setDraft(value);
   }
   const [sheet, setSheet] = useState<"agents" | "permissions">();
-  const [localError, setLocalError] = useState<string>();
+  const [localError, setLocalError] = useLocalizedState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
   const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<{
@@ -372,7 +369,7 @@ export function AssistantScreen({
     inputAttachments: assistant.inputAttachments,
   });
   const panelInsets = useSafeAreaInsets();
-  const widePanel = workspaceRightPanelLayout(
+  const widePanel = quickRail && workspaceRightPanelLayout(
     windowWidth,
     chatColumn.maxWidth,
     panelInsets.left + panelInsets.right,
@@ -705,11 +702,11 @@ export function AssistantScreen({
     } catch (cause) {
       if (current())
         setLocalError(
-          t(
+          () => (translateApp(
             cause instanceof Error
               ? cause.message
               : translateApp("Voice could not open. Try again."),
-          ),
+          )),
         );
     } finally {
       if (voiceOpening.current === controller) {
@@ -804,9 +801,9 @@ export function AssistantScreen({
       await operation();
     } catch (cause) {
       setLocalError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
-          : translateApp("Could not complete this action."),
+          : translateApp("Could not complete this action.")),
       );
     }
   }
@@ -877,7 +874,7 @@ export function AssistantScreen({
     // The Duo: More is always Chat details (Settings and Notifications are
     // on the rail; a live voice call keeps its own preferences control).
     // Wide windows keep Settings and Notifications in the persistent sidebar.
-    if (quickRail || (!narrowHeader && !hasVoice)) return openDetails();
+    if (quickRail || !hasVoice) return openDetails();
     const current = () =>
       getAuthEpoch() === voiceEpoch &&
       currentVoiceSurface.current === voiceSurfaceToken &&
@@ -902,26 +899,6 @@ export function AssistantScreen({
           if (stillCurrent()) openDetails();
         },
       },
-      ...(narrowHeader && bell.enabled && !quickRail
-        ? [
-            {
-              text: t("Notifications"),
-              onPress: () => {
-                if (stillCurrent()) openNotifications();
-              },
-            },
-          ]
-        : []),
-      ...(narrowHeader
-        ? [
-            {
-              text: t("Settings"),
-              onPress: () => {
-                if (stillCurrent()) openSettings();
-              },
-            },
-          ]
-        : []),
       { text: t("Cancel"), style: "cancel" },
     ]);
   }
@@ -931,30 +908,22 @@ export function AssistantScreen({
       navigation.dispatch(workspaceNavigateAction("AccountSettings")),
     );
   }
-  function openScanner() {
-    afterPickerDismissal(() => navigation.dispatch(openScannerSheetAction()));
-  }
 
   const headerHandlers = useRef({
     newChat,
     openOptions: openChatOptions,
     openNotifications,
-    openScanner,
   });
   headerHandlers.current = {
     newChat,
     openOptions: openChatOptions,
     openNotifications,
-    openScanner,
   };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <ChatHeaderActions
-          layout={headerLayout}
-          scanDisabled={headerDisabled}
           newChatDisabled={newChatDisabled}
-          onScanQr={() => headerHandlers.current.openScanner()}
           onNewChat={() => headerHandlers.current.newChat()}
           onOptions={() => headerHandlers.current.openOptions()}
           notifications={
@@ -975,7 +944,7 @@ export function AssistantScreen({
       headerTitle: () => (
         <WorkspaceHeaderVisibility>
           <ChatIdentity
-            compact
+            compact={quickRail}
             floating
             name={agentName}
             detail={headerDetail}
@@ -1014,7 +983,6 @@ export function AssistantScreen({
     bell.unread,
     bell.needsDecision,
     narrowHeader,
-    headerLayout,
     t,
   ]);
 
@@ -1540,9 +1508,9 @@ export function AssistantScreen({
             onStartNextStep={(step) => {
               if (newChatDisabled || running || uploads.session.sending) {
                 setLocalError(
-                        translateApp(
+                        () => (translateApp(
                           "NyxBot is busy. Start this step once it finishes.",
-                        ),
+                        )),
                       );
                 return;
               }
@@ -1562,7 +1530,7 @@ export function AssistantScreen({
           <FlatList
             // A live text-size change remounts the transcript: RN otherwise keeps
             // stale paragraph metrics and clips message, date and Markdown text.
-            key={transcriptListKey(assistant.conversationId, fontScale)}
+            key={quickRail ? transcriptListKey(assistant.conversationId, fontScale) : assistant.conversationId ?? "new-chat"}
             ref={transcript}
             style={styles.fill}
             data={messages}
@@ -1971,7 +1939,7 @@ export function AssistantScreen({
               // Phones: idle composers are one row; anything typed, attached,
               // uploading or dictating keeps the full two-row layout.
               compactWhenIdle={
-                narrowHeader &&
+                quickRail && narrowHeader &&
                 !dictation.active &&
                 uploads.files.length === 0 &&
                 !uploads.picking &&
@@ -1979,7 +1947,7 @@ export function AssistantScreen({
               }
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={layout}
+                  layout={quickRail ? layout : undefined}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -2235,13 +2203,14 @@ function Sheet({
   const band = workspaceHeaderBand(
     SHEET_TOP_PADDING,
     cornerSensor,
-    workspaceStatusCluster({ width, height, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, width, height, rightInset: insets.right }),
     SHEET_HEADER_HEIGHT,
   );
   // Both Duo postures: the same bottom sheet as Settings, ending before the
   // quick rail's column (a native page sheet always spans the window). The
   // surface owns its travel, scrim, drag handle and dismissal.
   const railReserve = workspaceSheetRailReserve({
+    platform: Platform.OS,
     width,
     height,
     rightInset: insets.right,
@@ -2299,7 +2268,7 @@ function Sheet({
           styles.sheet,
           {
             backgroundColor: colors.bg,
-            paddingTop: band.paddingTop,
+            paddingTop: cornerSensor ? band.paddingTop : 20,
           },
         ]}
       >

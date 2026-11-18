@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
@@ -66,7 +67,7 @@ export function SavedLogins({
 }) {
   useAppLanguage();
   const runtime = useMachineRuntime();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   const logins = useQuery({
     queryKey: loginsKey(runtime.epoch),
     queryFn: ({ signal }) => machinesApi.logins(signal),
@@ -76,7 +77,7 @@ export function SavedLogins({
   async function refresh() {
     const result = await logins.refetch();
     if (!runtime.current()) return;
-    setRefreshError(result.error ? machineError(result.error) : undefined);
+    setRefreshError(() => (result.error ? machineError(result.error) : undefined));
   }
   const pull = usePullRefresh(async () => {
     if (runtime.active) await refresh();
@@ -159,8 +160,8 @@ export function SavedLoginScreen({
     onBack: navigation.goBack,
   });
   const client = useQueryClient();
-  const [notice, setNotice] = useState<string>();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   const logins = useQuery({
     queryKey: loginsKey(write.epoch),
     queryFn: ({ signal }) => machinesApi.logins(signal),
@@ -174,7 +175,7 @@ export function SavedLoginScreen({
   async function refresh() {
     const result = await logins.refetch();
     if (!write.current()) return;
-    if (result.error) setRefreshError(machineError(result.error));
+    if (result.error) setRefreshError(() => (machineError(result.error)));
     else {
       write.reviewed();
       setRefreshError(undefined);
@@ -188,9 +189,9 @@ export function SavedLoginScreen({
       await machinesApi.removeLogin(target, current);
       if (!current()) return;
       setNotice(
-        translateApp(
+        () => (translateApp(
           "Saved login deleted. Its login contexts are quarantined and specialist grants have been removed.",
-        ),
+        )),
       );
       await Promise.all([
         client.invalidateQueries({ queryKey: machineKeys(write.epoch) }),

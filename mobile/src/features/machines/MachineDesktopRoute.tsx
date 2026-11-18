@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
@@ -22,7 +23,7 @@ export function MachineDesktopRoute({
   const appLanguage = useAppLanguage().language;
   const focused = useIsFocused();
   const [ready, setReady] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   useEffect(() => {
     if (!focused) {
       setReady(false);
@@ -41,9 +42,9 @@ export function MachineDesktopRoute({
     }).catch(() => {
       if (mounted)
         setError(
-          translateApp(
+          () => (translateApp(
             "Desktop privacy protection is unavailable. Install the current development build and try again.",
-          ),
+          )),
         );
     });
     return () => {

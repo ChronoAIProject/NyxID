@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { requestJson } from "./http";
 import {
@@ -35,9 +35,7 @@ export const servicesApi = {
       await requestJson(`/catalog/${encodeURIComponent(slug)}`, { signal }),
     );
     if (entry.slug !== slug)
-      throw new Error(
-        translateApp("The server returned a different service. Please reload."),
-      );
+      throw localizedError("The server returned a different service. Please reload.");
     return entry;
   },
   async connection(id: string, signal?: AbortSignal) {
@@ -45,11 +43,7 @@ export const servicesApi = {
       await requestJson(keyPath(id), { signal }),
     );
     if (connection.id !== id)
-      throw new Error(
-        translateApp(
-          "The server returned a different connection. Please reload.",
-        ),
-      );
+      throw localizedError("The server returned a different connection. Please reload.");
     return connection;
   },
   async create(body: {

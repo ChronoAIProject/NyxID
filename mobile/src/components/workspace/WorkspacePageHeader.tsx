@@ -1,3 +1,4 @@
+import { Text, Platform } from "react-native";
 import {
   FLOATING_HEADER_GAP,
   FLOATING_HEADER_MARGIN,
@@ -7,7 +8,6 @@ import {
 } from "./workspaceHeaderMetrics";
 import { useContext } from "react";
 import { View, useWindowDimensions } from "react-native";
-import { DynamicTypeText as Text } from "../DynamicTypeText";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackHeaderProps } from "@react-navigation/native-stack";
 import { useTheme } from "../../theme/ThemeContext";
@@ -17,7 +17,7 @@ import {
   workspaceHeaderBand,
   workspaceHeaderRightPadding,
 } from "./workspaceLayout";
-import { WorkspaceCornerSensorContext, WorkspaceQuickRailContext } from "./WorkspaceLayoutContext";
+import { WorkspaceCornerSensorContext, WorkspaceQuickRailContext, } from "./WorkspaceLayoutContext";
 
 /** Navigator callbacks return a component; hooks belong to its render. */
 export function WorkspacePageHeader(props: NativeStackHeaderProps) {
@@ -40,7 +40,7 @@ function WorkspacePageHeaderContent({
   const band = workspaceHeaderBand(
     insets.top,
     cornerSensor,
-    workspaceStatusCluster({ ...window, rightInset: insets.right }),
+    workspaceStatusCluster({ platform: Platform.OS, ...window, rightInset: insets.right, }),
     undefined,
     rail,
   );

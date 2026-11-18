@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import { assistantDraftStore } from "./assistantDraftStore";
 import { useEffect, useRef, useState } from "react";
@@ -40,18 +42,14 @@ function disposeFile(file: PickedAssistantFile) {
 }
 function nativeFile(file: PickedAssistantFile) {
   if (!file.uri.startsWith("file://"))
-    throw new Error(
-      translateApp("The file could not be copied. Choose it again."),
-    );
+    throw localizedError("The file could not be copied. Choose it again.");
   const source = new File(file.uri);
   if (!source.exists)
-    throw new Error(
-      translateApp("This file is no longer available. Choose it again."),
-    );
+    throw localizedError("This file is no longer available. Choose it again.");
   return source;
 }
 function cancelled() {
-  return Object.assign(new Error(translateApp("Upload cancelled.")), { name: "AbortError" });
+  return Object.assign(localizedError("Upload cancelled."), { name: "AbortError" });
 }
 export function useAssistantUploads({
   conversationId,
@@ -79,7 +77,7 @@ export function useAssistantUploads({
   );
   const [, setVersion] = useState(0);
   const [picking, setPicking] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const live = useRef({
     enabled,
     focused,
@@ -137,14 +135,14 @@ export function useAssistantUploads({
           );
           if (signal.aborted) throw cancelled();
           if (bytes.byteLength !== size)
-            throw new Error(translateApp("The file changed. Choose it again."));
+            throw localizedError("The file changed. Choose it again.");
           return bytes;
         } finally {
           handle.close();
         }
       },
       createDraft: (signal) => {
-        if (groupId) throw new Error(translateApp("Open a saved crew to attach files."));
+        if (groupId) throw localizedError("Open a saved crew to attach files.");
         return assistantUploadsApi.createDraft(agentId, signal);
       },
       upload: (id, file, bytes, signal, onProgress) =>
@@ -326,9 +324,9 @@ export function useAssistantUploads({
             return;
           if (!permission.granted) {
             setError(
-              translateApp(
+              () => (translateApp(
                 "Camera access is off. Allow NyxID to use the camera in Settings, or choose Photos or Files.",
-              ),
+              )),
             );
             Alert.alert(
               translateApp("Allow camera access"),
@@ -348,9 +346,9 @@ export function useAssistantUploads({
                         epoch === getAuthEpoch()
                       )
                         setError(
-                          translateApp(
+                          () => (translateApp(
                             "Couldn't open Settings. Open your device's Settings and allow camera access for NyxID.",
-                          ),
+                          )),
                         );
                     });
                   },
@@ -398,11 +396,7 @@ export function useAssistantUploads({
           )
             continue;
           if (!requireOptionalNativeModule("ExpoImageManipulator"))
-            throw new Error(
-              translateApp(
-                "This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.",
-              ),
-            );
+            throw localizedError("This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.");
           const { ImageManipulator, SaveFormat } =
             await import("expo-image-manipulator");
           const context = ImageManipulator.manipulate(file.uri);
@@ -457,13 +451,13 @@ export function useAssistantUploads({
     } catch (cause) {
       if (current.current === session && epoch === getAuthEpoch())
         setError(
-          source === "camera"
+          () => (source === "camera"
             ? translateApp(
                 "The camera couldn't open. It may be unavailable on this device. Try again, or choose Photos or Files.",
               )
             : cause instanceof Error
               ? cause.message
-              : translateApp("The file picker could not open."),
+              : translateApp("The file picker could not open.")),
         );
     } finally {
       if (!transferred) pickedCopies.forEach(disposeFile);

@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -107,7 +108,7 @@ export function WorkspacePushShell(props: Props) {
   const { colors } = useTheme();
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const windowMetrics = { width, height, rightInset: insets.right };
+  const windowMetrics = { platform: Platform.OS, width, height, rightInset: insets.right, };
   const [quickRailHidden, setQuickRailHidden] = useQuickRailHidden();
   const quickRailAvailable =
     props.enabled &&
@@ -155,7 +156,7 @@ export function WorkspacePushShell(props: Props) {
   const programmatic = useSharedValue(false);
   const dragActive = useSharedValue(false);
   const transition = useSharedValue(0);
-  const sidebarCollapsed = persistent && Boolean(props.sidebarCollapsed);
+  const sidebarCollapsed = persistent && cornerSensor && Boolean(props.sidebarCollapsed);
   // 1 = persistent sidebar shown, 0 = hidden (content full width).
   const sidebarShown = useSharedValue(sidebarCollapsed ? 0 : 1);
   // 0 = rail mode, 1 = full screen: one UI-thread clock for the content's
@@ -213,7 +214,7 @@ export function WorkspacePushShell(props: Props) {
     [
       quickRailAvailable,
       fullScreen,
-      fullScreenProgress,
+      fullScreenProgress
     ],
   );
   useEffect(() => {
@@ -562,12 +563,14 @@ export function WorkspacePushShell(props: Props) {
             // Observes every touch in the slab (pages, headers, rail, sheets)
             // without claiming it: one that began outside a focused chat
             // composer blurs it when it ends.
-            onTouchStart={chatComposerFocus.workspaceTouchStart}
-            onTouchEnd={chatComposerFocus.workspaceTouchEnd}
+            onTouchStart={
+              cornerSensor ? chatComposerFocus.workspaceTouchStart : undefined
+            }
+            onTouchEnd={
+              cornerSensor ? chatComposerFocus.workspaceTouchEnd : undefined
+            }
           >
-            <WorkspaceCornerSensorContext.Provider
-              value={cornerSensor}
-            >
+            <WorkspaceCornerSensorContext.Provider value={cornerSensor}>
               {/* The header keeps the same controls in rail mode and full
                   screen: on the Duo (folded or unfolded, narrow or beside
                   the persistent sidebar) the rail carries New chat,
@@ -604,7 +607,9 @@ export function WorkspacePushShell(props: Props) {
               }
               accessible={active}
               accessibilityRole={active ? "button" : undefined}
-              accessibilityLabel={active ? translateApp("Close navigation") : undefined}
+              accessibilityLabel={
+                active ? translateApp("Close navigation") : undefined
+              }
               onPress={active ? () => props.onOpenChange(false) : undefined}
               style={active ? StyleSheet.absoluteFill : styles.edge}
             />
@@ -622,8 +627,12 @@ export function WorkspacePushShell(props: Props) {
           <View
             testID="workspace-quick-rail"
             pointerEvents="box-none"
-            onTouchStart={chatComposerFocus.workspaceTouchStart}
-            onTouchEnd={chatComposerFocus.workspaceTouchEnd}
+            onTouchStart={
+              cornerSensor ? chatComposerFocus.workspaceTouchStart : undefined
+            }
+            onTouchEnd={
+              cornerSensor ? chatComposerFocus.workspaceTouchEnd : undefined
+            }
             style={[
               styles.quickRailHost,
               workspaceQuickRailFrame(insets.top, insets.bottom, cluster, statusOffset),

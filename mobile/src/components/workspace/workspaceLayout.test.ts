@@ -20,8 +20,8 @@ import {
 } from "./workspaceLayout";
 import { FLOATING_HEADER_MARGIN } from "./workspaceHeaderMetrics";
 
-const FOLDED = { width: 466, height: 678, rightInset: 83 };
-const UNFOLDED = { width: 951, height: 669, rightInset: 104 };
+const FOLDED = { platform: "ios", width: 466, height: 678, rightInset: 83 };
+const UNFOLDED = { platform: "ios", width: 951, height: 669, rightInset: 104 };
 // Measured in duo-folded-en-notifications-default.png (points).
 const CLUSTER_INK_LEFT = 397.67;
 const CAMERA_INK_TOP = 29.0;
@@ -37,7 +37,7 @@ test("corner sensor detection excludes ordinary iPhones, landscape notches and i
     [834, 1194, 0, false], [600, 700, 0, false], [1366, 1024, 0, false],
     [899, 700, 79, false],
   ] as const)
-    assert.equal(workspaceCornerSensor({ width, height, rightInset }), corner);
+    assert.equal(workspaceCornerSensor({ platform: "ios", width, height, rightInset }), corner);
 });
 test("panel routes home groups and conversation details without duplicating home groups inline", () => {
   assert.equal(workspacePanelContent(true, false), "home");
@@ -79,7 +79,7 @@ test("beside the Duo's status column the header row sits flush at the top; conte
     paddingBottom: 32,
   });
   // Unmeasured corner postures: flush too, clearing the folded height.
-  const foldedLandscape = { width: 678, height: 466, rightInset: 104 };
+  const foldedLandscape = { platform: "ios", width: 678, height: 466, rightInset: 104 };
   assert.equal(workspaceStatusCluster(foldedLandscape), undefined);
   assert.deepEqual(workspaceHeaderBand(0, true, undefined), {
     paddingTop: 8,
@@ -87,9 +87,9 @@ test("beside the Duo's status column the header row sits flush at the top; conte
   });
   // Ordinary iPhones are unchanged: the row sits at their real top inset.
   for (const metrics of [
-    { width: 402, height: 874, rightInset: 0 },
-    { width: 852, height: 393, rightInset: 59 },
-    { width: 1366, height: 1024, rightInset: 0 },
+    { platform: "ios", width: 402, height: 874, rightInset: 0 },
+    { platform: "ios", width: 852, height: 393, rightInset: 59 },
+    { platform: "ios", width: 1366, height: 1024, rightInset: 0 },
   ]) {
     assert.equal(workspaceStatusCluster(metrics), undefined);
     assert.equal(workspaceCornerSensor(metrics), false);
@@ -153,13 +153,13 @@ test("only corner insets are reclaimed below the sensor band", () => {
   assert.equal(workspaceHeaderRightPadding(104), 112);
   assert.deepEqual(
     workspaceBodyEdges(
-      workspaceCornerSensor({ width: 678, height: 466, rightInset: 104 }),
+      workspaceCornerSensor({ platform: "ios", width: 678, height: 466, rightInset: 104 }),
     ),
     ["bottom", "left"],
   );
   assert.deepEqual(
     workspaceBodyEdges(
-      workspaceCornerSensor({ width: 852, height: 393, rightInset: 59 }),
+      workspaceCornerSensor({ platform: "ios", width: 852, height: 393, rightInset: 59 }),
     ),
     ["bottom", "left", "right"],
   );
@@ -215,7 +215,7 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
     [874, 402, 62, 0], // landscape iPhone notch
   ] as const)
     assert.equal(
-      layout.workspaceSheetRailReserve({ width, height, rightInset }),
+      layout.workspaceSheetRailReserve({ platform: "ios", width, height, rightInset }),
       reserve,
       `${width}x${height}`,
     );
@@ -230,7 +230,7 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
     [834, 1194, 0, false],
   ] as const)
     assert.equal(
-      layout.workspaceQuickRailAvailable({ width, height, rightInset }),
+      layout.workspaceQuickRailAvailable({ platform: "ios", width, height, rightInset }),
       rail,
       `${width}x${height}`,
     );
@@ -450,4 +450,16 @@ test("the shortcuts capsule hugs its quick-access entries, or takes the room lef
     height: 44,
     scrolls: true,
   });
+});
+
+test('P10 only iOS corner windows get sensor headers, quick rail and sheet reserve', () => {
+  for (const platform of ['android', 'web', 'windows', 'macos']) {
+    for(const metrics of [FOLDED, UNFOLDED, { platform: "ios",width:700,height:850,rightInset:100}]) {
+      const window={...metrics,platform};
+      assert.equal(workspaceCornerSensor(window),false,`${platform} must retain ordinary headers`);
+      assert.equal(layout.workspaceQuickRailAvailable(window),false);
+      assert.equal(layout.workspaceSheetRailReserve(window),0);
+      assert.equal(workspaceStatusCluster(window),undefined);
+    }
+  }
 });

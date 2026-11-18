@@ -155,13 +155,13 @@ test("real JSON request options preserve a signed-in MFA session on bad-code 401
   );
   assert.equal(env.invalidations(), 0);
 });
-test("default JSON 401 still invalidates the current session", async () => {
+test("retry-disabled JSON resource 401 preserves the current session", async () => {
   const env = setup();
   await assert.rejects(
     env.request("/users/me", { retryOnAuthFailure: false }),
     /Invalid code/,
   );
-  assert.equal(env.invalidations(), 1);
+  assert.equal(env.invalidations(), 0);
 });
 test("a late JSON 401 never invalidates a replacement session for either option", async () => {
   for (const invalidateSessionOnAuthFailure of [false, true]) {
@@ -554,4 +554,32 @@ test("a temporary refresh failure keeps the session instead of signing out", asy
     assert.equal(env.invalidations(), 0, `status ${status} must not sign out`);
     assert.equal(env.session().refreshToken, before);
   }
+});
+
+for (const body of ['{}', '{"access_token":""}', 'null', '[]', '<html>captive portal</html>', '{"access_token":']) {
+  test(`P2 malformed successful refresh keeps stored credentials: ${body}`, async () => {
+    const env = setup(async url => url.endsWith('/auth/refresh')
+      ? new Response(body, {status:200})
+      : Response.json({error:'unauthorized'}, {status:401}), true);
+    const before=env.session();
+    await assert.rejects(env.request('/protected', {}));
+    assert.equal(env.invalidations(),0);
+    assert.equal(env.session().refreshToken,before.refreshToken);
+  });
+}
+for (const status of [409,429,500,502,503]) {
+  test(`P2 refresh HTTP ${status} is transient`, async () => {
+    const env=setup(async url=>Response.json({error:'temporarily_unavailable'}, {status:url.endsWith('/auth/refresh')?status:401}),true);
+    await assert.rejects(env.request('/protected',{}));
+    assert.equal(env.invalidations(),0);
+  });
+}
+
+for(const status of [400,401,403]) test(`P1-3 proactive explicit refresh refusal ${status} invalidates`,async()=>{
+  const env=setup(async()=>Response.json({error:'refused'},{status}),true);
+  assert.equal(await env.refresh(true),false);assert.equal(env.invalidations(),1);
+});
+test('P1-3 successful refresh followed by resource401 keeps session',async()=>{
+  const env=setup(async url=>url.endsWith('/auth/refresh')?Response.json({access_token:'next',refresh_token:'next-refresh',expires_in:600}):Response.json({error:'resource_refused'},{status:401}),true);
+  await assert.rejects(env.request('/protected',{}));assert.equal(env.commits(),1);assert.equal(env.invalidations(),0);
 });

@@ -87,7 +87,16 @@ export function SegmentControl({
   const contentWidth = widths.length
     ? offsets[widths.length - 1]! + widths[widths.length - 1]!
     : 0;
-  const scrollable = contentWidth > inner + 0.5;
+  const equal = Math.max(
+    0,
+    (inner - (segments.length - 1) * gap) / segments.length,
+  );
+  const adaptive =
+    !stacked &&
+    natural.length >= segments.length &&
+    natural.slice(0, segments.length).every((width) => !!width) &&
+    natural.slice(0, segments.length).some((width) => width! > equal);
+  const scrollable = adaptive && contentWidth > inner + 0.5;
   const activeOffset = offsets[activeIndex] ?? 0;
   const activeWidth = widths[activeIndex] ?? 0;
 
@@ -111,7 +120,7 @@ export function SegmentControl({
       0,
       Math.min(
         contentWidth - inner,
-        activeOffset - (inner - activeWidth) / 2,
+        activeOffset - (inner - activeWidth) / 2
       ),
     );
     scroll.current?.scrollTo({ x, animated: true });
@@ -140,13 +149,13 @@ export function SegmentControl({
         style={({ pressed }) => [
           styles.item,
           stacked && styles.itemStacked,
-          !stacked && widths.length > 0 && { flex: 0, width: widths[i] },
+          adaptive && widths.length > 0 && { flex: 0, width: widths[i] },
           stacked && isActive && styles.selected,
           pressed && !disabled && styles.pressed,
         ]}
         onPress={() => onPress(i)}
       >
-        {segmentContent(seg, isActive, styles)}
+        {segmentContent(seg, isActive, styles, adaptive)}
       </Pressable>
     );
   });
@@ -158,7 +167,7 @@ export function SegmentControl({
       style={[
         styles.container,
         stacked && styles.containerStacked,
-        style,
+        style
       ]}
       onLayout={onContainerLayout}
     >
@@ -166,6 +175,7 @@ export function SegmentControl({
         items
       ) : (
         <>
+          {adaptive ? (
           <ScrollView
             ref={scroll}
             horizontal
@@ -180,6 +190,7 @@ export function SegmentControl({
                 pointerEvents="none"
                 style={[
                   styles.highlight,
+                    { top: 0, left: 0, bottom: 0 },
                   styles.selected,
                   { width: activeWidth, transform: [{ translateX }] },
                 ]}
@@ -187,6 +198,21 @@ export function SegmentControl({
             ) : null}
             {items}
           </ScrollView>
+          ) : (
+            <>
+              {widths.length > 0 ? (
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.highlight,
+                    styles.selected,
+                    { width: activeWidth, transform: [{ translateX }] },
+                  ]}
+                />
+              ) : null}
+              {items}
+            </>
+          )}
           {/* Off-screen single-line copies give each label's natural width. */}
           <View
             pointerEvents="none"
@@ -202,7 +228,7 @@ export function SegmentControl({
                   onLayout={(e) => measure(i, e.nativeEvent.layout.width)}
                   style={[styles.item, styles.itemNatural]}
                 >
-                  {segmentContent(seg, i === activeIndex, styles)}
+                  {segmentContent(seg, i === activeIndex, styles, false, true)}
                 </View>
               ))}
             </View>
@@ -219,20 +245,28 @@ function segmentContent(
   seg: Segment,
   active: boolean,
   styles: ReturnType<typeof createStyles>,
+  adaptive: boolean,
+  measuring = false,
 ) {
   return (
     <>
       {seg.icon}
       <Text
-        numberOfLines={1}
+        numberOfLines={adaptive || measuring ? 1 : undefined}
         style={[styles.label, active && styles.labelActive]}
       >
         {seg.label}
       </Text>
       {seg.count !== undefined && seg.count > 0 ? (
-        <View style={[styles.countBadge, active && styles.countBadgeActive]}>
+        <View
+          style={[
+            styles.countBadge,
+            adaptive && { height: undefined, minHeight: 18 },
+            active && styles.countBadgeActive,
+          ]}
+        >
           <Text
-            numberOfLines={1}
+            numberOfLines={adaptive || measuring ? 1 : undefined}
             style={[styles.countText, active && styles.countTextActive]}
           >
             {seg.count}
@@ -258,9 +292,9 @@ const createStyles = (c: ThemeColors) => {
     // Inside the scroll row: the track's padding is outside it.
     highlight: {
       position: "absolute",
-      top: 0,
-      left: 0,
-      bottom: 0,
+      top: shared.container.padding,
+      left: shared.container.padding,
+      bottom: shared.container.padding,
       borderRadius: shared.item.borderRadius,
       borderWidth: shared.item.borderWidth,
     },
@@ -304,8 +338,7 @@ const createStyles = (c: ThemeColors) => {
     },
     countBadge: {
       minWidth: 18,
-      // Grows with its scaled count; a fixed height clipped it at large sizes.
-      minHeight: 18,
+      height: 18,
       // DESIGN.md §Badges: rounded-md (6px), purple accent variant. Theme-aware
       // via `primaryTone`, so both light + dark render correctly.
       borderRadius: radius.sm,

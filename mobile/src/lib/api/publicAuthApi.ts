@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import {
   parsePublicAuthConfig,
   type PublicAuthConfig,
@@ -9,7 +9,7 @@ import { cachePublicConfigHints } from "../publicConfigHints";
 const PUBLIC_AUTH_CONFIG_TIMEOUT_MS = 10_000;
 
 function cancelledRequest(): Error {
-  return Object.assign(new Error(translateApp("Loading sign-in options was cancelled.")), {
+  return Object.assign(localizedError("Loading sign-in options was cancelled."), {
     name: "AbortError",
   });
 }
@@ -35,9 +35,7 @@ export async function getPublicAuthConfig(
     });
     if (signal?.aborted) throw cancelledRequest();
     if (timedOut) {
-      throw new Error(
-        translateApp("Loading sign-in options timed out. Please try again."),
-      );
+      throw localizedError("Loading sign-in options timed out. Please try again.");
     }
     const config = parsePublicAuthConfig(response);
     cachePublicConfigHints(response);
@@ -45,18 +43,10 @@ export async function getPublicAuthConfig(
   } catch {
     if (signal?.aborted) throw cancelledRequest();
     if (timedOut) {
-      throw new Error(
-        translateApp(
-          "Loading sign-in options timed out. Check your connection and try again.",
-        ),
-      );
+      throw localizedError("Loading sign-in options timed out. Check your connection and try again.");
     }
     // API errors and invalid response bodies may contain server details.
-    throw new Error(
-      translateApp(
-        "Unable to load sign-in options. Check your connection and try again.",
-      ),
-    );
+    throw localizedError("Unable to load sign-in options. Check your connection and try again.");
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", forwardAbort);

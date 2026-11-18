@@ -128,40 +128,40 @@ function parseCron(expression: string): ParsedCron | null {
   return days ? { kind: "days", hour: h, minute: m, days: new Set(days) } : null;
 }
 
-const DAY_PLURAL = [
-  translateApp("Sundays"),
-  translateApp("Mondays"),
-  translateApp("Tuesdays"),
-  translateApp("Wednesdays"),
-  translateApp("Thursdays"),
-  translateApp("Fridays"),
-  translateApp("Saturdays"),
-];
-const DAY_SHORT = [
-  translateApp("Sun"),
-  translateApp("Mon"),
-  translateApp("Tue"),
-  translateApp("Wed"),
-  translateApp("Thu"),
-  translateApp("Fri"),
-  translateApp("Sat"),
-];
-
 function describeDays(days: Set<number>) {
   const list = [...days].sort((a, b) => a - b);
   if (list.length === 7) return translateApp("Every day");
   if (list.join() === "1,2,3,4,5") return translateApp("Weekdays");
   if (list.join() === "0,6") return translateApp("Weekends");
-  if (list.length === 1) return DAY_PLURAL[list[0]!]!;
+  const dayPlural = [
+    translateApp("Sundays"),
+    translateApp("Mondays"),
+    translateApp("Tuesdays"),
+    translateApp("Wednesdays"),
+    translateApp("Thursdays"),
+    translateApp("Fridays"),
+    translateApp("Saturdays"),
+  ];
+  const dayShort = [
+    translateApp("Sun"),
+    translateApp("Mon"),
+    translateApp("Tue"),
+    translateApp("Wed"),
+    translateApp("Thu"),
+    translateApp("Fri"),
+    translateApp("Sat"),
+  ];
+
+  if (list.length === 1) return dayPlural[list[0]!]!;
   // A run that may wrap past Saturday (e.g. Tue–Sat, Sat–Wed).
   const start = list.find((day) => !days.has((day + 6) % 7));
   if (start !== undefined) {
     let end = start;
     while (days.has((end + 1) % 7) && (end + 1) % 7 !== start) end = (end + 1) % 7;
     if ((((end - start) % 7) + 7) % 7 === list.length - 1)
-      return `${DAY_SHORT[start]}–${DAY_SHORT[end]}`;
+      return `${dayShort[start]}–${dayShort[end]}`;
   }
-  return list.map((day) => DAY_SHORT[day]).join(", ");
+  return list.map((day) => dayShort[day]).join(", ");
 }
 
 function clock(hour: number, minute: number) {

@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { OnboardingReplay } from "./OnboardingReplay";
@@ -90,7 +91,7 @@ export function FirstRunIntro({
   const mounted = useRef(true);
   const saving = useRef(false);
   const presentation = useRef(0);
-  const [saveError, setSaveError] = useState<string>();
+  const [saveError, setSaveError] = useLocalizedState<string>();
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -161,9 +162,9 @@ export function FirstRunIntro({
         opened === presentation.current
       )
         setSaveError(
-          translateApp(
+          () => (translateApp(
             "Your intro could not be saved. Check your connection and try again.",
-          ),
+          )),
         );
       return false;
     } finally {

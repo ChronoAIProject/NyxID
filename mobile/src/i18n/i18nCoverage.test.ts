@@ -1,4 +1,5 @@
-import { translationConcatenations, missingRenderLanguageSubscription } from "./i18nQualityGuard";
+import { exclusiveCharacters, wrongScriptCharacters } from './i18nScriptGuard';
+import { translationConcatenations, missingRenderLanguageSubscription, moduleScopeTranslations } from "./i18nQualityGuard";
 import { NON_TRANSLATABLE_TOKENS } from "./i18nLiteralGuard";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -213,23 +214,38 @@ test("rendered bridge translations subscribe to the app language", () => {
   assert.deepEqual(missingRenderLanguageSubscription('function Page() { return <Button onPress={() => Alert.alert(translateApp("Hello"))} /> }'), []);
 });
 
+test("N13 production translations never freeze copy at module scope", () => {
+  const failures = sources(new URL("../", import.meta.url)).flatMap((file) =>
+    moduleScopeTranslations(readFileSync(file, "utf8"), file.pathname)
+      .map((line) => `${file.pathname}:${line}`));
+  assert.deepEqual(failures, []);
+});
+
+test("N13 module-scope AST guard distinguishes cached copy from deferred formatters", () => {
+  assert.deepEqual(moduleScopeTranslations(`
+    import { translateApp as label } from "./appTranslation";
+    const days = [label("Sundays"), translateApp("Mondays")];
+    const map = { day: translate("zh-CN", "Tuesdays") };
+    class Labels { static day = translateApp("Wednesdays"); }
+  `), [3, 3, 4, 5]);
+  assert.deepEqual(moduleScopeTranslations(`
+    // translateApp("not executed")
+    const source = 'translateApp("not executed")';
+    const getter = { get label() { return translateApp("Sundays"); } };
+    const format = () => translateApp("Mondays");
+    function render() { return translate("zh-CN", "Tuesdays"); }
+  `), []);
+});
+
 test("Chinese catalogs use the correct script including OpenCC mappings with multiple targets", () => {
-  const exclusiveCharacters = (dictionary: string) => new Set(
-    readFileSync(new URL(`./opencc/${dictionary}`, import.meta.url), "utf8")
-      .split("\n")
-      .filter((line) => line && !line.startsWith("#"))
-      .map((line) => line.split("\t"))
-      .filter(([character, targets]) => !targets!.split(" ").includes(character!))
-      .map(([character]) => character!),
-  );
   const simplified = exclusiveCharacters("STCharacters.txt");
   const traditional = exclusiveCharacters("TSCharacters.txt");
   // Multiple traditional choices do not make these valid Traditional characters.
   for (const character of "开证发复获") assert.ok(simplified.has(character));
   for (const character of "開證發髮複獲") assert.ok(traditional.has(character));
-  for (const [language, catalog, forbidden] of [["zh-CN", cn, traditional], ["zh-TW", tw, simplified]] as const)
+  for (const [language, catalog] of [["zh-CN", cn], ["zh-TW", tw]] as const)
     for (const [key, value] of Object.entries(catalog))
-      for (const character of value) assert.ok(!forbidden.has(character), `${language}: ${key}: ${character}`);
+      assert.deepEqual(wrongScriptCharacters(language, value), [], `${language}: ${key}`);
   for (const shared of "刷窗缺着著") {
     assert.ok(!simplified.has(shared));
     assert.ok(!traditional.has(shared));

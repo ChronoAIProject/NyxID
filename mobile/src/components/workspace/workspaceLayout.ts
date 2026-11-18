@@ -62,6 +62,7 @@ export const QUICK_RAIL_TAB_SIZE = FLOATING_CONTROL_SIZE;
 export const CENTERED_SHEET_MIN_WIDTH = 768;
 
 export type WorkspaceWindowMetrics = {
+  platform: string;
   width: number;
   height: number;
   rightInset: number;
@@ -70,6 +71,7 @@ export type WorkspaceWindowMetrics = {
 /** A corner status strip, unlike the full-height notch inset on ordinary phones. */
 export function workspaceCornerSensor(metrics: WorkspaceWindowMetrics) {
   return (
+    metrics.platform === "ios" &&
     metrics.rightInset >= CORNER_SENSOR_MIN_RIGHT_INSET &&
     Math.max(metrics.width, metrics.height) /
       Math.min(metrics.width, metrics.height) <

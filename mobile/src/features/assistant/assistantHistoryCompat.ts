@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
@@ -53,6 +54,6 @@ export function historyErrorMessage(error: Error | null | undefined): string | u
 
 export function parseHistoryResponse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
-  if (!result.success) throw new Error(translateApp(HISTORY_UNAVAILABLE));
+  if (!result.success) throw localizedError(HISTORY_UNAVAILABLE);
   return result.data;
 }

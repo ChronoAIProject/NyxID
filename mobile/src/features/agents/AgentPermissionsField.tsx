@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
@@ -192,7 +193,7 @@ export function AgentPermissionsSheet({
   const [guestService, setGuestService] = useState<ServiceOption>();
   const [saving, setSaving] = useState(false);
   const [failedSave, setFailedSave] = useState(false);
-  const [unexpectedError, setUnexpectedError] = useState<string>();
+  const [unexpectedError, setUnexpectedError] = useLocalizedState<string>();
   const savingRef = useRef(false);
   const blocked = disabled || readOnly || saving;
   const known = new Set(options.map((row) => row.value));
@@ -237,9 +238,9 @@ export function AgentPermissionsSheet({
       else setFailedSave(true);
     } catch (cause) {
       setUnexpectedError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
-          : translateApp("Could not save permissions. Try again."),
+          : translateApp("Could not save permissions. Try again.")),
       );
       setFailedSave(true);
     } finally {

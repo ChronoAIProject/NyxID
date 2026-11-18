@@ -343,11 +343,11 @@ test("pending rows place Approve and Deny in one borderless split row below the 
   assert.ok(all.every((e) => e.type !== "StatusBadge"));
 });
 
-test("approval and activity card text re-measures after a live text-size change", () => {
+test("approval and activity cards retain base native paragraph identity", () => {
   for (const name of ["HistoryCard", "ChallengeCard", "GrantCard"]) {
     const source = readFileSync(new URL(`./${name}.tsx`, import.meta.url), "utf8");
-    assert.match(source, /DynamicTypeText as Text/, name);
-    assert.doesNotMatch(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
+    assert.doesNotMatch(source, /DynamicTypeText as Text/, name);
+    assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
     assert.doesNotMatch(source, /[^a-zA-Z]height: \d/, `${name}: no fixed row height`);
   }
 });

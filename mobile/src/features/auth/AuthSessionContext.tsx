@@ -10,12 +10,14 @@ import {
   clearStoredAuthSession,
   authSessionGeneration,
   loadStoredAuthSession,
+  peekStoredAuthSession,
   persistAuthSession,
   StoredAuthSession,
 } from "../../lib/auth/sessionStore";
 import {
   activatePushAfterLogin,
   deactivatePushOnLogout,
+  capturePushLogout,
 } from "../../lib/notifications/pushNotifications";
 import { clearPendingApprovalRefreshSignal } from "../../lib/notifications/approvalRefreshSignal";
 import { getCurrentUserProfileRequest, refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
@@ -32,8 +34,24 @@ import { useMobileConsent } from "../../lib/consent";
 
 const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const RESTORE_TIMEOUT_MS = 6000;
+const SIGN_OUT_PUSH_CAPTURE_TIMEOUT_MS = 250;
+async function captureSignOutPush(accessToken?: string): Promise<Awaited<ReturnType<typeof capturePushLogout>>> {
+  const fallback = { accessToken, registration: null };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      capturePushLogout(accessToken),
+      new Promise<typeof fallback>(resolve => { timeout = setTimeout(() => resolve(fallback), SIGN_OUT_PUSH_CAPTURE_TIMEOUT_MS); }),
+    ]);
+  } catch (error) {
+    if (__DEV__) console.warn("[push] sign-out capture unavailable; cleanup will retry", error);
+    return fallback;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 const RESTORE_RETRY_DELAY_MS = 500;
-const RESTORE_FOREGROUND_ATTEMPTS = 3;
+const RESTORE_MAX_RETRY_DELAY_MS = 30_000;
 export const SESSION_STORAGE_FAILED_MESSAGE =
   "Signed in, but this device couldn't save your session. Please try again.";
 
@@ -52,34 +70,45 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
   useEffect(() => { void crashLifecycle?.setRestoring(isRestoring); }, [isRestoring]);
-  const isSigningOutRef = useRef(false);
+  const admittedSessionRef = useRef<StoredAuthSession | null>(null);
+  const signOutFlight = useRef<Promise<void> | null>(null);
+  const authIntentRef = useRef(0);
 
-  const performSignOut = useCallback(async () => {
-    if (isSigningOutRef.current) return;
-    isSigningOutRef.current = true;
-    crashLifecycle?.disarm();
-    setAuthAccountId(null);
-    advanceAuthEpoch();
+  const performSignOut = useCallback((): Promise<void> => {
+    if (signOutFlight.current) return signOutFlight.current;
+    authIntentRef.current++;
     const expectedGeneration = authSessionGeneration();
-    telemetryReset();
-    try {
-      await deactivatePushOnLogout();
-      // A generic refresh hint may outlive a blurred Activity route. Never
-      // carry that previous user's pending work into the next auth session.
-      clearPendingApprovalRefreshSignal();
-      // Clear telemetry identity before we wipe auth state so the
-      // very next event carries a fresh anon distinct_id rather than
-      // the ex-user's id. Safe no-op when telemetry is off.
-      telemetryReset();
-      if (authSessionGeneration() !== expectedGeneration) return;
+    const run = (async () => {
+      // Capture credentials/registration before clearing; no queue or network
+      // teardown may delay the authoritative local sign-out.
+      const session = peekStoredAuthSession() ?? admittedSessionRef.current;
+      const push = await captureSignOutPush(session?.accessToken);
+      // Rotation may finish during the bounded registration read. Use the
+      // latest coordinator-owned pair, not the restore/sign-in snapshot.
+      push.accessToken = (peekStoredAuthSession() ?? session)?.accessToken;
+      if (authSessionGeneration() !== expectedGeneration)
+        throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       await clearStoredAuthSession();
-      if (authSessionGeneration() === expectedGeneration + 1) {
-        queryClient.clear();
-        setIsAuthenticated(false);
-      }
-    } finally {
-      isSigningOutRef.current = false;
-    }
+      if (authSessionGeneration() !== expectedGeneration + 1)
+        throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
+      crashLifecycle?.disarm();
+      admittedSessionRef.current = null;
+      setAuthAccountId(null);
+      advanceAuthEpoch();
+      clearPendingApprovalRefreshSignal();
+      telemetryReset();
+      queryClient.clear();
+      setIsAuthenticated(false);
+      setIsRestoring(false);
+      // The durable tombstone owns success. Pending-unbind recovery and native
+      // cleanup are independent and use the captured, old account credentials.
+      void deactivatePushOnLogout(push).catch((error) => {
+        if (__DEV__) console.warn("[push] post-sign-out cleanup failed", error);
+      });
+    })();
+    const flight = run.finally(() => { if (signOutFlight.current === flight) signOutFlight.current = null; });
+    signOutFlight.current = flight;
+    return flight;
   }, [queryClient]);
 
   // Register the HTTP-layer session invalidation hook so that a 401
@@ -87,7 +116,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   // + push cleanup) instead of silently clearing SecureStore.
   useEffect(() => {
     setSessionInvalidationListener(() => {
-      void performSignOut();
+      void performSignOut().catch((error) => {
+        if (__DEV__) console.warn("[auth] durable sign-out failed; retry required", error);
+      });
     });
     return () => setSessionInvalidationListener(null);
   }, [performSignOut]);
@@ -135,8 +166,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     let settled = false;
     // Sign-in or sign-out during a slow or retried restore owns the state.
     const restoreGeneration = authSessionGeneration();
-    const superseded = () => authSessionGeneration() !== restoreGeneration;
-    let retryWhenActive = false;
+    const restoreIntent = authIntentRef.current;
+    const superseded = () => authSessionGeneration() !== restoreGeneration || authIntentRef.current !== restoreIntent;
+    let inFlight = false;
     let foregroundFailures = 0;
     let restoreTimeout: ReturnType<typeof setTimeout> | undefined;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -163,18 +195,20 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       (next) => {
         if (next !== "active" || !active || settled) return;
         armTimeout();
-        if (retryWhenActive) {
-          retryWhenActive = false;
-          restore();
-        }
+        clearTimeout(retryTimer);
+        restore();
       },
     );
 
-    const restore = () =>
+    const restore = () => {
+      if (!active || settled || inFlight) return;
+      if (superseded()) return settle();
+      inFlight = true;
       void loadStoredAuthSession()
       .then((session) => {
         if (!active || settled) return;
           if (superseded()) return settle();
+        admittedSessionRef.current = session;
         setIsAuthenticated(Boolean(session));
         setAuthAccountId(
           session ? (decodeJwtSub(session.accessToken) ?? session.userId ?? null)
@@ -205,25 +239,13 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
         if (__DEV__) console.warn("[auth] restore session failed", error);
         if (!active || settled) return;
           if (superseded()) return settle();
-          // An unreadable keychain is not a signed-out user. iOS relaunches the
-          // app in the background (silent pushes, after reclaiming it) while the
-          // device may be locked; storage is intact and readable once unlocked.
-          // Retry in the foreground and keep the splash until then.
-          if (AppState.currentState !== "active") {
-            retryWhenActive = true;
-            return;
-          }
-          if (++foregroundFailures < RESTORE_FOREGROUND_ATTEMPTS) {
-            retryTimer = setTimeout(() => {
-        if (active && !settled) restore();
-            }, RESTORE_RETRY_DELAY_MS);
-            return;
-          }
-          // Storage stays unreadable while in use: show sign-in, but leave the
-          // stored session untouched so a later launch can still restore it.
-          setIsAuthenticated(false);
-          settle();
-        });
+          // An unreadable keychain never proves sign-out. Release the splash
+          // after the timeout, but retain foreground and bounded active retries.
+          if (AppState.currentState !== "active") return;
+          const delay = Math.min(RESTORE_RETRY_DELAY_MS * 2 ** Math.min(foregroundFailures++, 6), RESTORE_MAX_RETRY_DELAY_MS);
+          retryTimer = setTimeout(() => { if (AppState.currentState === "active") restore(); }, delay);
+        }).finally(() => { inFlight = false; });
+    };
 
     armTimeout();
     restore();
@@ -238,6 +260,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthSessionContextValue>(() => {
     const signInWithSession = async (session: StoredAuthSession) => {
+      authIntentRef.current++;
       const nextAccountId = decodeJwtSub(session.accessToken) ?? session.userId ?? null;
       if (getAuthAccountId() !== nextAccountId) setAuthAccountId(null);
       advanceAuthEpoch();
@@ -256,31 +279,26 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
       // Gate: if an allowlist is configured, verify the user's email before proceeding
       if (ALLOWED_EMAILS.length > 0) {
+        let profile: Awaited<ReturnType<typeof getCurrentUserProfileRequest>>;
         try {
-          const profile = await getCurrentUserProfileRequest();
-          if (!isEmailAllowed(profile.email)) {
-            if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-            throw new Error(
-              t(
-                "Access restricted. Your account is not authorized for this app.",
-              ),
-            );
-          }
-        } catch (error) {
-          // Re-throw allowlist rejections; swallow profile-fetch failures only
-          if (error instanceof Error && error.message.includes("Access restricted")) {
-            throw error;
-          }
+          profile = await getCurrentUserProfileRequest();
+        } catch {
           if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-          throw new Error(
-            t("Unable to verify account access. Please try again."),
-          );
+          throw new Error(t("Unable to verify account access. Please try again."));
+        }
+        // A policy denial is a successful verification. Keep it outside the
+        // request catch so localized copy never participates in control flow.
+        if (!isEmailAllowed(profile.email)) {
+          if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
+          throw new Error(t("Access restricted. Your account is not authorized for this app."));
         }
       }
 
       if (authSessionGeneration() !== expectedGeneration) throw new Error("auth_session_changed");
+      admittedSessionRef.current = session;
       setAuthAccountId(nextAccountId);
       setIsAuthenticated(true);
+      setIsRestoring(false);
       // Identify to telemetry as soon as the session is persisted.
       // `persistAuthSession` derives/persists userId internally but does
       // not mutate the passed object, so we also derive it here from

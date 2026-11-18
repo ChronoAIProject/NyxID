@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -35,7 +36,7 @@ export function useComposerAccessChange(props: {
     retry: false,
   });
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   const latest = useRef({ props, availability });
@@ -82,9 +83,9 @@ export function useComposerAccessChange(props: {
     } catch (cause) {
       if (current())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : translateApp("Could not change permissions."),
+            : translateApp("Could not change permissions.")),
         );
     } finally {
       lock.current = false;

@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import type { RequestOptions } from "./authenticatedTransport";
@@ -76,9 +77,7 @@ export function createCollaborationApi(request: Request) {
           }),
         );
       if (result.group && result.group.id !== id)
-        throw new Error(
-          translateApp("Group response mismatch. Reload before continuing."),
-        );
+        throw localizedError("Group response mismatch. Reload before continuing.");
       return result;
     },
     async preview(token: string, signal?: AbortSignal) {
@@ -109,7 +108,7 @@ export function createCollaborationApi(request: Request) {
       const allowed =
         kind === "consent" ? ["once", "always", "skip"] : ["allow", "deny"];
       if (!allowed.includes(decision))
-        throw new Error(translateApp("Invalid decision for this card."));
+        throw localizedError("Invalid decision for this card.");
       const target =
         kind === "approval"
           ? `/approvals/requests/${encodeURIComponent(id)}/decide`
@@ -259,11 +258,7 @@ export function inviteToken(input: string) {
     .regex(/^[a-fA-F0-9]+$/)
     .safeParse(token);
   if (!parsed.success)
-    throw new Error(
-      translateApp(
-        "Paste the full invitation link or a 64-character invitation code.",
-      ),
-    );
+    throw localizedError("Paste the full invitation link or a 64-character invitation code.");
   // NyxID issues lowercase codes and hashes them byte-for-byte.
   return parsed.data.toLowerCase();
 }

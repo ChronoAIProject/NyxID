@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -23,7 +24,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
   const [setup, setSetup] = useState<SuggestionSetup>();
   const [busy, setBusy] = useState(true);
   const [opened, setOpened] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const live = useRef(true);
   const started = useRef(false);
   const generation = useRef(0);
@@ -55,7 +56,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
         if (currentRequest()) setOpened(true);
       }
     } catch {
-      if (currentRequest()) setError(translateApp("Could not load connection options. Try again."));
+      if (currentRequest()) setError(() => (translateApp("Could not load connection options. Try again.")));
     } finally {
       if (currentRequest()) setBusy(false);
     }

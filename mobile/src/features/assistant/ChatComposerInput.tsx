@@ -67,7 +67,21 @@ export function ChatComposerToolbar({
   layout?: ComposerActionsLayout;
   children: ReactNode;
 }) {
-  const compact = !!layout?.compact;
+  if (!layout)
+    return (
+      <ChatComposerRow>
+        <ComposerAttachButton {...attach} />
+        {mention}
+        {settings}
+        <View style={{ flex: 1 }} />
+        <ComposerDictationButton
+          dictation={dictation}
+          disabled={dictationDisabled}
+        />
+        {children}
+      </ChatComposerRow>
+    );
+  const compact = !!layout.compact;
   return (
     <ChatComposerRow overlay={compact}>
       <View

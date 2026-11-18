@@ -43,6 +43,9 @@ export function hookHarness<T>(
     }
     mocks["react/jsx-runtime"] = runtime;
   }
+  // Share the VM Error constructor across loaded production modules. Errors
+  // created by host-side fixtures retain the pre-existing unknown-error path.
+  const realmError = runInNewContext("Error") as ErrorConstructor;
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();
   let pendingEffects: number[] = [];
@@ -153,6 +156,11 @@ export function hookHarness<T>(
               ? react
               : name in mocks
                 ? mocks[name]
+                : (name.endsWith("/i18n/useLocalizedState") || name.endsWith("/i18n/localizedError"))
+                  ? harness.load(require.resolve(name))
+                : name.endsWith("/i18n/appTranslation") && Object.entries(mocks).some(([key]) => key.endsWith("/i18n/LanguageProvider"))
+                  ? { ...require(name), translateApp: (phrase: string, values?: Record<string, string | number>) =>
+                      englishTranslation((Object.entries(mocks).find(([key]) => key.endsWith("/i18n/LanguageProvider"))![1] as { useAppLanguage(): { t: typeof englishTranslation } }).useAppLanguage().t(phrase, values), values) }
                 : name.endsWith("/deviceLanguages")
                   ? harness.load(require.resolve(name))
                 : name.endsWith("/DynamicTypeText")
@@ -198,7 +206,7 @@ export function hookHarness<T>(
                       { SettingsHeaderButton: "SettingsHeaderButton" }
                   : name.endsWith("/i18n/Translation")
                     ? richTranslationMock
-                  : name.endsWith("/i18n/LanguageProvider")
+                  : name.endsWith("/LanguageProvider")
                   ? {
                       useAppLanguage: () => ({
                         language: "en",
@@ -206,6 +214,7 @@ export function hookHarness<T>(
                       }),
                     }
                   : require(name),
+          Error: realmError,
           AbortController,
           URL,
           URLSearchParams,

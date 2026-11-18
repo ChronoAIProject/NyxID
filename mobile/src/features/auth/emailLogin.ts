@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { isApiError } from "../../lib/api/ApiError";
 
 export function requiresTotp(error: unknown): boolean {
@@ -15,11 +15,9 @@ export function passwordLoginInput(
   code: string,
 ) {
   if (!email.trim() || !password)
-    throw new Error(translateApp("Enter your email and password."));
+    throw localizedError("Enter your email and password.");
   const mfaCode = code.trim();
   if (mfaRequired && !/^\d{6}$/.test(mfaCode))
-    throw new Error(
-      translateApp("Enter the six-digit code from your authenticator."),
-    );
+    throw localizedError("Enter the six-digit code from your authenticator.");
   return { email: email.trim(), password, ...(mfaRequired ? { mfaCode } : {}) };
 }

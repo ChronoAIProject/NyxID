@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { AuthSubmitButton } from "./AuthSubmitButton";
@@ -36,7 +37,7 @@ export function AgentKeyCreateForm({
   const [expiry, setExpiry] = useState(
     initialValues?.never_expires ? "none" : initialValues?.expires_at ? "custom" : "90",
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   function update<K extends keyof NewAgentKey>(key: K, value: NewAgentKey[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
   }
@@ -346,13 +347,13 @@ export function AgentKeyCreateForm({
         onPress={() => {
           const parsed = newAgentKeySchema.safeParse(draft);
           if (expiry === "custom" && !draft.expires_at) {
-            setError(translateApp("Choose a custom expiry date."));
+            setError(() => (translateApp("Choose a custom expiry date.")));
             return;
           }
           if (!parsed.success) {
             setError(
-              parsed.error.issues[0]?.message ??
-                translateApp("Check the key details."),
+              () => (parsed.error.issues[0]?.message ??
+                translateApp("Check the key details.")),
             );
             return;
           }

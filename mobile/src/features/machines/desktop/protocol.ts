@@ -1,4 +1,4 @@
-import { translateApp } from "../../../i18n/appTranslation";
+import { localizedError } from "../../../i18n/localizedError";
 /** Pure NYXM/NYXD byte contract, shared by native admission and canvas tests.
  * No Blob, filesystem, React Native or browser APIs. All sequences stay u64. */
 export const HEADER_BYTES = 30;
@@ -135,7 +135,7 @@ export function desktopInputValue(value: unknown): DesktopInput | undefined {
 /** Same NYXM kind=2 UUID/u64 and JSON {tool,arguments} as the web client. */
 export function desktopInput(session: string, sequence: bigint, input: DesktopInput): ArrayBuffer {
   const command = desktopInputValue(input);
-  if (!uuid.test(session) || sequence <= 0n || sequence > 0xffffffffffffffffn || !command) throw new Error(translateApp('Invalid desktop input'));
+  if (!uuid.test(session) || sequence <= 0n || sequence > 0xffffffffffffffffn || !command) throw localizedError('Invalid desktop input');
   // RN/Hermes does not guarantee TextEncoder. Encode UTF-8 explicitly.
   const payload: number[] = [];
   for (const character of JSON.stringify(command)) {
@@ -147,7 +147,7 @@ export function desktopInput(session: string, sequence: bigint, input: DesktopIn
     else payload.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 63), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63),
       );
   }
-  if (payload.length > 16384) throw new Error(translateApp('Desktop input is too long'));
+  if (payload.length > 16384) throw localizedError('Desktop input is too long');
   const bytes = new Uint8Array(HEADER_BYTES + payload.length);
   bytes.set([78, 89, 88, 77, 2, 0]);
   const id = session.replaceAll('-', '');
