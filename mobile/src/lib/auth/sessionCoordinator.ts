@@ -3,6 +3,7 @@ export type StoredAuthSession = { accessToken: string; refreshToken?: string; ac
 export type SessionStorage = { getItemAsync(key: string): Promise<string | null>; setItemAsync(key: string, value: string): Promise<void>; deleteItemAsync(key: string): Promise<void> };
 const ACCESS = 'nyxid.auth.access_token', REFRESH = 'nyxid.auth.refresh_token', EXPIRES = 'nyxid.auth.access_token_expires_at', USER = 'nyxid.auth.user_id';
 /** Non-secret marker. Version 2: items use the after-first-unlock keychain class. */
+const DRAFT_KEY = 'nyxid.assistant.draft_key';
 const FORMAT = 'nyxid.auth.storage_format',
   STORAGE_FORMAT = '2';
 /** All SecureStore operations share this queue. Explicit login/logout advances
@@ -50,6 +51,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
     // an apparently authenticated mixed-token record on the next app launch.
     // Every item is re-added, so a login always uses the current storage class.
     await storage.deleteItemAsync(ACCESS);
+    await storage.deleteItemAsync(DRAFT_KEY);
     for (const [key, value] of fields(session)) await replace(key, value);
     await storage.setItemAsync(ACCESS, session.accessToken);
     await storage.setItemAsync(FORMAT, STORAGE_FORMAT);
@@ -95,6 +97,18 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         if (value) await migrate(expected).catch(() => {});
         return value; });
     },
+    draftKey(expected: number, create?: () => Promise<string>): Promise<string | null> {
+      return serial(async () => {
+        if (generation !== expected) return null;
+        let key = await storage.getItemAsync(DRAFT_KEY);
+        if (!key && create && generation === expected) {
+          key = await create();
+          if (generation !== expected) return null;
+          await storage.setItemAsync(DRAFT_KEY, key);
+        }
+        return generation === expected ? key : null;
+      });
+    },
     persist(session: StoredAuthSession) {
       const expected = ++generation; bind(null);
       return serial(async () => {
@@ -108,7 +122,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       const expected = ++generation; bind(null);
       return serial(async () => {
         if (generation !== expected) return;
-        await Promise.all([ACCESS, REFRESH, EXPIRES, USER].map((key) => storage.deleteItemAsync(key)));
+        await Promise.all([ACCESS, REFRESH, EXPIRES, USER, DRAFT_KEY].map((key) => storage.deleteItemAsync(key)));
       });
     },
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {

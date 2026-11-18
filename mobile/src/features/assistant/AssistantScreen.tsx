@@ -34,6 +34,7 @@ import { ComposerConnectionPicker } from "./ComposerConnectionPicker";
 import { transcriptColumnStyle } from "../display/chatLayout";
 import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
+import { readAssistantDraft, saveAssistantDraft } from "./assistantDraftPersistence";
 import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceAgentPicker } from "../../components/workspace/WorkspaceAgentPicker";
 import {
@@ -70,6 +71,8 @@ import {
 } from "react";
 import {
   AccessibilityInfo,
+  AppState,
+  Linking,
   Alert,
   FlatList,
   findNodeHandle,
@@ -190,6 +193,8 @@ import {
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
+import { Camera } from "expo-camera";
+import { waitForVoiceForeground } from "./voice/voicePermission";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
 import { retryInput } from "./assistantState";
 import type { AssistantAcknowledgement } from "./assistantTypes";
@@ -238,12 +243,34 @@ function dismissKeyboardForVoice(signal: AbortSignal): Promise<void> {
 async function createVoiceDraft(
   agentId: string | undefined,
   signal: AbortSignal,
+  current: () => boolean,
 ) {
   const request = new AbortController();
   const cancel = () => request.abort(signal.reason);
   if (signal.aborted) cancel();
   else signal.addEventListener("abort", cancel, { once: true });
   try {
+    // A server draft is a real history entry. Ask before allocating it.
+    let permission = await withVoiceRequestDeadline(request, () => Camera.getMicrophonePermissionsAsync());
+    if (current() && !permission.granted && permission.canAskAgain) {
+      permission = await withVoiceRequestDeadline(request, () => Camera.requestMicrophonePermissionsAsync(), 60_000);
+    }
+    if (!current()) return;
+    if (!permission.granted) {
+      const message = translateApp("Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.");
+      if (!permission.canAskAgain) {
+        Alert.alert(translateApp("Microphone permission was denied"), message, [
+          { text: translateApp("Cancel"), style: "cancel" },
+          { text: translateApp("Open Settings"), onPress: () => { void Linking.openSettings().catch(() => undefined); } },
+        ]);
+      }
+      throw new Error(message);
+    }
+    await waitForVoiceForeground(AppState, request.signal, current, {
+      allowInitialBackground: Platform.OS === "android",
+      waitWhileInactive: Platform.OS === "ios",
+    });
+    if (!current()) return;
     return await withVoiceRequestDeadline(request, () =>
       assistantUploadsApi.createDraft(agentId, request.signal),
     );
@@ -307,13 +334,16 @@ export function AssistantScreen({
     (route?.params?.home === true && !route.params.draft) || !route?.params,
   );
   const draftOwner = useRef(draftKey);
+  const draftEpoch = getAuthEpoch();
   const [draft, setDraft] = useState(
     () => assistantDraftStore.get<string>(`text:${draftKey}`) ?? "",
   );
   const [composerGeneration, setComposerGeneration] = useState(0);
   const draftRevision = useRef(0);
   function updateDraft(value: string) {
+    if (getAuthEpoch() !== draftEpoch) return;
     draftRevision.current += 1;
+    void saveAssistantDraft(draftOwner.current, value, draftEpoch).catch(() => undefined);
     assistantDraftStore.set(`text:${draftOwner.current}`, value);
     setDraft(value);
   }
@@ -687,8 +717,8 @@ export function AssistantScreen({
       if (!current()) return;
       const id =
         scope.conversationId ??
-        (await createVoiceDraft(scope.agentId, controller.signal));
-      if (!current()) return;
+        (await createVoiceDraft(scope.agentId, controller.signal, current));
+      if (!id || !current()) return;
       if (!scope.conversationId) {
         adoptedId.current = id;
         assistant.openConversation(id);
@@ -780,6 +810,8 @@ export function AssistantScreen({
       adoptedId.current = undefined;
       const value =
         assistantDraftStore.get<string>(`text:${draftOwner.current}`) ?? "";
+      void saveAssistantDraft(draftOwner.current, "", draftEpoch).catch(() => undefined);
+      void saveAssistantDraft(draftKey, value, draftEpoch).catch(() => undefined);
       assistantDraftStore.delete(`text:${draftOwner.current}`);
       assistantDraftStore.set(`text:${draftKey}`, value);
       draftOwner.current = draftKey;
@@ -787,8 +819,19 @@ export function AssistantScreen({
     }
     draftRevision.current += 1;
     draftOwner.current = draftKey;
-    setDraft(assistantDraftStore.get<string>(`text:${draftKey}`) ?? "");
-  }, [draftKey]);
+    const cached = assistantDraftStore.get<string>(`text:${draftKey}`);
+    setDraft(cached ?? "");
+    if (cached !== undefined) return;
+    let active = true;
+    const revision = draftRevision.current;
+    void readAssistantDraft(draftKey, draftEpoch).then((text) => {
+      if (!active || getAuthEpoch() !== draftEpoch || revision !== draftRevision.current || text === undefined) return;
+      draftRevision.current += 1;
+      assistantDraftStore.set(`text:${draftKey}`, text);
+      setDraft(text);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [draftKey, draftEpoch]);
   useEffect(() => {
     if (!stopProtected) return;
     const timeout = setTimeout(

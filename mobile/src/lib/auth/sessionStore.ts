@@ -34,3 +34,5 @@ export function clearStoredAuthSession() {
 }
 export const commitRefreshedAuthSession = coordinator.commitRefresh;
 export const authSessionGeneration = coordinator.generation;
+
+export const sessionDraftKey = coordinator.draftKey;

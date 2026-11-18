@@ -87,6 +87,10 @@ function setup(
   platform = "ios",
   reducedMotion = false,
   translations: Record<string, string> = {},
+  diskDrafts = {
+    readAssistantDraft: async (_key: string): Promise<string | undefined> => undefined,
+    saveAssistantDraft: async (_key: string, _value: string) => {},
+  },
 ) {
   let onAdopt: ((id: string) => void) | undefined;
   let headerOptions: Record<string, any> = {};
@@ -94,6 +98,11 @@ function setup(
   const headerModule = {};
   let navigationDisabled = false;
   const draft = deferred<string>();
+  let microphone = { granted: true, canAskAgain: true };
+  const mic = {
+    getMicrophonePermissionsAsync: async () => microphone,
+    requestMicrophonePermissionsAsync: async () => microphone,
+  };
   const events: unknown[][] = [];
   const alerts: { text: string; style?: string; onPress?: () => void }[][] =
     [];
@@ -244,6 +253,7 @@ function setup(
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => reducedMotion,
     },
+    "./assistantDraftPersistence": diskDrafts,
     "./assistantDraftStore": {
       assistantDraftKey,
       assistantDraftStore: createAssistantDraftStore(() => epoch),
@@ -300,7 +310,10 @@ function setup(
         key,
       }),
     },
+    "expo-camera": { Camera: mic },
     "react-native": {
+      AppState: { currentState: "active" },
+      Linking: { openSettings: async () => { events.push(["settings"]); } },
       useWindowDimensions: () => ({
         width: windowWidth,
         height: 844,
@@ -624,6 +637,8 @@ function setup(
     events,
     alerts,
     drafts,
+    mic,
+    setMicrophone(value: typeof microphone) { microphone = value; },
     featureQueries,
     draft,
     adopt: (id: string) => {
@@ -1378,7 +1393,7 @@ test("empty chat creates exactly one real draft and adopts it before opening voi
   const open = x.button("Open voice call")!;
   open.props.onPress();
   open.props.onPress();
-  x.harness.flush();
+  await x.harness.settle();
   assert.equal(x.drafts.length, 1);
   assert.equal(x.drafts[0]!.agentId, "agent-a");
   assert.equal(x.drafts[0]!.signal.aborted, false);
@@ -1419,7 +1434,7 @@ test("a hung voice draft releases its spinner with a localized error and a retry
     "Voice could not open. Try again.": timeoutMessage,
   });
   x.button("Open voice call")!.props.onPress();
-  x.harness.flush();
+  await x.harness.settle();
   context.mock.timers.tick(VOICE_RECOVERY_TIMEOUT_MS - 1);
   await x.harness.settle();
   assert.equal(x.button("Open voice call")?.props.disabled, true);
@@ -1437,7 +1452,7 @@ test("a hung voice draft releases its spinner with a localized error and a retry
   );
 
   x.button("Open voice call")!.props.onPress();
-  x.harness.flush();
+  await x.harness.settle();
   assert.equal(x.drafts.length, 2);
   assert.equal(x.button("Open voice call")?.props.disabled, true);
   assert.equal(
@@ -1470,7 +1485,7 @@ test("chat, account, blur and unmount cancel a hung draft without waiting for tr
   for (const reason of ["chat", "account", "blur", "unmount"] as const) {
     const x = setup();
     x.button("Open voice call")!.props.onPress();
-    x.harness.flush();
+    await x.harness.settle();
     if (reason === "chat") {
       x.props.route.params.conversationId = B;
       x.assistant.openConversation(B);
@@ -1489,6 +1504,7 @@ test("chat, account, blur and unmount cancel a hung draft without waiting for tr
       assert.equal(x.button("Open voice call")?.props.disabled, false, reason);
       x.button("Open voice call")!.props.onPress();
       if (reason !== "chat") {
+        await x.harness.settle();
         assert.equal(x.drafts.length, 2, reason);
         x.drafts[1]!.response.resolve(B);
       }
@@ -1687,12 +1703,12 @@ test("typing or losing voice availability during keyboard handoff cannot start a
   }
 });
 
-test("voice entry without a visible keyboard keeps the existing zero-delay path on iOS and Android", () => {
+test("voice entry without a visible keyboard keeps the existing keyboard-dismissal-free path on iOS and Android", async () => {
   for (const platform of ["ios", "android"]) {
     for (const id of [undefined, A]) {
       const x = setup(id, true, platform);
       x.button("Open voice call")!.props.onPress();
-      x.harness.flush();
+      await x.harness.settle();
       assert.equal(x.keyboard.listeners(), 0, platform);
       if (id) assert.equal(x.voice()?.props.thread, id, platform);
       else assert.equal(x.drafts.length, 1, platform);
@@ -1882,6 +1898,7 @@ test("the server feature flag and eligible chat context determine whether voice 
 test("switching chat while draft creation is pending aborts it and ignores its late result", async () => {
   const x = setup();
   x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.props.route.params.conversationId = B;
   x.assistant.openConversation(B);
   x.harness.render();
@@ -1904,6 +1921,7 @@ test("switching chat while draft creation is pending aborts it and ignores its l
 test("switching account while draft creation is pending cannot adopt or open the old account's result", async () => {
   const x = setup();
   x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.setEpoch(8);
   x.harness.render();
   x.draft.resolve(A);
@@ -1920,6 +1938,7 @@ test("switching account while draft creation is pending cannot adopt or open the
 test("typing during pending draft creation preserves the text and invalidates the voice launch", async () => {
   const x = setup();
   x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.input().props.onChangeText("Actually, send this instead");
   x.harness.flush();
   x.draft.resolve(A);
@@ -1938,6 +1957,7 @@ test("typing during pending draft creation preserves the text and invalidates th
 test("a pending voice draft cannot take over a composer that started uploading", async () => {
   const x = setup();
   x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.uploads.picking = true;
   x.harness.render();
   assert.equal(x.button("Open voice call"), undefined);
@@ -1955,6 +1975,7 @@ test("a late draft cannot open voice after the account loses voice availability"
   for (const reason of ["feature", "offline"] as const) {
     const x = setup();
     x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
     if (reason === "feature") x.setFeatures([]);
     else {
       x.assistant.online = false;
@@ -1975,6 +1996,7 @@ test("a late draft cannot open voice after the account loses voice availability"
 test("unmount aborts pending draft creation and late success cannot navigate", async () => {
   const x = setup();
   x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.harness.unmount();
   assert.equal(x.drafts[0]!.signal.aborted, true);
   x.draft.resolve(A);
@@ -3338,4 +3360,61 @@ test("Home loading never registers a critical navigation guard; only its initial
     "an established chat can leave during a send",
   );
   env.harness.unmount();
+});
+
+test("reopening a composer restores its own unsent text without overwriting new typing", async () => {
+  const rows = new Map<string, string>();
+  const disk = {
+    readAssistantDraft: async (key: string) => rows.get(key),
+    saveAssistantDraft: async (key: string, text: string) => { rows.set(key, text); },
+  };
+  for (const thread of [undefined, A]) {
+    const first = setup(thread, false, "ios", false, {}, disk);
+    first.input().props.onChangeText(thread ? "Thread reply" : "Home draft");
+    first.harness.unmount();
+  }
+  for (const thread of [undefined, A]) {
+    const restored = setup(thread, false, "android", false, {}, disk);
+    await restored.harness.settle();
+    assert.equal(restored.input().props.value, thread ? "Thread reply" : "Home draft");
+    restored.harness.unmount();
+  }
+  const pending = deferred<string>();
+  const editing = setup(A, false, "ios", false, {}, { ...disk, readAssistantDraft: () => pending.promise });
+  editing.input().props.onChangeText("New edit");
+  pending.resolve("Old draft");
+  await editing.harness.settle();
+  assert.equal(editing.input().props.value, "New edit");
+  editing.harness.unmount();
+});
+
+test("denying microphone permission on a new chat creates no server thread and a later grant permits a retry", async () => {
+  for (const platform of ["android", "ios"]) {
+    const x = setup(undefined, true, platform);
+    let requests = 0;
+    x.setMicrophone({ granted: false, canAskAgain: true });
+    x.mic.requestMicrophonePermissionsAsync = async () => {
+      requests++;
+      return { granted: false, canAskAgain: false };
+    };
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(requests, 1);
+    assert.equal(x.drafts.length, 0);
+    assert.equal(x.voice(), undefined);
+    x.alerts.at(-1)?.find((button) => button.text === "Open Settings")?.onPress?.();
+    assert.ok(x.events.some(([event]) => event === "settings"));
+    x.setMicrophone({ granted: false, canAskAgain: false });
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    assert.equal(requests, 1);
+    assert.equal(x.drafts.length, 0);
+    x.setMicrophone({ granted: true, canAskAgain: true });
+    x.button("Open voice call")!.props.onPress();
+    x.draft.resolve(A);
+    await x.harness.settle();
+    assert.equal(x.voice()?.props.thread, A);
+    assert.equal(x.drafts.length, 1);
+    x.harness.unmount();
+  }
 });

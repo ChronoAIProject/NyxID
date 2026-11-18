@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
+import { onlineManager, QueryClient, QueryObserver } from "@tanstack/react-query";
 import { COMPOSER_ACCESS_DESCRIPTION } from "./composerSettings";
 
 type Element = { type: unknown; props: Record<string, any> };
@@ -481,4 +482,45 @@ test("access-mode API posts only validated owner access_mode to the existing set
   ]);
   await assert.rejects(api.updateAccessMode("invalid"));
   assert.equal(calls.length, 2);
+});
+
+test("an offline cold start automatically reads the owner permissions when connectivity returns", async (t) => {
+  const screen = setup();
+  t.after(screen.h.unmount);
+  screen.available(false);
+  screen.settings.data = undefined;
+  screen.settings.isError = true;
+  screen.h.render();
+  assert.ok(screen.find("Permissions: Permissions"));
+  const offline = screen.queries.at(-1);
+  const client = new QueryClient();
+  await assert.rejects(client.fetchQuery({
+    queryKey: offline.queryKey,
+    queryFn: async () => { throw new Error("Offline"); },
+    networkMode: "always",
+    retry: false,
+  }), /Offline/);
+  onlineManager.setOnline(false);
+  client.mount();
+  let reads = 0;
+  const read = async () => {
+    reads++;
+    return { access_mode: "nyxmode" };
+  };
+  const observer = new QueryObserver(client, { ...offline, queryFn: read });
+  const settled = deferred<void>();
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.isSuccess) settled.resolve();
+  });
+  t.after(() => { unsubscribe(); client.unmount(); client.clear(); onlineManager.setOnline(true); });
+  assert.equal(reads, 0);
+  onlineManager.setOnline(true);
+  screen.available(true);
+  observer.setOptions({ ...screen.queries.at(-1), queryFn: read });
+  await settled.promise;
+  screen.settings.data = observer.getCurrentResult().data;
+  screen.h.render();
+  assert.equal(reads, 1);
+  assert.ok(screen.find("Permissions: Auto"));
+  assert.equal(screen.calls.some(([name]) => name === "retry-settings"), false);
 });

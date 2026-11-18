@@ -219,3 +219,21 @@ test(
     assert.equal((await coordinator.load())?.accessToken, a.accessToken);
   },
 );
+
+test("draft encryption keys survive restore and refresh, and rotate on explicit login and logout", async () => {
+  const { coordinator, storage } = setup();
+  await coordinator.persist(a);
+  const generation = coordinator.generation();
+  assert.equal(await coordinator.draftKey(generation, async () => "first"), "first");
+  const reboot = createSessionCoordinator(storage, () => {});
+  const loaded = (await reboot.load())!;
+  await reboot.commitRefresh(loaded, a);
+  assert.equal(await reboot.draftKey(reboot.generation()), "first");
+  await reboot.clear();
+  assert.equal(await reboot.draftKey(reboot.generation()), null);
+  await reboot.persist(a);
+  assert.equal(await reboot.draftKey(reboot.generation(), async () => "second"), "second");
+  await reboot.persist(b);
+  assert.equal(await reboot.draftKey(reboot.generation()), null);
+  assert.equal(await reboot.draftKey(generation, async () => "stale"), null);
+});
