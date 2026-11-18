@@ -10,6 +10,13 @@ const LEGACY_KEYS = ['access_token', 'refresh_token', 'access_token_expires_at',
 type RecordValue = { version: 2; session: Omit<StoredAuthSession, 'sessionGeneration'> | null };
 export function createSessionCoordinator(storage: SessionStorage, bind: (actor: string | null) => void) {
   let generation = 0;
+  // Only failed clears may extend this generation interval. An intent fences
+  // immediately; failure restores the prior floor, success keeps the fence.
+  let refreshLineageStart = 0;
+  function ownsRefreshLineage(expected: StoredAuthSession) {
+    return expected.sessionGeneration !== undefined && expected.sessionGeneration >= refreshLineageStart
+      && expected.sessionGeneration <= generation;
+  }
   let legacyCleanupComplete = false;
   let known: { generation: number; session: StoredAuthSession | null } | undefined;
   function remember(session: StoredAuthSession | null, expected: number) {
@@ -101,6 +108,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     persist(session: StoredAuthSession) {
+      refreshLineageStart = generation + 1;
       const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) throw new Error('auth_session_changed');
@@ -114,6 +122,8 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
     },
     clear() {
       const previousGeneration = generation;
+      const previousLineageStart = refreshLineageStart;
+      refreshLineageStart = generation + 1;
       const previousKnown = known?.generation === previousGeneration ? known : undefined;
       const previousSuccessor = pendingSuccessor?.generation === previousGeneration ? pendingSuccessor : null;
       const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
@@ -125,10 +135,11 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         } catch (error) {
           // Failure leaves the admitted session usable, including a successor
           // that exists only in memory. Rebase it into this intent's generation
-          // without admitting any older refresh flight or a replacement login.
+          // while retaining same-pair refresh lineage only after this clear fails.
           if (generation === expected) {
             const retained = previousSuccessor?.session ?? previousKnown?.session;
             if (retained) {
+              refreshLineageStart = previousLineageStart;
               // Android commit() updates native memory before reporting disk
               // failure. The recovery slot must outrank that cached tombstone,
               // even when this pair was already durable before sign-out.
@@ -149,17 +160,17 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
     },
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {
       return serial(async () => {
-        if (generation !== expected.sessionGeneration) return false;
+        if (!ownsRefreshLineage(expected)) return false;
         // The captured predecessor was loaded by this coordinator. Retain the
         // server's successor before any further fallible native operation.
-        const current = known?.generation === generation ? known.session : await read(expected.sessionGeneration);
-        if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
+        const current = known?.generation === generation ? known.session : await read(generation);
+        if (!ownsRefreshLineage(expected) || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
           || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
         const candidate = { generation, session: normalize(next) };
         pendingSuccessor = candidate;
         remember({ ...candidate.session, sessionGeneration: generation }, generation);
         await persistSuccessor(candidate, 3);
-        if (generation !== expected.sessionGeneration) return false;
+        if (!ownsRefreshLineage(expected)) return false;
         bind(decodeJwtSub(next.accessToken) ?? null);
         return true;
       });

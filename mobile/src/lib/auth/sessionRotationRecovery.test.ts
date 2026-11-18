@@ -139,3 +139,32 @@ test('R1-B Android memory-before-disk tombstone failure keeps an ordinary persis
   await e.coordinator.clear();
   assert.equal(await createSessionCoordinator(e.storage, () => {}).load(), null);
 });
+
+test('R1-C in-flight refresh survives only failed clears in the exact same session lineage', async () => {
+  for (const boundary of ['failed', 'twice-failed', 'success', 'replacement'] as const) {
+    const e = fixture(); await e.coordinator.persist(old);
+    let sent!: () => void, reply!: (value: any) => void;
+    const entered = new Promise<void>(resolve => { sent = resolve; });
+    const refresh = createSessionRefresh({load: e.coordinator.load, commit: e.coordinator.commitRefresh, expiresAt: n => n,
+      request: async value => { assert.equal(value, 'old'); sent(); return new Promise(resolve => { reply = resolve; }); }});
+    const flight = refresh();
+    const result = flight.then(() => 'accepted', error => error.name);
+    await entered;
+    if (boundary === 'success') await e.coordinator.clear();
+    else {
+      e.fail(100); await assert.rejects(e.coordinator.clear(), /locked/);
+      if (boundary === 'twice-failed') await assert.rejects(e.coordinator.clear(), /locked/);
+      e.fail(0);
+      if (boundary === 'replacement') await e.coordinator.persist({accessToken: token('b', 0), refreshToken: 'b'});
+    }
+    reply({access_token: next.accessToken, refresh_token: next.refreshToken, expires_in: 60});
+    assert.equal(await result, boundary === 'failed' || boundary === 'twice-failed' ? 'accepted' : 'AbortError', boundary);
+    const loaded = await e.coordinator.load();
+    assert.equal(loaded?.refreshToken ?? null, boundary === 'success' ? null : boundary === 'replacement' ? 'b' : 'successor', boundary);
+    if (boundary === 'failed' || boundary === 'twice-failed') {
+      assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken, 'successor');
+      assert.equal(await e.coordinator.commitRefresh({...loaded!, refreshToken: 'wrong'}, next), false);
+      assert.equal(await e.coordinator.commitRefresh(loaded!, {accessToken: token('b', 2), refreshToken: 'foreign'}), false);
+    }
+  }
+});
