@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
@@ -510,7 +511,7 @@ export function useNativeVoice(
       if (!selected?.available)
         throw new Error(
           selected?.unavailable_reason ??
-            "This voice source is no longer available.",
+            translateApp("This voice source is no longer available."),
         );
       if (
         !savedPreferences ||
@@ -722,7 +723,7 @@ export function useNativeVoice(
                 "message" in cause &&
                 typeof cause.message === "string"
               ? cause.message
-              : "Voice could not start. Try again.",
+              : translateApp("Voice could not start. Try again."),
         );
     } finally {
       // A deadline abort still owns its UI until a newer action takes over.
@@ -785,7 +786,9 @@ export function useNativeVoice(
     ) {
       if (manual)
         reportStatusError(
-          "The previous voice start is still settling. Check again shortly.",
+          translateApp(
+            "The previous voice start is still settling. Check again shortly.",
+          ),
         );
       return false;
     }
@@ -985,7 +988,9 @@ export function useNativeVoice(
       if (ownsOperation()) {
         remember({ ...priorTarget, unknown: true }, owner);
         reportStatusError(
-          "Call status could not be verified. Check status again before starting voice.",
+          translateApp(
+            "Call status could not be verified. Check status again before starting voice.",
+          ),
         );
       }
       return false;
@@ -1042,7 +1047,7 @@ export function useNativeVoice(
               controller.signal,
             ),
           );
-          if (next.id !== conflict.id) throw new Error("Voice session changed");
+          if (next.id !== conflict.id) throw new Error(translateApp("Voice session changed"));
           if (valid()) {
             const terminal = next.state === "closed" || next.state === "failed";
             setConfirmedEnded(terminal);
@@ -1063,7 +1068,9 @@ export function useNativeVoice(
         } catch {
           if (!valid()) return false;
           reportError(
-            "The existing call could not be ended. Refresh its state and try again.",
+            translateApp(
+              "The existing call could not be ended. Refresh its state and try again.",
+            ),
           );
           try {
             const active = await discoverActiveVoiceCall(
@@ -1092,7 +1099,9 @@ export function useNativeVoice(
     } catch {
       if (ownsOperation())
         reportError(
-          "Ending the call could not be confirmed. Return to chat or check status again.",
+          translateApp(
+            "Ending the call could not be confirmed. Return to chat or check status again.",
+          ),
         );
       return false;
     } finally {
@@ -1125,7 +1134,11 @@ export function useNativeVoice(
       if (valid()) refresh();
     } catch {
       if (valid())
-        reportError("The task could not be stopped. Try again from the chat.");
+        reportError(
+          translateApp(
+            "The task could not be stopped. Try again from the chat.",
+          ),
+        );
     } finally {
       if (taskCancellations.current.get(id) === controller)
         taskCancellations.current.delete(id);
@@ -1192,7 +1205,7 @@ export function useNativeVoice(
       if (!sameScope()) return;
       if (
         current.current &&
-        error === "Tap Resume audio to hear the assistant."
+        error === translateApp("Tap Resume audio to hear the assistant.")
       )
         reportError();
       return current.current?.resumeAudio();

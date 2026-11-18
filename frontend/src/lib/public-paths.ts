@@ -18,6 +18,7 @@ export function isPublicPath(path: string): boolean {
     path === "/onboarding/link" ||
     path === "/privacy" ||
     path === "/terms" ||
+    path === "/data-deletion" ||
     path === "/blog" ||
     path.startsWith("/blog/") ||
     path === "/docs" ||

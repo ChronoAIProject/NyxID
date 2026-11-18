@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 const credentialSourceSchema = z.discriminatedUnion("type", [
@@ -112,7 +113,7 @@ export function canEditConnection(connection: ServiceConnection): boolean {
 export function connectionOwner(connection: ServiceConnection): string {
   return connection.credential_source?.type === "org"
     ? connection.credential_source.org_name
-    : "Personal";
+    : translateApp("Personal");
 }
 
 /** Match the canonical catalog slug, never the suffixed connection proxy slug. */
@@ -150,10 +151,14 @@ export function validateBrowserUrl(value: string): string {
   try {
     url = new URL(value);
   } catch {
-    throw new Error("The service returned an invalid browser link.");
+    throw new Error(
+      translateApp("The service returned an invalid browser link."),
+    );
   }
   if (url.protocol !== "https:" || url.username || url.password) {
-    throw new Error("The service must return a secure HTTPS browser link.");
+    throw new Error(
+      translateApp("The service must return a secure HTTPS browser link."),
+    );
   }
   return url.toString();
 }
@@ -169,10 +174,12 @@ export function buildCatalogConnectionInput(
   },
 ) {
   const label = values.label.trim();
-  if (!label) throw new Error("Give this connection a name.");
+  if (!label) throw new Error(translateApp("Give this connection a name."));
   if (values.platform) {
     if (!entry.platform_key?.available)
-      throw new Error("A platform key is not available for this service.");
+      throw new Error(
+        translateApp("A platform key is not available for this service."),
+      );
     return { service_slug: entry.slug, label, use_platform_key: true };
   }
   let endpoint_url: string | undefined;
@@ -184,7 +191,9 @@ export function buildCatalogConnectionInput(
     const fields: Record<string, string> = {};
     for (const field of entry.token_exchange_credential_fields) {
       const value = values.fields[field.name]?.trim();
-      if (!value) throw new Error(`Enter ${field.label}.`);
+      if (!value) throw new Error(
+          translateApp("Enter {{label}}.", { label: field.label}),
+        );
       fields[field.name] = value;
     }
     credential = JSON.stringify(fields);
@@ -194,7 +203,7 @@ export function buildCatalogConnectionInput(
     !credential &&
     !supportsManagedOAuth(entry)
   ) {
-    throw new Error("Enter the service credential.");
+    throw new Error(translateApp("Enter the service credential."));
   }
   return {
     service_slug: entry.slug,

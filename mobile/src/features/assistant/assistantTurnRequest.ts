@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { conversationIdSchema } from "./assistantTypes";
 import { z } from "zod";
 
@@ -14,24 +15,28 @@ export type AssistantTurnInput = {
 export function assistantTurnBody(input: AssistantTurnInput) {
   const ids = input.attachmentIds ?? [];
   if (ids.length > 10 || new Set(ids).size !== ids.length)
-    throw new Error("Choose up to 10 distinct attachments.");
+    throw new Error(translateApp("Choose up to 10 distinct attachments."));
   ids.forEach((id) => z.string().uuid().parse(id));
   if (
     (!input.text.trim() && !ids.length && !input.retryOf) ||
     [...input.text].length > 32768
   )
     throw new Error(
-      "Enter a message or attach a file (up to 32,768 characters).",
+      translateApp(
+        "Enter a message or attach a file (up to 32,768 characters).",
+      ),
     );
   if (ids.length && !input.conversationId)
-    throw new Error("Upload files to this chat before sending.");
+    throw new Error(translateApp("Upload files to this chat before sending."));
   if (input.retryOf && ids.length)
-    throw new Error("Retry uses the original message's attachments.");
+    throw new Error(
+      translateApp("Retry uses the original message's attachments."),
+    );
   if (input.conversationId) conversationIdSchema.parse(input.conversationId);
   if (input.acknowledgementId !== undefined) {
     z.string().uuid().parse(input.acknowledgementId);
     if (!input.conversationId)
-      throw new Error("A decision can only resume its own chat.");
+      throw new Error(translateApp("A decision can only resume its own chat."));
   }
   return {
     ...(input.conversationId

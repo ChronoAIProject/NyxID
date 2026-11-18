@@ -927,6 +927,8 @@ pub(super) async fn diagnostics(db: &Database) -> AppResult<Vec<super::BillingSt
         }
         if !details.is_empty() {
             output.push(super::BillingStartupDiagnostic {
+                severity: super::DiagnosticSeverity::Action,
+                technical_details: None,
                 code: if exact {
                     "billing_hold_conservation"
                 } else {
@@ -1009,7 +1011,7 @@ mod tests {
             .iter()
             .find(|d| d.code == "billing_hold_backlog")
             .expect("unfinished rows must be visible");
-        assert!(backlog.detail.contains("grant status=forwarded age=over_7d unit=credits rows=1 held=0.0000008 resources=1 wallets=1 owners=1"),"{}",backlog.detail);
+        assert!(backlog.technical_details.as_ref().unwrap().contains("grant status=forwarded age=over_7d unit=credits rows=1 held=0.0000008 resources=1 wallets=1 owners=1"),"{}",backlog.technical_details.as_ref().unwrap());
     }
 
     #[tokio::test]

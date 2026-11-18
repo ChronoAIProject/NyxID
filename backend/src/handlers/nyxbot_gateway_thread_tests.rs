@@ -851,6 +851,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 turn_id: turn_id.clone(),
                 content_type: "image/png".into(),
                 size: 6,
+                chunks: 0,
                 data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
                 created_at: Utc::now(),
             };
@@ -3042,3 +3043,6 @@ async fn supplemental_result_window_followed_original_event_and_retention() {
         }
     }).await;
 }
+
+#[path = "nyxbot_response_read_tests.rs"]
+mod response_read_tests;

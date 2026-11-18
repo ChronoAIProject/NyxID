@@ -1,6 +1,9 @@
+import { translateApp } from '../../../i18n/appTranslation';
 import { desktopActivity, desktopFrame, desktopInput, desktopInputValue, type DesktopFrame } from './protocol';
 
-export type ViewerState = { controls?: boolean; taking?: boolean; phase: 'connecting' | 'watching' | 'attention' | 'reconnecting' | 'unavailable'; label: string };
+export type ViewerState = { controls?: boolean; taking?: boolean; phase:
+    | 'connecting' | 'watching' | 'attention' | 'reconnecting' | 'unavailable'; label: string;
+};
 export type ViewSocket = {
   readyState: number;
   binaryType: string;
@@ -24,24 +27,33 @@ const systemClock: Clock = {
 };
 // These are server authority/runtime refusals, not session logout signals.
 export function terminalDesktopFailure(cause: unknown): boolean {
-  const error = cause as { statusCode?: number; errorCode?: number; error_code?: number } | null;
-  return !!error && ([400, 401, 403, 404, 405, 410, 426].includes(error.statusCode ?? 0) ||
-    [8000, 12400, 12401, 12408, 12409, 12413, 12415, 12416, 12419, 12420, 12421].includes(error.errorCode ?? error.error_code ?? 0));
+  const error = cause as { statusCode?: number; errorCode?: number; error_code?: number;
+  } | null;
+  return (
+    !!error && ([400, 401, 403, 404, 405, 410, 426].includes(error.statusCode ?? 0) ||
+    [8000, 12400, 12401, 12408, 12409, 12413, 12415, 12416, 12419, 12420, 12421].includes(error.errorCode ?? error.error_code ?? 0)));
 }
 export function refusalLabel(cause: unknown): string {
-  const error = cause as { errorCode?: unknown; error_code?: unknown; message?: unknown } | null;
+  const error = cause as { errorCode?: unknown; error_code?: unknown; message?: unknown;
+  } | null;
   const code = error?.errorCode ?? error?.error_code;
   const known: Record<number, string> = {
-    12408: 'The machine owner is controlling this desktop. Wait for them to hand it back.',
-    12420: 'Your permission to use this desktop was revoked.',
-    12421: 'Desktop authority is stale. Retry after permissions refresh.',
-    12400: 'Desktop capability is disabled on this machine.',
-    12401: 'You do not have permission to control this desktop.',
-    12419: 'This machine needs an update before opening this desktop.',
+    12408: translateApp(
+      'The machine owner is controlling this desktop. Wait for them to hand it back.',
+    ),
+    12420: translateApp('Your permission to use this desktop was revoked.'),
+    12421: translateApp(
+      'Desktop authority is stale. Retry after permissions refresh.',
+    ),
+    12400: translateApp('Desktop capability is disabled on this machine.'),
+    12401: translateApp('You do not have permission to control this desktop.'),
+    12419: translateApp(
+      'This machine needs an update before opening this desktop.',
+    ),
   };
   if (typeof code === 'number' && known[code]) return known[code];
   if (typeof error?.message === 'string' && error.message.trim()) return error.message.slice(0, 500);
-  return `Desktop permission or runtime unavailable${typeof code === 'number' && Number.isInteger(code) ? ` (code ${code})` : ''}.`;
+  return (typeof code === 'number' && Number.isInteger(code) ? translateApp('Desktop permission or runtime unavailable (code {{code}}).', { code: code}) : translateApp('Desktop permission or runtime unavailable.'));
 }
 
 let stopActiveViewer: (() => void) | undefined;
@@ -115,9 +127,10 @@ export function createDesktopViewer(deps: {
   const reconnect = () => {
     detach();
     if (!requireActive()) return;
-    if (attempt >= 4) { unavailable('Desktop disconnected. Retry to reconnect.'); return; }
+    if (attempt >= 4) { unavailable(translateApp('Desktop disconnected. Retry to reconnect.')); return; }
     const delay = Math.min(8000, 1000 * 2 ** attempt++) * (0.75 + clock.random() * 0.5);
-    deps.state({ phase: 'reconnecting', label: 'Reconnecting to the desktop…' });
+    deps.state({ phase: 'reconnecting', label: translateApp('Reconnecting to the desktop…'),
+    });
     retryTimer = clock.later(() => void connect(), delay);
   };
   const watch = () => {
@@ -128,7 +141,8 @@ export function createDesktopViewer(deps: {
   };
   const connect = async () => {
     if (!requireActive()) return;
-    deps.state({ phase: 'connecting', label: 'Connecting to the desktop…' });
+    deps.state({ phase: 'connecting', label: translateApp('Connecting to the desktop…'),
+    });
     const expected = generation;
     lastLive = clock.now(); watch();
     try {
@@ -157,7 +171,9 @@ export function createDesktopViewer(deps: {
           }
           if (value.type === 'connected') {
             if (typeof value.session_id !== 'string' || !/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value.session_id)) {
-              unavailable('The server returned unsupported desktop data.'); return;
+              unavailable(
+                translateApp('The server returned unsupported desktop data.'),
+              ); return;
             }
             deps.clear(); session = value.session_id; controls = false; intent = false; taking = false; sequence = 0n;
           }
@@ -168,20 +184,26 @@ export function createDesktopViewer(deps: {
             if (value.type === 'state' && value.controls === false && value.controller !== 'taking') { intent = false; taking = false; }
             const attention = value.controller === 'owner' || value.controller === 'requested' || !!value.reason;
             deps.state({ phase: attention ? 'attention' : 'watching', controls, taking, label: controls
-              ? 'You are controlling this desktop' : value.controller === 'owner' ? 'Owner is controlling elsewhere'
-              : taking ? 'Taking control…' : attention ? 'Needs owner attention' : 'Watching the desktop' });
+              ? translateApp('You are controlling this desktop')
+                : value.controller === 'owner' ? translateApp('Owner is controlling elsewhere')
+                  : taking ? translateApp('Taking control…')
+                    : attention ? translateApp('Needs owner attention')
+                      : translateApp('Watching the desktop'),
+            });
           }
-        } catch { unavailable('The server returned unsupported desktop data.'); }
+        } catch { unavailable(
+            translateApp('The server returned unsupported desktop data.'),
+          ); }
       };
       ws.onclose = event => {
         if (!owned()) return;
         // Unknown upgrade refusals are terminal until the human chooses Retry.
-        if (!session || [1000, 1002, 1003, 1008, 1010].includes(event.code)) unavailable('Desktop unavailable. Retry to reconnect.');
+        if (!session || [1000, 1002, 1003, 1008, 1010].includes(event.code)) unavailable(translateApp('Desktop unavailable. Retry to reconnect.'));
         else reconnect();
       };
       ws.onerror = () => {
         if (!owned()) return;
-        if (!session) unavailable('The server could not open this desktop.');
+        if (!session) unavailable(translateApp('The server could not open this desktop.'));
         else reconnect();
       };
     } catch (cause) {
@@ -193,13 +215,15 @@ export function createDesktopViewer(deps: {
   const takeControl = () => {
     if (!active() || !session || socket?.readyState !== 1 || controls || taking) return;
     intent = true; taking = true;
-    deps.state({ phase: 'attention', controls: false, taking: true, label: 'Taking control…' });
+    deps.state({ phase: 'attention', controls: false, taking: true, label: translateApp('Taking control…'),
+    });
     try { socket.send('{"type":"take_control"}'); } catch { reconnect(); }
   };
   const handBack = () => {
     if (!intent || (!controls && !taking)) return;
     returnControl();
-    deps.state({ phase: 'watching', controls: false, label: 'Returning control…' });
+    deps.state({ phase: 'watching', controls: false, label: translateApp('Returning control…'),
+    });
   };
   // True means queued on this socket, not acknowledged or executed remotely.
   const input = (value: unknown): boolean => {

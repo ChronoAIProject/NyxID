@@ -1,5 +1,6 @@
 #[tokio::test]
 async fn generated_artifacts_writer_cutover_persists_materializes_and_reads_both_formats() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     for contextual in [false, true] {
         for reader_writes_contextual in [false, true] {
             let db =
@@ -97,6 +98,7 @@ async fn generated_artifacts_writer_cutover_persists_materializes_and_reads_both
 
 #[tokio::test]
 async fn generated_artifacts_writer_cutover_migrates_legacy_with_exact_snapshot_fence() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artifact_cutover_migrate").await;
     let mut keys = crate::test_utils::test_encryption_keys();
     keys.set_contextual_record_writes(false);

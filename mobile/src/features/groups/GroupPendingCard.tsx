@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { View } from "react-native";
 import {
   Card,
@@ -26,54 +28,55 @@ export function GroupPendingCard({
   onDecision: (decision: "allow" | "deny") => void;
   onAnswer: (yes: boolean) => void;
 }) {
+  useAppLanguage();
   const expired = Date.parse(action.expires_at) <= Date.now();
   const review = groupPendingReview(action, actorId, organization);
   const canDecide = groupCanDecide(action, actorId, organization);
   return (
     <Card>
       <View
-        accessibilityLabel={`Confirm: ${action.summary}`}
+        accessibilityLabel={translateApp("Confirm: {{summary}}", {
+          summary: action.summary,
+        })}
         accessibilityLiveRegion="polite"
       >
         <Label>
-          {name} wants to: {action.summary}
+          {translateApp("{{name}} wants to: {{summary}}", { name: name, summary: action.summary})}
         </Label>
         {expired ? (
           <Label muted>
-            This request expired. Refresh the crew for its latest state.
+            {translateApp(
+              "This request expired. Refresh the crew for its latest state.",
+            )}
           </Label>
         ) : action.authored_skill ? (
           review && onReview ? (
             <ActionButton
               compact
-              label="Review draft"
+              label={translateApp("Review draft")}
               variant="secondary"
               disabled={blocked}
               onPress={onReview}
             />
           ) : (
-            <Label muted>
-              Awaiting {action.triggering_person?.display_name ?? "owner"}{" "}
-              review
-            </Label>
+            <Label muted>{translateApp("Awaiting {{name}} review", { name: action.triggering_person?.display_name ?? translateApp("owner") })}</Label>
           )
         ) : action.triggering_person ? (
           <>
-            <Label muted>
-              Awaiting {action.triggering_person.display_name}
+            <Label muted>{translateApp("Awaiting {{name}}", { name: action.triggering_person.display_name })}
             </Label>
             {canDecide ? (
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <ActionButton
                   compact
-                  label="Deny"
+                  label={translateApp("Deny")}
                   variant="secondary"
                   disabled={blocked}
                   onPress={() => onDecision("deny")}
                 />
                 <ActionButton
                   compact
-                  label="Allow"
+                  label={translateApp("Allow")}
                   disabled={blocked}
                   onPress={() => onDecision("allow")}
                 />
@@ -84,20 +87,22 @@ export function GroupPendingCard({
           <View style={{ flexDirection: "row", gap: 8 }}>
             <ActionButton
               compact
-              label="Cancel"
+              label={translateApp("Cancel")}
               variant="secondary"
               disabled={blocked}
               onPress={() => onAnswer(false)}
             />
             <ActionButton
               compact
-              label="Confirm"
+              label={translateApp("Confirm")}
               disabled={blocked}
               onPress={() => onAnswer(true)}
             />
           </View>
         ) : (
-          <Label muted>Awaiting the owner in the agent's conversation.</Label>
+          <Label muted>
+            {translateApp("Awaiting the owner in the agent's conversation.")}
+          </Label>
         )}
       </View>
     </Card>

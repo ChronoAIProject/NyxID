@@ -1,3 +1,4 @@
+pub mod account_export_service;
 pub mod action_description;
 pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
@@ -12,6 +13,7 @@ pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
 pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
+pub(crate) mod api_key_audit_service;
 pub mod api_key_credential_service;
 pub mod api_key_mutation_service;
 pub mod api_key_scope_service;
@@ -25,7 +27,10 @@ pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
 pub mod assistant_cma_gateway;
+pub(crate) mod assistant_cma_legacy_service;
+pub mod assistant_cma_reservation_service;
 pub mod assistant_cma_sandbox_service;
+pub(crate) mod assistant_cma_slot_audit;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
@@ -42,6 +47,7 @@ pub mod assistant_service;
 pub mod assistant_skill_authoring;
 pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
+pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
@@ -204,6 +210,9 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub(crate) mod personal_attribution_service;
+pub mod personal_data_registry;
+pub mod personal_erasure_orphan_sweep;
 pub mod personal_erasure_registry;
 pub mod personal_erasure_service;
 pub(crate) mod platform_binding_service;
@@ -240,6 +249,7 @@ pub mod proxy_discovery_service;
 pub mod proxy_http_response;
 pub mod proxy_service;
 pub mod push_service;
+pub mod raw_attachment_tool;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub(crate) mod record_field_service;
@@ -586,6 +596,7 @@ pub mod assistant_cma_admission;
 pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
+pub(crate) mod org_thread_notice;
 
 pub mod generated_artifacts;
 pub(crate) mod invocation_diagnostic_service;
@@ -611,3 +622,13 @@ pub(crate) mod durable_wake_tests;
 pub mod channel_turn_preparation;
 
 pub mod nyxbot_dispatch_identity;
+
+pub(crate) mod service_account_connection_audit;
+#[cfg(test)]
+mod service_account_connection_audit_tests;
+
+pub mod crash_report_service;
+
+pub mod crash_report_export;
+
+pub mod nyxbot_response_read;

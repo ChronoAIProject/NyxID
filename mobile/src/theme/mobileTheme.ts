@@ -80,6 +80,13 @@ export type ThemeColors = {
   /** Filled chat composer surface and its faint outline. */
   composerBg: string;
   composerBorder: string;
+  /**
+   * Every floating control (header buttons, the identity pill, the folded
+   * Duo's rail capsules): one opaque surface and hairline edge, the colour the
+   * header buttons resolve to in each theme, so they all match exactly.
+   */
+  floatingControlBg: string;
+  floatingControlBorder: string;
   navActive: string;     // active nav row background — neutral white/black alpha, NEVER purple-tinted
   shadowColor: string;
   /**
@@ -176,6 +183,8 @@ export const darkColors: ThemeColors = {
   sheetEdge: "rgba(255, 255, 255, 0.16)",
   composerBg: "#2C2C30",
   composerBorder: "rgba(255, 255, 255, 0.06)",
+  floatingControlBg: "#353539",
+  floatingControlBorder: "rgba(255, 255, 255, 0.10)",
   handleBg: "rgba(255, 255, 255, 0.15)",
   // DESIGN.md §Usage Rules: "Hover stays neutral (bg-white/[0.03] / bg-white/[0.06])".
   navActive: "rgba(255, 255, 255, 0.06)",
@@ -240,6 +249,8 @@ export const lightColors: ThemeColors = {
   sheetEdge: "rgba(0, 0, 0, 0.20)",
   composerBg: "#FFFFFF",
   composerBorder: "#C4C4CA",
+  floatingControlBg: "#F9F9F9",
+  floatingControlBorder: "rgba(0, 0, 0, 0.12)",
   handleBg: "rgba(0, 0, 0, 0.12)",
   // DESIGN.md §Usage Rules: idle/hover stays neutral. Light-mode = black-alpha,
   // matching the web pattern of `bg-black/[0.06]` on hover surfaces.

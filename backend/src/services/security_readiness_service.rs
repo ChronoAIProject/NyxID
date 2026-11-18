@@ -153,6 +153,8 @@ pub const CAPABILITIES: &[&str] = &[
     super::nyxbot_response_recovery::RELAY_READINESS,
     super::nyxbot_dispatch_identity::READINESS,
     super::channel_media_authority::READINESS,
+    super::billing::usage_comparison::coverage::READINESS,
+    super::feature_flag_service::CRASH_REPORTS_FLAG_KEY,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 pub(crate) const MAX_AGE_SECS: i64 = 45;

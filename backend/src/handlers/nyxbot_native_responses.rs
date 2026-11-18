@@ -481,10 +481,26 @@ async fn snapshot_inner(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) => {
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Snapshot,
+            ))
+            .await;
+        }
     };
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) => {
+            return ([("cache-control", "no-store")], Json(view.payload.snapshot)).into_response();
+        }
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
+    }
     let output = match relay_responses::claim_replay(&state, &row, &id).await {
         Ok(output) => output,
         Err(error) => return provider_refusal::error(error),
@@ -523,14 +539,36 @@ async fn events_inner(
     Query(query): Query<Cursor>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) if failure.closed.is_some() => {
+            let after = match cursor(query.starting_after.as_deref()) {
+                Ok(after) => after,
+                Err(error) => return provider_refusal::error(error),
+            };
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Events(after),
+            ))
+            .await;
+        }
+        Err(failure) => return failure.response,
     };
     let after = match cursor(query.starting_after.as_deref()) {
         Ok(v) => v,
         Err(e) => return provider_refusal::error(e),
     };
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) if after.is_none_or(|n| n < view.payload.frames.len() as u64) => {
+            return response_read::stream(state, row, headers, id, after);
+        }
+        Ok(Some(_)) => return problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
+    }
     let output = match relay_responses::claim_replay(&state, &row, &id).await {
         Ok(output) => output,
         Err(error) => return provider_refusal::error(error),

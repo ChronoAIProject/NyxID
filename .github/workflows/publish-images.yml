@@ -125,12 +125,24 @@ jobs:
     with:
       coverage: true
 
+  frontend-identity:
+    name: Compute shared frontend artifact identity
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.identity.outputs.artifact_id }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Derive one UUID for both frontend architectures
+        id: identity
+        run: echo "artifact_id=$(python3 .github/scripts/crash-artifact-id.py)" >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------
   # Build each component for each platform on its native runner while CI runs.
   # Each image is pushed by digest only. Backend buildcache-* references may
   # update during builds; release tags wait for both the builds and the CI gate.
   # ---------------------------------------------------------------------------
   build:
+    needs: frontend-identity
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -211,17 +223,21 @@ jobs:
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
+        env:
+          CRASH_ARTIFACTS_SENTRY: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY || '' }}
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          secret-envs: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY != '' && 'crash_artifacts_sentry=CRASH_ARTIFACTS_SENTRY' || '' }}
           # Build-args: git hash for backend/node-agent surface tagging
           # (stamped on /health). Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
           # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
+            CRASH_ARTIFACT_ID=${{ needs.frontend-identity.outputs.artifact_id }}
             ${{ matrix.cargo_build_args }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           # Image layer caches exceed the shared 10 GB Actions cache budget and

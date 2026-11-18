@@ -18,12 +18,45 @@ for HTTP response shapes.
   must be drained before eight-character v2 issuance. Both readers remain.
   Normalize case, separators and I/L→1, O→0, U→V. Ambiguous retained matches in
   either collection fail closed. Reservations survive insertion failures until TTL.
-- Browser-owned QR login uses the server-returned `verification_uri_complete`, built from configured
-  `FRONTEND_URL` and `/login/device?user_code=…`. The installed scanner fixture
-  accepts trusted host/query payloads with eight-character codes. A QR identifies
-  a request; scanning/signing in never approves it. No new browser handoff or
-  deep-link scheme is introduced. CLI-originated links omit the code: the human
-  copies the separately displayed `user_code` into the approval page.
+- Only `/login` → Continue with the NyxID app (including the `/login` MFA app
+  option) opts into the optional server-returned `app_verification_uri` for QR
+  payloads. It is built from origin-only HTTPS `BASE_URL` and
+  `/login/device?user_code=…` only when Apple or Android identity is configured
+  and frontend/API origins differ. Configuration does not prove OS association.
+  On coarse-pointer devices, only tapping the ready, live QR button opens the
+  shared “Open NyxID app?” confirmation. Cancel/Escape/Close return focus to the
+  QR. Only the affirmative link opens the selected URL in a new tab with no
+  referrer, preserving the original tab's private poll. No automatic opening runs
+  on request creation, regeneration, mount, polling or resume. The dialog binds
+  the exact request object and URL; tap/confirmation recheck the original deadline.
+  Close, expiry, terminal state, replacement or eligibility loss retire it.
+  Fine-pointer `/login` keeps a plain native QR for external scanning. Every
+  non-opted-in consumer, including `/login/device`, `/login/agent-key` request-bound
+  verification and onboarding, uses `verification_uri_complete` with no web
+  handoff. External scans remain OS-dependent. There is no installation detection
+  or universal handoff guarantee. Verified iOS/Android links can load the public
+  preview without a camera; approval still requires an authenticated, explicit
+  decision. The app asks the user to return to the original browser, which
+  finishes through its private poll and cookie session.
+  When the OS leaves the link in the browser, the backend redirects to the fixed
+  `FRONTEND_URL` approval page, forwarding only the validated public code.
+  Older responses and HTTP development use `verification_uri_complete` for a plain
+  QR with no tap target. The original browser must collect the approved delivery
+  within the existing 60-second post-approval window, including when that window
+  extends beyond the original QR deadline. At QR expiry, the browser hides the
+  QR/tap/manual-code controls and checks private delivery. No new poll starts at or
+  after the original deadline plus 60 seconds. An already in-flight read may finish
+  for up to 10 more seconds, solely to receive an existing response; this does not
+  extend server approval or delivery deadlines. An error after the poll-start
+  cutoff ends collection without retrying. A hung read is discarded at the finite
+  response deadline; close, regeneration and unmount fence local adoption sooner.
+  Restricted handoffs retain their own strict expiry. Visibility/pageshow resume
+  polls promptly after the minimum interval, preserving slowdown/rate-limit backoff.
+  The installed scanner accepts trusted frontend/API host payloads. A QR identifies
+  a request; opening/scanning/signing in never approves it. No poll secret, token,
+  or arbitrary return URL is included. CLI-originated links still omit the code:
+  the human copies the separately displayed `user_code` into the approval page.
+  See the [app-link runbook](../mobile/docs/APP_LINKS.md) for association setup.
 - Step 1 shows the actual preview/code. Signed-in approvers acknowledge “This is my request — continue”; signed-out approvers verify inline after choosing browser persistence.
   Step 2 offers full account or restricted access only when `supports_grant_choice`
   permits it. Step 3 shows requested filters, matching keys and the actual grant,

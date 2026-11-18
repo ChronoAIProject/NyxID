@@ -6,6 +6,7 @@ import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
 import languageCases from "./voice/dictation-language-cases.json";
 import androidCases from "./voice/dictation-android-cases.json";
 import type { useComposerDictation } from "./useComposerDictation";
+import { systemStatusActivityActive } from "../../lib/systemStatusActivity";
 
 type Listener = (event?: any) => void;
 type PermissionStatus = "granted" | "denied" | "undetermined";
@@ -624,6 +625,9 @@ test("dictation errors follow the app language without restarting capture or dro
 test("interim words are replaced, final segments append, and finishing inserts once into the draft", async () => {
   const x = setup();
   await x.begin();
+  assert.equal(systemStatusActivityActive(), false, "recognizer setup alone does not signal capture");
+  x.emit("audiostart");
+  assert.equal(systemStatusActivityActive(), true);
   x.result("Book a");
   assert.deepEqual(
     [x.h.value().final, x.h.value().interim, x.h.value().text],
@@ -645,6 +649,8 @@ test("interim words are replaced, final segments append, and finishing inserts o
   x.h.flush();
   assert.equal(x.events.filter((e) => e === "stop").length, 1);
   x.result(" for two", true);
+  x.emit("audioend");
+  assert.equal(systemStatusActivityActive(), false);
   x.emit("end", null);
   x.emit("end", null);
   x.h.flush();

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
   automationIdSchema,
@@ -31,7 +32,9 @@ export function createAutomationsApi(request: JsonRequest) {
       );
       if (row.id !== id)
         throw new Error(
-          "The server returned a different automation. Please reload.",
+          translateApp(
+            "The server returned a different automation. Please reload.",
+          ),
         );
       return row;
     },

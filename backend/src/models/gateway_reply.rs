@@ -16,10 +16,21 @@ pub enum Code {
     ReplyTargetRevoked,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Failure {
+    NoResponse,
+    ServerError,
+    UnreadableResponse,
+    Interrupted,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Observation {
     pub status: Option<u16>,
     pub code: Option<Code>,
+    #[serde(default)]
+    pub failure: Option<Failure>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub retry_after: Option<DateTime<Utc>>,
 }

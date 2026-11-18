@@ -1,4 +1,5 @@
 import { bareAutolinkTarget, splitBareAutolinks } from "./autolinkPunctuation";
+import { translateApp } from "../../i18n/appTranslation";
 import type MarkdownIt from "markdown-it";
 import imageRule from "markdown-it/lib/rules_inline/image";
 import footnote from "markdown-it-footnote";
@@ -159,7 +160,7 @@ export function configureAssistantMarkdown(parser: MarkdownIt): MarkdownIt {
             child.children
               ?.map((part) => part.content)
               .join("")
-              .trim() || "Image";
+              .trim() || translateApp("Image");
           child.children = null;
         }
         footnoteLink(child);

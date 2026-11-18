@@ -82,3 +82,140 @@ test('missing access cleans orphan secrets in the serialized read without harmin
   storage.getItemAsync = original;
   assert.equal((await coordinator.load())?.refreshToken, b.refreshToken); assert.equal(actor(), 'b');
 });
+
+test(
+  'rotation stores the successor refresh token before the access token and never deletes it',
+  { timeout: 10000 },
+  async () => {
+    const { coordinator, storage, values } = setup();
+    await coordinator.persist(a);
+    const loaded = (await coordinator.load())!;
+    const deletes: string[] = [];
+    const originalDelete = storage.deleteItemAsync,
+      originalSet = storage.setItemAsync;
+    storage.deleteItemAsync = async (key) => {
+      deletes.push(key);
+      return originalDelete(key);
+    };
+    // The process dies (or the keychain refuses) while the access token is written.
+    storage.setItemAsync = async (key, value) => {
+      if (key === 'nyxid.auth.access_token') throw new Error('interrupted');
+      return originalSet(key, value);
+    };
+    const rotated = {
+      accessToken: token('a', 'rotated'),
+      refreshToken: 'rotated-a',
+      accessTokenExpiresAt: 1,
+    };
+    await assert.rejects(
+      coordinator.commitRefresh(loaded, rotated),
+      /interrupted/,
+    );
+    storage.setItemAsync = originalSet;
+    assert.deepEqual(
+      deletes.filter(
+        (key) =>
+          key !== 'nyxid.auth.user_id' &&
+          key !== 'nyxid.auth.access_token_expires_at',
+      ),
+      [],
+    );
+    const after = await coordinator.load();
+    assert.equal(after?.accessToken, a.accessToken);
+    assert.equal(after?.refreshToken, 'rotated-a');
+    assert.equal(values.get('nyxid.auth.refresh_token'), 'rotated-a');
+  },
+);
+
+test(
+  'a failed rotation write keeps the previous refresh token',
+  { timeout: 10000 },
+  async () => {
+    const { coordinator, storage } = setup();
+    await coordinator.persist(a);
+    const loaded = (await coordinator.load())!;
+    const originalSet = storage.setItemAsync;
+    storage.setItemAsync = async () => {
+      throw new Error('keychain_unavailable');
+    };
+    await assert.rejects(
+      coordinator.commitRefresh(loaded, {
+        accessToken: token('a', 'rotated'),
+        refreshToken: 'rotated-a',
+      }),
+      /keychain_unavailable/,
+    );
+    storage.setItemAsync = originalSet;
+    const after = await coordinator.load();
+    assert.equal(after?.accessToken, a.accessToken);
+    assert.equal(after?.refreshToken, a.refreshToken);
+  },
+);
+
+test(
+  'a session from an older build is re-added once under the current storage class',
+  { timeout: 10000 },
+  async () => {
+    const { coordinator, storage, values } = setup();
+    // Written by a previous build: no format marker.
+    values.set('nyxid.auth.access_token', a.accessToken);
+    values.set('nyxid.auth.refresh_token', a.refreshToken);
+    values.set('nyxid.auth.user_id', 'a');
+    const readded: string[] = [];
+    const originalDelete = storage.deleteItemAsync;
+    storage.deleteItemAsync = async (key) => {
+      readded.push(key);
+      return originalDelete(key);
+    };
+    assert.equal((await coordinator.load())?.refreshToken, a.refreshToken);
+    assert.deepEqual(readded, [
+      'nyxid.auth.refresh_token',
+      'nyxid.auth.user_id',
+      'nyxid.auth.access_token',
+    ]);
+    assert.equal(values.get('nyxid.auth.access_token'), a.accessToken);
+    assert.equal(values.get('nyxid.auth.refresh_token'), a.refreshToken);
+    assert.equal(values.get('nyxid.auth.storage_format'), '2');
+    readded.length = 0;
+    assert.equal((await coordinator.load())?.accessToken, a.accessToken);
+    assert.deepEqual(readded, []);
+  },
+);
+
+test(
+  'a failed migration still returns the stored session',
+  { timeout: 10000 },
+  async () => {
+    const { coordinator, storage, values } = setup();
+    values.set('nyxid.auth.access_token', a.accessToken);
+    values.set('nyxid.auth.refresh_token', a.refreshToken);
+    storage.getItemAsync = (() => {
+      const original = storage.getItemAsync;
+      return async (key: string) => {
+        if (key === 'nyxid.auth.storage_format')
+          throw new Error('keychain_unavailable');
+        return original(key);
+      };
+    })();
+    assert.equal((await coordinator.load())?.refreshToken, a.refreshToken);
+    assert.equal(values.get('nyxid.auth.refresh_token'), a.refreshToken);
+  },
+);
+
+test(
+  'an unreadable keychain rejects the load and leaves every stored key in place',
+  { timeout: 10000 },
+  async () => {
+    const { coordinator, storage, values } = setup();
+    await coordinator.persist(a);
+    const snapshot = new Map(values);
+    const originalGet = storage.getItemAsync;
+    storage.getItemAsync = async () => {
+      throw new Error('User interaction is not allowed.');
+    };
+    await assert.rejects(coordinator.load(), /not allowed/);
+    storage.getItemAsync = originalGet;
+    assert.deepEqual(values, snapshot);
+    assert.equal((await coordinator.load())?.accessToken, a.accessToken);
+  },
+);

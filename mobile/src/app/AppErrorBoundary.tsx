@@ -1,3 +1,5 @@
+import { crashLifecycle } from "../lib/crashReporting/runtime";
+import { useAppLanguage } from "../i18n/LanguageProvider";
 import { Component, type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -11,17 +13,24 @@ export class AppErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
+  override componentDidCatch(error: Error) { void crashLifecycle?.capture(error, "render_error"); }
+
   override render() {
     if (this.state.hasError) {
-      return (
-        <View style={styles.container}>
-          <Text style={styles.title}>Something went wrong</Text>
-          <Text style={styles.subtitle}>Please restart the app.</Text>
-        </View>
-      );
+      return <ErrorFallback />;
     }
     return this.props.children;
   }
+}
+
+function ErrorFallback() {
+  const { t } = useAppLanguage();
+  return (
+    <View style={styles.container}>
+      <Text style={styles.title}>{t("Something went wrong")}</Text>
+      <Text style={styles.subtitle}>{t("Please restart the app.")}</Text>
+    </View>
+  );
 }
 
 // Class component can't use the theme hook, and the boundary must render

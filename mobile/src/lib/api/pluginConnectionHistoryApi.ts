@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { requestJson } from "./http";
 import {
   parseConnectionHistory,
@@ -41,6 +42,8 @@ export const pluginConnectionHistoryApi = {
       offset = page.next_offset;
       version = page.version;
     }
-    throw new Error("History filters exceed the supported page limit.");
+    throw new Error(
+      translateApp("History filters exceed the supported page limit."),
+    );
   },
 };

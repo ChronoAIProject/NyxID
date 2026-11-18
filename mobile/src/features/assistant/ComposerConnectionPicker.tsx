@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
@@ -17,6 +19,7 @@ export function ComposerConnectionPicker({
 }: {
   state: ComposerConnectionState;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [search, setSearch] = useState("");
   useEffect(() => {
@@ -28,7 +31,7 @@ export function ComposerConnectionPicker({
     <>
       {connection ? (
         <View
-          accessibilityLabel="Connection for this message"
+          accessibilityLabel={translateApp("Connection for this message")}
           style={{
             flexDirection: "row",
             alignItems: "center",
@@ -52,15 +55,13 @@ export function ComposerConnectionPicker({
               color: state.unavailable ? colors.danger : colors.textSecondary,
             }}
           >
-            {connection.catalog_service_name ?? connection.label} ·{" "}
-            {connection.label} · {connectionOwner(connection)}
-            {state.unavailable
-              ? " · Unavailable — choose another connection or remove"
-              : " · This message"}
+            {(state.unavailable ? translateApp("{{service}} · {{label}} · {{connectionOwner}} · Unavailable — choose another connection or remove", { service: connection.catalog_service_name ?? connection.label, label: connection.label, connectionOwner: connectionOwner(connection)}) : translateApp("{{service}} · {{label}} · {{connectionOwner}} · This message", { service: connection.catalog_service_name ?? connection.label, label: connection.label, connectionOwner: connectionOwner(connection) }))}
           </Label>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Remove connection for this message"
+            accessibilityLabel={translateApp(
+              "Remove connection for this message",
+            )}
             disabled={state.locked}
             onPress={state.remove}
             style={{
@@ -117,11 +118,11 @@ export function ComposerConnectionPicker({
                 maxFontSizeMultiplier={1.25}
                 style={{ fontSize: 18, flex: 1 }}
               >
-                Connection for this message
+                {translateApp("Connection for this message")}
               </Label>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Close connections"
+                accessibilityLabel={translateApp("Close connections")}
                 onPress={state.close}
                 style={workspaceCloseControlStyle(colors.cardSoft)}
               >
@@ -137,33 +138,34 @@ export function ComposerConnectionPicker({
               contentContainerStyle={{ padding: 16, gap: 8 }}
             >
               <Label muted>
-                Choose the account to use for this message. Manage your saved
-                connection order in Agent Details.
+                {translateApp(
+                  "Choose the account to use for this message. Manage your saved connection order in Agent Details.",
+                )}
               </Label>
               <Field
-                label="Search connections"
-                placeholder="Search services or accounts…"
+                label={translateApp("Search connections")}
+                placeholder={translateApp("Search services or accounts…")}
                 value={search}
                 onChangeText={setSearch}
               />
               {state.loading ? (
                 <Label accessibilityLiveRegion="polite">
-                  Loading connections…
+                  {translateApp("Loading connections…")}
                 </Label>
               ) : null}
               {state.error ? (
                 <>
                   <Label accessibilityRole="alert">
-                    Could not load connections.
+                    {translateApp("Could not load connections.")}
                   </Label>
                   <Pressable
                     accessibilityRole="button"
-                    accessibilityLabel="Retry"
+                    accessibilityLabel={translateApp("Retry")}
                     disabled={state.locked}
                     onPress={state.retry}
                     style={{ minHeight: 44, justifyContent: "center" }}
                   >
-                    <Label>Retry</Label>
+                    <Label>{translateApp("Retry")}</Label>
                   </Pressable>
                 </>
               ) : (
@@ -218,13 +220,14 @@ export function ComposerConnectionPicker({
               {!state.loading && !state.error && !groups.length ? (
                 <Label muted>
                   {search.trim()
-                    ? "No matching connections."
-                    : "No enabled connections are available."}
+                    ? translateApp("No matching connections.")
+                    : translateApp("No enabled connections are available.")}
                 </Label>
               ) : null}
               <Label muted style={{ fontSize: 11 }}>
-                Organization connections still require approval in Auto and Ask
-                every time.
+                {translateApp(
+                  "Organization connections still require approval in Auto and Ask every time.",
+                )}
               </Label>
             </ScrollView>
           </View>

@@ -164,10 +164,16 @@ during a rolling upgrade. No new index, setting or operator step is required.
 Failed/abandoned rows without quantities and unacknowledged wallet-backed rows
 keep their existing retention behavior.
 
-`GET /api/v1/billing/usage` and its response totals summarize retained raw rows;
-`90d` and `all` cannot restore expired requests. Admin whole-hour/day rollup
-totals survive expiry. Custom partial-hour edges and operation breakdowns that
-read raw rows lose those details after expiry.
+`GET /api/v1/billing/usage` keeps the exact raw aggregate for `24h`, `7d`, and
+`30d`. Longer periods align their start to a UTC midnight and use permanent
+daily rollups before the retained raw window. The additive `covers_from` field
+states the earliest source time included. Rows from the permanent part set
+`detail_retained` to false because operation, machine, key, and acknowledgement
+detail is not stored there; the endpoint returns permanent rows separately from
+newer raw rows so consumers can sum service totals without inventing request
+detail. Allowance units are reported only on retained raw rows. `machine_id` and
+`job_id` filters remain raw queries and expose the retention boundary in
+`covers_from`.
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced

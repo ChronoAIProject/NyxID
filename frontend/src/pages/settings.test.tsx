@@ -17,10 +17,13 @@ import { useConsentStore } from "@/stores/consent-store";
 import type { User } from "@/types/api";
 import { SettingsPage } from "./settings";
 
-const { securityUser, mockDisable } = vi.hoisted(() => ({
+const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() => ({
   securityUser: { display_name: "Reader", email: "reader@example.com", email_verified: true, mfa_enabled: false, social_provider: null as string | null, has_password: true },
   mockDisable: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
 }));
+vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 vi.mock("@/hooks/use-auth", () => ({
   useUser: () => ({ data: securityUser }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
@@ -39,6 +42,8 @@ const unexpectedRequests: string[] = [];
 beforeEach(() => {
   Object.assign(securityUser, { mfa_enabled: false, social_provider: null, has_password: true });
   mockDisable.mockReset().mockResolvedValue(undefined);
+  toastSuccess.mockReset();
+  toastError.mockReset();
   useAuthStore.setState({ user: { id: "owner", email: "reader@example.com", mfa_enabled: true, profile_config: { security: { skip_mfa_for_approved_sign_ins: false }, onboarding: { ai_services_completed_at: null } } } as User });
   unexpectedRequests.length = 0;
   transport.mockReset().mockImplementation(async (url, options) => {
@@ -97,7 +102,7 @@ async function open(
   await act(() => router.load());
   await screen.findByRole("tab", { name: "Profile" });
   if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-  return { router, history };
+  return { router, history, client };
 }
 
 async function saveSettings() {
@@ -447,6 +452,92 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(transport).toHaveBeenCalledTimes(2);
     });
 
+    it.each([null, "gzip"])("downloads the server-named JSON export and revokes its object URL (encoding %s)", async (encoding) => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (url === "/api/v1/users/me/export" && options?.method === "POST") {
+          return new Response('{"format":"nyxid.account-export"}', {
+            headers: { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="account.json"', ...(encoding ? { "Content-Encoding": encoding, "Content-Length": "1024" } : {}) },
+          });
+        }
+        return original(url, options);
+      });
+      const createObjectUrl = vi.fn(() => "blob:account-export");
+      const revokeObjectUrl = vi.fn();
+      const oldCreateObjectUrl = URL.createObjectURL;
+      const oldRevokeObjectUrl = URL.revokeObjectURL;
+      Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectUrl });
+      Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectUrl });
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      try {
+        await open(route, "privacy");
+        await userEvent.click(screen.getByRole("button", { name: "Download" }));
+        await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Your data export is ready."));
+        expect(transport).toHaveBeenCalledWith("/api/v1/users/me/export", expect.objectContaining({ method: "POST" }));
+        expect(createObjectUrl).toHaveBeenCalledOnce();
+        expect(click).toHaveBeenCalledOnce();
+        expect(click.mock.instances[0]).toHaveProperty("download", "account.json");
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        expect(revokeObjectUrl).toHaveBeenCalledWith("blob:account-export");
+      } finally {
+        if (oldCreateObjectUrl) Object.defineProperty(URL, "createObjectURL", { configurable: true, value: oldCreateObjectUrl }); else Reflect.deleteProperty(URL, "createObjectURL");
+        if (oldRevokeObjectUrl) Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: oldRevokeObjectUrl }); else Reflect.deleteProperty(URL, "revokeObjectURL");
+        click.mockRestore();
+      }
+    });
+
+    it.each(["fetch abort", "body abort", "short body", "identity mismatch", "encoded invalid JSON", "invalid JSON without length"])("does not download an incomplete export: %s", async (failure) => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => {
+        if (url !== "/api/v1/users/me/export" || options?.method !== "POST") return original(url, options);
+        if (failure === "fetch abort") throw new TypeError("connection aborted");
+        if (failure === "body abort") return new Response(new ReadableStream({
+          start(controller) { controller.error(new TypeError("connection aborted")); },
+        }));
+        return new Response(["short body", "identity mismatch"].includes(failure) ? '{"format":"nyxid.account-export"}' : '{"format":', {
+          headers: failure === "short body" ? { "Content-Length": "1024" } : failure === "identity mismatch" ? { "Content-Encoding": "identity", "Content-Length": "1024" } : failure === "encoded invalid JSON" ? { "Content-Encoding": "gzip", "Content-Length": "1024" } : {},
+        });
+      });
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      try {
+        await open(route, "privacy");
+        await userEvent.click(screen.getByRole("button", { name: "Download" }));
+        await waitFor(() => expect(toastError).toHaveBeenCalledWith("We couldn't create your data export. Please try again."));
+        expect(click).not.toHaveBeenCalled();
+        expect(toastSuccess).not.toHaveBeenCalled();
+      } finally { click.mockRestore(); }
+    });
+
+    it.each([[1, "1 second"], [42, "42 seconds"], [60, "1 minute"], [130, "3 minutes"]])("shows Retry-After %i with the right time unit", async (seconds, duration) => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" && options?.method === "POST"
+        ? new Response(JSON.stringify({ error: "rate_limited", error_code: 1005, message: "Rate limited" }), { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(seconds) } })
+        : original(url, options));
+      await open(route, "privacy");
+      await userEvent.click(screen.getByRole("button", { name: "Download" }));
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith(`Your data export is temporarily rate limited. Try again in ${duration}.`));
+    });
+
+    it.each([404, 405])("explains that export is unavailable on an older backend (%i)", async (status) => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" && options?.method === "POST"
+        ? new Response(JSON.stringify({ error: "not_found", error_code: 1404, message: "Not available" }), { status, headers: { "Content-Type": "application/json" } })
+        : original(url, options));
+      await open(route, "privacy");
+      await userEvent.click(screen.getByRole("button", { name: "Download" }));
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith("Data export is not available on this server yet."));
+    });
+
+    it("shows a generic message for other export failures", async () => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me/export" && options?.method === "POST"
+        ? new Response("upstream failure", { status: 500, headers: { "Content-Type": "text/plain" } })
+        : original(url, options));
+      await open(route, "privacy");
+      await userEvent.click(screen.getByRole("button", { name: "Download" }));
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith("We couldn't create your data export. Please try again."));
+    });
+
     it("discloses deletion of every managed Machine and paused workspace in the actual confirmation", async () => {
       await open(route, "security");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
@@ -550,4 +641,31 @@ describe("MFA security settings", () => {
     await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
     await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
   });
+});
+
+it("privacy hides diagnostics when not offered and orders offered rows account browser diagnostics", async () => {
+  const {client}=await open("/settings","privacy");
+  expect(screen.getByText("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")).toBeInTheDocument();
+  await waitFor(()=>expect(transport).toHaveBeenCalledWith("/api/v1/users/me/preferences/analytics",expect.anything()));
+  expect(screen.queryByText("Crash diagnostics")).not.toBeInTheDocument();
+  expect(screen.queryByText("Review updated analytics")).not.toBeInTheDocument();
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:false,revision:"live"});});
+  const diagnostics=await screen.findByText("Crash diagnostics");
+  const browser=screen.getByText("Allow on this browser");
+  expect(browser.compareDocumentPosition(diagnostics) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Review updated analytics" })).toBeInTheDocument();
+  useConsentStore.setState({ accountId: "owner", enabled: true, asked: true, policy: 2 });
+  await act(async()=>{client.setQueryData(["analytics-consent","owner"],{account_id:"owner",enabled:true,current_policy_version:"2",diagnostics_offered:true,diagnostics_available:true,revision:"live"});});
+  expect(screen.queryByRole("button", { name: "Review updated analytics" })).not.toBeInTheDocument();
+});
+
+it.each(["2",null])("account re-enable retains an acknowledged policy from account=%s or device",async(accountPolicy)=>{
+  useConsentStore.getState().setConsent(false,2);
+  transport.mockImplementation(async (_url,options)=>new Response(JSON.stringify({account_id:"owner",enabled:options?.method==="PUT",policy_version:accountPolicy,current_policy_version:"2",diagnostics_offered:true,diagnostics_status:"consent_required",diagnostics_available:false,revision:"r",changed_at:null}),{headers:{"Content-Type":"application/json"}}));
+  await open("/settings","privacy");
+  const toggle=await screen.findByRole("switch",{name:"Allow account usage analytics"});
+  await waitFor(()=>expect(toggle).not.toBeDisabled()); await userEvent.click(toggle);
+  await waitFor(()=>expect(transport.mock.calls.some(([,opts])=>opts?.method==="PUT")).toBe(true));
+  const request=transport.mock.calls.find(([,opts])=>opts?.method==="PUT")!;
+  expect(JSON.parse(String(request[1]?.body))).toMatchObject({enabled:true,policy_version:"2"});
 });

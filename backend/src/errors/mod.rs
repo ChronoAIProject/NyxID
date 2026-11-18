@@ -1,6 +1,7 @@
 pub mod access_denial;
 pub mod memory_write;
 pub mod refresh;
+mod refusal_throttle;
 pub mod skill_draft;
 pub mod skill_read;
 pub mod voice_start;
@@ -182,6 +183,10 @@ pub enum AppError {
         #[source]
         source: Box<AppError>,
     },
+    #[error("Crash reporting is unavailable")]
+    CrashReportingUnavailable,
+    #[error("Crash report consent is required")]
+    CrashReportConsentRequired,
     /// Response metadata, preserving the underlying error through handler layers.
     #[error("{source}")]
     InvocationDiagnostic {
@@ -218,7 +223,7 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
-    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    /// A rate-limit refusal with a bounded retry delay; preserves 1005.
     #[error("Rate limited")]
     RateLimitedWithRetry { retry_after: u64 },
 
@@ -926,6 +931,8 @@ impl AppError {
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
+            Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
+            Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
@@ -1177,6 +1184,8 @@ impl AppError {
             Self::MonitoringUnavailable => 13300,
             Self::MonitoringNotConfigured => 13301,
             Self::DiagnosticNotReady => 13302,
+            Self::CrashReportingUnavailable => 13400,
+            Self::CrashReportConsentRequired => 13401,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
@@ -1471,6 +1480,8 @@ impl AppError {
             Self::MonitoringUnavailable => "monitoring_unavailable",
             Self::MonitoringNotConfigured => "monitoring_not_configured",
             Self::DiagnosticNotReady => "diagnostic_not_ready",
+            Self::CrashReportingUnavailable => "crash_reporting_unavailable",
+            Self::CrashReportConsentRequired => "crash_report_consent_required",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
@@ -1703,6 +1714,22 @@ impl AppError {
 }
 
 impl AppError {
+    pub(crate) fn quiet_rate_limit_response(retry_after: u64) -> Response {
+        let error = Self::RateLimitedWithRetry { retry_after };
+        let mut response = (error.status_code(), axum::Json(error.response_body())).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(
+                &error
+                    .retry_after_seconds()
+                    .expect("rate limit delay")
+                    .to_string(),
+            )
+            .expect("bounded numeric retry delay"),
+        );
+        response
+    }
+
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
             Self::BillingRecoveryFailed { source, .. }
@@ -3574,4 +3601,30 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         serde_json::to_value(response).unwrap()["session_token"],
         secret
     );
+}
+
+#[cfg(test)]
+mod crash_error_contract_tests {
+    use super::*;
+    #[test]
+    fn crash_error_codes_statuses_and_keys_are_stable() {
+        for (error, status, code, key) in [
+            (
+                AppError::CrashReportingUnavailable,
+                StatusCode::NOT_FOUND,
+                13400,
+                "crash_reporting_unavailable",
+            ),
+            (
+                AppError::CrashReportConsentRequired,
+                StatusCode::FORBIDDEN,
+                13401,
+                "crash_report_consent_required",
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_code(), code);
+            assert_eq!(error.error_key(), key);
+        }
+    }
 }

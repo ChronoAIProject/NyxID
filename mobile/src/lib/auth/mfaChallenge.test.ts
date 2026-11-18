@@ -56,3 +56,61 @@ test('documented first-factor error becomes a contained challenge; other respons
     assert.equal(mfaChallengeFromResponse(body,status),null);
   }
 });
+
+test('a failure while installing a successful login is reported even though the login moved the session', async () => {
+  const { runAuthAttempt } = await import('./authAttempt');
+  let generation = 0;
+  const mounted = true;
+  const outcomes: unknown[] = [];
+  await runAuthAttempt(
+    async () => 'tokens',
+    () => mounted && generation === 0,
+    async () => {
+      generation++;
+      throw new Error('could not store session');
+    },
+    (error) => {
+      outcomes.push((error as Error).message);
+    },
+    () => mounted,
+  );
+  assert.deepEqual(outcomes, ['could not store session']);
+});
+
+test('a failure while installing a login is dropped once its screen unmounts', async () => {
+  const { runAuthAttempt } = await import('./authAttempt');
+  let mounted = true;
+  const outcomes: unknown[] = [];
+  await runAuthAttempt(
+    async () => 'tokens',
+    () => mounted,
+    async () => {
+      mounted = false;
+      throw new Error('late');
+    },
+    (error) => {
+      outcomes.push(error);
+    },
+    () => mounted,
+  );
+  assert.deepEqual(outcomes, []);
+});
+
+test('a rejected password is reported to the screen that sent it', async () => {
+  const { runAuthAttempt } = await import('./authAttempt');
+  const outcomes: unknown[] = [];
+  await runAuthAttempt(
+    async () => {
+      throw new Error('Invalid email or password.');
+    },
+    () => true,
+    async () => {
+      outcomes.push('signed-in');
+    },
+    (error) => {
+      outcomes.push((error as Error).message);
+    },
+    () => true,
+  );
+  assert.deepEqual(outcomes, ['Invalid email or password.']);
+});

@@ -1,4 +1,6 @@
+import { translateApp } from "../i18n/appTranslation";
 import { LanguageSettingsScreen } from "../features/account/LanguageSettingsScreen";
+import { QuickAccessSettingsScreen } from "../features/quickAccess/QuickAccessSettingsScreen";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { WorkspacePageSurface } from "./WorkspacePageSurface";
 import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
@@ -15,6 +17,7 @@ import {
   WorkspaceRecentsScreen,
   WorkspaceSearchScreen,
 } from "../components/workspace/WorkspaceBrowseScreen";
+import { WorkspaceRecentChatsSheet } from "../components/workspace/WorkspaceRecentChatsSheet";
 import { UsageCreditsScreen } from "../features/billing/UsageCreditsScreen";
 import { WorkspaceInteractionSurface } from "../lib/accessibility/WorkspaceInteractionSurface";
 import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
@@ -43,6 +46,7 @@ import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
 import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
 import { VoiceSettingsScreen } from "../features/account/VoiceSettingsScreen";
+import { AppleWatchSettingsScreen } from "../features/account/AppleWatchSettingsScreen";
 import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
 import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
 import {
@@ -124,6 +128,7 @@ import {
 import {
   workspaceContextChatNavigationAction,
   workspaceChatNavigationAction,
+  type WorkspaceChatTarget,
 } from "./workspaceChatNavigation";
 import type {
   RootStackParamList,
@@ -146,6 +151,7 @@ const ContentStack = createNativeStackNavigator<WorkspaceContentParamList>();
 const SheetStack = createNativeStackNavigator<WorkspaceSheetParamList>();
 
 function AgentsRoute({ navigation, route }: WorkspaceScreenProps<"Agents">) {
+  useAppLanguage();
   const openChat = useOpenWorkspaceChat();
   return (
     <AgentsGroupsScreen
@@ -177,6 +183,7 @@ function GroupChatRoute({
   navigation,
   route,
 }: ContentScreenProps<"GroupChat">) {
+  useAppLanguage();
   return (
     <WorkspaceInteractionSurface style={{ flex: 1 }}>
       <AssistantLinkHost scope={route.params.groupId}>
@@ -209,6 +216,7 @@ function GroupEditorRoute({
   navigation,
   route,
 }: ContentScreenProps<"GroupEditor">) {
+  useAppLanguage();
   return (
     <GroupEditorScreen
       key={route.params?.groupId ?? "new"}
@@ -229,6 +237,7 @@ function AgentDetailRoute({
   navigation,
   route,
 }: ContentScreenProps<"AgentDetail">) {
+  useAppLanguage();
   const openChat = useOpenWorkspaceChat();
   return (
     <AgentsScreen
@@ -251,6 +260,7 @@ function AgentDetailRoute({
 }
 
 function AgentCreateRoute({ navigation }: ContentScreenProps<"AgentCreate">) {
+  useAppLanguage();
   return (
     <AgentsScreen
       initialCreate
@@ -263,6 +273,7 @@ function AgentCreateRoute({ navigation }: ContentScreenProps<"AgentCreate">) {
 function AssistantContextRoute({
   route,
 }: ContentScreenProps<"AssistantContext">) {
+  useAppLanguage();
   return (
     <WorkspaceInteractionSurface style={{ flex: 1 }}>
       <AssistantLinkHost
@@ -275,6 +286,7 @@ function AssistantContextRoute({
 }
 
 function AssistantRoute({ route }: WorkspaceScreenProps<"Assistant">) {
+  useAppLanguage();
   return (
     <AssistantLinkHost
       scope={`${route.key}:${route.params?.conversationId ?? route.params?.draftId ?? "home"}`}
@@ -285,6 +297,7 @@ function AssistantRoute({ route }: WorkspaceScreenProps<"Assistant">) {
 }
 
 function PluginsRoute({ route }: WorkspaceScreenProps<"Plugins">) {
+  useAppLanguage();
   return (
     <PluginsScreen
       initialTab={route.params?.tab}
@@ -296,6 +309,7 @@ function PluginsRoute({ route }: WorkspaceScreenProps<"Plugins">) {
 function PluginConnectionsRoute({
   route,
 }: ContentScreenProps<"PluginConnections">) {
+  useAppLanguage();
   return <PluginsScreen connectorId={route.params.connectorId} />;
 }
 
@@ -303,6 +317,7 @@ function ServiceSetupRoute({
   navigation,
   route,
 }: ContentScreenProps<"ServiceSetup">) {
+  useAppLanguage();
   return (
     <ServicesScreen
       key={route.key}
@@ -314,6 +329,7 @@ function ServiceSetupRoute({
 }
 
 function AgentSkillsRoute({ route }: ContentScreenProps<"AgentSkills">) {
+  useAppLanguage();
   return (
     <AgentSkillsScreen
       key={route.params.agentId}
@@ -430,7 +446,7 @@ function WorkspaceNavigator() {
         <ContentStack.Screen
           name="Notifications"
           component={NotificationsScreen}
-          options={{ title: "Notifications" }}
+          options={{ title: translateApp("Notifications") }}
         />
         <ContentStack.Screen
           name="WorkspaceSearch"
@@ -604,6 +620,7 @@ function SettingsSheetRoute({
   navigation,
   route,
 }: NativeStackScreenProps<RootStackParamList, "WorkspaceSheet">) {
+  useAppLanguage();
   const { t } = useAppLanguage();
   // The route renders outside SheetThemeProvider, so header colors read the drawer palette directly.
   const { mode } = useTheme();
@@ -658,15 +675,20 @@ function SettingsSheetRoute({
     },
     [navigation],
   );
-  const onOpenGroup = useCallback(
-    (groupId: string) => {
-      const action = workspaceChatNavigationAction(navigation.getState(), {
-        kind: "group",
-        groupId,
-      });
+  const onOpenTarget = useCallback(
+    (target: WorkspaceChatTarget) => {
+      // Resetting onto the thread removes this sheet through its own dismissal.
+      const action = workspaceChatNavigationAction(
+        navigation.getState(),
+        target,
+      );
       if (action) navigation.dispatch(action);
     },
     [navigation],
+  );
+  const onOpenGroup = useCallback(
+    (groupId: string) => onOpenTarget({ kind: "group", groupId }),
+    [onOpenTarget],
   );
   const canHandleHardwareBack = useCallback(() => {
     const sheet = navigation
@@ -683,6 +705,7 @@ function SettingsSheetRoute({
       onClose,
       onOpenChat,
       onOpenGroup,
+      onOpenTarget,
     }),
     [
       navigation,
@@ -690,6 +713,7 @@ function SettingsSheetRoute({
       onClose,
       onOpenChat,
       onOpenGroup,
+      onOpenTarget,
       registerDismissGuard,
       dismissAuthorized,
     ],
@@ -756,9 +780,19 @@ function SettingsSheetRoute({
             options={{ title: t("Language") }}
           />
           <SheetStack.Screen
+            name="QuickAccessSettings"
+            component={QuickAccessSettingsScreen}
+            options={{ title: t("Quick access") }}
+          />
+          <SheetStack.Screen
             name="VoiceSettings"
             component={VoiceSettingsScreen}
             options={{ title: t("Voice") }}
+          />
+          <SheetStack.Screen
+            name="AppleWatchSettings"
+            component={AppleWatchSettingsScreen}
+            options={{ title: t("Apple Watch") }}
           />
           <SheetStack.Screen
             name="PrivacySettings"
@@ -783,6 +817,11 @@ function SettingsSheetRoute({
             options={({ route }) => ({
               title: chatLayoutTitle(route.params.key),
             })}
+          />
+          <SheetStack.Screen
+            name="RecentChats"
+            component={WorkspaceRecentChatsSheet}
+            options={{ title: t("Recent chats") }}
           />
           <SheetStack.Screen
             name="TermsOfService"
@@ -828,6 +867,7 @@ function SheetEntryRoute({
   RootStackParamList,
   "DeviceLogin" | "AgentKeyLogin" | "TermsOfService" | "PrivacyPolicy"
 >) {
+  useAppLanguage();
   useLayoutEffect(() => {
     const action = workspaceSharedEntryNavigationAction(
       navigation.getState(),
@@ -864,7 +904,7 @@ export function AppNavigator({
     return (
       <FullScreenLoading
         title={t("Signing you in…")}
-        subtitle="Restoring your secure session"
+        subtitle={translateApp("Restoring your secure session")}
       />
     );
   return (
@@ -960,13 +1000,6 @@ export function AppNavigator({
                         options={{ title: t("Privacy Policy") }}
                       />
                       <Stack.Screen
-                        name="DeviceLogin"
-                        component={
-                          isAuthenticated ? SheetEntryRoute : DeviceLoginScreen
-                        }
-                        options={{ title: t("Approve Device Login") }}
-                      />
-                      <Stack.Screen
                         name="AgentKeyLogin"
                         component={
                           isAuthenticated
@@ -976,6 +1009,15 @@ export function AppNavigator({
                         options={{ title: t("Agent Key Login") }}
                       />
                     </Stack.Group>
+                    {/* Keep the public request through sign-in; its preview
+                        remounts in the workspace and still requires approval. */}
+                    <Stack.Screen
+                      name="DeviceLogin"
+                      component={
+                        isAuthenticated ? SheetEntryRoute : DeviceLoginScreen
+                      }
+                      options={{ title: t("Approve Device Login") }}
+                    />
                   </Stack.Navigator>
                 </WorkspaceRootSwapContext.Provider>
               </WorkspacePagePaintedContext.Provider>

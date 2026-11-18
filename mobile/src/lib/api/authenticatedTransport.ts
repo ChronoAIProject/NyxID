@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { decodeJwtSub } from "../auth/jwt";
 
 export type RequestOptions = {
@@ -29,7 +30,7 @@ function identity(session: Session): string {
 
 function ensureNotAborted(signal?: AbortSignal) {
   if (signal?.aborted)
-    throw Object.assign(new Error("Request cancelled"), { name: "AbortError" });
+    throw Object.assign(new Error(translateApp("Request cancelled")), { name: "AbortError" });
 }
 
 /** Share native JSON and streaming admission. Only an explicit HTTP 401 is
@@ -57,7 +58,7 @@ export async function executeAuthenticatedRequest<
 }): Promise<{ response: R; assertOwner: () => Promise<void> }> {
   const { options } = input;
   if (options.body !== undefined && options.rawBody !== undefined)
-    throw new Error("Choose either JSON or raw request bytes.");
+    throw new Error(translateApp("Choose either JSON or raw request bytes."));
   const requiresAuth = options.requiresAuth ?? true;
   const originalEpoch = input.getAuthEpoch?.();
   ensureNotAborted(options.signal);

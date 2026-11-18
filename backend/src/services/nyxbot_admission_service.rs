@@ -29,6 +29,7 @@ pub async fn begin(
         .as_ref()
         .and_then(|facts| facts.discord_gateway.as_ref());
     let diagnostic = NyxbotAdmission {
+        requires_org_notice: false,
         disposition: "received".into(),
         bot_mentioned: discord.map(|d| d.bot_mentioned),
         managed_role_mentioned: discord.is_some_and(|d| d.managed_role_mentioned),

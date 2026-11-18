@@ -206,6 +206,211 @@ impl Inventory {
         lines.join("\n")
     }
 }
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct RecoveryTotals {
+    ended_requests: i64,
+    ended_rows: i64,
+    holdless_ended_requests: i64,
+    holdless_ended_rows: i64,
+}
+
+impl RecoveryTotals {
+    fn read(state: Option<Document>) -> Result<Self, ReadFailure> {
+        let invalid = || ReadFailure {
+            reason: "row_decode_error",
+            stage: "ended_totals",
+            database_code: None,
+        };
+        let totals: Self = bson::from_document(state.unwrap_or_default()).map_err(|_| invalid())?;
+        if [
+            totals.ended_requests,
+            totals.ended_rows,
+            totals.holdless_ended_requests,
+            totals.holdless_ended_rows,
+        ]
+        .iter()
+        .any(|n| *n < 0)
+        {
+            return Err(invalid());
+        }
+        Ok(totals)
+    }
+}
+
+impl Inventory {
+    fn presentation(
+        &self,
+        totals: Option<&RecoveryTotals>,
+        failure: Option<&ReadFailure>,
+    ) -> (super::super::DiagnosticSeverity, String, String) {
+        use super::super::diagnostic_text::{
+            InventoryIssue, counted, inventory_status, number, oldest,
+        };
+        let mut issues = BTreeSet::new();
+        let mut sentences = Vec::new();
+        if self.invalid != 0 {
+            issues.insert(InventoryIssue::InvalidRows);
+            sentences.push(format!(
+                "{} invalid {} {} found.",
+                number(self.invalid as u64),
+                if self.invalid == 1 { "row" } else { "rows" },
+                if self.invalid == 1 { "was" } else { "were" }
+            ));
+        }
+        if self.truncated {
+            issues.insert(failure.map_or(InventoryIssue::RowLimit, |failure| {
+                InventoryIssue::scan_failure(failure.reason)
+            }));
+            sentences.push("The hold scan is incomplete.".into());
+        }
+        if !self.registry_readable {
+            issues.insert(InventoryIssue::RegistryRead);
+            sentences.push("Process ownership evidence could not be read.".into());
+        }
+        if self.holdless_lower_bound.is_none() {
+            issues.insert(InventoryIssue::HoldlessCount);
+            sentences.push("The count of rows with no holds could not be read.".into());
+        }
+        if totals.is_none() {
+            issues.insert(InventoryIssue::RecoveryTotals);
+            sentences.push("Recovery totals could not be read.".into());
+        }
+        let (severity, remediation) = inventory_status(&issues);
+        let partial = self.truncated || self.invalid != 0;
+        let mut kinds = Vec::new();
+        for (kind, label) in [
+            ("wallet", "wallet credits"),
+            ("grant", "grant credits"),
+            ("allowance", "allowance units"),
+        ] {
+            let rows: usize = self
+                .holds
+                .iter()
+                .filter(|((_, _, _, found, _, _), _)| found == kind)
+                .map(|(_, group)| group.rows)
+                .sum();
+            if rows != 0 {
+                kinds.push(format!("{} with {label}", number(rows as u64)));
+            }
+        }
+        if self.requests.is_empty() {
+            sentences.push(
+                if partial {
+                    "No requests with holds could be counted in the rows read."
+                } else {
+                    "No requests with holds were found."
+                }
+                .into(),
+            );
+        } else {
+            sentences.push(format!(
+                "{}{} {} holds across {}{}.",
+                if partial { "At least " } else { "" },
+                counted(self.requests.len() as u64, "request", "requests"),
+                if self.requests.len() == 1 {
+                    "has"
+                } else {
+                    "have"
+                },
+                counted(self.rows as u64, "billing row", "billing rows"),
+                if kinds.is_empty() {
+                    String::new()
+                } else {
+                    format!(", including {}", kinds.join(", "))
+                },
+            ));
+            let age = oldest(self.groups.keys().map(|(_, _, age, _)| age.as_str()));
+            if !age.is_empty() {
+                sentences.push(age);
+            }
+        }
+        let mut eligible: BTreeSet<&String> = BTreeSet::new();
+        let mut running: BTreeSet<&String> = BTreeSet::new();
+        let mut finalizing: BTreeSet<&String> = BTreeSet::new();
+        for ((class, can_recover, _, _), group) in &self.groups {
+            if *can_recover {
+                eligible.extend(&group.requests);
+            } else if matches!(
+                class.as_str(),
+                "owned_by_live_generation" | "voice_live_session"
+            ) {
+                running.extend(&group.requests);
+            } else if matches!(
+                class.as_str(),
+                "final_quantity_awaiting_retry"
+                    | "durable_finalization_intent"
+                    | "has_final_checkpoint"
+                    | "money_protocol_in_progress"
+            ) {
+                finalizing.extend(&group.requests);
+            }
+        }
+        if !eligible.is_empty() {
+            sentences.push(format!(
+                "The recovery sweep can release unused holds from eligible reservations in {} after rechecking them.",
+                counted(eligible.len() as u64, "request", "requests")
+            ));
+        }
+        for (requests, description) in [
+            (&running, "that belong to work that is still running"),
+            (&finalizing, "being finalized"),
+        ] {
+            if !requests.is_empty() {
+                sentences.push(format!(
+                    "{} {} reservations {description}.",
+                    counted(requests.len() as u64, "request", "requests"),
+                    if requests.len() == 1 { "has" } else { "have" }
+                ));
+            }
+        }
+        let other = self
+            .requests
+            .iter()
+            .filter(|r| !eligible.contains(r) && !running.contains(r) && !finalizing.contains(r))
+            .count();
+        if other != 0 {
+            sentences.push(format!(
+                "{} {} ownership evidence or another recovery path.",
+                counted(other as u64, "request", "requests"),
+                if other == 1 { "awaits" } else { "await" }
+            ));
+        }
+        if let Some(bound) = self.holdless_lower_bound {
+            sentences.push(format!(
+                "At least {} sent request {} {} no funds, so no money is tied up in {}.",
+                number(bound as u64),
+                if bound == 1 { "row" } else { "rows" },
+                if bound == 1 { "holds" } else { "hold" },
+                if bound == 1 { "it" } else { "them" }
+            ));
+        }
+        if let Some(totals) = totals {
+            sentences.push(format!(
+                "Cleanup has closed {} such {} so far ({}).",
+                number(totals.holdless_ended_rows as u64),
+                if totals.holdless_ended_rows == 1 {
+                    "row"
+                } else {
+                    "rows"
+                },
+                counted(totals.holdless_ended_requests as u64, "request", "requests")
+            ));
+            if totals.ended_requests != 0 || totals.ended_rows != 0 {
+                sentences.push(format!(
+                    "The recovery sweep has ended {} covering {}.",
+                    counted(totals.ended_requests as u64, "request", "requests"),
+                    counted(totals.ended_rows as u64, "billing row", "billing rows")
+                ));
+            }
+        }
+        (severity, sentences.join(" "), remediation)
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests;
+
 pub(super) fn count_pipeline() -> Vec<Document> {
     vec![doc! {"$limit":COUNT_KEYS}, doc! {"$count":"rows"}]
 }
@@ -353,6 +558,7 @@ pub(crate) async fn diagnostics(
     };
     inventory.truncated |= failure.is_some();
     let present = failure.is_some()
+        || !inventory.registry_readable
         || !inventory.candidates.is_empty()
         || inventory.holdless_lower_bound != Some(0);
     let reason = if let Some(failure) = failure.as_ref().or(inventory.registry_failure.as_ref()) {
@@ -364,7 +570,7 @@ pub(crate) async fn diagnostics(
     } else {
         "reason=ok".into()
     };
-    let mut detail = format!(
+    let mut technical_details = format!(
         "{}\n{reason} elapsed_ms={}",
         inventory.detail(),
         started.elapsed().as_millis()
@@ -377,50 +583,52 @@ pub(crate) async fn diagnostics(
             .into_future(),
     )
     .await;
-    match state {
-        Ok(Ok(state)) => {
-            let ended = state
-                .as_ref()
-                .and_then(|s| s.get_i64("ended_requests").ok())
-                .unwrap_or(0);
-            let ended_rows = state
-                .as_ref()
-                .and_then(|s| s.get_i64("ended_rows").ok())
-                .unwrap_or(0);
-            let holdless_ended = state
-                .as_ref()
-                .and_then(|s| s.get_i64("holdless_ended_requests").ok())
-                .unwrap_or(0);
-            let holdless_rows = state
-                .as_ref()
-                .and_then(|s| s.get_i64("holdless_ended_rows").ok())
-                .unwrap_or(0);
-            if !present && ended == 0 && holdless_ended == 0 {
+    let totals = match state {
+        Ok(Ok(state)) => RecoveryTotals::read(state),
+        Ok(Err(error)) => Err(ReadFailure::from_error(
+            &AppError::DatabaseError(error),
+            "ended_totals",
+        )),
+        Err(_) => Err(ReadFailure {
+            reason: "deadline_exceeded",
+            stage: "ended_totals",
+            database_code: None,
+        }),
+    };
+    let totals = match totals {
+        Ok(totals) => {
+            if !present && totals.ended_requests == 0 && totals.holdless_ended_requests == 0 {
                 return Ok(vec![]);
             }
-            detail.push_str(&format!("\nended_requests={ended} ended_rows={ended_rows}; remaining rows and requests are classified above"));
-            detail.push_str(&format!(
-                "\nholdless_ended_requests={holdless_ended} holdless_ended_rows={holdless_rows}"
+            technical_details.push_str(&format!("\nended_requests={} ended_rows={}; remaining rows and requests are classified above", totals.ended_requests, totals.ended_rows));
+            technical_details.push_str(&format!(
+                "\nholdless_ended_requests={} holdless_ended_rows={}",
+                totals.holdless_ended_requests, totals.holdless_ended_rows
             ));
+            Some(totals)
         }
-        Ok(Err(error)) => detail.push_str(&format!(
-            "\nended totals unavailable; {}",
-            ReadFailure::from_error(&AppError::DatabaseError(error), "ended_totals")
-                .detail(started.elapsed().as_millis())
-        )),
-        Err(_) => detail.push_str(&format!(
-            "\nended totals unavailable; reason=deadline_exceeded stage=ended_totals elapsed_ms={}",
-            started.elapsed().as_millis()
-        )),
-    }
-    Ok(vec![super::super::BillingStartupDiagnostic{
-        code:"billing_stuck_requests".into(),summary:"Held forwarded request recovery eligibility".into(),detail,
-        remediation:"Read-only classification of potential wallet, grant and allowance holds. At most 10,000 distinct candidate rows, in 128-row pages, within four seconds; incomplete groups mean at least the reported counts and amounts. The separate hold-less lower bound uses at most 100,001 index keys per source and may undercount overlapping funding or returned holds. Siblings are bounded at 129 per row; locks and receipts are deducted in the same snapshot. Live includes the registry's 45-second window plus a two-minute margin. Legacy eligibility requires an extra hour before every live generation's registration. Missing or unreadable registry evidence authorizes no cleanup. No quantities or charges change.".into(),detected_at:chrono::Utc::now(),
+        Err(failure) => {
+            technical_details.push_str(&format!(
+                "\nended totals unavailable; {}",
+                failure.detail(started.elapsed().as_millis())
+            ));
+            None
+        }
+    };
+    let (severity, detail, remediation) = inventory.presentation(totals.as_ref(), failure.as_ref());
+    Ok(vec![super::super::BillingStartupDiagnostic {
+        code: "billing_stuck_requests".into(),
+        severity,
+        technical_details: Some(technical_details),
+        summary: "Sent requests with remaining holds".into(),
+        detail,
+        remediation,
+        detected_at: chrono::Utc::now(),
     }])
 }
 
 // Only stable metadata is exposed: driver messages can contain query values.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ReadFailure {
     reason: &'static str,
     stage: &'static str,

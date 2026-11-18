@@ -879,6 +879,7 @@ async fn materialize(
             .ok_or_else(invalid)?;
         let bytes = storage::decrypt(keys, &row).await?;
         let mut attachment = AssistantAttachment {
+            chunks: 0,
             artifact: meta.artifact.clone(),
             id: meta.id.clone(),
             origin: meta.origin.clone(),

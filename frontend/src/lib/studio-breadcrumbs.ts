@@ -144,6 +144,7 @@ const PAGE_LABELS: Record<string, string> = {
   get "/admin/users"() { return translateUi("Users"); },
   get "/admin/audit-log"() { return translateUi("Audit Log"); },
   get "/admin/usage"() { return translateUi("Usage"); },
+  get "/admin/crash-reports"() { return translateUi("Crash reports"); },
   get "/admin/integrity"() { return translateUi("Integrity"); },
   get "/admin/credits"() { return translateUi("Credits"); },
   get "/admin/billing"() { return translateUi("Billing"); },
@@ -161,6 +162,7 @@ const PAGE_LABELS: Record<string, string> = {
 };
 
 const DETAIL_LABELS: Record<string, string> = {
+  get "/admin/crash-reports"() { return translateUi("Crash report"); },
   get "/keys"() { return translateUi("Credential"); },
   get "/nodes"() { return translateUi("Node"); },
   get "/services"() { return translateUi("Service"); },
