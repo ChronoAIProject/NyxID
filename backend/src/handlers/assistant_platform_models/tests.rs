@@ -1540,8 +1540,13 @@ async fn discovery_degrades_for_unready_and_unknown_fleets_without_authorizing_e
 
 #[tokio::test]
 async fn repeated_platform_model_authority_uses_the_live_calling_key() {
-    let (state, plan, row, key) = setup().await;
+    let (state, initial_plan, row, key) = setup().await;
     adapter::activate_bridge(&state.db, &row, &capabilities())
+        .await
+        .unwrap();
+    // Production builds its plan from persisted authority, including BSON
+    // timestamp precision; the seed plan still contains in-memory timestamps.
+    let plan = adapter::selection_plan(&state, PERSON, &initial_plan.model.public_id)
         .await
         .unwrap();
     let stored = state
@@ -1562,11 +1567,9 @@ async fn repeated_platform_model_authority_uses_the_live_calling_key() {
         .as_deref()
         .unwrap();
     let body = serde_json::to_vec(&json!({"model":plan.model.public_id,"messages":[{"role":"user","content":"hello"}],"max_tokens":128})).unwrap();
-    assert!(
-        adapter::check_request(&state, &auth, handle, &plan, &body)
-            .await
-            .is_ok()
-    );
+    adapter::check_request(&state, &auth, handle, &plan, &body)
+        .await
+        .expect("the admitted model authority must be valid before adding rules");
     let mut sibling = stored.clone();
     sibling.id = uuid::Uuid::new_v4().to_string();
     sibling.key_hash = crate::crypto::token::hash_token("sibling-model-test-key");
