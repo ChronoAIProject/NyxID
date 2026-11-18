@@ -9,6 +9,7 @@ import {
 } from "../../components/settings/SettingsList";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useTheme } from "../../theme/ThemeContext";
+import { isApiError } from "../../lib/api/ApiError";
 import type { QuickAccessItem } from "../../lib/api/quickAccessSchema";
 import { chatAgentLabel } from "../assistant/assistantAgentContext";
 import {
@@ -44,6 +45,8 @@ export function QuickAccessSettingsScreen(
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
   const partial = quickAccess.state.hasUnsupportedEntries === true;
+  const conflict = isApiError(quickAccess.saveError) && quickAccess.saveError.statusCode === 409
+    && (quickAccess.saveError.errorCode === 1004 || quickAccess.saveError.errorKey === "conflict");
   const editable = quickAccess.loaded && !partial;
   const saving = pending || quickAccess.saving;
   const begin = (operation: (complete: () => void) => void, reset = false) => {
@@ -92,6 +95,8 @@ export function QuickAccessSettingsScreen(
         footer={
           partial
             ? t("Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.")
+            : conflict
+            ? t("Your shortcuts changed on another device. The latest list is shown. Try again.")
             : quickAccess.saveError
             ? t("Couldn't save quick access. Your previous list is back.")
             : t(

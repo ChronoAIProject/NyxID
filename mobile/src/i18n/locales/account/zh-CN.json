@@ -315,6 +315,7 @@
   "Your name": "您的姓名",
   "Your role": "你的角色",
   "Your saved voice ({{voice}}) is no longer available. Choose a voice to continue.": "您保存的声音（{{voice}}）已不可用。请选择声音以继续。",
+  "Your shortcuts changed on another device. The latest list is shown. Try again.": "你的快捷方式已在其他设备上更改。已显示最新列表，请重试。",
   "Your watch gets its own sign-in for approvals, notifications and talking to your agents. Sign it out here, on the watch, or from Account & security › Sessions.": "手表会单独登录，用于审批、通知以及与智能体对话。您可以在此处、手表上，或在“账号与安全 › 会话”中将其退出登录。",
   "Your watch is signed in.": "手表已登录。",
   "Your watch is signed out.": "手表已退出登录。",

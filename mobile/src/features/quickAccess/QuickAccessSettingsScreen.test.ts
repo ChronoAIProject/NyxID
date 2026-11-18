@@ -3,6 +3,9 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import { MutationObserver, QueryClient } from "@tanstack/query-core";
+import { ApiError } from "../../lib/api/ApiError";
+import { translate } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import { lightColors } from "../../theme/mobileTheme";
 
 type Element = { type: unknown; props: Record<string, any> };
@@ -36,6 +39,7 @@ const destination = (id: string) => ({ kind: "destination", id });
 const DEFAULT = ["new_chat", "notifications", "scan_qr", "recent_chats", "settings"].map(destination);
 
 function setup({
+  language = 'en' as Language,
   items = DEFAULT,
   customized = false,
   loaded = true,
@@ -63,6 +67,7 @@ function setup({
   };
   const jsx = (type: unknown, props: Element["props"]) => ({ type, props });
   const h = hookHarness<Element>({
+    "../../i18n/LanguageProvider": { useAppLanguage: () => ({language, t: (phrase: string, values?: Record<string, string | number>) => translate(language, phrase, values)}) },
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
       Pressable: "Pressable",
@@ -275,4 +280,19 @@ test('M2622-08 partial quick-access list stays visible and read-only with explic
   const reset=x.groups.flatMap(g=>x.rows(g)).find(row=>row.props.label==='Reset to default')!;
   assert.equal(reset.props.disabled,false);reset.props.onPress();
   same(x.calls,[['clear'],['reset']]);
+});
+
+
+test('R1-F4 shortcut conflicts use localized copy while partial lists keep their explanation', () => {
+  const message = 'Your shortcuts changed on another device. The latest list is shown. Try again.';
+  const error = new ApiError({statusCode: 409, errorCode: 1004, errorKey: 'conflict', message: 'Quick access changed. Reload the list before editing.'});
+  for (const language of ['en', 'zh-CN', 'zh-TW'] as const) {
+    const x = setup({language, saveError: error});
+    const footer = x.group(translate(language, 'Your shortcuts')).props.footer;
+    assert.equal(footer, translate(language, message));
+    if (language !== 'en') assert.notEqual(footer, message);
+    const partial = setup({language, saveError: error, hasUnsupportedEntries: true});
+    assert.equal(partial.group(translate(language, 'Your shortcuts')).props.footer,
+      translate(language, 'Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.'));
+  }
 });
