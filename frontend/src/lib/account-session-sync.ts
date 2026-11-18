@@ -47,7 +47,6 @@ export function installAccountSessionSync(): () => void {
   };
   const reveal = () => {
     restoring = false;
-    settleAccountEvidence();
     document.documentElement.removeAttribute("data-account-verifying");
     useAuthStore.setState({ isIdentityVerifying: false });
     const saved = focusBeforeHide;
@@ -94,6 +93,7 @@ export function installAccountSessionSync(): () => void {
       clearTimeout(attempt.timer);
       pending = undefined;
       if (attempt.evidence && !confirmed && attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
+      if (confirmed || attempt.evidence) settleAccountEvidence();
       reveal();
     });
   };
@@ -104,6 +104,7 @@ export function installAccountSessionSync(): () => void {
       pending = undefined;
       attempt.controller.abort();
       if (attempt.revision === getAssistantIdentityRevision()) useAuthStore.getState().setUser(null);
+      settleAccountEvidence();
       reveal();
     }, EVIDENCE_TIMEOUT_MS);
   };
@@ -143,7 +144,11 @@ export function installAccountSessionSync(): () => void {
       channel?.close();
       channel = undefined;
       hide();
-    } else reveal();
+    } else {
+      // Unloading changes presentation, not account authority. Held results
+      // remain fenced until a profile result or fail-closed sign-out settles.
+      reveal();
+    }
   };
   const pageshow = (event: PageTransitionEvent) => {
     if (event.persisted) {

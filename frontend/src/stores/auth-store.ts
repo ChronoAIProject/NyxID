@@ -170,13 +170,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     requireSession = false,
     isCurrent,
   } = {}): Promise<boolean> => {
-    const profile = captureAccountProfileRead();
-    const assertProfile = () => { if (!isCurrent) profile.assertCurrent(); };
-    const authorityGuard = isCurrent
-      ? () => {
-          if (!isCurrent()) throw new Error("Profile restoration cancelled");
-        }
-      : undefined;
     if (isCurrent && !isCurrent()) return false;
     // Scoped QR restoration owns its loading UI and may be cancelled on unmount.
     if (isCurrent) {
@@ -192,6 +185,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     } else {
       set({ isLoading: true });
     }
+    // The intentional handoff reset precedes this read's authority. Component
+    // ownership cannot authorize a profile superseded by later session evidence.
+    const profile = captureAccountProfileRead();
+    const authorityGuard = isCurrent
+      ? () => {
+          if (!isCurrent()) throw new Error("Profile restoration cancelled");
+          profile.assertCurrent();
+        }
+      : undefined;
     const request = captureAccountRequest();
     try {
       const user = ephemeral || authorityGuard
@@ -199,7 +201,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         : await api.get<User>("/users/me", { preserveSessionOn401: true });
       request.assertCurrent();
       authorityGuard?.();
-      assertProfile();
+      profile.assertCurrent();
       const previousUser = get().user;
       applyIdentityTransition(previousUser, user);
       set({
@@ -217,7 +219,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       return true;
     } catch (caught) {
       let error = caught;
-      try { assertProfile(); } catch (stale) { error = stale; }
+      try { profile.assertCurrent(); } catch (stale) { error = stale; }
       if (error instanceof Error && error.name === "AbortError") {
         if (!isCurrent) set({ isLoading: false });
         if (requireSession) throw error;
