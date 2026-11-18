@@ -15,7 +15,9 @@ plugin checks, Google Permissions, SDK, Mobile, CLI tests, wizard freshness and
 Oracle worker tests. Backend tests, workspace test-target compilation and lints,
 KMS feature builds, coverage, Machine Container E2E and Docker validation wait
 for the full run. PR updates cancel superseded runs. Branch protection requires
-`CI Pipeline` and the independent `Main Merge Guard`.
+`CI Pipeline` and the independent `Main Merge Guard`. The latter runs
+`.github/workflows/main-merge-guard.yml` from the default branch on
+`pull_request_target`. It checks PR metadata without checking out code.
 
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses

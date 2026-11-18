@@ -56,25 +56,6 @@ env:
   NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
 
 jobs:
-  main-merge-guard:
-    name: Main Merge Guard
-    # Only workflow_call declares force-all. A PR caller reports its checks with a caller prefix.
-    if: >-
-      github.event_name == 'pull_request' && !contains(toJSON(inputs), '"force-all"')
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - name: Check the release branch
-        env:
-          BASE: ${{ github.base_ref }}
-          HEAD_BRANCH: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          if [[ "$BASE" == main && ( "$HEAD_BRANCH" != dev || "$HEAD_REPO" != "$GITHUB_REPOSITORY" ) ]]; then
-            echo "::error::Target dev with feature PRs, then open a release PR from this repository's dev branch into main."
-            exit 1
-          fi
-
   # ---------------------------------------------------------------------------
   # Detect which areas of the monorepo changed so downstream jobs can skip
   # work that isn't relevant to this PR. Always runs first; outputs feed the
