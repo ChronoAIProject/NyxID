@@ -666,6 +666,22 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
+## Verified Mobile Login Links (Optional)
+
+Android uses the existing [Android App Links](#android-app-links) identity settings
+below. iOS uses the existing `APNS_TEAM_ID` and `APNS_TOPIC` to serve
+`/.well-known/apple-app-site-association`; the APNs push private key is not
+required for that file.
+
+The additive `app_verification_uri` in device-login responses requires an HTTPS
+origin-only `BASE_URL`, a different `FRONTEND_URL` origin (scheme, host and port),
+and a configured Apple (nonblank team + topic) or Android app-link identity.
+Identity configuration alone does not verify that external associations work.
+Its `/login/device?user_code=…` fallback redirects to the configured frontend
+approval page; the backend returns 404 for a same-origin target to avoid a loop.
+HTTP local development retains the ordinary web verification QR without a tap target. See the
+[mobile app-link runbook](../mobile/docs/APP_LINKS.md) for rollout and device checks.
+
 ## SMTP (Reserved; currently unused)
 
 | Variable | Description |

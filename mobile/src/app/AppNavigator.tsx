@@ -1000,13 +1000,6 @@ export function AppNavigator({
                         options={{ title: t("Privacy Policy") }}
                       />
                       <Stack.Screen
-                        name="DeviceLogin"
-                        component={
-                          isAuthenticated ? SheetEntryRoute : DeviceLoginScreen
-                        }
-                        options={{ title: t("Approve Device Login") }}
-                      />
-                      <Stack.Screen
                         name="AgentKeyLogin"
                         component={
                           isAuthenticated
@@ -1016,6 +1009,15 @@ export function AppNavigator({
                         options={{ title: t("Agent Key Login") }}
                       />
                     </Stack.Group>
+                    {/* Keep the public request through sign-in; its preview
+                        remounts in the workspace and still requires approval. */}
+                    <Stack.Screen
+                      name="DeviceLogin"
+                      component={
+                        isAuthenticated ? SheetEntryRoute : DeviceLoginScreen
+                      }
+                      options={{ title: t("Approve Device Login") }}
+                    />
                   </Stack.Navigator>
                 </WorkspaceRootSwapContext.Provider>
               </WorkspacePagePaintedContext.Provider>

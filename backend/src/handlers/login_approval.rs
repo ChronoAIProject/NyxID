@@ -365,6 +365,10 @@ pub async fn app_request(
     url.query_pairs_mut()
         .append_pair("user_code", &request.user_code);
     Ok(private(super::auth_device::AuthDeviceRequestResponse {
+        app_verification_uri: super::mobile_app_links::app_verification_uri(
+            &state.config,
+            &request.user_code,
+        ),
         device_code: request.device_code,
         user_code: request.user_code,
         verification_uri,

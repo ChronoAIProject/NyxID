@@ -3874,6 +3874,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/catalog-icons/{id}", get(handlers::catalog_icons::serve))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
+        .route("/login/device", get(handlers::mobile_app_links::device_login))
         .route(
             "/nodes/{node_id}/credentials/pending/{pending_id}/accept",
             get(handlers::credential_accept::accept_page),

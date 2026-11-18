@@ -2599,6 +2599,7 @@ mod tests {
             "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
+            "/login/device",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
             "/api/v1/services",

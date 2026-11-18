@@ -13,6 +13,7 @@
   "All eligible pool members are cooling down": "所有符合條件的服務集區成員都在冷卻中",
   "Allow all cannot be combined with a restricted list": "「全部允許」不能與限制清單同時使用",
   "An internal error occurred": "發生內部錯誤",
+  "App verification links require HTTPS": "應用程式驗證連結必須使用 HTTPS",
   "Application name is required": "應用程式名稱為必填項",
   "Applied {{count}}; failed: {{details}}. Review remaining changes before retrying.": "已套用 {{count}} 項；失敗：{{details}}。重試前請檢查剩餘變更。",
   "Applied {{length}}; failed: {{value}}. Review remaining changes before retrying.": "應用 {{length}}；失敗：{{value}}。重試之前檢查剩餘的變更。",

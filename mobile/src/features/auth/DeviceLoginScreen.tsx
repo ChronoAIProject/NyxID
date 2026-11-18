@@ -51,6 +51,7 @@ import {
   X,
 } from "lucide-react-native";
 
+import { StackActions } from "@react-navigation/routers";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -396,6 +397,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [rawUserAgentExpanded, setRawUserAgentExpanded] = useState(false);
   const lastActionAt = useRef(0);
   const generation = useRef(0);
+  const [linkedPreview, setLinkedPreview] = useState<{ code: string; generation: number } | null>(null);
   const actionBusy = useRef(false);
   const decisionOperation = useRef<symbol | null>(null);
   const deferredRoute = useRef(false);
@@ -438,6 +440,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       return;
     }
     if (route.params?.user_code === undefined) {
+      setLinkedPreview(null);
       if (route.params?.start_scanner === true) setIsScanning(true);
       return;
     }
@@ -460,6 +463,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     if (handoff?.result.kind === "device") {
       lastActionAt.current = handoff.at;
       acceptPreview(handoff.code, handoff.result.preview);
+      setLinkedPreview(null);
+    } else {
+      setLinkedPreview({ code: route.params.user_code, generation: generation.current });
     }
   }, [route.params?.start_scanner, route.params?.user_code, routeRevision]);
   useEffect(() => {
@@ -605,8 +611,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   }, []);
 
   const runPreview = useCallback(
-    async (candidate: string): Promise<boolean> => {
-      if (cooldown.coolingDown) return false;
+    async (candidate: string, automatic = false): Promise<boolean> => {
+      if (!automatic) setLinkedPreview(null);
+      if (automatic ? previewCooldownMs() > 0 : cooldown.coolingDown) return false;
       if (actionBusy.current || !claimAction()) {
         setErrorMessage(t("Please wait a moment before trying again."));
         return false;
@@ -649,6 +656,29 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     },
     [claimAction, cooldown.coolingDown, navigation, t],
   );
+
+  // Incoming links use the same resolver, throttle and cooldown as manual
+  // entry. Each route generation previews once; opening never makes a decision.
+  useEffect(() => {
+    if (!linkedPreview || linkedPreview.generation !== generation.current) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const run = () => {
+      if (linkedPreview.generation !== generation.current) return;
+      const delay = Math.max(
+        ACTION_THROTTLE_MS - (Date.now() - lastActionAt.current),
+        previewCooldownMs(),
+        actionBusy.current ? ACTION_THROTTLE_MS : 0,
+      );
+      if (delay > 0) {
+        timer = setTimeout(run, delay);
+        return;
+      }
+      setLinkedPreview(null);
+      void runPreview(linkedPreview.code, true);
+    };
+    run();
+    return () => clearTimeout(timer);
+  }, [linkedPreview, runPreview]);
 
   const handleScannedCode = (
     normalized: string,
@@ -739,7 +769,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     } else if (isAuthenticated) {
       navigation.dispatch(workspaceNavigateAction("Activity"));
     } else {
-      navigation.navigate("Auth");
+      navigation.dispatch(StackActions.replace("Auth"));
     }
   };
 
@@ -841,6 +871,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     return (
       <LoginRequestTerminalView
         state={terminal}
+        clientKind={preview?.client_kind}
         inSheet={inWorkspaceSheet}
         disabled={decisionPending !== null}
         onDone={handleBack}
@@ -926,6 +957,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 accessibilityLabel={translateApp("Login code")}
                 value={userCode}
                 onChangeText={(value) => {
+                  setLinkedPreview(null);
                   setUserCode(formatAuthDeviceUserCode(value));
                   if (!cooldown.coolingDown) setErrorMessage(null);
                 }}

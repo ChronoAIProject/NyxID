@@ -1,4 +1,5 @@
 pub mod domain_aliases;
+pub mod mobile_app_links;
 
 use std::{
     env,
