@@ -1829,6 +1829,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             "channel_event_logs",
             doc! {"_id":"event-joined","conversation_id":"personal-chat"},
         ),
+        (
+            "channel_inspection_dispatches",
+            doc! {"_id":"inspection-joined","conversation_id":"personal-chat"},
+        ),
         ("mcp_sessions", doc! {"_id":"mcp","user_id":&owner}),
         (
             "consents",

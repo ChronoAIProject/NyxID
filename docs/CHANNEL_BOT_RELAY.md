@@ -327,6 +327,68 @@ sequenceDiagram
     H-->>AG: 200 OK { platform_message_id: "..." }
 ```
 
+### Production inspection ingress
+
+NyxID exposes a restricted synthetic ingress for production inspection. It is
+disabled unless both `CHANNEL_INSPECTION_HMAC_KEY` and the exact 10-case
+`CHANNEL_INSPECTION_CASES_JSON` server allowlist pass startup validation. The
+caller selects only a `case_id`; destination, Bot, platform, assigned Agent Key,
+sender marker, and fixed inspection text are derived by the server. The request
+cannot supply a message body, destination, user, or platform identifier.
+The fixed case contract also verifies platform, private/group conversation
+type, and personal/organization owner type before callback delivery.
+
+```http
+POST /api/v1/channel-inspections/{case_id}/dispatch
+GET /api/v1/channel-inspections/{dispatch_id}/status
+```
+
+Both requests use these headers:
+
+| Header | Value |
+|---|---|
+| `X-NyxID-Inspection-Version` | `v1` |
+| `X-NyxID-Inspection-Timestamp` | Current Unix seconds; accepted skew is 30 seconds |
+| `X-NyxID-Inspection-Nonce` | Fresh UUID; MongoDB replay claim is retained for 120 seconds |
+| `X-NyxID-Inspection-Body-Sha256` | Lowercase SHA-256 hex of the exact body, or the empty body for `GET` |
+| `X-NyxID-Inspection-Signature` | Lowercase HMAC-SHA256 hex using the dedicated inspection key |
+
+The canonical signature input is the following ASCII/UTF-8 text, including
+newlines and the uppercase method:
+
+```text
+v1
+<METHOD>
+<PATH>
+<TIMESTAMP>
+<NONCE>
+<BODY_SHA256>
+```
+
+The dispatch JSON contains exactly `protocol_version: 1`, `run_id`, a UUID
+`event_id`, and a timezone-aware `timestamp`. A successful `202` returns a
+dispatch UUID plus `case_id`, `run_id`, `transport: synthetic_ingress`, phase,
+and idempotency state. Status returns only bounded correlation metadata:
+terminal/evidence flags, callback admission, correlated outbound count,
+provider acceptance, latency, outcome, and deadline. Responses never expose
+Bot, conversation, platform-user, Agent Key, inbound-message, provider-message,
+or owner identifiers, and never expose message content.
+
+The server stores a metadata-only inbound anchor and forwards the ordinary
+assigned-agent callback with a one-use reply token. It deliberately omits
+`X-NyxID-User-Token`. The callback's reply therefore uses the normal
+`POST /api/v1/channel-relay/reply` path and real provider send, but grants no
+owner access and does not read or require `allow_agent_initiated`. The synthetic
+sender is explicitly marked in callback metadata; an assigned agent must admit
+that marker instead of impersonating a real platform user.
+
+Terminal outcomes are `ok`, `callback_failed`, `callback_rejected`,
+`reply_timeout`, `duplicate_reply`, and `provider_receipt_missing`. A missing
+anchor, configuration drift, persistence failure, or unconfirmed terminal
+state returns `inspection_incomplete` evidence instead of inventing a platform
+failure. Correlation records expire after seven days and are also removed by
+personal/organization erasure through their bound conversation.
+
 ### Editing a sent reply
 
 `POST /api/v1/channel-relay/reply/update` replaces a previously sent message. `message_id` is the `platform_message_id` returned by `/reply` or `/send`, and `outbound_message_id` is the NyxID `message_id` from the same response:

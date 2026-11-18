@@ -640,6 +640,11 @@ pub async fn delete_org_user(
         db.collection::<bson::Document>(crate::models::channel_event_log::COLLECTION_NAME)
             .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
             .await?;
+        db.collection::<bson::Document>(
+            crate::models::channel_inspection_dispatch::COLLECTION_NAME,
+        )
+        .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
+        .await?;
     }
     for collection in [
         crate::models::saved_login::COLLECTION_NAME,

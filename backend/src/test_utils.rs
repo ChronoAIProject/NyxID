@@ -2251,6 +2251,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         node_ws_manager,
         replica_identity,
         node_dispatch,
+        channel_inspection: None,
         ssh_session_manager: Arc::new(SshSessionManager::new(
             cluster_slot_manager.clone(),
             config.ssh_max_sessions_per_user,

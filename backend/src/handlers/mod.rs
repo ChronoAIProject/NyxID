@@ -51,6 +51,7 @@ pub mod channel_bots;
 pub mod channel_connect_links;
 pub mod channel_conversations;
 pub mod channel_events;
+pub mod channel_inspections;
 pub mod channel_managed;
 #[cfg(test)]
 mod channel_managed_tests;

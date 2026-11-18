@@ -186,6 +186,9 @@ pub struct AppState {
     pub replica_identity: Arc<services::node_owner_service::ReplicaIdentity>,
     /// Cluster-aware dispatch for local and remote credential-node sockets.
     pub node_dispatch: Arc<services::node_dispatch::NodeDispatch>,
+    /// Dedicated HMAC runtime for fixed production channel inspections.
+    /// `None` keeps the public inspection routes closed.
+    pub channel_inspection: Option<Arc<services::channel_inspection_service::Runtime>>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Renewable MongoDB capacity slots shared by cluster-wide session caps.
@@ -1186,6 +1189,9 @@ async fn server_run(cli: Cli) {
 
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
+    let channel_inspection = services::channel_inspection_service::Runtime::from_env(db.clone())
+        .expect("Invalid channel inspection configuration")
+        .map(Arc::new);
     let state = AppState {
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
@@ -1208,6 +1214,7 @@ async fn server_run(cli: Cli) {
         node_ws_manager,
         replica_identity,
         node_dispatch,
+        channel_inspection,
         ssh_session_manager,
         cluster_slot_manager: cluster_slot_manager.clone(),
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::with_db(

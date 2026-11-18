@@ -752,6 +752,14 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
 | `CHANNEL_POLL_INTERVAL_SECS` | `30` | Interval for the generic channel poll sweep; `0` disables it. Only polling adapters participate. X has a 60-second minimum per bot; provider backoff and MongoDB leases can defer the next poll. Webhook channels are unaffected. |
+| `CHANNEL_INSPECTION_HMAC_KEY` | *(unset)* | Dedicated 32-byte production-inspection HMAC key as exactly 64 hexadecimal characters. Configure only with `CHANNEL_INSPECTION_CASES_JSON`; unset keeps both inspection endpoints closed. This key grants only the fixed inspection ingress and must not reuse `INTERNAL_DISPATCH_HMAC_KEY`, an API key, or a user credential. |
+| `CHANNEL_INSPECTION_CASES_JSON` | *(unset)* | Server-only JSON array containing exactly the 10 named active inspection fixtures. Each object has only `case_id`, `platform`, `conversation_id`, and `bot_id`; IDs must be UUIDs. Each case's platform, private/group conversation type, and personal/organization owner type are fixed by the server contract. The referenced route, Bot, owner/platform binding, Agent Key callback, and ownership state must all be active at dispatch time. Never copy this allowlist to the inspection runner. |
+
+Inspection ingress configuration is startup-validated as a pair. The caller
+receives only the matching dedicated HMAC secret and public NyxID base URL; it
+does not receive fixture identifiers, user tokens, or platform credentials.
+Changing either variable requires a coordinated server/runner key rollout.
+See [Production inspection ingress](CHANNEL_BOT_RELAY.md#production-inspection-ingress).
 
 ## Oracle Relay
 

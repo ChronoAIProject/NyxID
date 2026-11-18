@@ -87,6 +87,18 @@ Recovery is explicit: a human can run `nyxid login` and choose account access, o
 
 For existing read-only agent discovery, use `GET /api/v1/channel-relay/conversations?page=1&per_page=50` with the assigned active API key. It returns only active conversations assigned to that exact key, including device channels (`platform=device`); it grants no bot inventory or management access. There is no separate channel-event discovery endpoint. A key without assignments receives an empty list. The management lists remain closed to API keys.
 
+### Production channel inspection
+
+`POST /api/v1/channel-inspections/{case_id}/dispatch` and
+`GET /api/v1/channel-inspections/{dispatch_id}/status` are disabled by default
+and accept only the dedicated inspection HMAC contract. They do not accept
+sessions, access tokens, API keys, delegated credentials, service accounts, or
+relay tokens as substitutes. Dispatch accepts only a server-allowlisted case
+selection plus run/event metadata; status returns bounded, metadata-only
+callback and provider correlation. See
+[Production inspection ingress](CHANNEL_BOT_RELAY.md#production-inspection-ingress)
+for signing, configuration, response fields, and failure semantics.
+
 ---
 
 ## Error Format

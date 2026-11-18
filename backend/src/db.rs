@@ -3143,9 +3143,28 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
+    // Production inspections correlate only by the internal inbound anchor.
+    // The partial index keeps that bounded without indexing unrelated inbound rows.
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "reply_to_message_id": 1, "created_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_messages_reply_correlation_idx".to_string())
+                        .partial_filter_expression(doc! {
+                            "direction": "outbound",
+                            "reply_to_message_id": { "$type": "string" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     crate::services::channel_reply_delivery::ensure_indexes(db).await?;
     crate::services::channel_text_delivery::ensure_indexes(db).await?;
+    crate::services::channel_inspection_service::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");

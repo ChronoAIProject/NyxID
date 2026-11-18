@@ -2355,6 +2355,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .layer(DefaultBodyLimit::disable());
 
+    // Fixed synthetic production inspections authenticate inside the handler
+    // with a dedicated HMAC key. They deliberately bypass ordinary user/API-key
+    // auth and accept no caller-supplied destination or message content.
+    let channel_inspection_routes = Router::new()
+        .route(
+            "/{case_id}/dispatch",
+            post(handlers::channel_inspections::dispatch),
+        )
+        .route(
+            "/{dispatch_id}/status",
+            get(handlers::channel_inspections::status),
+        )
+        .layer(DefaultBodyLimit::max(
+            crate::services::channel_inspection_service::REQUEST_BODY_LIMIT,
+        ));
+
     let developer_routes = Router::new()
         .route(
             "/oauth-clients",
@@ -2508,6 +2524,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/connect-links/preview",
             post(handlers::connect_links::preview_connect_link),
         )
+        .nest("/channel-inspections", channel_inspection_routes)
         .nest("/devices/code", device_code_public_routes)
         .nest("/devices/onboard", device_onboard_public_routes);
 

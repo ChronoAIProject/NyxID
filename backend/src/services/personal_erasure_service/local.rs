@@ -960,6 +960,10 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
             m::channel_conversation::COLLECTION_NAME,
             &[
                 (m::channel_event_log::COLLECTION_NAME, "conversation_id"),
+                (
+                    m::channel_inspection_dispatch::COLLECTION_NAME,
+                    "conversation_id",
+                ),
                 (m::channel_message::COLLECTION_NAME, "conversation_id"),
             ],
         ),
