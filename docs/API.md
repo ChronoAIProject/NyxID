@@ -9855,6 +9855,9 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 - `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
   `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
   `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
+  Lifecycle operations without a resource also distinguish `operation_in_progress_without_resource`,
+  `operation_waiting_for_connection` and `operation_failed_without_resource`. None proves absence;
+  `next_step` explains automatic observation, owner connection completion, or the missing CMA evidence.
   `owner_retry_will_recover` means the dispatched generic Sandbox creation is
   inside the 23-hour replay window: the owner's next allocating create or retry
   of the original request automatically attempts the existing recovery. If CMA
@@ -9863,12 +9866,14 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 ### POST `/api/v1/admin/cma-sandbox-reservations/{id}/resolve`
 
 Use the latest inspection's three fences (`creation_revision` is null for a legacy
-row with no matching creation; such a row cannot authorize settlement). Example
+row with no matching creation; it can authorize only exact bound-resource retirement). Example
 association body:
 
 ```json
 {"generation":1,"revision":2,"creation_revision":3,"action":"associate","remote_sandbox_id":"sandbox-id"}
 ```
+
+For an already bound sandbox, `"action":"confirm_retirement"` freshly reads its exact identity and requires CMA state `retired`. It completes local retirement and clears recovery material with the same transaction and fences, including for legacy bound rows without a journal. A 404, timeout, live state or retirement acknowledgment cannot authorize it. This action never sends a retirement command.
 
 For release use `"action":"release"` and omit `remote_sandbox_id`. Caller-supplied
 proof is not accepted. `associate` requires a saved creation receipt or exact

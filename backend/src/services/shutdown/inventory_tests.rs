@@ -481,6 +481,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
     (
         "handlers/assistant_team.rs",
         "spawn_sweeps",
+        "crate::services::assistant_cma_reservation_recovery::spawn_worker",
+        1,
+        "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
+    ),
+    (
+        "handlers/assistant_team.rs",
+        "spawn_sweeps",
         "crate::services::assistant_notification_service::spawn_worker",
         1,
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",

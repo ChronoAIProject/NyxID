@@ -28,6 +28,7 @@ pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
 pub mod assistant_cma_gateway;
 pub(crate) mod assistant_cma_legacy_service;
+pub mod assistant_cma_reservation_recovery;
 pub mod assistant_cma_reservation_service;
 pub mod assistant_cma_sandbox_service;
 pub(crate) mod assistant_cma_slot_audit;
