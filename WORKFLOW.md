@@ -55,8 +55,8 @@ hooks:
     elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
       git checkout "$BRANCH"
     else
-      git checkout main && git pull
-      git checkout -b "$BRANCH" origin/main
+      git fetch origin dev:refs/remotes/origin/dev
+      git checkout -b "$BRANCH" origin/dev
     fi
     (cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build)
     (cd frontend && npm install)
@@ -308,7 +308,7 @@ Do not keep iterating after one of those conditions is reached. Do not drift int
    ```
 4. If `PR` is empty and your role produced code changes, create exactly one PR:
    ```bash
-   gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --label symphony
+   gh pr create --base dev --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --label symphony
    ```
 5. If the PR already exists, push to the same branch. Do not create a replacement PR.
 6. Use conventional commit messages such as `feat:`, `fix:`, `refactor:`, `test:`, or `docs:`.
