@@ -1,7 +1,7 @@
 name: Publish Dev Images
 
 # Publishes the staging images on every push to `dev`:
-#   backend and frontend, linux/amd64 only -> tags: dev, dev-<sha>
+#   backend and frontend, linux/amd64 only -> dev-<sha> and dev (current tip).
 #
 # Deliberately separate from publish-images.yml. A dev push never creates,
 # moves or attests a production tag (`main`, `main-<sha>`, `edge`, semver,
@@ -16,10 +16,6 @@ on:
     branches: [dev]
   workflow_dispatch:
 
-concurrency:
-  group: publish-dev-images
-  cancel-in-progress: true
-
 permissions:
   contents: read
   packages: write
@@ -30,6 +26,9 @@ jobs:
     # A manual run from any other branch must not publish `dev` tags.
     if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
+    concurrency:
+      group: publish-dev-images-${{ matrix.component }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -51,10 +50,17 @@ jobs:
         id: image
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="ghcr.io/${owner}/nyxid/${{ matrix.component }}"
+          tip=$(git ls-remote --exit-code origin refs/heads/dev)
           {
-            echo "repo=ghcr.io/${owner}/nyxid/${{ matrix.component }}"
-            echo "sha_tag=dev-${GITHUB_SHA::7}"
-            echo "hash=$(git rev-parse --short=12 HEAD)"
+            echo "repo=$repo"
+            echo "tags<<EOF"
+            echo "$repo:dev-${GITHUB_SHA::7}"
+            if [[ "${tip%%[[:space:]]*}" == "$GITHUB_SHA" ]]; then
+              echo "$repo:dev"
+            fi
+            echo "EOF"
+            echo "hash=${GITHUB_SHA::12}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Ensure Ubuntu archive DNS
@@ -78,9 +84,7 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ steps.image.outputs.repo }}:dev
-            ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.sha_tag }}
+          tags: ${{ steps.image.outputs.tags }}
           labels: |
             org.opencontainers.image.title=nyxid-${{ matrix.component }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -95,3 +99,35 @@ jobs:
             type=registry,ref=${{ steps.image.outputs.repo }}:buildcache-linux-amd64
           cache-to: type=registry,ref=${{ steps.image.outputs.repo }}:buildcache-dev-linux-amd64,mode=max,ignore-error=true
           provenance: false
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    environment:
+      name: staging
+      url: https://staging.nyxid.ai
+    concurrency:
+      # A slow older build can reach this queue after a newer one.
+      group: deploy-nyxid-staging
+      queue: max
+    timeout-minutes: 17
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check current dev tip
+        id: revision
+        run: |
+          tip=$(git ls-remote --exit-code origin refs/heads/dev)
+          if [[ "${tip%%[[:space:]]*}" == "$GITHUB_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping superseded staging deployment for $GITHUB_SHA."
+          fi
+      - name: Roll out backend and frontend
+        if: steps.revision.outputs.current == 'true'
+        env:
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+        run: python3 .github/scripts/deploy_staging.py
