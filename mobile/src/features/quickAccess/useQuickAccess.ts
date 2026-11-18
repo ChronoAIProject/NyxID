@@ -168,8 +168,8 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     loadError: query.error,
     saving: mutation.isPending,
     saveError: mutation.error,
-    save: (items: readonly QuickAccessItem[]) => mutation.mutate({ items, authority: captureAuthority() }),
-    reset: () => mutation.mutate({ reset: true, authority: captureAuthority() }),
+    save: (items: readonly QuickAccessItem[], complete?: () => void) => mutation.mutate({ items, authority: captureAuthority() }, { onSettled: complete }),
+    reset: (complete?: () => void) => mutation.mutate({ reset: true, authority: captureAuthority() }, { onSettled: complete }),
     clearSaveError: () => mutation.reset(),
     retry: () => void query.refetch(),
   };

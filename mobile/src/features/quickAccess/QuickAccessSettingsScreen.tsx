@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { ChevronDown, ChevronUp, Minus, Plus } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -41,11 +41,20 @@ export function QuickAccessSettingsScreen(
   const sources = useQuickAccessSources({ agents: true, crews: true });
   // Editing waits for the saved list: a change made over the placeholder
   // default would overwrite it.
+  const busy = useRef(false);
+  const [pending, setPending] = useState(false);
   const editable = quickAccess.loaded;
+  const saving = pending || quickAccess.saving;
+  const begin = (operation: (complete: () => void) => void) => {
+    if (!editable || saving || busy.current) return;
+    busy.current = true;
+    setPending(true);
+    quickAccess.clearSaveError();
+    operation(() => { busy.current = false; setPending(false); });
+  };
   const full = quickAccessFull(items);
   const change = (next: QuickAccessItem[]) => {
-    quickAccess.clearSaveError();
-    quickAccess.save(next);
+    begin(complete => quickAccess.save(next, complete));
   };
   const candidates = quickAccessCandidates(items, sources);
   const glyph = (entry: QuickAccessEntry) => (
@@ -119,20 +128,21 @@ export function QuickAccessSettingsScreen(
                   <View style={styles.controls}>
                     <OrderButton
                       label={t("Move {{name}} up", { name })}
-                      disabled={index === 0}
+                      disabled={!editable || saving || index === 0}
                       onPress={() => change(moveQuickAccess(items, index, -1))}
                     >
                       <ChevronUp size={18} color={colors.textPrimary} />
                     </OrderButton>
                     <OrderButton
                       label={t("Move {{name}} down", { name })}
-                      disabled={index === items.length - 1}
+                      disabled={!editable || saving || index === items.length - 1}
                       onPress={() => change(moveQuickAccess(items, index, 1))}
                     >
                       <ChevronDown size={18} color={colors.textPrimary} />
                     </OrderButton>
                     <OrderButton
                       label={t("Remove {{name}}", { name })}
+                      disabled={!editable || saving}
                       onPress={() => change(removeQuickAccess(items, index))}
                     >
                       <Minus size={18} color={colors.danger} />
@@ -166,7 +176,7 @@ export function QuickAccessSettingsScreen(
                 name,
                 label: name,
               })}
-              disabled={!editable || full}
+              disabled={!editable || saving || full}
               onAdd={() => change(addQuickAccess(items, { kind: "destination", id }))}
             />
           );
@@ -189,7 +199,7 @@ export function QuickAccessSettingsScreen(
                   label: name,
                   agent,
                 })}
-                disabled={!editable || full}
+                disabled={!editable || saving || full}
                 onAdd={() =>
                   change(addQuickAccess(items, { kind: "agent", id: agent.id }))
                 }
@@ -213,7 +223,7 @@ export function QuickAccessSettingsScreen(
                 label: crew.name,
                 members: crew.members,
               })}
-              disabled={!editable || full}
+              disabled={!editable || saving || full}
               onAdd={() =>
                 change(addQuickAccess(items, { kind: "crew", id: crew.id }))
               }
@@ -229,10 +239,9 @@ export function QuickAccessSettingsScreen(
         <SettingsRow
           label={t("Reset to default")}
           tone="action"
-          disabled={!editable || !customized}
+          disabled={!editable || saving || !customized}
           onPress={() => {
-            quickAccess.clearSaveError();
-            quickAccess.reset();
+            begin(complete => quickAccess.reset(complete));
           }}
         />
       </SettingsGroup>

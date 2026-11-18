@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { MutationObserver, QueryClient } from "@tanstack/query-core";
 import { lightColors } from "../../theme/mobileTheme";
 
 type Element = { type: unknown; props: Record<string, any> };
@@ -54,8 +55,8 @@ function setup({
     loaded,
     loadError,
     saveError,
-    save: (next: unknown) => calls.push(["save", next]),
-    reset: () => calls.push(["reset"]),
+    save: (next: unknown, complete?: () => void) => { calls.push(["save", next]); complete?.(); },
+    reset: (complete?: () => void) => { calls.push(["reset"]); complete?.(); },
     clearSaveError: () => calls.push(["clear"]),
     retry: () => calls.push(["retry"]),
   };
@@ -212,4 +213,51 @@ test("reset returns to the default; editing waits for the saved list; failures a
   // An empty list is shown as such.
   const empty = setup({ items: [], customized: true });
   assert.match(empty.rows(empty.group("Your shortcuts"))[0]!.props.label, /Nothing in quick access yet/);
+});
+
+
+test('M2622-05 three accepted UI edits survive staggered server responses; pending controls refuse extra presses', async () => {
+  const client=new QueryClient(); const key=['account','quick-access',7];
+  client.setQueryData(key,{customized:true,items:[]});
+  let server:any={customized:true,items:[]}; const requests:any[]=[];const gates:Array<()=>void>=[];
+  let observer:any; const hooks:any={};
+  const jsx=(type:unknown,props:any)=>({type,props});
+  const h=hookHarness<Element>({
+    'react/jsx-runtime':{jsx,jsxs:jsx},
+    'react-native':{Pressable:'Pressable',View:'View',StyleSheet:{create:(v:unknown)=>v}},
+    'lucide-react-native':Object.fromEntries(['ChevronDown','ChevronUp','Minus','Plus'].map(k=>[k,k])),
+    '../../components/settings/SettingsList':Object.fromEntries(['SettingsPage','SettingsGroup','SettingsRow'].map(k=>[k,k])),
+    '../../theme/ThemeContext':{useTheme:()=>({colors:lightColors})},
+    './QuickAccessGlyph':{QuickAccessGlyph:'QuickAccessGlyph'},
+    './useQuickAccess':hooks,'./useQuickAccessSources':{useQuickAccessSources:()=>({agents:[],crews:[]})},
+    '../../lib/auth/authEpoch':{getAuthEpoch:()=>7},'../../lib/auth/authAccount':{getAuthAccountId:()=> 'a'},
+    '../../lib/auth/sessionStore':{authSessionGeneration:()=>1},
+    '../../lib/api/quickAccessApi':{quickAccessApi:{save:async(items:any)=>{
+      requests.push(items);await new Promise<void>(r=>gates.push(r));server={customized:true,items};return server;
+    },reset:async()=>{requests.push('reset');return server;}}},
+    '@tanstack/react-query':{useQueryClient:()=>client,useQuery:()=>({data:client.getQueryData(key)}),useMutation:(opts:any)=>{
+      if(!observer){observer=new MutationObserver(client,opts);observer.subscribe(()=>{});}
+      return {...observer.getCurrentResult(),mutate:(v:unknown, callbacks:any)=>{void observer.mutate(v,callbacks).catch(()=>{});},reset:()=>observer.reset()};
+    }},
+  });
+  Object.assign(hooks,h.load(fileURLToPath(new URL('./useQuickAccess.ts',import.meta.url))));
+  const {QuickAccessSettingsScreen}=h.load(fileURLToPath(new URL('./QuickAccessSettingsScreen.tsx',import.meta.url))) as any;
+  h.mount(()=>QuickAccessSettingsScreen({}));
+  const tree=()=>elements(expand(h.value())).flatMap(n=>[n,...(n.props.accessory?.props ? elements(expand(n.props.accessory)) : [])]);
+  const button=(label:string)=>{const found=tree().find(n=>n.props.accessibilityLabel===label || n.props.label===label);assert.ok(found,label);return found;};
+  const settle=async()=>{await new Promise(r=>setImmediate(r));h.render();await h.settle();};
+  try {
+    const first=button('Add Plugins'),stale=button('Add Machines');first.props.onPress();stale.props.onPress();
+    await settle();assert.equal(requests.length,1,'sync guard refuses same-frame second press');
+    assert.equal(button('Add Machines').props.disabled,true);assert.equal(button('Reset to default').props.disabled,true);
+    assert.equal(button('Remove Plugins').props.disabled,true);
+    gates.shift()!();await settle();
+    button('Add Machines').props.onPress();await settle();
+    assert.equal(button('Add Settings').props.disabled,true);button('Add Settings').props.onPress();await settle();
+    assert.equal(requests.length,2,'pending Settings press refused');
+    gates.shift()!();await settle();button('Add Settings').props.onPress();await settle();
+    gates.shift()!();await settle();
+    same(server.items.map((i:any)=>i.id),['plugins','machines','settings']);
+    same((client.getQueryData(key) as any).items,server.items,'server readback retains all three accepted edits');
+  } finally {h.unmount();client.clear();}
 });
