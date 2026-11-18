@@ -214,26 +214,20 @@ async fn saved_source(
     } else {
         format!("oc_{sender}")
     });
+    let provider_ref = |id: &str| match row.platform.as_str() {
+        "telegram" => id.to_owned(),
+        "whatsapp" => format!("{}/{id}", provider.uri()),
+        _ => format!("{}/download/{id}", provider.uri()),
+    };
     let mut image = source.attachments[0].clone();
-    image.provider_ref = format!(
-        "{}/{}456",
-        provider.uri(),
-        if row.platform == "whatsapp" {
-            ""
-        } else {
-            "download/"
-        }
-    );
-    if row.platform == "telegram" {
-        image.provider_ref = "456".into();
-    }
+    image.provider_ref = provider_ref("456");
     image.image_key = None;
     image.file_key = Some("456".into());
     image.filename = None; // WhatsApp images commonly have no filename.
     image.mime_type = Some("image/png".into());
     image.size_bytes = None;
     let mut original = image.clone();
-    original.provider_ref = image.provider_ref.replace("456", "457");
+    original.provider_ref = provider_ref("457");
     original.file_key = Some("457".into());
     original.content_type = "file".into();
     original.filename = Some("original.bin".into());

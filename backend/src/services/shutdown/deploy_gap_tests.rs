@@ -223,8 +223,6 @@ async fn shutdown_deploy_gap_drain_records_include_recent_traffic() {
     .unwrap();
     let drain = drain::Drain::begin(&state, Duration::from_secs(25), "SIGTERM").unwrap();
     state.shutdown.tasks_stopped().await;
-    let progress = drain.progress(&state);
-    tokio::pin!(progress);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::time::resume();
@@ -239,8 +237,9 @@ async fn shutdown_deploy_gap_drain_records_include_recent_traffic() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
+    // Drop the progress writer before finish competes for the audit append lock.
     tokio::select! {
-        never = &mut progress => match never {},
+        never = drain.progress(&state) => match never {},
         result = tokio::time::timeout(Duration::from_secs(3), recorded) => result.unwrap(),
     };
     drain

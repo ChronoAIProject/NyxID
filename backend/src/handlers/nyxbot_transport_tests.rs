@@ -906,6 +906,43 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
                 PARTITION
             );
         }
+        // A transport switch can return with the remote release queued for the worker.
+        use crate::models::nyxbot_gateway_release::{
+            COLLECTION_NAME, NyxbotGatewayRelease, ReleaseState,
+        };
+        let releases = state.db.collection::<NyxbotGatewayRelease>(COLLECTION_NAME);
+        let release = releases
+            .find_one(doc! {
+                "channel_id": &before.id, "state": {"$in":["due","settled"]},
+                "record_id":{"$type":"string"}, "native_drain_for":null,
+            })
+            .await
+            .unwrap()
+            .expect("remote release for the Discord channel");
+        if release.state == ReleaseState::Due {
+            releases
+                .update_one(
+                    doc! {"_id":&release.id, "state":"due"},
+                    doc! {"$set":{"next_attempt_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            crate::services::nyxbot_gateway_release_service::sweep(&state)
+                .await
+                .unwrap();
+        }
+        let settled = releases
+            .find_one(doc! {"_id":&release.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settled.resolution.as_deref(),
+            Some("released"),
+            "release {:?}, last error {:?}",
+            settled.state,
+            settled.last_error
+        );
         assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
         complete_native_drain(&state, &before).await;
         gateway.abort();

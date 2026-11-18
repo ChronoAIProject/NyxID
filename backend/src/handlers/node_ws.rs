@@ -2706,7 +2706,6 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_rejects_previous_generation_before_auth_ok_then_recovers_after_expiry() {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
         use crate::services::node_owner_service::{self, ReplicaIdentity};
         use futures::StreamExt;
         let db = test_db("ws_owner_retry").await;
@@ -2729,81 +2728,108 @@ mod tests {
         .unwrap()
         .unwrap();
         let (url, server) = start_node_ws_test_server(state.clone()).await;
-        let mut rejected = auth_test_socket(&url, &node.id, "auth-token").await;
-        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rejected.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(first, tokio_tungstenite::tungstenite::Message::Close(Some(ref frame)) if u16::from(frame.code) == 4008),
-            "ownership rejection must be the first response (old agents then back off during auth): {first:?}"
-        );
-        wait_for_socket_count(&state.node_ws_manager, 0).await;
-        assert!(!state.node_ws_manager.is_connected(&node.id));
-        let stored = db
-            .collection::<Node>(NODES)
-            .find_one(doc! {"_id": &node.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.connection_owner.unwrap().generation_id,
-            "previous-generation"
-        );
-        db.collection::<Node>(NODES).update_one(doc! {"_id": &node.id}, doc! {"$set": {"connection_owner.expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
-        let mut accepted = auth_test_socket(&url, &node.id, "auth-token").await;
-        let first = tokio::time::timeout(std::time::Duration::from_secs(5), accepted.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let payload: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
-        assert_eq!(payload["type"], "auth_ok");
-        let stored = db
-            .collection::<Node>(NODES)
-            .find_one(doc! {"_id": &node.id})
-            .await
-            .unwrap()
-            .unwrap();
-        let owner = stored.connection_owner.unwrap();
-        assert_eq!(owner.generation_id, state.replica_identity.generation_id);
-        assert_eq!(
-            Some(owner.connection_id),
-            state.node_ws_manager.connection_id(&node.id)
-        );
-        accepted.close(None).await.unwrap();
-        wait_for_socket_count(&state.node_ws_manager, 0).await;
-        let stored = db
-            .collection::<Node>(NODES)
-            .find_one(doc! {"_id": &node.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(stored.connection_owner.is_none());
-        server.abort();
-        }).await.expect("node WebSocket lifecycle regression timed out");
+        let phase = std::cell::Cell::new("opening the first connection");
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut rejected = auth_test_socket(&url, &node.id, "auth-token").await;
+            phase.set("reading the ownership rejection");
+            let first = tokio::time::timeout(std::time::Duration::from_secs(5), rejected.next())
+                .await
+                .unwrap_or_else(|_| panic!("node WebSocket frame timed out while {}", phase.get()))
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(first, tokio_tungstenite::tungstenite::Message::Close(Some(ref frame)) if u16::from(frame.code) == 4008),
+                "ownership rejection must be the first response (old agents then back off during auth): {first:?}"
+            );
+            phase.set("waiting for the rejected connection to be released");
+            wait_for_socket_count(&state.node_ws_manager, 0).await;
+            assert!(!state.node_ws_manager.is_connected(&node.id));
+            phase.set("reading the previous generation");
+            let stored = db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"_id": &node.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.connection_owner.unwrap().generation_id,
+                "previous-generation"
+            );
+            phase.set("expiring the previous owner");
+            let expired_at = bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1));
+            db.collection::<Node>(NODES)
+                .update_one(
+                    doc! {"_id": &node.id},
+                    doc! {"$set": {"connection_owner.expires_at": expired_at}},
+                )
+                .await
+                .unwrap();
+            phase.set("opening the connection after expiry");
+            let mut accepted = auth_test_socket(&url, &node.id, "auth-token").await;
+            phase.set("reading auth_ok after expiry");
+            let first = tokio::time::timeout(std::time::Duration::from_secs(5), accepted.next())
+                .await
+                .unwrap_or_else(|_| panic!("node WebSocket frame timed out while {}", phase.get()))
+                .unwrap()
+                .unwrap();
+            let payload: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+            assert_eq!(payload["type"], "auth_ok");
+            phase.set("reading the accepted owner");
+            let stored = db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"_id": &node.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let owner = stored.connection_owner.unwrap();
+            assert_eq!(owner.generation_id, state.replica_identity.generation_id);
+            assert_eq!(
+                Some(owner.connection_id),
+                state.node_ws_manager.connection_id(&node.id)
+            );
+            phase.set("closing the accepted connection");
+            accepted.close(None).await.unwrap();
+            phase.set("waiting for the accepted connection to be released");
+            wait_for_socket_count(&state.node_ws_manager, 0).await;
+            phase.set("reading the owner after close");
+            let stored = db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"_id": &node.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(stored.connection_owner.is_none());
+            server.abort();
+        })
+        .await
+        .unwrap_or_else(|_| panic!("node WebSocket reconnect timed out while {}", phase.get()));
     }
 
     #[tokio::test]
     async fn reconnect_replacement_and_admin_close_release_idle_readers_with_fenced_cleanup() {
+        use futures::StreamExt;
+        let db = test_db("ws_idle_replace").await;
+        let node = test_node(&uuid::Uuid::new_v4().to_string(), "idle", "auth-token");
+        insert_user_and_node(&db, &node.user_id, &node).await;
+        let state = test_app_state(db.clone());
+        let (url, server) = start_node_ws_test_server(state.clone()).await;
+        let phase = std::cell::Cell::new("opening the first connection");
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            use futures::StreamExt;
-            let db = test_db("ws_idle_replace").await;
-            let node = test_node(&uuid::Uuid::new_v4().to_string(), "idle", "auth-token");
-            insert_user_and_node(&db, &node.user_id, &node).await;
-            let state = test_app_state(db.clone());
-            let (url, server) = start_node_ws_test_server(state.clone()).await;
             let mut old = auth_test_socket(&url, &node.id, "auth-token").await;
+            phase.set("reading initial auth_ok");
             assert!(old.next().await.unwrap().unwrap().is_text());
             let old_id = state.node_ws_manager.connection_id(&node.id).unwrap();
+            phase.set("opening the replacement connection");
             let mut replacement = auth_test_socket(&url, &node.id, "auth-token").await;
+            phase.set("reading replacement auth_ok");
             assert!(replacement.next().await.unwrap().unwrap().is_text());
             // The old client does not read or answer Close. Writer completion must
             // still end the old reader, release its reservation, and preserve the new lease.
+            phase.set("waiting for the replaced reader to be released");
             wait_for_socket_count(&state.node_ws_manager, 1).await;
             let new_id = state.node_ws_manager.connection_id(&node.id).unwrap();
             assert_ne!(old_id, new_id);
+            phase.set("reading the replacement owner");
             let stored = db
                 .collection::<Node>(NODES)
                 .find_one(doc! {"_id": &node.id})
@@ -2812,11 +2838,14 @@ mod tests {
                 .unwrap();
             assert_eq!(stored.connection_owner.unwrap().connection_id, new_id);
             assert_eq!(stored.status, NodeStatus::Online);
+            phase.set("disconnecting the replacement as admin");
             state
                 .node_ws_manager
                 .disconnect_connection_if(&node.id, &new_id, 4000, "admin disconnected")
                 .await;
+            phase.set("waiting for the admin-disconnected reader to be released");
             wait_for_socket_count(&state.node_ws_manager, 0).await;
+            phase.set("reading the owner after admin close");
             let stored = db
                 .collection::<Node>(NODES)
                 .find_one(doc! {"_id": &node.id})
@@ -2829,7 +2858,7 @@ mod tests {
             server.abort();
         })
         .await
-        .expect("node WebSocket lifecycle regression timed out");
+        .unwrap_or_else(|_| panic!("node WebSocket reconnect timed out while {}", phase.get()));
     }
 
     #[tokio::test]
