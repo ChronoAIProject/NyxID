@@ -115,6 +115,8 @@ function harness() {
         // The Voice settings row is gated on a live feature read; this suite covers deletion only.
         if (name.endsWith("/assistantVoiceApi")) return { assistantVoiceFeatures: async () => [] };
         if (name.endsWith("/pushNotifications")) return { activatePushAfterLogin: vi.fn() };
+        // No paired Apple Watch here, so the Apple Watch row stays hidden.
+        if (name.endsWith("/watch/watchLink")) return { nativeWatchLink: () => null };
         if (name.endsWith("/errorMessages")) return { resolveErrorMessage: vi.fn() };
         if (name.endsWith("/OfflineBanner")) return { OfflineBanner: () => null };
         if (name.endsWith("/TelegramLinkModal")) return { TelegramLinkModal: () => null };
