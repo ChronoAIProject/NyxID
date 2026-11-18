@@ -1,0 +1,24 @@
+{
+  "id": 44281976093,
+  "html_url": "https://github.com/ChronoAIProject/NyxID/actions/runs/44281976093",
+  "event": "pull_request",
+  "path": ".github/workflows/ci.yml",
+  "head_branch": "dev",
+  "head_sha": "7b4795582cdd70e7e16c3c594a037519a0153504",
+  "head_repository": {
+    "full_name": "ChronoAIProject/NyxID"
+  },
+  "pull_requests": [],
+  "run_number": 4069,
+  "run_attempt": 2,
+  "status": "completed",
+  "conclusion": "success",
+  "updated_at": "2026-11-18T11:40:06Z",
+  "referenced_workflows": [
+    {
+      "path": "ChronoAIProject/NyxID/.github/workflows/backend-tests.yml@dbbc71a7b0af494bd1efe6eb18289e2724744d71",
+      "sha": "dbbc71a7b0af494bd1efe6eb18289e2724744d71",
+      "ref": "refs/pull/2659/merge"
+    }
+  ]
+}
