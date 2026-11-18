@@ -364,6 +364,8 @@ Include:
 Open feature and fix PRs against `dev`. Two required checks protect both branches.
 **CI Pipeline** collects the correctness jobs. **Main Merge Guard** accepts any
 head into `dev` and requires this repository's `dev` branch for PRs into `main`.
+GitHub runs the guard from the repository's default branch on `pull_request_target`,
+including when a PR changes its base branch.
 
 | Gate | Checks |
 | --- | --- |

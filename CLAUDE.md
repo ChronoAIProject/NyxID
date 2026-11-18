@@ -740,6 +740,7 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - Open feature and fix PRs against `dev` for review and the fast, path-filtered gate. Once `dev` is the default branch, merging a PR there closes issues linked with `Closes #N`.
 - Every push to `dev` requests full CI, including backend tests, all-targets Clippy, coverage, feature builds, container E2E and image checks.
 - Promote with a reviewed release PR from this repository's `dev` branch into `main`. Wait for `CI Pipeline` and `Main Merge Guard`, then select **Create a merge commit**. The release PR runs full CI across all paths.
+- GitHub runs `Main Merge Guard` from the default branch on `pull_request_target`. Retargeting a PR reruns the guard against its new base.
 
 
 <!-- consensus-rnd:foundational-invariants:start version=1 sha256=180aef50d385eb24f73e772f75753fa61a2adde8407539bbacd586878d7e2166 -->

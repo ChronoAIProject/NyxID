@@ -76,12 +76,39 @@ def decision_jobs():
 
 
 class GateReuseTests(unittest.TestCase):
-    def test_main_guard_checks_both_release_source_fields_without_checkout(self):
-        jobs = strict_load_workflow(Path(".github/workflows/ci.yml").read_text())["jobs"]
-        guard = jobs["main-merge-guard"]
-        self.assertEqual(guard["name"], "Main Merge Guard")
+    def test_only_the_target_workflow_reports_main_merge_guard(self):
+        directory = Path(".github/workflows")
+        workflows = {path.name: strict_load_workflow(path.read_text())
+                     for path in directory.iterdir() if path.suffix in {".yml", ".yaml"}}
+        ci_jobs = workflows["ci.yml"]["jobs"]
+        self.assertNotIn("main-merge-guard", ci_jobs)
+        self.assertNotIn("main-merge-guard", ci_jobs["ci-pass"]["needs"])
+        reporters = [(name, job_id) for name, workflow in workflows.items()
+                     for job_id, job in workflow["jobs"].items()
+                     if job.get("name", job_id) == "Main Merge Guard"]
+        self.assertEqual(reporters, [("main-merge-guard.yml", "main-merge-guard")])
+        workflow = workflows["main-merge-guard.yml"]
+        self.assertEqual(workflow["on"], {"pull_request_target": {
+            "types": ["opened", "synchronize", "reopened", "edited"],
+        }})
+        self.assertEqual(workflow["permissions"], {})
+        self.assertEqual(set(workflow["jobs"]), {"main-merge-guard"})
+        guard = workflow["jobs"]["main-merge-guard"]
+        self.assertEqual(guard.get("permissions", {}), {})
         self.assertNotIn("needs", guard)
-        self.assertNotIn("main-merge-guard", jobs["ci-pass"]["needs"])
+        self.assertNotIn("if", guard)
+        step, = guard["steps"]
+        self.assertNotIn("uses", step)
+        self.assertNotIn("${{", step["run"])
+        self.assertEqual(step["env"], {
+            "BASE": "${{ github.base_ref }}",
+            "HEAD_BRANCH": "${{ github.head_ref }}",
+            "HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+        })
+
+    def test_main_guard_checks_both_release_source_fields_without_checkout(self):
+        path = Path(".github/workflows/main-merge-guard.yml")
+        guard = strict_load_workflow(path.read_text())["jobs"]["main-merge-guard"]
         step, = guard["steps"]
         cases = [("main", "dev", "o/r", 0), ("main", "feature", "o/r", 1),
                  ("main", "dev", "fork/r", 1), ("main", "Dev", "o/r", 1),
