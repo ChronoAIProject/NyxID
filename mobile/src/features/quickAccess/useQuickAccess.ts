@@ -29,6 +29,26 @@ export const quickAccessKey = (epoch: number) =>
 /** Every change to the list (save or reset), across screens. */
 export const QUICK_ACCESS_MUTATION_KEY = ["account", "quick-access", "change"] as const;
 export const QUICK_ACCESS_STALE_MS = 60_000;
+const writeKey = (epoch: number) => ['account', 'quick-access-write', epoch] as const;
+type WriteState = {revision: number; pending: number};
+type WriteTicket = {finished: boolean};
+type MutationContext = {previous?: QuickAccessState; ticket?: WriteTicket};
+const writeState = (client: QueryClient, epoch: number): WriteState =>
+  client.getQueryData<WriteState>(writeKey(epoch)) ?? {revision: 0, pending: 0};
+function admitWrite(client: QueryClient, epoch: number): WriteTicket {
+  // The owner may close every editor/rail while a request is still pending.
+  // Retain the account fence until the auth lifecycle clears the client.
+  client.setQueryDefaults(writeKey(epoch), {gcTime: Infinity});
+  const state = writeState(client, epoch);
+  client.setQueryData(writeKey(epoch), {revision: state.revision + 1, pending: state.pending + 1});
+  return {finished: false};
+}
+function finishWrite(client: QueryClient, epoch: number, ticket?: WriteTicket) {
+  if (!ticket || ticket.finished) return;
+  ticket.finished = true;
+  const state = writeState(client, epoch);
+  client.setQueryData(writeKey(epoch), {revision: state.revision + 1, pending: Math.max(0, state.pending - 1)});
+}
 const conflictKey = (epoch: number) => ['account', 'quick-access-conflict', epoch] as const;
 type ConflictRecovery = {phase: 'required' | 'ready'};
 const needsRecovery = (client: QueryClient, epoch: number) =>
@@ -50,15 +70,18 @@ export function quickAccessQueryOptions(epoch: number, client?: QueryClient) {
     queryFn: async ({ signal }: { signal: AbortSignal }) => {
       if (epoch !== getAuthEpoch()) throw new Error("auth_session_changed");
       const recovery = client?.getQueryData<ConflictRecovery>(conflictKey(epoch));
-      // Reconnect/manual reads cannot replace an accepted optimistic edit.
-      // Conflict recovery runs after the refused write, even while its
-      // onSettled callback is still pending.
-      if (client && client.isMutating({mutationKey: QUICK_ACCESS_MUTATION_KEY}) > 0
-        && recovery?.phase !== 'required') {
+      const started = client ? writeState(client, epoch) : undefined;
+      // A pending write owns the list, including Reset during conflict
+      // recovery. A refused write releases this fence before its recovery GET.
+      if (client && started!.pending > 0) {
         const cached = client.getQueryData<QuickAccessState>(quickAccessKey(epoch));
         if (cached) return cached;
       }
       const fresh = await quickAccessApi.get(signal);
+      if (client && (writeState(client, epoch).revision !== started!.revision || started!.pending > 0)) {
+        // A read spanning a mutation cannot hand its old snapshot to TanStack.
+        return client.getQueryData<QuickAccessState>(quickAccessKey(epoch)) ?? fresh;
+      }
       if (client && !signal.aborted && epoch === getAuthEpoch()
         && recovery?.phase === 'required'
         && client.getQueryData(conflictKey(epoch)) === recovery) {
@@ -131,26 +154,39 @@ export function quickAccessMutationHandlers(
       if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       if (!('reset' in change) && needsRecovery(client, key[2]))
         throw Object.assign(new Error('quick_access_recovery_required'), {name: 'AbortError'});
-      await client.cancelQueries({ queryKey: key });
-      if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
-      const previous = client.getQueryData<QuickAccessState>(key);
-      client.setQueryData<QuickAccessState>(key, optimisticQuickAccess(change));
-      return { previous };
+      const ticket = admitWrite(client, key[2]);
+      if (client.getQueryData<ConflictRecovery>(conflictKey(key[2]))?.phase === 'ready')
+        client.setQueryData(conflictKey(key[2]), null);
+      try {
+        await client.cancelQueries({ queryKey: key });
+        if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
+        const previous = client.getQueryData<QuickAccessState>(key);
+        client.setQueryData<QuickAccessState>(key, optimisticQuickAccess(change));
+        return { previous, ticket };
+      } catch (error) {
+        finishWrite(client, key[2], ticket);
+        throw error;
+      }
     },
     onError: (
       _error: unknown,
       change: QuickAccessChange & { authority?: ActionAuthority },
-      context: { previous?: QuickAccessState } | undefined,
+      context: MutationContext | undefined,
     ) => {
       if (!current(change)) return;
+      finishWrite(client, key[2], context?.ticket);
       if (conflictError(_error)) client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'required'});
       if (_error instanceof Error && _error.name === 'AbortError') return;
       if (context?.previous) client.setQueryData(key, context.previous);
       else client.removeQueries({ queryKey: key, exact: true });
     },
-    onSuccess: (saved: QuickAccessState, change?: QuickAccessChange & { authority?: ActionAuthority }) => {
+    onSuccess: (saved: QuickAccessState, change?: QuickAccessChange & { authority?: ActionAuthority }, context?: MutationContext) => {
       if (!current(change)) return;
+      // Also cancel reads which returned an optimistic cache value while this
+      // write was pending, before publishing the authoritative response.
+      void client.cancelQueries({queryKey: key});
       client.setQueryData(key, saved);
+      finishWrite(client, key[2], context?.ticket);
       if (change && 'reset' in change && needsRecovery(client, key[2]))
         client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'ready'});
     },

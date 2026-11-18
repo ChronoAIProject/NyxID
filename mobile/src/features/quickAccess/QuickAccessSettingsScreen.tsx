@@ -1,3 +1,4 @@
+import {isApiError} from "../../lib/api/ApiError";
 import { useRef, useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { ChevronDown, ChevronUp, Minus, Plus } from "lucide-react-native";
@@ -44,6 +45,8 @@ export function QuickAccessSettingsScreen(
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
   const partial = quickAccess.state.hasUnsupportedEntries === true;
+  const conflictError = isApiError(quickAccess.saveError) && quickAccess.saveError.statusCode === 409
+    && (quickAccess.saveError.errorCode === 1004 || quickAccess.saveError.errorKey === 'conflict');
   const editable = quickAccess.loaded && !partial && !quickAccess.recoveryRequired;
   const saving = pending || quickAccess.saving;
   const begin = (operation: (complete: () => void) => void, reset = false) => {
@@ -96,6 +99,8 @@ export function QuickAccessSettingsScreen(
             ? quickAccess.recoveryPending
               ? t("Reloading shortcuts changed on another device. Editing will resume when the latest list loads.")
               : t("Couldn't reload your shortcuts. Reload the latest list before editing.")
+            : quickAccess.saveError && !conflictError
+            ? t("Couldn't save quick access. Your previous list is back.")
             : quickAccess.conflictRecovered
             ? t("Your shortcuts changed on another device. The latest list is shown. Try again.")
             : quickAccess.saveError
