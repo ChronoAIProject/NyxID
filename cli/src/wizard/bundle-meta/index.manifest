@@ -184,8 +184,10 @@ frontend/src/lib/formatting-locale.ts
 frontend/src/lib/http-origin.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/overlay-layer.ts
+frontend/src/lib/owner-persist-storage.ts
 frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/public-paths.ts
+frontend/src/lib/safe-persist-storage.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/theme-colors.ts
 frontend/src/lib/typography.ts
