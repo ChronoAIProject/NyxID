@@ -1,0 +1,189 @@
+{
+  "en": {
+    "title": "Pay as you go. 15% markup.",
+    "label": "Pricing",
+    "heading": "Pay as you go.",
+    "highlight": "15% markup.",
+    "description": "Services we pay for on your behalf include a 15% markup. Bring your own provider account and pay no platform fee.",
+    "commitmentLabel": "Our pricing policy",
+    "commitmentHeading": "One clear markup:",
+    "commitmentHighlight": "15%.",
+    "commitmentDescription": "Models are priced at the provider’s published API rate plus 15%. Tools, SMS, calls and remote machines are priced at supplier cost plus 15% when we pay for them on your behalf.",
+    "checks": [
+      {
+        "title": "Clear price basis",
+        "text": "Published API prices for models; supplier cost for other services. Each is multiplied by 1.15."
+      },
+      {
+        "title": "Itemised usage",
+        "text": "See how much you use and what you pay for each service."
+      },
+      {
+        "title": "Bring your own account",
+        "text": "Pay the provider directly, with no markup or platform fee from us for that service."
+      }
+    ],
+    "exampleLabel": "How the markup works",
+    "exampleRows": [
+      {
+        "label": "Model usage at published API rates",
+        "amount": "US$100.00",
+        "total": false
+      },
+      { "label": "NyxID markup (15%)", "amount": "US$15.00", "total": false },
+      {
+        "label": "Usage price before GST",
+        "amount": "US$115.00",
+        "total": true
+      },
+      { "label": "Singapore GST (9%)", "amount": "US$10.35", "total": false },
+      {
+        "label": "Singapore price including GST",
+        "amount": "US$125.35",
+        "total": true
+      }
+    ],
+    "exampleNote": "Illustrative model usage, not a minimum spend or a fixed package. All amounts are in US dollars. Singapore customers pay 9% GST on usage, separately from the 15% markup.",
+    "pricingLabel": "How pricing works",
+    "pricingHeading": "Choose how you pay providers",
+    "cards": [
+      {
+        "badge": "We pay providers",
+        "title": "Usage plus 15%",
+        "text": "Use the provider accounts we supply. Your prepaid balance pays for models, tools, SMS, calls and machine time at the rates described above."
+      },
+      {
+        "badge": "Your own accounts",
+        "title": "No platform fee",
+        "text": "Connect your own model or service account. The provider bills you directly for that service, and we add no markup or platform fee."
+      },
+      {
+        "badge": "Prepaid credits",
+        "title": "Top up, then use",
+        "text": "1 credit = US$1. Paid usage draws down your balance. No monthly subscription; you pay for what you use."
+      }
+    ],
+    "freeNote": "Self-hosting the open-source edition is free. Any provider or infrastructure costs you incur remain yours to pay.",
+    "faqLabel": "FAQ",
+    "faqHeading": "Pricing questions",
+    "faqs": [
+      {
+        "question": "Why is there a 15% markup?",
+        "answer": "The markup helps cover payment processing, hosting and currency costs when we pay providers on your behalf. We use one percentage across these services so the pricing is straightforward."
+      },
+      {
+        "question": "How is the markup calculated?",
+        "answer": "Multiply the model provider’s published API price, or the supplier cost of tools, SMS, calls and remote machines, by 1.15. Applicable GST is added separately. The example above shows both the price before GST and the Singapore price including GST."
+      },
+      {
+        "question": "What are credits?",
+        "answer": "Credits are your prepaid balance: 1 credit = US$1. Usage and any applicable GST are deducted from that balance."
+      },
+      {
+        "question": "Can I use my own API keys?",
+        "answer": "Yes. Connect your own provider account and pay that provider directly. We charge no markup or platform fee for services billed to your own account."
+      },
+      {
+        "question": "Is there a subscription?",
+        "answer": "No monthly subscription. Pay as you go for the services we pay for on your behalf, or use your own provider accounts."
+      },
+      {
+        "question": "Can I self-host for free?",
+        "answer": "Yes. NyxID is open source under Apache-2.0. You can run it yourself with Docker; your own provider and infrastructure costs still apply."
+      }
+    ],
+    "ctaHeading": "Know what you pay for.",
+    "ctaDescription": "Use our provider accounts with a clear 15% markup, or connect your own at no platform fee.",
+    "start": "Get started",
+    "talk": "Talk to us",
+    "browse": "Browse solutions"
+  },
+  "zh": {
+    "title": "按用量付费，统一加成 15%。",
+    "label": "价格",
+    "heading": "按用量付费，",
+    "highlight": "统一加成 15%。",
+    "description": "由我们代付的服务统一加成 15%。接入你自己的服务商账号，我们不收平台费。",
+    "commitmentLabel": "定价政策",
+    "commitmentHeading": "统一、透明的加成：",
+    "commitmentHighlight": "15%。",
+    "commitmentDescription": "模型按服务商公布的 API 价格加成 15%。工具、短信、通话和远程机器，在由我们代付时，按供应商成本加成 15%。",
+    "checks": [
+      {
+        "title": "明确的计价基准",
+        "text": "模型以公布的 API 价格为基准，其他服务以供应商成本为基准，统一乘以 1.15。"
+      },
+      { "title": "用量明细", "text": "查看各项服务的用量和费用。" },
+      {
+        "title": "自带服务商账号",
+        "text": "直接向服务商付款，该项服务我们不加价，也不收平台费。"
+      }
+    ],
+    "exampleLabel": "加成如何计算",
+    "exampleRows": [
+      {
+        "label": "按公布的 API 价格计算的模型用量",
+        "amount": "US$100.00",
+        "total": false
+      },
+      { "label": "NyxID 加成（15%）", "amount": "US$15.00", "total": false },
+      { "label": "不含 GST 的用量价格", "amount": "US$115.00", "total": true },
+      { "label": "新加坡 GST（9%）", "amount": "US$10.35", "total": false },
+      { "label": "新加坡含 GST 价格", "amount": "US$125.35", "total": true }
+    ],
+    "exampleNote": "仅为模型用量的计算示例，不代表最低消费或固定套餐。所有金额均为美元。新加坡商户的用量另加 9% GST，与 15% 加成分开计算。",
+    "pricingLabel": "计费方式",
+    "pricingHeading": "选择如何向服务商付款",
+    "cards": [
+      {
+        "badge": "我们代付",
+        "title": "用量加成 15%",
+        "text": "使用我们提供的服务商账号。模型、工具、短信、通话和机器用量按上述规则计费，从预付余额中扣除。"
+      },
+      {
+        "badge": "自带账号",
+        "title": "不收平台费",
+        "text": "接入你自己的模型或服务账号。该项服务由服务商直接向你收费，我们不加价，也不收平台费。"
+      },
+      {
+        "badge": "预付积分",
+        "title": "先充值，后使用",
+        "text": "1 credit = 1 美元。付费用量从余额中扣除，没有月度订阅费，按实际用量付费。"
+      }
+    ],
+    "freeNote": "开源版可免费自托管。你使用的服务商和基础设施费用仍由你承担。",
+    "faqLabel": "常见问题",
+    "faqHeading": "价格问题",
+    "faqs": [
+      {
+        "question": "为什么加成 15%？",
+        "answer": "由我们代付服务商费用时，加成用于分担支付手续费、托管成本和汇率波动。各项代付服务采用同一比例，方便理解和计算。"
+      },
+      {
+        "question": "加成如何计算？",
+        "answer": "模型按服务商公布的 API 价格，工具、短信、通话和远程机器按供应商成本，统一乘以 1.15。适用的 GST 另计。上方示例同时列出不含 GST 的价格和新加坡含 GST 的价格。"
+      },
+      {
+        "question": "积分是什么？",
+        "answer": "积分是你的预付余额：1 credit = 1 美元。用量及适用的 GST 从余额中扣除。"
+      },
+      {
+        "question": "能用我自己的 API 密钥吗？",
+        "answer": "可以。接入自己的服务商账号，直接向服务商付款。由你自己的账号结算的服务，我们不加价，也不收平台费。"
+      },
+      {
+        "question": "有订阅费吗？",
+        "answer": "没有月度订阅费。由我们代付的服务按用量收费，你也可以使用自己的服务商账号。"
+      },
+      {
+        "question": "可以免费自托管吗？",
+        "answer": "可以。NyxID 基于 Apache-2.0 开源，可用 Docker 自行部署；你使用的服务商和基础设施费用仍由你承担。"
+      }
+    ],
+    "ctaHeading": "每一笔费用，清清楚楚。",
+    "ctaDescription": "使用我们的服务商账号，统一加成 15%；接入自己的账号，不收平台费。",
+    "start": "开始使用",
+    "talk": "联系我们",
+    "browse": "浏览方案"
+  }
+}

@@ -10,6 +10,7 @@ import { format } from "prettier";
 import { fixPrimaryButtonPaint } from "./primary-button-css.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
+const pricingCopy = JSON.parse(fs.readFileSync(path.join(root, "src/features/website-a/pricing-copy.json"), "utf8"));
 const publication = JSON.parse(fs.readFileSync(path.join(root, "content/publication.json"), "utf8"));
 const approvedArticles = new Set(publication.pages.filter(p => p.route.startsWith("/blog/") && p.publication === "published" && p.approval === "approved").map(p => p.route.slice(6)));
 fs.writeFileSync(path.join(root, "content/published.json"), JSON.stringify(publication.pages.filter(p=>p.publication==="published"&&p.approval==="approved").map(({id,route,locales,indexable})=>({id,route,locales,indexable})),null,2)+"\n");
@@ -487,8 +488,9 @@ for (locale of ["en", "zh"]) {
               .split(/[-/]/)
               .map((part) => part[0].toUpperCase() + part.slice(1))
               .join("") + "Page";
-    const body =
-      jsxChildren(tree) + (route === "" ? "<CommunityAccess />" : "");
+    const body = route === "pricing"
+      ? "<PricingSection />"
+      : jsxChildren(tree) + (route === "" ? "<CommunityAccess />" : "");
     const interactions = [
       "AudienceSwitcher",
       "CodeExample",
@@ -511,6 +513,7 @@ for (locale of ["en", "zh"]) {
       imports + visualImports +
       (["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].some(name => body.includes("<"+name)) ? `import {${["NewsletterSignup", "ContactChat", "FooterStatus", "BlogMenuLink"].filter(name => body.includes("<"+name)).join(",")}} from '../../optional-features';\n` : "") +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
+      (body.includes("<PricingSection") ? "import {PricingSection} from '../../pricing';\n" : "") +
       (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
       (body.includes("<SolutionActivation") ? "import {SolutionActivation} from '../../solution-activation';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
@@ -531,6 +534,10 @@ for (locale of ["en", "zh"]) {
         .forEach((br) => br.replaceWith(dom.document.createTextNode(" ")));
       pageTitles["/" + (route === "notfound" ? "404" : route)] =
         route === "" ? (locale === "zh" ? "AI，超越聊天。" : "AI that does more than chat.") : heading.textContent.replace(/\s+/g, " ").trim();
+    }
+    if (route === "pricing") {
+      pageTitles["/pricing"] = pricingCopy[locale].title;
+      pageDescriptions["/pricing"] = pricingCopy[locale].description;
     }
     exports.push(
       `${q("/" + (route === "notfound" ? "404" : route))}:${component}`,

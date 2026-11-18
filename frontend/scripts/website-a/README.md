@@ -26,6 +26,12 @@ checks in `docs/plans/website-a-delivery.md`. The runtime interactions, auth lin
 helpers, public route policy, legacy blog compatibility and workflow CSS are
 maintained normally outside the generated directory.
 
+The pricing route uses the native `PricingSection` adapter and bilingual
+`pricing-copy.json`, based on the effective policy in chrono-finance PR #315
+(D2/D3/D5). Its 15% markup, own-account exception and GST example replace the
+baseline's superseded zero-markup copy. The generator also reads that copy for
+pricing titles and descriptions so regeneration preserves the policy update.
+
 The baseline's five-workflow embedded film is migrated to locale JSON and native
 React, with accessible selection and playback controls. Its animation timing and
 responsive arrangement are implemented in `interactions.tsx` / `workflow-film.css`.

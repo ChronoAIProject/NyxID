@@ -71,7 +71,7 @@ export const titles: Record<string, string> = {
   "/how-it-works": "NyxID 如何把 AI 安全地连接到你的世界",
   "/security": "你的密码， 永远不会交给 AI。",
   "/agents": "已经在用 AI 智能体？ 把它接入 NyxID。",
-  "/pricing": "平台原价， 零加价。",
+  "/pricing": "按用量付费，统一加成 15%。",
   "/integrations": "连接你 已经在用的工具。",
   "/blog": "指南、故事与更新",
   "/contact": "联系我们",
@@ -98,7 +98,7 @@ export const descriptions: Record<string, string> = {
   "/agents":
     "Claude、ChatGPT、Cursor、Codex 或你自己的脚本：把它指向 NyxID，就能获得对你的服务、AI 模型和机器的限权访问，而且永远不用持有密码。NyxID 是开源的：可自行部署，也可使用我们的托管服务。",
   "/pricing":
-    "每一次模型和 API 调用都按服务商公布的价格计费，NyxID 不额外加收任何费用。",
+    "由我们代付的服务统一加成 15%。接入你自己的服务商账号，我们不收平台费。",
   "/integrations":
     "30 个类别、145 种应用和 API。每个都通过安全登录链接连接，再精确决定 AI 能用它做什么。",
   "/blog": "让 AI 安全落地的实用思路。",
