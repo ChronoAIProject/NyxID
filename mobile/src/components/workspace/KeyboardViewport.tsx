@@ -61,7 +61,11 @@ export function KeyboardViewport({
         { y: y + (Platform.OS === "android" ? insets.top : 0), height },
         // iOS keyboard events already use the same window as measureInWindow.
         // A nested provider can describe an already-lifted sheet, not the window.
-        frame,
+        // ReactRootView subtracts the system navigation bar from Android IME
+        // height. Edge-to-edge pages can extend into that final strip.
+        Platform.OS === "android" && frame.height > 0
+          ? { ...frame, height: frame.height + insets.bottom }
+          : frame,
       );
       // The sheet's KeyboardAvoidingView lifts after will-change. Do not
       // reserve or reveal against its old position before native layout settles.
@@ -71,7 +75,7 @@ export function KeyboardViewport({
         frame.height > 0 ? { y, height: height - overlap } : undefined,
       );
     });
-  }, [insets.top]);
+  }, [insets.top, insets.bottom]);
 
   useEffect(() => {
     mounted.current = true;

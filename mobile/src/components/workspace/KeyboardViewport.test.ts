@@ -172,6 +172,18 @@ test("Android Fabric window coordinates include the live status-bar origin", () 
   env.harness.unmount();
 });
 
+test("Android edge-to-edge reserves the navigation strip omitted from the native IME height", () => {
+  const env = setup(undefined, 52, "android", { y: 0, height: 914 }, 914);
+  env.show({ screenY: 571, height: 319 });
+  env.measurements.shift()!(0, 242, 411, 620);
+  assert.equal(env.bottom(), 343);
+  assert.deepEqual(env.viewport(), { y: 242, height: 277 });
+  env.layout();
+  env.measurements.shift()!(0, 242, 411, 277);
+  assert.equal(env.bottom(), 0, "native resize already clears the IME");
+  env.harness.unmount();
+});
+
 test("an already resized window consumes no additional inset with a status bar", () => {
   const env = setup(undefined, 52);
   env.show({ screenY: 572, height: 295 });
