@@ -464,7 +464,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             icon={Mail}
             label={t("Contact support")}
             detail={SUPPORT_EMAIL}
-            accessibilityLabel={t("Contact support") + ", " + SUPPORT_EMAIL}
+            accessibilityLabel={t("Contact support, {{email}}", { email: SUPPORT_EMAIL })}
             accessibilityRole="link"
             accessibilityHint={translateApp("Email {{email}}", {
               email: SUPPORT_EMAIL,

@@ -1,5 +1,4 @@
 {
-  " plus {{credits}} {{basis}}": "，{{basis}}另收 {{credits}} 积分",
   "@{{name}} · View only · {{description}}": "@{{name}} · 仅可查看 · {{description}}",
   "@{{name}} · {{description}}": "@{{name}} · {{description}}",
   "A decision can only resume its own chat.": "决定只能恢复其自己的聊天。",
@@ -17,6 +16,7 @@
   "Add attachments": "添加附件",
   "Add your connection details and approve the request.": "添加你的连接详细信息并批准请求。",
   "Adding": "正在添加",
+  "Additional charge of {{credits}} credits {{basis}}.": "{{basis}}另收 {{credits}} 积分。",
   "Adds the words to your message. Nothing is sent until you tap Send.": "将文字添加到消息中。点按发送后才会发送。",
   "Agent details could not be refreshed. Showing saved information.": "无法刷新智能体详情。正在显示已保存的信息。",
   "Agent ready": "智能体准备就绪",
@@ -1009,7 +1009,7 @@
   "{{count}} update waiting for {{agent}}'s next turn": "有 {{count}} 条更新等待 {{agent}} 的下一轮处理",
   "{{count}} updates waiting for {{agent}}'s next turn": "有 {{count}} 条更新等待 {{agent}} 的下一轮处理",
   "{{count}} waiting": "{{count}} 项等待中",
-  "{{credits}} credits per second{{totalCost}}.": "每秒 {{credits}} 积分{{totalCost}}。",
+  "{{credits}} credits per second.": "每秒 {{credits}} 积分。",
   "{{credits}} credits {{basis}}.": "{{basis}}收取 {{credits}} 积分。",
   "{{description}}, {{label}}, Skipped": "{{description}}，{{label}}，已跳过",
   "{{description}}, {{label}}, Skipped, {{elapsed}}": "{{description}}，{{label}}，已跳过，{{elapsed}}",

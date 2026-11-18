@@ -109,13 +109,16 @@ export function voiceTariff(option: VoiceOption) {
           price.metric.includes("tokens")) ||
         option.voice.billing_metrics.some((metric) => metric === price.metric)),
   );
-  return translateApp("{{credits}} credits per second{{totalCost}}.", {
+  const durationRate = translateApp("{{credits}} credits per second.", {
     credits: duration.credits_per_unit,
-    totalCost: extras.map((price) => translateApp(" plus {{credits}} {{basis}}", {
+  });
+  const additionalRates = extras.map((price) =>
+    translateApp("Additional charge of {{credits}} credits {{basis}}.", {
       credits: price.credits_per_unit,
       basis: voicePriceBasis(price.metric),
-    })).join(""),
-  });
+    }),
+  );
+  return [durationRate, ...additionalRates].join(appLocale() === "en" ? " " : "");
 }
 
 export function voiceElapsed(

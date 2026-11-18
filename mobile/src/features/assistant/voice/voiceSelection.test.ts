@@ -183,7 +183,7 @@ test("platform tariffs retain exact decimal rates and only list synced applicabl
     }),
   );
   assert.match(text, /0\.000000000001 credits per second/);
-  assert.match(text, /0\.000000000013 per start/);
+  assert.match(text, /0\.000000000013 credits per start/);
   assert.doesNotMatch(text, /0\.123456789123|99/);
   assert.doesNotMatch(text, /e-1[0-9]/);
 });
@@ -221,20 +221,20 @@ test("xAI tariffs include reported token prices even when the duration metric li
       },
     }),
   );
-  assert.match(text, /0\.000000000021 per input token/);
-  assert.match(text, /0\.000000000089 per output token/);
+  assert.match(text, /0\.000000000021 credits per input token/);
+  assert.match(text, /0\.000000000089 credits per output token/);
   assert.doesNotMatch(text, /0\.9|cache read/);
 });
 
 for (const [language, platformText, ownText] of [
   [
     "zh-CN",
-    "每秒 0.02 积分，每个输入词元另收 0.000000000013 积分，每次通话启动另收 0.1 积分。",
+    "每秒 0.02 积分。每个输入词元另收 0.000000000013 积分。每次通话启动另收 0.1 积分。",
     "NyxID 不收取时长费用。服务提供商仍会收费。每个输入词元收取 0.000000000013 积分。",
   ],
   [
     "zh-TW",
-    "每秒 0.02 點數，每個輸入詞元另收 0.000000000013 點數，每次通話啟動另收 0.1 點數。",
+    "每秒 0.02 點數。每個輸入詞元另收 0.000000000013 點數。每次通話啟動另收 0.1 點數。",
     "NyxID 不收取時長費用。服務提供者仍會收費。每個輸入詞元收取 0.000000000013 點數。",
   ],
 ] as const) {
@@ -287,7 +287,7 @@ test("declared OpenAI billing metrics show only their synced prices", () => {
       },
     }),
   );
-  assert.match(text, /0\.001 per input token/);
+  assert.match(text, /0\.001 credits per input token/);
   assert.doesNotMatch(text, /0\.009|output tokens/);
 });
 

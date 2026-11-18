@@ -1,5 +1,4 @@
 {
-  " plus {{credits}} {{basis}}": "，{{basis}}另收 {{credits}} 點數",
   "@{{name}} · View only · {{description}}": "@{{name}} · 僅可檢視 · {{description}}",
   "@{{name}} · {{description}}": "@{{name}} · {{description}}",
   "A decision can only resume its own chat.": "決定只能恢復自己的聊天。",
@@ -17,6 +16,7 @@
   "Add attachments": "新增附件",
   "Add your connection details and approve the request.": "新增你的連線詳細資料並核准請求。",
   "Adding": "正在添加",
+  "Additional charge of {{credits}} credits {{basis}}.": "{{basis}}另收 {{credits}} 點數。",
   "Adds the words to your message. Nothing is sent until you tap Send.": "將文字加入訊息中。點一下傳送後才會傳送。",
   "Agent details could not be refreshed. Showing saved information.": "無法重新整理智慧體詳情。正在顯示已儲存的資訊。",
   "Agent ready": "智慧體準備就緒",
@@ -1009,7 +1009,7 @@
   "{{count}} update waiting for {{agent}}'s next turn": "有 {{count}} 則更新等待 {{agent}} 的下一輪處理",
   "{{count}} updates waiting for {{agent}}'s next turn": "有 {{count}} 則更新等待 {{agent}} 的下一輪處理",
   "{{count}} waiting": "{{count}} 項等待中",
-  "{{credits}} credits per second{{totalCost}}.": "每秒 {{credits}} 點數{{totalCost}}。",
+  "{{credits}} credits per second.": "每秒 {{credits}} 點數。",
   "{{credits}} credits {{basis}}.": "{{basis}}收取 {{credits}} 點數。",
   "{{description}}, {{label}}, Skipped": "{{description}}，{{label}}，已跳過",
   "{{description}}, {{label}}, Skipped, {{elapsed}}": "{{description}}，{{label}}，已跳過，{{elapsed}}",
