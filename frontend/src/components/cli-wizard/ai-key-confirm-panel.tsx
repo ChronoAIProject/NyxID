@@ -1,3 +1,4 @@
+import { useAccountAcceptedResult } from "./use-account-accepted-result";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
@@ -756,6 +757,7 @@ function CustomServiceForm({
   onSuccess,
 }: CustomServiceFormProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
   // `--slug`, `--via-node`, etc. alongside `--custom`, those values
   // pre-populate the form and let the user submit with just the
@@ -788,7 +790,7 @@ function CustomServiceForm({
   const needsCredential = authMethod !== "none";
   const needsKeyName = authMethodNeedsKeyName(authMethod);
   const submitDisabled =
-    loading ||
+    acceptedResult.accepted || loading ||
     !trimmedLabel ||
     !trimmedEndpoint ||
     (needsCredential && !trimmedCredential);
@@ -802,6 +804,7 @@ function CustomServiceForm({
           : "API key / credential";
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -833,12 +836,12 @@ function CustomServiceForm({
       const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<UserServiceCreated>("/keys", body),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "ai-key",
         service_id: res.id,
         slug: res.slug,
         label: res.label,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       // `ApiError.message` can be empty when the proxy returns a body the
@@ -1031,6 +1034,7 @@ function CatalogConfirmForm({
   onSuccess,
 }: CatalogConfirmFormProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
@@ -1088,6 +1092,7 @@ function CatalogConfirmForm({
   const [authFlowActive, setAuthFlowActive] = useState(false);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -1142,12 +1147,12 @@ function CatalogConfirmForm({
       const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<UserServiceCreated>("/keys", body),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "ai-key",
         service_id: res.id,
         slug: res.slug,
         label: res.label,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       // `ApiError.message` can be empty when the proxy returns a body the
@@ -1330,7 +1335,7 @@ function CatalogConfirmForm({
     return fields.every((f) => (tokenFields[f.name] ?? "").trim().length > 0);
   })();
   const submitDisabled =
-    loading ||
+    acceptedResult.accepted || loading ||
     !label.trim() ||
     (needsCredentialInput && !viaNode && !credential.trim()) ||
     (!usePlatformKey && entry.requires_gateway_url && !endpointUrl.trim()) ||
@@ -1350,12 +1355,12 @@ function CatalogConfirmForm({
   return (
     <div className="flex flex-col gap-4">
 
-      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} showPricing={false} />}
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading || acceptedResult.accepted} showPricing={false} />}
       {oauthClientChoice ? (
         <OAuthClientSourceChoice
           value={oauthClientSource}
           onChange={chooseOAuthClient}
-          disabled={loading}
+          disabled={loading || acceptedResult.accepted}
         />
       ) : null}
       <div className="flex flex-col gap-3">

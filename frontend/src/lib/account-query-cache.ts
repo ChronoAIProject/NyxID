@@ -1,9 +1,12 @@
+import { useAuthStore } from "@/stores/auth-store";
 import { QueryClient, type QueryClientConfig } from "@tanstack/react-query";
 import {
   AccountChangedError,
   captureAccountOperation,
   getAssistantIdentityRevision,
   isAccountAbort,
+  isAccountEvidencePending,
+  subscribeAccountEvidence,
   subscribeAssistantIdentity,
 } from "./assistant/identity";
 
@@ -89,9 +92,17 @@ export function createAccountQueryScope(
     stopBinding = bindAccountQueryClient(client);
     stopClient = onClient?.(client);
   });
+  const stopEvidence = subscribeAccountEvidence(() => {
+    if (isAccountEvidencePending()) return;
+    const user = useAuthStore.getState().user;
+    // An unchanged verifier profile need not publish a new store reference.
+    // Refill an initial query refused during evidence without another request.
+    if (user) client.setQueryData(["user", "me"], user);
+  });
   return {
     getClient: () => client,
     dispose: () => {
+      stopEvidence();
       stopIdentity();
       stopBinding();
       stopClient?.();

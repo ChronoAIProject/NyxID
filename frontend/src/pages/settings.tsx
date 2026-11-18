@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { captureAccountRequest, captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
+import { captureAccountRequest, captureAccountProfileRead, isAccountEvidencePending, captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
@@ -265,9 +265,12 @@ function ProfileForm({ user }: { readonly user: User }) {
   async function save(values: { display_name: string }) {
     form.clearErrors("root");
     try {
+      const profile = captureAccountProfileRead();
       const updated = await api.put<User>("/users/me", values);
-      setUser(updated);
-      queryClient.setQueryData(["user", "me"], updated);
+      if (profile.isCurrent()) {
+        setUser(updated);
+        queryClient.setQueryData(["user", "me"], updated);
+      }
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });
       if (draft !== values.display_name) form.setValue("display_name", draft);
@@ -495,11 +498,13 @@ function SecurityTab() {
           ? "Account erasure complete"
           : "Account deletion accepted. Cleanup continues until verified."),
       );
+      if (isAccountEvidencePending() || useAuthStore.getState().user?.id !== operation.userId) return;
       try {
         await logout();
       } catch {
         // Logout may fail if session is already invalidated by account deletion
       }
+      if (isAccountEvidencePending() || useAuthStore.getState().user) return;
       queryClient.clear();
       void navigate({ to: "/login" });
     } catch (error) {

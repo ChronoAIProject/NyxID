@@ -11,6 +11,7 @@ let evidenceEpoch = 0;
 let evidencePending = false;
 let requests = new AbortController();
 const listeners = new Set<AssistantIdentityListener>();
+const evidenceListeners = new Set<() => void>();
 // Neither the epoch nor a long-lived caller keeps fallback requests alive.
 const fallbackChildren = new Set<WeakRef<AbortController>>();
 type FallbackCleanup = { child: WeakRef<AbortController>; caller: WeakRef<AbortSignal>; listener: EventListener };
@@ -47,10 +48,34 @@ export function getAssistantIdentityRevision(): number {
 export function invalidateAccountEvidence(): void {
   evidenceEpoch += 1;
   evidencePending = true;
+  for (const listener of evidenceListeners) listener();
 }
 
 export function settleAccountEvidence(): void {
   evidencePending = false;
+  for (const listener of evidenceListeners) listener();
+}
+
+export function getAccountEvidenceEpoch(): number { return evidenceEpoch; }
+
+export function isAccountEvidencePending(): boolean { return evidencePending; }
+
+export function subscribeAccountEvidence(listener: () => void): () => void {
+  evidenceListeners.add(listener);
+  return () => evidenceListeners.delete(listener);
+}
+
+/** Profile reads cannot authorize identity changes across incompatible evidence. */
+export function captureAccountProfileRead() {
+  const revision = identityRevision;
+  const epoch = evidenceEpoch;
+  const startedPending = evidencePending;
+  const isCurrent = () => !startedPending && !evidencePending &&
+    revision === identityRevision && epoch === evidenceEpoch;
+  return {
+    isCurrent,
+    assertCurrent() { if (!isCurrent()) throw new AccountChangedError(); },
+  };
 }
 
 /** Authority for a complete user-confirmed operation, including waits/retries. */

@@ -1,3 +1,5 @@
+import { act } from "@testing-library/react";
+import { invalidateAccountEvidence, settleAccountEvidence, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -789,4 +791,27 @@ describe("CliPairPage liveness poll → disconnect banner", () => {
     const banner = await screen.findByTestId("disconnect-banner");
     expect(banner).toHaveAttribute("data-status", "expired");
   });
+});
+
+it.each(["same", "different"])("retains accepted result but gates the separate CLI ack until %s-owner verification", async (owner) => {
+  transitionAssistantIdentity("user");
+  const user = userEvent.setup();
+  render(<CliPairPage />);
+  await enterCode(user, makeClaim("api-key-rotate"));
+  api.post.mockResolvedValue({});
+  act(() => invalidateAccountEvidence());
+  try {
+    await user.click(screen.getByTestId("confirm-api-key-rotate"));
+    expect(api.post.mock.calls.filter(([url]) => url.endsWith("/complete"))).toHaveLength(0);
+    expect(screen.queryByTestId("display-once")).not.toBeInTheDocument();
+    act(() => { if (owner === "different") transitionAssistantIdentity("B"); settleAccountEvidence(); });
+    if (owner === "same") {
+      await waitFor(() => expect(api.post.mock.calls.filter(([url]) => url.endsWith("/complete"))).toHaveLength(1));
+      act(() => { invalidateAccountEvidence(); settleAccountEvidence(); });
+      expect(api.post.mock.calls.filter(([url]) => url.endsWith("/complete"))).toHaveLength(1);
+    } else {
+      expect(api.post.mock.calls.filter(([url]) => url.endsWith("/complete"))).toHaveLength(0);
+      expect(screen.queryByTestId("display-once")).not.toBeInTheDocument();
+    }
+  } finally { settleAccountEvidence(); }
 });

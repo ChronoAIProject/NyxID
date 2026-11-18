@@ -13,7 +13,7 @@ import { useConsentStore } from "./stores/consent-store";
 import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
-import { subscribeAssistantIdentity } from "./lib/assistant/identity";
+import { isAccountEvidencePending, subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { createAccountQueryScope } from "./lib/account-query-cache";
 import { installAccountSessionSync } from "./lib/account-session-sync";
 import { AccountVerificationStatus } from "./components/account-verification-status";
@@ -81,7 +81,7 @@ function AccountRuntime({ ready }: { ready: boolean }) {
   const confirmedUser = useAuthStore((s) => s.user);
   const telemetryAccountId = confirmedUser?.id;
   useEffect(() => {
-    if (confirmedUser) queryClient.setQueryData(["user", "me"], confirmedUser);
+    if (confirmedUser && !isAccountEvidencePending()) queryClient.setQueryData(["user", "me"], confirmedUser);
   }, [confirmedUser, queryClient]);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);

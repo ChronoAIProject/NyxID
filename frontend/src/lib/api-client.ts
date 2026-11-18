@@ -3,8 +3,10 @@ import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
 import {
+  captureAccountProfileRead,
   captureAccountRequest,
   getAssistantIdentityRevision,
+  getAccountEvidenceEpoch,
 } from "./assistant/identity";
 import {
   currentCreditsActor,
@@ -64,19 +66,22 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
 ]);
 
 let sessionConfirmation: {
+  epoch: number;
   revision: number;
   promise: Promise<boolean>;
 } | null = null;
-let lastSessionConfirmation: { at: number; valid: boolean; user: unknown } | null = null;
+let lastSessionConfirmation: { epoch: number; at: number; valid: boolean; user: unknown } | null = null;
 
 async function confirmSessionStillValid(): Promise<boolean> {
   const now = Date.now();
+  const epoch = getAccountEvidenceEpoch();
+  const profile = captureAccountProfileRead();
   const user = useAuthStore.getState().user;
-  if (lastSessionConfirmation && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
+  if (lastSessionConfirmation && lastSessionConfirmation.epoch === epoch && profile.isCurrent() && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
     return lastSessionConfirmation.valid;
   }
   const revision = getAssistantIdentityRevision();
-  if (!sessionConfirmation || sessionConfirmation.revision !== revision) {
+  if (!sessionConfirmation || sessionConfirmation.revision !== revision || sessionConfirmation.epoch !== epoch) {
     const request = captureAccountRequest();
     const promise = fetch(apiUrl("/users/me"), {
       ...buildFetchConfig({ preserveSessionOn401: true }),
@@ -86,18 +91,17 @@ async function confirmSessionStillValid(): Promise<boolean> {
       // Only a confirmed identity 401 proves that the NyxID session is gone.
       // A 2xx, another HTTP status, or a transient network failure must keep
       // the browser session intact.
-      .then((response) => response.status !== 401 || useAuthStore.getState().user !== user)
+      .then((response) => !profile.isCurrent() || response.status !== 401 || useAuthStore.getState().user !== user)
       .catch(() => true)
       .then((valid) => {
-        lastSessionConfirmation = { at: Date.now(), valid, user };
+        if (profile.isCurrent()) lastSessionConfirmation = { epoch, at: Date.now(), valid, user };
         return valid;
       })
       .finally(() => {
         request.dispose();
-        if (sessionConfirmation?.revision === revision)
-          sessionConfirmation = null;
+        if (sessionConfirmation?.promise === promise) sessionConfirmation = null;
       });
-    sessionConfirmation = { revision, promise };
+    sessionConfirmation = { revision, epoch, promise };
   }
   return sessionConfirmation.promise;
 }
@@ -213,6 +217,7 @@ export async function apiFetch(
   };
   try {
     const userAtRequest = useAuthStore.getState().user;
+    const profile = captureAccountProfileRead();
     const actorId = options.creditsDenial ? currentCreditsActor() : null;
     options.authorityGuard?.();
     request.assertCanDispatch(options.method);
@@ -242,11 +247,12 @@ export async function apiFetch(
         !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
       ) {
         if (endpoint === "/users/me") {
+          profile.assertCurrent();
           useAuthStore.getState().setUser(null);
         } else {
           const sessionStillValid = await confirmSessionStillValid();
           options.authorityGuard?.();
-          if (!sessionStillValid && useAuthStore.getState().user === userAtRequest) {
+          if (!sessionStillValid && profile.isCurrent() && useAuthStore.getState().user === userAtRequest) {
             useAuthStore.getState().setUser(null);
           }
         }
@@ -298,7 +304,7 @@ export async function apiBlobClient(
 export const api = {
   get<T>(
     endpoint: string,
-    options?: Pick<RequestOptions, "authorityGuard">,
+    options?: Pick<RequestOptions, "authorityGuard" | "preserveSessionOn401">,
   ): Promise<T> {
     return apiClient<T>(endpoint, options);
   },

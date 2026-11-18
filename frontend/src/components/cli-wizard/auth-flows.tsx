@@ -1,3 +1,4 @@
+import { useAccountAcceptedResult } from "./use-account-accepted-result";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 // OAuth and device-code sub-flows for the ai-key pairing panel.
@@ -150,8 +151,8 @@ interface DeviceCodePollResponse {
  * Create a placeholder UserService that will be flipped to
  * `active` by a successful OAuth / device-code callback.
  *
- * Callers flip `placeholderCreateSentRef` to `true` BEFORE calling
- * this so `cancelAndCleanup` can't rewind the pairing while a
+ * The dispatch callback flips `placeholderCreateSentRef` to `true` so
+ * `cancelAndCleanup` can't rewind the pairing while a
  * create is in flight. On a definitive 4xx (validation error —
  * e.g. bad endpoint URL, slug not in the user's catalog) we know
  * the server committed nothing, so we clear the flag back to
@@ -201,7 +202,10 @@ async function createPlaceholderKey(
     }
   }
   try {
-    return await operation.dispatch(() => api.post<PlaceholderKeyResponse>("/keys", body));
+    return await operation.dispatch(() => {
+      createSentRef.current = true;
+      return api.post<PlaceholderKeyResponse>("/keys", body);
+    });
   } catch (e) {
     if (isAccountAbort(e)) throw e;
     // On a clean 4xx the server rejected the request before any
@@ -573,6 +577,7 @@ export function OAuthFlow({
 }: FlowProps) {
   const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   // Manage-scopes mode: re-auth an existing connection rather than minting a
   // placeholder. The credential sub-step is skipped (the connection already
   // carries its BYO creds), so we go straight to "starting".
@@ -611,6 +616,7 @@ export function OAuthFlow({
   // can't clear a winning tab's latch and enable a replay. If
   // this tab never reserved, cancel just tears down local state.
   const reservedRef = useRef(false);
+  const reservationOwnerRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   // Set to `true` right BEFORE the fetch for `createPlaceholderKey`
   // leaves the client. Reset to `false` inside
   // `createPlaceholderKey` ONLY when the server returned a clean
@@ -767,7 +773,7 @@ export function OAuthFlow({
       reservedRef.current = false;
       successRef.current = true;
       setPhase("done");
-      onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "ai-key",
         service_id: outcome.key.id,
         slug: outcome.key.slug,
@@ -903,12 +909,21 @@ export function OAuthFlow({
     cancelledRef.current = false;
     void (async () => {
       try {
-        // Mark the destructive step as started BEFORE the placeholder
-        // exists. Idempotent server-side, so re-runs on retry are a
-        // no-op after the first call.
+        // A definite, unused reservation survives same-owner verification.
+        // The server latch is single-use: reserving again would conflict.
         if (!keyIdRef.current) {
-          await operation.dispatch(() => reservePairingAction(pairingId));
-          reservedRef.current = true;
+          const owner = reservationOwnerRef.current;
+          if (owner && (owner.userId !== operation.userId || owner.revision !== operation.revision)) {
+            reservedRef.current = false;
+            reservationOwnerRef.current = null;
+          }
+          const reusable = reservedRef.current && !placeholderCreateSentRef.current &&
+            owner?.userId === operation.userId && owner.revision === operation.revision;
+          if (!reusable) {
+            await operation.dispatch(() => reservePairingAction(pairingId));
+            reservationOwnerRef.current = operation;
+            reservedRef.current = true;
+          }
         }
         // Reuse placeholder if we already minted one on a prior
         // retry (e.g. popup was blocked); avoids creating a second
@@ -921,12 +936,6 @@ export function OAuthFlow({
         if (keyIdRef.current) {
           placeholder = { id: keyIdRef.current, status: "pending_auth" };
         } else {
-          // Flag BEFORE sending the request, not after: once the
-          // fetch has left the client the server may commit a
-          // placeholder regardless of whether we ever see the
-          // response. `cancelAndCleanup` reads this ref to decide
-          // whether rewinding is safe.
-          placeholderCreateSentRef.current = true;
           // Park the in-flight promise on a ref so
           // `releaseServerState` (called from Cancel or the error
           // catch) can await the request to settle before deciding
@@ -1127,7 +1136,7 @@ export function OAuthFlow({
     if (cancelledRef.current) return;
     successRef.current = true;
     setPhase("done");
-    onSuccess({
+    acceptedResult.deliver(operation, {
       kind: "ai-key",
       service_id: finalKey.id,
       slug: finalKey.slug,
@@ -1306,6 +1315,7 @@ export function DeviceCodeFlow({
 }: FlowProps) {
   const operationRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [code, setCode] = useState<string | null>(null);
   const [verifyUrl, setVerifyUrl] = useState<string | null>(null);
   const [phase, setPhase] = useState<
@@ -1328,6 +1338,7 @@ export function DeviceCodeFlow({
   // can't clear a winning tab's latch and enable a replay. If
   // this tab never reserved, cancel just tears down local state.
   const reservedRef = useRef(false);
+  const reservationOwnerRef = useRef<ReturnType<typeof captureAccountOperation> | null>(null);
   // Set to `true` right BEFORE the fetch for `createPlaceholderKey`
   // leaves the client. `createPlaceholderKey` resets it to `false`
   // only when the server returned a clean 4xx (proves no side
@@ -1376,7 +1387,7 @@ export function DeviceCodeFlow({
       reservedRef.current = false;
       successRef.current = true;
       setPhase("done");
-      onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "ai-key",
         service_id: outcome.key.id,
         slug: outcome.key.slug,
@@ -1501,12 +1512,18 @@ export function DeviceCodeFlow({
         // cancel would skip rewind (good) but the WINNING tab
         // would also skip rewind on its own cancel (bad), leaving
         // the pairing latched forever and forcing a CLI rerun.
-        await operation.dispatch(() => reservePairingAction(pairingId));
-        reservedRef.current = true;
-        // Flag BEFORE the fetch leaves: see the matching comment
-        // in OAuthFlow. The server may commit a placeholder we
-        // never observe if the user cancels mid-request.
-        placeholderCreateSentRef.current = true;
+        const owner = reservationOwnerRef.current;
+        if (owner && (owner.userId !== operation.userId || owner.revision !== operation.revision)) {
+          reservedRef.current = false;
+          reservationOwnerRef.current = null;
+        }
+        const reusable = reservedRef.current && !placeholderCreateSentRef.current &&
+          owner?.userId === operation.userId && owner.revision === operation.revision;
+        if (!reusable) {
+          await operation.dispatch(() => reservePairingAction(pairingId));
+          reservationOwnerRef.current = operation;
+          reservedRef.current = true;
+        }
         // Park the in-flight promise so `releaseServerState` can
         // wait for it to settle before the rewind decision; see
         // the matching comment in `OAuthFlow`.
@@ -1553,7 +1570,7 @@ export function DeviceCodeFlow({
           if (myGen !== genRef.current) return;
           successRef.current = true;
           setPhase("done");
-          onSuccess({
+          acceptedResult.deliver(operation, {
             kind: "ai-key",
             service_id: active.id,
             slug: active.slug,
@@ -1645,7 +1662,7 @@ export function DeviceCodeFlow({
           if (myGen !== genRef.current) return;
           successRef.current = true;
           setPhase("done");
-          onSuccess({
+          acceptedResult.deliver(operation, {
             kind: "ai-key",
             service_id: final.id,
             slug: final.slug,

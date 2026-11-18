@@ -204,7 +204,7 @@ describe("login", () => {
       completed = true;
       return result;
     });
-    await vi.waitFor(() => expect(apiMock.get).toHaveBeenCalledWith("/users/me"));
+    await vi.waitFor(() => expect(apiMock.get).toHaveBeenCalledWith("/users/me", { preserveSessionOn401: true }));
     expect(completed).toBe(false);
     expect(useAuthStore.getState()).toMatchObject({
       user: null,

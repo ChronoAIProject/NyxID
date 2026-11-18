@@ -27,7 +27,7 @@ const { mockGet, mockPost, mockApiClient, mockSetUser, MockApiError } = vi.hoist
   return { mockGet: vi.fn(), mockPost: vi.fn(), mockApiClient: vi.fn(), mockSetUser: vi.fn(), MockApiError: HoistedApiError };
 });
 vi.mock("@/lib/api-client", () => ({ api: { get: mockGet, post: mockPost }, apiClient: mockApiClient, ApiError: MockApiError }));
-vi.mock("@/stores/auth-store", () => ({ useAuthStore: { getState: () => ({ setUser: mockSetUser }) } }));
+vi.mock("@/stores/auth-store", () => ({ useAuthStore: { getState: () => ({ user: { id: "00000000-0000-4000-8000-000000000001" }, setUser: mockSetUser }) } }));
 
 function renderDialog(element: ReactNode) { return render(element); }
 function accountEvidence(overrides: Record<string, unknown> = {}) { return { id: IDS.user, is_active: true, mfa_enabled: false, display_name_length: 7, avatar_url_length: null, updated_at: "2026-01-01T00:00:00.000Z", ...overrides }; }
@@ -142,7 +142,7 @@ describe("Wave 4 account journeys", () => {
       const button = await screen.findByRole("button", { name: "Continue" });
       expect(screen.getByRole("dialog")).toHaveAccessibleName("Account deletion accepted");
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-      act(() => invalidateAccountEvidence());
+      act(() => { invalidateAccountEvidence(); settleAccountEvidence(); });
       await userEvent.click(button);
       expect(onComplete).toHaveBeenCalledExactlyOnceWith(IDS.user);
       expect(mockSetUser).toHaveBeenCalledExactlyOnceWith(null);

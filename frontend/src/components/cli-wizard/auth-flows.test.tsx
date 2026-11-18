@@ -1,4 +1,4 @@
-import { invalidateAccountEvidence, settleAccountEvidence } from "@/lib/assistant/identity";
+import { invalidateAccountEvidence, settleAccountEvidence, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -778,6 +778,65 @@ describe("wizard operation restart", () => {
       await screen.findByText("RESTART-POLL");
       expect(mockPost.mock.calls.filter(([path]) => String(path).includes("device-code/initiate"))).toHaveLength(2);
     } finally { view.unmount(); settleAccountEvidence(); }
+  });
+
+});
+
+
+describe("unconsumed reservation ownership", () => {
+  it.each(["oauth", "device"])("reuses one committed reservation for %s after same-owner confirmation", async (kind) => {
+    transitionAssistantIdentity("A");
+    resetFlowMocks();
+    let latched = false;
+    mockReservePairingAction.mockImplementation(async () => {
+      if (latched) throw new Error("Pairing is already reserved");
+      latched = true;
+      invalidateAccountEvidence();
+    });
+    const onSuccess = vi.fn();
+    const view = kind === "oauth" ? renderOAuthFlow({ onSuccess }) : renderDeviceCodeFlow({ onSuccess });
+    try {
+      expect(await screen.findByRole("alert")).toHaveTextContent("Review this connection and try again");
+      expect(mockPost).not.toHaveBeenCalled();
+      settleAccountEvidence();
+      const userEvent = (await import("@testing-library/user-event")).default;
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(mockPost.mock.calls.some(([path]) => path === "/keys")).toBe(true));
+      expect(mockReservePairingAction).toHaveBeenCalledOnce();
+      await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    } finally { view.unmount(); settleAccountEvidence(); }
+  });
+  it.each(["oauth", "device"])("discards a different owner's unconsumed %s reservation", async (kind) => {
+    resetFlowMocks();
+    transitionAssistantIdentity("A");
+    mockReservePairingAction.mockImplementationOnce(async () => { invalidateAccountEvidence(); });
+    const onSuccess = vi.fn();
+    const view = kind === "oauth" ? renderOAuthFlow({ onSuccess }) : renderDeviceCodeFlow({ onSuccess });
+    try {
+      expect(await screen.findByRole("alert")).toHaveTextContent("Review this connection and try again");
+      expect(mockPost).not.toHaveBeenCalled();
+      act(() => { transitionAssistantIdentity("B"); settleAccountEvidence(); });
+      const userEvent = (await import("@testing-library/user-event")).default;
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+      expect(mockReservePairingAction).toHaveBeenCalledTimes(2);
+      expect(mockPost.mock.calls.filter(([path]) => path === "/keys")).toHaveLength(1);
+    } finally { view.unmount(); settleAccountEvidence(); }
+  });
+  it.each(["oauth", "device"])("never treats an ambiguous %s reserve as definite authority", async (kind) => {
+    resetFlowMocks();
+    mockReservePairingAction.mockRejectedValueOnce(new Error("Reservation response lost"))
+      .mockRejectedValueOnce(new Error("Pairing is already reserved"));
+    const view = kind === "oauth" ? renderOAuthFlow() : renderDeviceCodeFlow();
+    try {
+      expect(await screen.findByRole("alert")).toHaveTextContent("Reservation response lost");
+      expect(mockPost).not.toHaveBeenCalled();
+      const userEvent = (await import("@testing-library/user-event")).default;
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Pairing is already reserved");
+      expect(mockPost).not.toHaveBeenCalled();
+      expect(mockRewindPairingAction).not.toHaveBeenCalled();
+    } finally { view.unmount(); }
   });
 
 });

@@ -4,7 +4,7 @@ import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
 import { api, apiClient, ApiError } from "@/lib/api-client";
 import { bindAccountResourcePreferences } from "@/lib/account-resource-preferences";
-import { captureAccountRequest, getAssistantIdentityRevision, isAccountAbort, transitionAssistantIdentity } from "@/lib/assistant/identity";
+import { captureAccountProfileRead, isAccountEvidencePending, captureAccountRequest, getAssistantIdentityRevision, isAccountAbort, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import {
   identify as telemetryIdentify,
   reset as telemetryReset,
@@ -142,11 +142,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
   logout: async (): Promise<void> => {
     const request = captureAccountRequest();
+    let refused = false;
     try {
       await api.post<void>("/auth/logout");
+    } catch (error) {
+      refused = isAccountAbort(error);
+      throw error;
     } finally {
       // An old logout must never clear a replacement session.
-      if (!request.signal.aborted) {
+      if (!refused && !request.signal.aborted && !isAccountEvidencePending()) {
         const previousUser = get().user;
         clearAccountIdentity();
         set({
@@ -166,6 +170,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     requireSession = false,
     isCurrent,
   } = {}): Promise<boolean> => {
+    const profile = captureAccountProfileRead();
+    const assertProfile = () => { if (!isCurrent) profile.assertCurrent(); };
     const authorityGuard = isCurrent
       ? () => {
           if (!isCurrent()) throw new Error("Profile restoration cancelled");
@@ -188,15 +194,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
     const request = captureAccountRequest();
     try {
-      const user =
-        ephemeral || authorityGuard
-          ? await apiClient<User>("/users/me", {
-              preserveSessionOn401: ephemeral,
-              authorityGuard,
-            })
-          : await api.get<User>("/users/me");
+      const user = ephemeral || authorityGuard
+        ? await apiClient<User>("/users/me", { preserveSessionOn401: ephemeral || !isCurrent, authorityGuard })
+        : await api.get<User>("/users/me", { preserveSessionOn401: true });
       request.assertCurrent();
       authorityGuard?.();
+      assertProfile();
       const previousUser = get().user;
       applyIdentityTransition(previousUser, user);
       set({
@@ -212,7 +215,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // Bind explicit events to the freshly restored account.
       if (!ephemeral) telemetryIdentify(user.id);
       return true;
-    } catch (error) {
+    } catch (caught) {
+      let error = caught;
+      try { assertProfile(); } catch (stale) { error = stale; }
       if (error instanceof Error && error.name === "AbortError") {
         if (!isCurrent) set({ isLoading: false });
         if (requireSession) throw error;
@@ -247,7 +252,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       }
       if (requireSession) throw error;
       return false;
-    }
+    } finally { request.dispose(); }
   },
 
   verifySession: ({ isCurrent, signal } = {}): Promise<boolean> => {

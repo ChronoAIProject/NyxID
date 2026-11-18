@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
+import { captureAccountProfileRead } from "@/lib/assistant/identity";
 import { api, ApiError } from "@/lib/api-client";
 import type {
   User,
@@ -19,7 +20,9 @@ export function useUser() {
   return useQuery({
     queryKey: ["user", "me"],
     queryFn: async () => {
+      const profile = captureAccountProfileRead();
       const user = await api.get<User>("/users/me");
+      profile.assertCurrent();
       setUser(user);
       return user;
     },

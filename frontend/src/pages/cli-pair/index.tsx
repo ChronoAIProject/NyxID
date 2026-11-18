@@ -14,8 +14,9 @@ import { translateUi } from "@/i18n/use-ui-translation";
 // identifier (api_key_id / token_id / resource_id) in the ack. Matches
 // the local-server DisplayOnce wizard byte-for-byte in spirit.
 
-import { useEffect, useState } from "react";
-import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
+import { useEffect, useRef, useState } from "react";
+import { useAccountAcceptedResult } from "@/components/cli-wizard/use-account-accepted-result";
+import { captureAccountOperation, getAssistantIdentityRevision, getAssistantIdentityUserId, isAccountEvidencePending, isAccountAbort } from "@/lib/assistant/identity";
 import { ApiError, api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
@@ -253,6 +254,11 @@ function reconstructRotationAck(claim: ClaimResponse): AckPayload | null {
 
 function StageRouter() {
   useUiTranslation();
+  const [owner] = useState(captureAccountOperation);
+  const acknowledgments = useRef(new Map<ActionResult, "pending" | "complete">());
+  const deferredAck = useAccountAcceptedResult(({ claim, result }: { claim: ClaimResponse; result: ActionResult }) => {
+    void postComplete(claim, result);
+  });
   const [stage, setStage] = useState<Stage>({ phase: "enter-code" });
   const [slugPicked, setSlugPicked] = useState(false);
   // Pairing-side liveness. Once a claim lands, poll the backend
@@ -348,6 +354,13 @@ function StageRouter() {
     claim: ClaimResponse,
     result: ActionResult,
   ): Promise<void> {
+    if (owner.userId !== getAssistantIdentityUserId() || owner.revision !== getAssistantIdentityRevision()) return;
+    if (acknowledgments.current.has(result)) return;
+    if (isAccountEvidencePending()) {
+      deferredAck.deliver(owner, { claim, result });
+      return;
+    }
+    const operation = captureAccountOperation();
     const ack =
       result.kind === "ai-key"
         ? {
@@ -358,10 +371,14 @@ function StageRouter() {
           }
         : ackForResult(result);
     try {
-      await api.post(
-        `/cli-pairings/${encodeURIComponent(claim.id)}/complete`,
-        { ack },
-      );
+      await operation.dispatch(() => {
+        acknowledgments.current.set(result, "pending");
+        return api.post(
+          `/cli-pairings/${encodeURIComponent(claim.id)}/complete`,
+          { ack },
+        );
+      });
+      acknowledgments.current.set(result, "complete");
       // Safe to transition: /complete landed, so the CLI's next
       // poll will see Completed. For DisplayOnce flows we now show
       // the secret; for ai-key we go straight to the done screen.
@@ -371,7 +388,11 @@ function StageRouter() {
         setStage({ phase: "secret", claim, result });
       }
     } catch (e) {
-      if (isAccountAbort(e)) return;
+      acknowledgments.current.delete(result);
+      if (isAccountAbort(e)) {
+        deferredAck.deliver(owner, { claim, result });
+        return;
+      }
       // /complete failed — secret has been minted server-side, so
       // we stay in the notifying-cli / acking phase with the error
       // so the user can retry via the button. The pairing's

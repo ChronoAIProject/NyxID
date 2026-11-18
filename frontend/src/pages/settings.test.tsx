@@ -1,3 +1,5 @@
+import { Fragment } from "react";
+import { installAccountSessionSync } from "@/lib/account-session-sync";
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { invalidateAccountEvidence, settleAccountEvidence, transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -9,6 +11,7 @@ import {
   createRoute,
   createRouter,
   RouterProvider,
+  Outlet,
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -77,8 +80,13 @@ afterEach(() => {
 async function open(
   route: "/settings" | "/assistant",
   tab = "profile",
+  keyedAccount = false,
 ) {
-  const root = createRootRoute();
+  function AccountRoot() {
+    const generation = useAuthStore(state => state.accountGeneration);
+    return <Fragment key={generation}><Outlet /></Fragment>;
+  }
+  const root = createRootRoute(keyedAccount ? { component: AccountRoot } : {});
   const page = createRoute({
     path: route,
     getParentRoute: () => root,
@@ -89,7 +97,7 @@ async function open(
   const history = createMemoryHistory({
     initialEntries: [route === "/settings" ? `${route}?tab=${tab}` : `${route}?c=chat&mock=1&panel=settings&panelTab=${tab}`],
   });
-  const router = createRouter({ routeTree: root.addChildren([page]), history });
+  const router = createRouter({ routeTree: root.addChildren([page, createRoute({ path: "/login", getParentRoute: () => root, component: () => <p>Login fixture</p> })]), history });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
@@ -202,6 +210,31 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
       await userEvent.click(screen.getByRole("button", { name: "Discard" }));
       expect(name).toHaveValue("Saved name");
+    });
+
+    it("keeps an accepted profile save and form baseline without publishing superseded identity", async () => {
+      let finish!: (response: Response) => void;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
+        ? new Promise<Response>(resolve => { finish = resolve; }) : original(url, options));
+      const { client } = await open(route);
+      const confirmed = useAuthStore.getState().user;
+      client.setQueryData(["user", "me"], confirmed);
+      const name = screen.getByRole("textbox", { name: "Name" });
+      await userEvent.clear(name);
+      await userEvent.type(name, "Accepted name");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const review = screen.getByRole("dialog", { name: "Review changes" });
+      await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(finish).toBeTypeOf("function"));
+      act(() => { invalidateAccountEvidence(); settleAccountEvidence(); });
+      await act(async () => finish(Response.json({ ...securityUser, id: "owner", display_name: "Accepted name" })));
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Profile updated successfully"));
+      expect(review).not.toBeInTheDocument();
+      expect(name).toHaveValue("Accepted name");
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+      expect(useAuthStore.getState().user).toBe(confirmed);
+      expect(client.getQueryData(["user", "me"])).toEqual(confirmed);
     });
 
     it("retains failed profile edits and discards without calling the API again", async () => {
@@ -589,7 +622,7 @@ describe.each(["/settings", "/assistant"] as const)(
         if (String(url) === "/api/v1/users/me?expected_user_id=owner" && options?.method === "DELETE") {
           const response = Response.json({ status: "accepted" });
           const read = response.json.bind(response);
-          response.json = async () => { const result = await read(); invalidateAccountEvidence(); return result; };
+          response.json = async () => { const result = await read(); invalidateAccountEvidence(); settleAccountEvidence(); return result; };
           return response;
         }
         return original(url, options);
@@ -605,6 +638,57 @@ describe.each(["/settings", "/assistant"] as const)(
         expect(toastError).not.toHaveBeenCalled();
         expect(screen.queryByText("The signed-in account may have changed. Review account deletion and enter your email again.")).not.toBeInTheDocument();
       } finally { settleAccountEvidence(); }
+    });
+
+    it.each(["B", "401", "none"])("accepted deletion scopes real cleanup to its owner with %s evidence", async (outcome) => {
+      const posts: Array<string | null> = [];
+      let hint!: (id: string) => void;
+      vi.stubGlobal("BroadcastChannel", class {
+        set onmessage(fn: (event: { data: { userId: string; nonce: string } }) => void) {
+          hint = (userId) => fn({ data: { userId, nonce: crypto.randomUUID() } });
+        }
+        postMessage(value: { userId: string | null }) { posts.push(value.userId); }
+        close() {}
+      });
+      useAuthStore.setState({ logout: initialAuth.logout });
+      const stop = installAccountSessionSync();
+      const original = transport.getMockImplementation()!;
+      let release!: () => void;
+      transport.mockImplementation(async (url, options) => {
+        if (url === "/api/v1/users/me" && options?.method === "GET") return new Promise<Response>((resolve) => {
+          release = () => resolve(outcome === "401" ? Response.json({}, { status: 401 }) : Response.json({ id: "B", email: "b@example.test" }));
+        });
+        if (url === "/api/v1/auth/logout") return Response.json({});
+        if (url === "/api/v1/users/me?expected_user_id=owner" && options?.method === "DELETE") {
+          if (outcome !== "none") hint("B");
+          return Response.json({ status: "accepted" });
+        }
+        return original(url, options);
+      });
+      try {
+        const { router } = await open(route, "security", true);
+        await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
+        const dialog = screen.getByRole("dialog", { name: "Delete Account" });
+        await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
+        await userEvent.click(within(dialog).getByRole("button", { name: "Permanently Delete" }));
+        await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Account deletion accepted. Cleanup continues until verified."));
+        if (outcome === "none") {
+          await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+          expect(useAuthStore.getState().user).toBeNull();
+          expect(transport.mock.calls.filter(([url]) => url === "/api/v1/auth/logout")).toHaveLength(1);
+          expect(posts).toEqual([null]);
+        } else {
+          await waitFor(() => expect(release).toBeTypeOf("function"));
+          expect(useAuthStore.getState().user?.id).toBe("owner");
+          expect(router.state.location.pathname).toBe(route);
+          expect(posts).toEqual([]);
+          expect(transport.mock.calls.some(([url]) => url === "/api/v1/auth/logout")).toBe(false);
+          await act(async () => release());
+          await waitFor(() => expect(useAuthStore.getState().isIdentityVerifying).toBe(false));
+          expect([useAuthStore.getState().user?.id, router.state.location.pathname]).toEqual([outcome === "B" ? "B" : undefined, route]);
+          expect(posts).toEqual([outcome === "B" ? "B" : null]);
+        }
+      } finally { stop(); }
     });
 
     it("requires a fresh email confirmation when evidence interrupts deletion backoff", async () => {

@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { captureAccountProfileRead } from "@/lib/assistant/identity";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { useServiceCardView } from "@/stores/service-card-view-store";
@@ -40,16 +41,18 @@ export function useServiceView() {
       await queryClient.cancelQueries({ queryKey: ["user", "me"] });
       if (useAuthStore.getState().user?.id !== accountId)
         throw new Error("Account changed. Please try again.");
-      return serviceViewSchema.parse(
+      const profile = captureAccountProfileRead();
+      const saved = serviceViewSchema.parse(
         await api.put<unknown>(
           "/users/me/preferences/services",
           serviceViewSchema.parse(filters),
         ),
       );
+      return { saved, profile };
     },
-    onSuccess: (savedFilters, { accountId }) => {
+    onSuccess: ({ saved: savedFilters, profile }, { accountId }) => {
       const current = useAuthStore.getState().user;
-      if (current?.id !== accountId || !current.profile_config) return;
+      if (current?.id !== accountId || !current.profile_config || !profile.isCurrent()) return;
       const updated: User = {
         ...current,
         profile_config: {
@@ -87,16 +90,18 @@ export function useServiceView() {
       await queryClient.cancelQueries({ queryKey: ["user", "me"] });
       if (useAuthStore.getState().user?.id !== accountId)
         throw new Error("Account changed. Please try again.");
-      return serviceViewsSchema.parse(
+      const profile = captureAccountProfileRead();
+      const saved = serviceViewsSchema.parse(
         await api.put<unknown>(
           "/users/me/preferences/service-views",
           serviceViewsSchema.parse(preferences),
         ),
       );
+      return { saved, profile };
     },
-    onSuccess: (preferences, { accountId }) => {
+    onSuccess: ({ saved: preferences, profile }, { accountId }) => {
       const current = useAuthStore.getState().user;
-      if (current?.id !== accountId || !current.profile_config) return;
+      if (current?.id !== accountId || !current.profile_config || !profile.isCurrent()) return;
       const updated: User = {
         ...current,
         profile_config: {

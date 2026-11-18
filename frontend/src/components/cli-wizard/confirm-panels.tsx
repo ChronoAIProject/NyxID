@@ -1,3 +1,4 @@
+import { useAccountAcceptedResult } from "./use-account-accepted-result";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 // Per-kind wizard panels. Each panel owns the "confirm action" step
@@ -131,6 +132,7 @@ export function ApiKeyCreateConfirm({
   onCancel,
 }: ApiKeyCreateConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [name, setName] = useState(prefill.name ?? "");
   const [platform, setPlatform] = useState(prefill.platform ?? "");
   const [nameValid, setNameValid] = useState(false);
@@ -156,6 +158,7 @@ export function ApiKeyCreateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -190,12 +193,12 @@ export function ApiKeyCreateConfirm({
       const res = await operation.dispatch(() => withRewindOnError(pairingId, () =>
         api.post<ApiKeyCreateResponse>("/api-keys", body),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "api-key-create",
         api_key_id: res.id,
         full_key: res.full_key,
         ...(res.expires_at !== undefined ? { expires_at: res.expires_at } : {}),
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -204,7 +207,7 @@ export function ApiKeyCreateConfirm({
     }
   }
 
-  const submitDisabled = loading || !nameValid || scopes.size === 0;
+  const submitDisabled = acceptedResult.accepted || loading || !nameValid || scopes.size === 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -337,7 +340,7 @@ export function ApiKeyCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <div className="flex items-center justify-end gap-3 border-t border-border/60 pt-5">
-        {onCancel ? <Button variant="ghost" onClick={onCancel} disabled={loading}>{translateUi("Cancel")}</Button> : null}
+        {onCancel ? <Button variant="ghost" onClick={onCancel} disabled={loading || acceptedResult.accepted}>{translateUi("Cancel")}</Button> : null}
         <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
           {loading ? translateUi("Creating...") : translateUi("Create Key")}
         </Button>
@@ -373,10 +376,12 @@ export function ApiKeyRotateConfirm({
   onSuccess,
 }: ApiKeyRotateConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -387,12 +392,12 @@ export function ApiKeyRotateConfirm({
           `/api-keys/${encodeURIComponent(prefill.resource_id)}/rotate`,
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "api-key-rotate",
         resource_id: res.id,
         full_key: res.full_key,
         platform: res.platform,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -405,7 +410,7 @@ export function ApiKeyRotateConfirm({
     <div className="flex flex-col gap-4">
       <WizardHeading title={translateUi("Rotate API key")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" will issue a new key and immediately revoke the previous one.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
-      <Button variant="primary" onClick={() => void submit()} disabled={loading}>
+      <Button variant="primary" onClick={() => void submit()} disabled={loading || acceptedResult.accepted}>
         {loading ? translateUi("Rotating...") : translateUi("Rotate key")}
       </Button>
     </div>
@@ -448,12 +453,14 @@ export function NodeRegisterConfirm({
   onSuccess,
 }: NodeRegisterConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [name, setName] = useState(prefill.name ?? "");
   const [nameValid, setNameValid] = useState(true); // empty is valid (we fall back to default)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -467,11 +474,11 @@ export function NodeRegisterConfirm({
           { name: effectiveName },
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "node-register-token",
         token_id: res.token_id,
         token: res.token,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -496,7 +503,7 @@ export function NodeRegisterConfirm({
         autoFocus
       />
       {error ? <ErrorLine message={error} /> : null}
-      <Button variant="primary" onClick={() => void submit()} disabled={loading || !nameValid}>
+      <Button variant="primary" onClick={() => void submit()} disabled={acceptedResult.accepted || loading || !nameValid}>
         {loading ? translateUi("Generating...") : translateUi("Generate token")}
       </Button>
     </div>
@@ -529,10 +536,12 @@ export function NodeRotateConfirm({
   onSuccess,
 }: NodeRotateConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -543,12 +552,12 @@ export function NodeRotateConfirm({
           `/nodes/${encodeURIComponent(prefill.resource_id)}/rotate-token`,
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "node-rotate-token",
         resource_id: prefill.resource_id,
         auth_token: res.auth_token,
         signing_secret: res.signing_secret,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -561,7 +570,7 @@ export function NodeRotateConfirm({
     <div className="flex flex-col gap-4">
       <WizardHeading title={translateUi("Rotate node token")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" issues a new auth token + signing secret and revokes the previous pair.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
-      <Button variant="primary" onClick={() => void submit()} disabled={loading}>
+      <Button variant="primary" onClick={() => void submit()} disabled={loading || acceptedResult.accepted}>
         {loading ? translateUi("Rotating...") : translateUi("Rotate token")}
       </Button>
     </div>
@@ -595,6 +604,7 @@ export function ServiceAccountCreateConfirm({
   onSuccess,
 }: ServiceAccountCreateConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const form = useAppForm({
     resolver: zodResolver(createServiceAccountSchema),
     defaultValues: {
@@ -624,6 +634,7 @@ export function ServiceAccountCreateConfirm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     if (!(await form.trigger())) return;
     setLoading(true);
@@ -651,12 +662,12 @@ export function ServiceAccountCreateConfirm({
           body,
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "service-account-create",
         service_account_id: res.id,
         client_id: res.client_id,
         client_secret: res.client_secret,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -665,7 +676,7 @@ export function ServiceAccountCreateConfirm({
     }
   }
 
-  const submitDisabled = loading || name.trim().length === 0 || scopes.trim().length === 0;
+  const submitDisabled = acceptedResult.accepted || loading || name.trim().length === 0 || scopes.trim().length === 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -763,10 +774,12 @@ export function ServiceAccountRotateSecretConfirm({
   onSuccess,
 }: ServiceAccountRotateSecretConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -777,12 +790,12 @@ export function ServiceAccountRotateSecretConfirm({
           `/admin/service-accounts/${encodeURIComponent(prefill.resource_id)}/rotate-secret`,
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "service-account-rotate-secret",
         resource_id: prefill.resource_id,
         client_id: res.client_id,
         client_secret: res.client_secret,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -795,7 +808,7 @@ export function ServiceAccountRotateSecretConfirm({
     <div className="flex flex-col gap-4">
       <WizardHeading title={translateUi("Rotate service account secret")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" immediately revokes all existing access tokens issued under this service account and mints a new client_secret.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading}>
+      <Button onClick={() => void submit()} disabled={loading || acceptedResult.accepted}>
         {loading ? translateUi("Rotating...") : translateUi("Rotate secret")}
       </Button>
     </div>
@@ -827,6 +840,7 @@ export function DeveloperAppCreateConfirm({
   onSuccess,
 }: DeveloperAppCreateConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [name, setName] = useState(prefill.name ?? "");
   // Mutable list — each row gets a unique key so React doesn't
   // trample values when a row is removed mid-edit.
@@ -863,6 +877,7 @@ export function DeveloperAppCreateConfirm({
   }
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -921,11 +936,11 @@ export function DeveloperAppCreateConfirm({
           "Server didn't return a client_secret — was the client_type 'public'?",
         );
       }
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "developer-app-create",
         developer_app_id: res.id,
         client_secret: res.client_secret,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -934,7 +949,7 @@ export function DeveloperAppCreateConfirm({
     }
   }
 
-  const submitDisabled = loading || name.trim().length === 0;
+  const submitDisabled = acceptedResult.accepted || loading || name.trim().length === 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1074,10 +1089,12 @@ export function DeveloperAppRotateSecretConfirm({
   onSuccess,
 }: DeveloperAppRotateSecretConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     setLoading(true);
     setError(null);
@@ -1088,11 +1105,11 @@ export function DeveloperAppRotateSecretConfirm({
           `/developer/oauth-clients/${encodeURIComponent(prefill.resource_id)}/rotate-secret`,
         ),
       ));
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "developer-app-rotate-secret",
         resource_id: res.id,
         client_secret: res.client_secret,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -1105,7 +1122,7 @@ export function DeveloperAppRotateSecretConfirm({
     <div className="flex flex-col gap-4">
       <WizardHeading title={translateUi("Rotate developer app secret")}>{translateUi("Rotating ")}<strong>{prefill.display_name}</strong>{translateUi(" mints a new client_secret. Update any deployments using the previous value immediately.")}</WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading}>
+      <Button onClick={() => void submit()} disabled={loading || acceptedResult.accepted}>
         {loading ? translateUi("Rotating...") : translateUi("Rotate secret")}
       </Button>
     </div>
@@ -1153,6 +1170,7 @@ export function MfaSetupConfirm({
   onSuccess,
 }: MfaSetupConfirmProps) {
   useUiTranslation();
+  const acceptedResult = useAccountAcceptedResult(onSuccess);
   // Phase: "init" before reserve+setup, "ready" after secret is in
   // hand and we're waiting on the user's TOTP code, "confirming"
   // while /mfa/confirm is in flight.
@@ -1206,6 +1224,7 @@ export function MfaSetupConfirm({
   }, [pairingId]);
 
   async function submitConfirm() {
+    if (acceptedResult.accepted) return;
     const operation = captureAccountOperation();
     if (!factorId || phase !== "ready") return;
     setError(null);
@@ -1220,11 +1239,11 @@ export function MfaSetupConfirm({
       const res = await api.post<MfaConfirmResponse>("/auth/mfa/confirm", {
         code: trimmed,
       });
-      operation.dispatch(() => onSuccess({
+      acceptedResult.deliver(operation, {
         kind: "mfa-setup",
         factor_id: factorId,
         recovery_codes: res.recovery_codes,
-      }));
+      });
     } catch (e) {
       if (isAccountAbort(e)) return;
       setError(errorMessage(e));
@@ -1298,7 +1317,7 @@ export function MfaSetupConfirm({
       {error ? <ErrorLine message={error} /> : null}
       <Button
         onClick={() => void submitConfirm()}
-        disabled={phase === "confirming" || code.trim().length === 0}
+        disabled={acceptedResult.accepted || phase === "confirming" || code.trim().length === 0}
       >
         {phase === "confirming" ? translateUi("Verifying...") : translateUi("Verify and enable MFA")}
       </Button>

@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
-import { captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
+import { isAccountEvidencePending, captureAccountOperation, isAccountAbort } from "@/lib/assistant/identity";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { useRef, useState } from "react";
 import { z } from "zod";
@@ -35,7 +35,7 @@ export function AssistantAccountDeleteDialog({
   const [verifiedUserId, setVerifiedUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   function close() {
-    const deleted = verifiedUserId !== null;
+    const deletedOwner = verifiedUserId;
     submittingRef.current = false;
     setConfirmEmail("");
     setAccountEmail(null);
@@ -43,7 +43,8 @@ export function AssistantAccountDeleteDialog({
     setVerifiedUserId(null);
     setError(null);
     onOpenChange(false);
-    if (deleted) useAuthStore.getState().setUser(null);
+    if (deletedOwner && !isAccountEvidencePending() && useAuthStore.getState().user?.id === deletedOwner)
+      useAuthStore.getState().setUser(null);
   }
   async function submit() {
     if (submittingRef.current || verifiedUserId) return;

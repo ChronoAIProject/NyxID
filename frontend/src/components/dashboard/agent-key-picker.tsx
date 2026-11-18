@@ -84,7 +84,7 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
     return first.id;
   }, [activeKeys, userOverride]);
 
-  // Persist the picked id and notify the caller whenever it changes.
+  // Notify the caller whenever the effective selection changes.
   // `preview = key_prefix + ••••••••` so call sites never reach into the
   // raw `key_prefix` field and the redaction is visually explicit.
   useEffect(() => {
@@ -92,7 +92,6 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
       onSelect?.(null);
       return;
     }
-    safePersistStorage.setItem(accountResourcePreferenceKey(LS_KEY), selectedId);
     const k = activeKeys.find((x) => x.id === selectedId);
     if (!k) {
       onSelect?.(null);
@@ -120,7 +119,10 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
   }
 
   return (
-    <Select value={selectedId ?? undefined} onValueChange={setUserOverride}>
+    <Select value={selectedId ?? undefined} onValueChange={(value) => {
+      setUserOverride(value);
+      safePersistStorage.setItem(accountResourcePreferenceKey(LS_KEY), value);
+    }}>
       <SelectTrigger className="w-full max-w-sm">
         <SelectValue placeholder={translateUi("Select an Agent Key")} />
       </SelectTrigger>
