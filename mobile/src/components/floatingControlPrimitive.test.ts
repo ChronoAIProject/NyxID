@@ -58,11 +58,11 @@ test("every floating control renders through the floating-control primitive", ()
   const controls: [string, RegExp[]][] = [
     // Header ☰ / Back (and the sidebar toggle beside the persistent sidebar).
     ["app/WorkspaceHeader.tsx", [/<FloatingButton \{\.\.\.controlProps\}>/]],
-    // Scan QR, New chat, More and crew options.
+    // New chat, More and crew options.
     ["features/assistant/ChatSurface.tsx", [/if \(floating\)\s+return \(\s+<FloatingButton/]],
     // The agent / crew identity pill.
     ["features/assistant/ChatIdentityHeader.tsx", [/return floating \? \(\s+<FloatingButton/]],
-    // The wide bar's bell.
+    // The ordinary bar's bell, when notifications are enabled.
     ["features/notifications/NotificationBell.tsx", [/<FloatingButton/]],
     // The rail: the toggle (and restore) button, the grouped capsule and,
     // in full screen on a chat, the column header capsule.
@@ -113,7 +113,7 @@ test("every other workspace bar floats the chat bar's glass controls: Menu/Back,
   const producers: Record<string, RegExp> = {
     // Menu/Back on every page and sheet page (Close is the one plain control).
     "app/WorkspaceHeader.tsx": /<FloatingButton \{\.\.\.controlProps\}>/,
-    // The chat and crew bars (identity pill, Scan QR / New chat / More, crew
+    // The chat and crew bars (identity pill, bell / New chat / More, crew
     // options).
     "features/assistant/AssistantScreen.tsx": /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact=\{quickRail\}\s+floating/,
     "features/groups/GroupChatScreen.tsx": /floating\s*>\s*<MoreHorizontal/,
@@ -222,7 +222,7 @@ test("header buttons, the identity pill and both rail capsules resolve to the sa
       );
     };
     const surfaces = {
-      // ☰ / Back, More, Scan QR, New chat, the bell, crew options.
+      // ☰ / Back, More, New chat, the bell, crew options.
       headerButton: surfaceOf(ui.FloatingButton({ children: "Icon" })),
       // The identity pill (its capsule hugs the pill).
       identityPill: surfaceOf(

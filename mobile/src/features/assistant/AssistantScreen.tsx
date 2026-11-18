@@ -38,10 +38,7 @@ import { newAssistantChatParams } from "../../app/assistantChatParams";
 import { assistantDraftKey, assistantDraftStore } from "./assistantDraftStore";
 import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceAgentPicker } from "../../components/workspace/WorkspaceAgentPicker";
-import {
-  ChatHeaderActions,
-  type ChatHeaderLayout,
-} from "./ChatHeaderActions";
+import { ChatHeaderActions } from "./ChatHeaderActions";
 import { workspaceSidebarLayout } from "../../components/workspace/workspacePushState";
 import { NotificationBell } from "../notifications/NotificationBell";
 import {
@@ -100,7 +97,6 @@ import {
   WorkspaceHeaderVisibility,
 } from "../../app/WorkspaceHeader";
 import {
-  openScannerSheetAction,
   openWorkspaceSheetAction,
   openWorkspacePageAction,
   workspaceNavigateAction,
@@ -278,7 +274,6 @@ export function AssistantScreen({
   // The Duo's rail (folded or unfolded) carries New chat, Notifications, Scan
   // QR and Recent chats, and this chat's bar controls (it has no bar there).
   const quickRail = useContext(WorkspaceQuickRailContext);
-  const headerLayout: ChatHeaderLayout = narrowHeader ? "narrow" : "wide";
   const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
@@ -913,30 +908,22 @@ export function AssistantScreen({
       navigation.dispatch(workspaceNavigateAction("AccountSettings")),
     );
   }
-  function openScanner() {
-    afterPickerDismissal(() => navigation.dispatch(openScannerSheetAction()));
-  }
 
   const headerHandlers = useRef({
     newChat,
     openOptions: openChatOptions,
     openNotifications,
-    openScanner,
   });
   headerHandlers.current = {
     newChat,
     openOptions: openChatOptions,
     openNotifications,
-    openScanner,
   };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <ChatHeaderActions
-          layout={headerLayout}
-          scanDisabled={headerDisabled}
           newChatDisabled={newChatDisabled}
-          onScanQr={() => headerHandlers.current.openScanner()}
           onNewChat={() => headerHandlers.current.newChat()}
           onOptions={() => headerHandlers.current.openOptions()}
           notifications={
@@ -996,7 +983,6 @@ export function AssistantScreen({
     bell.unread,
     bell.needsDecision,
     narrowHeader,
-    headerLayout,
     t,
   ]);
 
