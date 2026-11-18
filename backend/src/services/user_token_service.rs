@@ -3728,50 +3728,55 @@ async fn transition_legacy_keys_from_stored_token_state(
 
 /// Atomically claim the currently active provider token by its observed `_id`.
 /// A callback replacement receives a new `_id` and cannot be captured by this claim.
+#[cfg(test)]
 pub async fn claim_provider_token_by_id(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
 ) -> AppResult<Option<UserProviderToken>> {
-    claim_provider_token_by_id_with_expected_state_version(db, user_id, token_id, None).await
+    let context = (db, user_id, token_id);
+    super::transaction_service::run_db_only(db, &context, |tx, &(db, user_id, token_id)| {
+        Box::pin(claim_provider_token_in_session(
+            db, user_id, token_id, None, tx,
+        ))
+    })
+    .await
 }
 
-/// Atomically claim a provider token while optionally fencing the write on
-/// authorization evidence read by the browser.
-pub async fn claim_provider_token_by_id_with_expected_state_version(
+pub(super) async fn claim_provider_token_in_session(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
     expected_state_version: Option<i64>,
+    tx: &mut mongodb::ClientSession,
 ) -> AppResult<Option<UserProviderToken>> {
-    let context = (db, user_id, token_id, expected_state_version);
-    super::transaction_service::run_db_only(db, &context, |tx, context| {
-        let &(db, user_id, token_id, expected_state_version) = context;
-        Box::pin(async move {
-            let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
-            if let Some(expected) = expected_state_version {
-                let current = collection.find_one(doc! {"_id":token_id,"user_id":user_id})
-                    .session(&mut *tx).await?;
-                if current.is_some_and(|token| token.state_version != expected) {
-                    return Err(AppError::Conflict(
-                        "the provider token changed since this action was prepared".into(),
-                    ));
-                }
-            }
-            let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
-            if let Some(expected) = expected_state_version {
-                filter.insert("$expr", doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]});
-            }
-            let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
+    let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
+    if let Some(expected) = expected_state_version {
+        let current = collection
+            .find_one(doc! {"_id":token_id,"user_id":user_id})
+            .session(&mut *tx)
+            .await?;
+        if current.is_some_and(|token| token.state_version != expected) {
+            return Err(AppError::Conflict(
+                "the provider token changed since this action was prepared".into(),
+            ));
+        }
+    }
+    let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
+    if let Some(expected) = expected_state_version {
+        filter.insert(
+            "$expr",
+            doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]},
+        );
+    }
+    let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
                 "status":"revoked","api_key_encrypted":bson::Bson::Null,
                 "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
                 "secret_context_versions":{"$literal":{}},
                 "updated_at":bson::DateTime::from_chrono(Utc::now()),
                 "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
             }}]).return_document(ReturnDocument::Before).session(&mut *tx).await?;
-            Ok(claimed)
-        })
-    }).await
+    Ok(claimed)
 }
 
 fn build_user_token_summary(
