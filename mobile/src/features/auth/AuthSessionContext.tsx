@@ -258,25 +258,18 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
       // Gate: if an allowlist is configured, verify the user's email before proceeding
       if (ALLOWED_EMAILS.length > 0) {
+        let profile: Awaited<ReturnType<typeof getCurrentUserProfileRequest>>;
         try {
-          const profile = await getCurrentUserProfileRequest();
-          if (!isEmailAllowed(profile.email)) {
-            if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-            throw new Error(
-              t(
-                "Access restricted. Your account is not authorized for this app.",
-              ),
-            );
-          }
-        } catch (error) {
-          // Re-throw allowlist rejections; swallow profile-fetch failures only
-          if (error instanceof Error && error.message.includes("Access restricted")) {
-            throw error;
-          }
+          profile = await getCurrentUserProfileRequest();
+        } catch {
           if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
-          throw new Error(
-            t("Unable to verify account access. Please try again."),
-          );
+          throw new Error(t("Unable to verify account access. Please try again."));
+        }
+        // A policy denial is a successful verification. Keep it outside the
+        // request catch so localized copy never participates in control flow.
+        if (!isEmailAllowed(profile.email)) {
+          if (authSessionGeneration() === expectedGeneration) await clearStoredAuthSession();
+          throw new Error(t("Access restricted. Your account is not authorized for this app."));
         }
       }
 

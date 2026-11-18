@@ -3,33 +3,37 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createSessionCoordinator, SESSION_RECORD_KEY } from '../../lib/auth/sessionCoordinator';
 import { hookHarness, deferred } from '../assistant/assistantHookTestHarness';
-function setup(initialPending?: Promise<unknown>) {
+import { translate } from '../../i18n/translate';
+import type { Language } from '../../i18n/language';
+function setup(initialPending?: Promise<unknown>, config?: {language: Language; profile: 'denied' | 'unavailable'}) {
   let generation = 0, failures = 100, reads = 0, now = 0;
   let pending = initialPending;
   const timers = new Map<number, { due: number; run: () => void }>(); let next = 0;
   const listeners = new Set<(value: string) => void>();
   const appState = { currentState: 'active', addEventListener: (_: string, fn: (v: string) => void) => { listeners.add(fn); return {remove: () => listeners.delete(fn)}; } };
   const session = { accessToken: 'token', refreshToken: 'refresh', userId: 'account' };
+  let stored: typeof session | null = session;
   const h = hookHarness<any>({
+    ...(config ? {'../../i18n/LanguageProvider': {useAppLanguage: () => ({language:config.language,t:(phrase:string)=>translate(config.language,phrase)})}} : {}),
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type, props})},
     'react-native': {AppState: appState},
     '@tanstack/react-query': {useQueryClient: () => client},
     '../../lib/auth/sessionStore': {authSessionGeneration: () => generation,
-      loadStoredAuthSession: async () => { reads++; if (pending) await pending; if (failures-- > 0) throw new Error('locked'); return session; },
-      persistAuthSession: async () => {generation++;}, clearStoredAuthSession: async () => {generation++;}},
+      loadStoredAuthSession: async () => { reads++; if (pending) await pending; if (failures-- > 0) throw new Error('locked'); return stored; },
+      persistAuthSession: async () => {generation++;stored=session;}, clearStoredAuthSession: async () => {generation++;stored=null;}},
     '../../lib/auth/authAccount': {getAuthAccountId: () => null, setAuthAccountId: () => {}},
     '../../lib/auth/authEpoch': {advanceAuthEpoch: () => {}},
     '../../lib/notifications/pushNotifications': {capturePushLogout: async () => ({}), activatePushAfterLogin: async () => {}, deactivatePushOnLogout: async () => {}},
     '../../lib/notifications/approvalRefreshSignal': {clearPendingApprovalRefreshSignal: () => {}},
-    '../../lib/api/http': {refreshAccessTokenIfNeeded: async () => {}, setSessionInvalidationListener: () => {}},
-    '../../lib/env': {ALLOWED_EMAILS: [], isEmailAllowed: () => true},
+    '../../lib/api/http': {getCurrentUserProfileRequest: async () => {if(config?.profile==='unavailable')throw Error('offline');return {email:'denied@example.test'};}, refreshAccessTokenIfNeeded: async () => {}, setSessionInvalidationListener: () => {}},
+    '../../lib/env': {ALLOWED_EMAILS: config ? ['allowed@example.test'] : [], isEmailAllowed: () => !config},
     '../../lib/telemetry': Object.fromEntries(['reset','identify','shutdownTelemetry','initTelemetry','readExpoTelemetryConfig'].map(key => [key, () => {}])),
     '../../lib/consent': {useMobileConsent: () => ({enabled: false, isHydrated: true})},
   }, {__DEV__: false, setTimeout: (run: () => void, delay: number) => {const id=++next; timers.set(id,{run,due:now+delay}); return id;}, clearTimeout: (id: number) => timers.delete(id)});
   const client = {clear: () => {}, cancelQueries: async () => {}};
   const {AuthSessionProvider} = h.load(fileURLToPath(new URL('./AuthSessionContext.tsx', import.meta.url))) as any;
   h.mount(() => AuthSessionProvider({children: null}));
-  return { h, value: () => h.value().props.value, reads: () => reads, recover: () => {failures=0;}, hold: (p: Promise<unknown>) => {pending=p;},
+  return { h, stored: () => stored, value: () => h.value().props.value, reads: () => reads, recover: () => {failures=0;}, hold: (p: Promise<unknown>) => {pending=p;},
     foreground: () => {appState.currentState='active'; for(const fn of [...listeners]) fn('active');},
     background: () => {appState.currentState='background'; for(const fn of [...listeners]) fn('background');},
     advance: async (ms: number) => {now+=ms; for(const [id,timer] of [...timers]) if(timer.due<=now) {timers.delete(id); timer.run();} await h.settle();} };
@@ -101,4 +105,21 @@ test('M2622-03 durable sign-out retries a failed tombstone without waiting for p
     assert.equal(await createSessionCoordinator(storage,()=>{}).load(),null);
     assert.ok(!values.has(SESSION_RECORD_KEY) || JSON.parse(values.get(SESSION_RECORD_KEY)!).session===null);
   } finally {push.resolve(); h.unmount();}
+});
+
+
+test('M2622-07 allowlist denial and profile outage remain distinct in every app language', async () => {
+  for(const language of ['en','zh-CN','zh-TW'] as const) {
+    for(const profile of ['denied','unavailable'] as const) {
+      const e=setup(undefined,{language,profile});
+      try {
+        await assert.rejects(e.value().signInWithSession({accessToken:'new',userId:'new'}),(error:any)=>{
+          assert.equal(error.message,translate(language,profile==='denied'?'Access restricted. Your account is not authorized for this app.':'Unable to verify account access. Please try again.'));
+          return true;
+        });
+        assert.equal(e.stored(),null,'both denied and unverifiable credentials must be cleared');
+        await e.h.settle();assert.equal(e.value().isAuthenticated,false);
+      } finally {e.h.unmount();}
+    }
+  }
 });
