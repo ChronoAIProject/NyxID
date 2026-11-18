@@ -271,3 +271,32 @@ for (const failure of ["invalidDraft", "draftError", "adoptError"] as const) {
     expect(fixture.pageErrors).toEqual([]);
   });
 }
+
+
+test("a revision conflict refreshes the draft and requires a new acknowledgement", async ({ page }) => {
+  const fixture = await installSetupFixture(page);
+  await page.goto("/onboarding/setups");
+  await selectChat(page);
+  await page.getByRole("checkbox", { name: reviewText }).check();
+  fixture.drafts = [platformSetup({ revision: 4 })];
+  await adopt(page).click();
+  await expect(page.getByText("Anonymous draft expired or changed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Telegram cafe · revision 4", { exact: true })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: reviewText })).not.toBeChecked();
+  await expect(adopt(page)).toBeDisabled();
+  expect(fixture.writes.map((write) => write.body)).toEqual([
+    { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+  ]);
+  expect(fixture.saved).toHaveLength(0);
+  await page.getByRole("checkbox", { name: reviewText }).check();
+  await adopt(page).click();
+  await expect(page.getByText("No unowned drafts remain for this chat.", { exact: true })).toBeVisible();
+  expect(fixture.writes.map((write) => write.body)).toEqual([
+    { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+    { revision: 4, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+  ]);
+  expect(fixture.saved).toHaveLength(1);
+  await singleModule(page, 0);
+  expect(fixture.unexpected).toEqual([]);
+  expect(fixture.pageErrors).toEqual([]);
+});

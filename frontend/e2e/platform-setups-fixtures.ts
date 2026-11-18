@@ -91,18 +91,22 @@ export async function installSetupFixture(page: Page) {
       (item) => path === `/onboarding/setups/${item.id}/adopt`,
     );
     if (method === "POST" && draft) {
+      const body = request.postDataJSON();
       await state.adoptionGate;
+      const binding = state.bindings.find((row) => row.id === body.binding_id);
+      if (!binding || binding.generation !== body.binding_generation)
+        return route.fulfill({ status: 403, json: { error: "forbidden", message: "Binding is unavailable" } });
+      const current = state.drafts.find((row) => row.id === draft.id);
+      if (!current || current.revision !== body.revision)
+        return route.fulfill({ status: 409, json: { error: "conflict", message: "Anonymous draft expired or changed" } });
       if (state.adoptError)
         return route.fulfill({
-          status: 409,
-          json: {
-            error: "conflict",
-            message: "Draft changed. Review it again.",
-          },
+          status: 503,
+          json: { error: "unavailable", message: "Draft changed. Review it again." },
         });
-      state.saved.push(draft);
-      state.drafts = state.drafts.filter((item) => item.id !== draft.id);
-      return route.fulfill({ json: draft });
+      state.saved.push(current);
+      state.drafts = state.drafts.filter((item) => item.id !== current.id);
+      return route.fulfill({ json: current });
     }
     state.unexpected.push(`${method} ${path}`);
     return route.fulfill({

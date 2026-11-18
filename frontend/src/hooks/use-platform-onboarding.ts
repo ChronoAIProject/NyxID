@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiClient } from "@/lib/api-client";
+import { isDefinitiveDraftError } from "@/lib/platform-draft-errors";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 import {
@@ -530,6 +531,16 @@ export function useAdoptAnonymousDraft(binding: {
           authorityGuard: actorGuard(actor),
         }),
       ),
+    // Hook callbacks run even after the review observer unmounts. Keep recovery
+    // scoped to the exact chat/generation and preserve the original refusal if
+    // refreshing fails; the owner can retry that read explicitly.
+    onError: (error) => {
+      if (isDefinitiveDraftError(error, "adopt"))
+        return client.invalidateQueries({
+          queryKey: ["onboarding", actor, "anonymous", binding.id, binding.generation],
+          exact: true,
+        }).catch(() => undefined);
+    },
     onSuccess: () =>
       client.invalidateQueries({ queryKey: ["onboarding", actor] }),
   });

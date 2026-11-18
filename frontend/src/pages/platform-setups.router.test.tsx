@@ -62,6 +62,7 @@ async function openSetups(setupsGate = Promise.resolve()) {
     bindings: [{ ...setupBinding }],
     writes: [] as string[],
     adoptionBodies: [] as unknown[],
+    draftReads: [] as string[],
     drafts: [platformSetup()],
     saved: [] as ReturnType<typeof platformSetup>[],
     adoptionGate: Promise.resolve(),
@@ -94,6 +95,7 @@ async function openSetups(setupsGate = Promise.resolve()) {
         );
       }
       if (path === "/onboarding/setups") await setupsGate;
+      if (path === "/onboarding/anonymous-drafts") fixture.draftReads.push(input);
       const draft =
         fixture.drafts.find(
           (row) => path === `/onboarding/setups/${row.id}/adopt`,
@@ -102,20 +104,31 @@ async function openSetups(setupsGate = Promise.resolve()) {
           (row) => path === `/onboarding/setups/${row.id}/adopt`,
         );
       if (draft) {
-        fixture.adoptionBodies.push(JSON.parse(init!.body as string));
+        const body = JSON.parse(init!.body as string);
+        fixture.adoptionBodies.push(body);
         await fixture.adoptionGate;
-        if (fixture.adoptionError)
-          return new Response(
-            JSON.stringify({
-              error: "conflict",
-              message: "Draft changed. Review it again.",
-            }),
+        const binding = fixture.bindings.find((row) => row.id === body.binding_id);
+        if (!binding || binding.generation !== body.binding_generation)
+          return Response.json(
+            { error: "forbidden", message: "Binding is unavailable" },
+            { status: 403 },
+          );
+        const current = fixture.drafts.find((row) => row.id === draft.id);
+        const saved = fixture.saved.find((row) => row.id === draft.id);
+        if (!saved && (!current || current.revision !== body.revision))
+          return Response.json(
+            { error: "conflict", message: "Anonymous draft expired or changed" },
             { status: 409 },
           );
-        if (!fixture.saved.some((row) => row.id === draft.id))
-          fixture.saved.push(draft);
-        fixture.drafts = fixture.drafts.filter((row) => row.id !== draft.id);
-        return Response.json(draft);
+        if (fixture.adoptionError)
+          return Response.json(
+            { error: "unavailable", message: "Draft changed. Review it again." },
+            { status: 503 },
+          );
+        const adopted = saved ?? current!;
+        if (!saved) fixture.saved.push(adopted);
+        fixture.drafts = fixture.drafts.filter((row) => row.id !== adopted.id);
+        return Response.json(adopted);
       }
       const responses: Record<string, unknown> = {
         "/users/me": fixture.actor,
@@ -408,7 +421,7 @@ it("settles one rapid adoption, refreshes to empty and requires review for the n
   expect(fixture.saved).toHaveLength(2);
 });
 
-it("keeps the adoption error and reviewed revision available for one explicit retry", async () => {
+it("keeps a transient adoption error and reviewed revision available for one explicit retry", async () => {
   const { fixture } = await openSetups();
   fixture.adoptionError = true;
   const user = await reviewDraft();
@@ -547,5 +560,32 @@ it("requires a fresh explicit review to resubmit the same draft after a pending 
     await expectSettled();
   }
   await screen.findByText("No unowned drafts remain for this chat.");
+  expect(fixture.saved).toHaveLength(1);
+});
+
+
+it("refetches a rejected revision and requires fresh review before adopting it", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  fixture.drafts = [platformSetup({ revision: 4 })];
+  await user.click(adoptionButton());
+  await screen.findByText("Anonymous draft expired or changed");
+  await expectSettled();
+  await screen.findByText("Telegram cafe · revision 4");
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(adoptionButton()).toBeDisabled();
+  expect(fixture.adoptionBodies).toEqual([
+    { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+  ]);
+  expect(fixture.draftReads).toHaveLength(2);
+  expect(new URL(fixture.draftReads[1], "http://localhost").searchParams.get("binding_id")).toBe(setupBinding.id);
+  expect(fixture.saved).toHaveLength(0);
+  expectSingleModule();
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(adoptionButton());
+  await screen.findByText("No unowned drafts remain for this chat.");
+  await expectSettled();
+  expect(fixture.adoptionBodies[1]).toEqual({ revision: 4, binding_id: setupBinding.id, binding_generation: setupBinding.generation });
+  expect(fixture.writes).toHaveLength(2);
   expect(fixture.saved).toHaveLength(1);
 });

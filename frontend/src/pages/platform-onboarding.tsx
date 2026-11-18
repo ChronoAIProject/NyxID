@@ -4,6 +4,7 @@ import { getFormattingLocale } from "@/lib/formatting-locale";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
+import { isDefinitiveDraftError } from "@/lib/platform-draft-errors";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CopyableField } from "@/components/shared/copyable-field";
 import {
@@ -503,8 +504,16 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               // its second click must not silently retry the reviewed request.
               if (event.detail > 1 || !review || adoptionPending.current) return;
               adoptionPending.current = true;
-              mutation.mutate(review, {
+              const submitted = review;
+              const clearSubmittedReview = () => setReview((current) =>
+                current?.id === submitted.id && current.revision === submitted.revision
+                  ? null : current,
+              );
+              mutation.mutate(submitted, {
                 onSuccess: () => setReview(null),
+                onError: (error) => {
+                  if (isDefinitiveDraftError(error, "adopt")) clearSubmittedReview();
+                },
                 onSettled: () => {
                   adoptionPending.current = false;
                 },
