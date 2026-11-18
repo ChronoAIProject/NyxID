@@ -484,6 +484,12 @@ export function useAdminGuideMutation() {
   });
 }
 
+// A denial is successful query data so TanStack replaces private cached facts.
+// Later transient failures retain this marker, never the discarded draft list.
+export type AnonymousDraftsResult =
+  | { status: "ready"; drafts: PlatformSetup[] }
+  | { status: "denied" };
+
 export function useAnonymousDrafts(binding?: {
   id: string;
   generation: number;
@@ -500,15 +506,20 @@ export function useAnonymousDrafts(binding?: {
     enabled: !!actor && !!binding,
     gcTime: 0,
     retry: false,
-    queryFn: async () =>
-      z.array(setupSchema).parse(
-        await apiClient(
-          `/onboarding/anonymous-drafts?binding_id=${binding!.id}&binding_generation=${binding!.generation}`,
-          {
-            authorityGuard: actorGuard(actor),
-          },
-        ),
-      ),
+    queryFn: async (): Promise<AnonymousDraftsResult> => {
+      try {
+        const drafts = z.array(setupSchema).parse(
+          await apiClient(
+            `/onboarding/anonymous-drafts?binding_id=${binding!.id}&binding_generation=${binding!.generation}`,
+            { authorityGuard: actorGuard(actor) },
+          ),
+        );
+        return { status: "ready", drafts };
+      } catch (error) {
+        if (isDefinitiveDraftError(error, "read")) return { status: "denied" };
+        throw error;
+      }
+    },
   });
 }
 

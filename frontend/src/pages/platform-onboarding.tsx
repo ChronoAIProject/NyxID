@@ -453,16 +453,23 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
   const mutation = useAdoptAnonymousDraft(binding);
   const [review, setReview] = useState<PlatformSetup | null>(null);
   const adoptionPending = useRef(false);
+  const denied = query.data?.status === "denied";
+  const drafts = query.data?.status === "ready" ? query.data.drafts : undefined;
+  // Drop consent before committing the denial view, including on a fast retry.
+  if (denied && review) setReview(null);
   return (
     <div className="space-y-3">
       {query.isPending && (
         <p role="status">{translateUi("Loading drafts from this exact chat…")}</p>
       )}
-      {query.error && (
-        <ErrorBanner message={translateUi("Could not load drafts for this chat. Refresh your binding before trying again.")} />
+      {(query.error || denied) && (
+        <ErrorBanner
+          message={translateUi("Could not load drafts for this chat. Refresh your binding before trying again.")}
+          onRetry={() => { void query.refetch(); }}
+        />
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
-      {query.data?.map((draft) => (
+      {drafts?.map((draft) => (
         <div key={draft.id} className="space-y-2 rounded-lg border p-3">
           <p className="font-medium">
             {draft.facts.name}{translateUi(" · revision ")}{draft.revision}
@@ -522,7 +529,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
           >{translateUi("Adopt reviewed draft")}</Button>
         </div>
       ))}
-      {query.data?.length === 0 && (
+      {drafts?.length === 0 && (
         <p>{translateUi("No unowned drafts remain for this chat.")}</p>
       )}
     </div>

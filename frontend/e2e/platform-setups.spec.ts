@@ -3,6 +3,7 @@ import { installSetupFixture } from "./platform-setups-fixtures";
 import {
   platformSetup,
   setupBinding,
+  setupActor,
 } from "../src/test/platform-setup-fixture";
 
 const moduleTitle = "Bring a Telegram draft into your account";
@@ -297,6 +298,49 @@ test("a revision conflict refreshes the draft and requires a new acknowledgement
   ]);
   expect(fixture.saved).toHaveLength(1);
   await singleModule(page, 0);
+  expect(fixture.unexpected).toEqual([]);
+  expect(fixture.pageErrors).toEqual([]);
+});
+
+
+test("a denied draft read discards facts through transient failure and authorized recovery", async ({ page }) => {
+  const fixture = await installSetupFixture(page);
+  const queryKey = ["onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation];
+  await page.goto("/onboarding/setups");
+  await selectChat(page);
+  await page.getByRole("checkbox", { name: reviewText }).check();
+  fixture.draftErrorStatus = 403;
+  await page.evaluate(async (key) => {
+    const client = (window as unknown as { __nyxQueryClient: import("@tanstack/react-query").QueryClient }).__nyxQueryClient;
+    await client.invalidateQueries({ queryKey: key, exact: true });
+  }, queryKey);
+  const expectNoPrivateDraft = async () => {
+    await expect(page.getByText("Could not load drafts for this chat. Refresh your binding before trying again.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Telegram cafe · revision 3", { exact: true })).toHaveCount(0);
+    await singleModule(page, 0);
+    const cache = await page.evaluate((key) => {
+      const client = (window as unknown as { __nyxQueryClient: import("@tanstack/react-query").QueryClient }).__nyxQueryClient;
+      return JSON.stringify(client.getQueryData(key));
+    }, queryKey);
+    expect(cache).not.toContain('"facts"');
+    expect(cache).not.toContain("Telegram cafe");
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.bindings).toHaveLength(1);
+  };
+  await expectNoPrivateDraft();
+  fixture.draftErrorStatus = 503;
+  const failedRead = page.waitForResponse((response) => response.url().includes("/onboarding/anonymous-drafts") && response.status() === 503);
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await failedRead;
+  await expectNoPrivateDraft();
+  fixture.draftErrorStatus = 0;
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByText("Telegram cafe · revision 3", { exact: true })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: reviewText })).not.toBeChecked();
+  await expect(adopt(page)).toBeDisabled();
+  await page.getByRole("checkbox", { name: reviewText }).check();
+  await expect(adopt(page)).toBeEnabled();
+  expect(fixture.writes).toEqual([]);
   expect(fixture.unexpected).toEqual([]);
   expect(fixture.pageErrors).toEqual([]);
 });

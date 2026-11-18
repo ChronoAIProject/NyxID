@@ -9,7 +9,7 @@ import {
 } from "@/schemas/platform-onboarding";
 const state = vi.hoisted(() => ({ drafts: [] as unknown[], mutate: vi.fn() }));
 vi.mock("@/hooks/use-platform-onboarding", () => ({
-  useAnonymousDrafts: () => ({ data: state.drafts }),
+  useAnonymousDrafts: () => ({ data: { status: "ready", drafts: state.drafts } }),
   useAdoptAnonymousDraft: () => ({ mutate: state.mutate, isPending: false }),
 }));
 const binding = { id: "binding", generation: 2 } as OwnedBinding;

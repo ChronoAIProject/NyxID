@@ -15,6 +15,7 @@ export async function installSetupFixture(page: Page) {
     saved: [] as PlatformSetup[],
     invalidDraft: false,
     draftError: false,
+    draftErrorStatus: 0,
     adoptError: false,
     adoptionGate: Promise.resolve(),
     writes: [] as { path: string; method: string; body: unknown }[],
@@ -71,6 +72,8 @@ export async function installSetupFixture(page: Page) {
       if (path === "/onboarding/bindings")
         return route.fulfill({ json: state.bindings });
       if (path === "/onboarding/anonymous-drafts") {
+        if (state.draftErrorStatus)
+          return route.fulfill({ status: state.draftErrorStatus, json: { error: "unavailable", message: "Binding is unavailable" } });
         const binding = state.bindings.find(
           (item) =>
             item.id === url.searchParams.get("binding_id") &&
