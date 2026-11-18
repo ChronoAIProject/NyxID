@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { AppState } from "react-native";
 import {
   useMutation,
+  useIsMutating,
   useQuery,
   useQueryClient,
   type QueryClient,
@@ -166,7 +167,9 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     state: query.data ?? QUICK_ACCESS_DEFAULT_STATE,
     loaded: query.data !== undefined,
     loadError: query.error,
-    saving: mutation.isPending,
+    // Account-wide pending state survives closing/reopening the editor. Its
+    // replacement observer must not edit over an older optimistic response.
+    saving: useIsMutating({ mutationKey: key, exact: true }) > 0,
     saveError: mutation.error,
     save: (items: readonly QuickAccessItem[], complete?: () => void) => mutation.mutate({ items, authority: captureAuthority() }, { onSettled: complete }),
     reset: (complete?: () => void) => mutation.mutate({ reset: true, authority: captureAuthority() }, { onSettled: complete }),

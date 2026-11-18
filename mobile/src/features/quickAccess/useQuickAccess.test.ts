@@ -229,6 +229,7 @@ test("the hook reads one account's list (default until loaded), saves and resets
   let data: QuickAccessState | undefined;
   const module = load({
     "@tanstack/react-query": {
+      useIsMutating: () => 0,
       useQueryClient: () => new QueryClient(),
       useQuery: (options: any) => {
         queries.push(options);
@@ -404,6 +405,7 @@ test("the hook's foreground listener refreshes the mounted account's failed list
   const module = load(
     {
       "@tanstack/react-query": {
+        useIsMutating: () => 0,
         useQueryClient: () => client,
         useQuery: () => ({ data: undefined, error: null, refetch: () => {} }),
         useMutation: () => ({
@@ -444,7 +446,7 @@ test('P1-4 queued actions cannot dispatch or repopulate cache after account, epo
       '../../lib/auth/authAccount':{getAuthAccountId:()=>account},
       '../../lib/auth/sessionStore':{authSessionGeneration:()=>generation},
       '../../lib/api/quickAccessApi':{quickAccessApi:{save:async()=>{requests.push(account);return gate.promise;},reset:async()=>{requests.push(account);return saved;}}},
-      '@tanstack/react-query':{useQueryClient:()=>client,useQuery:()=>({data:saved}),useMutation:(options:any)=>{const observer=new MutationObserver<unknown, unknown, unknown>(client,options);observers.push(observer);return {mutate:(v:unknown)=>{const p=observer.mutate(v);p.catch(()=>{});pending.push(p);},reset:()=>{}};}}
+      '@tanstack/react-query':{useIsMutating:(filters:any)=>client.isMutating(filters),useQueryClient:()=>client,useQuery:()=>({data:saved}),useMutation:(options:any)=>{const observer=new MutationObserver<unknown, unknown, unknown>(client,options);observers.push(observer);return {mutate:(v:unknown)=>{const p=observer.mutate(v);p.catch(()=>{});pending.push(p);},reset:()=>{}};}}
     });
     const module=h.load(fileURLToPath(new URL('./useQuickAccess.ts',import.meta.url))) as typeof import('./useQuickAccess');
     h.mount(()=>module.useQuickAccess());h.value().save(saved.items);h.value().reset();
@@ -457,4 +459,34 @@ test('P1-4 queued actions cannot dispatch or repopulate cache after account, epo
     assert.equal(client.getQueryData(module.quickAccessKey(7)),undefined,'late callbacks must never recreate previous-account cache');
     h.unmount();client.clear();
   }
+});
+
+test('M2622-05 a remounted editor observes the outstanding account save until settlement', async () => {
+  const client = new QueryClient();
+  const gate = deferred<QuickAccessState>();
+  const requests: unknown[] = [];
+  const module = load({
+    '../../lib/api/quickAccessApi': {quickAccessApi: {save: async (items: unknown) => {requests.push(items);return gate.promise;}}},
+    '@tanstack/react-query': {
+      useQueryClient: () => client,
+      useQuery: () => ({data: client.getQueryData(['account', 'quick-access', 7])}),
+      useIsMutating: (filters: any) => client.isMutating(filters),
+      useMutation: (options: any) => {
+        const observer = new MutationObserver<unknown, unknown, unknown>(client, options);
+        return {...observer.getCurrentResult(), mutate: (value: unknown) => {void observer.mutate(value).catch(() => {});}, reset: () => observer.reset()};
+      },
+    },
+  });
+  client.setQueryData(module.quickAccessKey(7), saved);
+  try {
+    const firstEditor = module.useQuickAccess();
+    firstEditor.save(saved.items);
+    await new Promise(resolve => setImmediate(resolve));
+    const remountedEditor = module.useQuickAccess();
+    assert.equal(remountedEditor.saving, true, 'a fresh observer cannot bypass an outstanding save');
+    assert.equal(requests.length, 1);
+    gate.resolve(saved);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(module.useQuickAccess().saving, false, 'editing resumes when the account save settles');
+  } finally {gate.resolve(saved);client.clear();}
 });

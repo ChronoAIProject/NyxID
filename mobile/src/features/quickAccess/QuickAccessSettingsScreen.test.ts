@@ -236,7 +236,7 @@ test('M2622-05 three accepted UI edits survive staggered server responses; pendi
     '../../lib/api/quickAccessApi':{quickAccessApi:{save:async(items:any)=>{
       requests.push(items);await new Promise<void>(r=>gates.push(r));server={customized:true,items};return server;
     },reset:async()=>{requests.push('reset');return server;}}},
-    '@tanstack/react-query':{useQueryClient:()=>client,useQuery:()=>({data:client.getQueryData(key)}),useMutation:(opts:any)=>{
+    '@tanstack/react-query':{useIsMutating:(filters:any)=>client.isMutating(filters),useQueryClient:()=>client,useQuery:()=>({data:client.getQueryData(key)}),useMutation:(opts:any)=>{
       if(!observer){observer=new MutationObserver(client,opts);observer.subscribe(()=>{});}
       return {...observer.getCurrentResult(),mutate:(v:unknown, callbacks:any)=>{void observer.mutate(v,callbacks).catch(()=>{});},reset:()=>observer.reset()};
     }},
