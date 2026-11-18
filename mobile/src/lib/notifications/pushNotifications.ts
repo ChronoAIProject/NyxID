@@ -811,7 +811,7 @@ export async function capturePushLogout(accessToken?: string): Promise<PushLogou
 }
 
 export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Promise<boolean> {
-  if (captured) pushOperationRevision++;
+  pushOperationRevision++;
   const logoutGuard = pushAccountGuard();
   if (captured) {
     // Fence a register already in flight. Persist recovery before any network
@@ -827,7 +827,7 @@ export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Prom
   let queueTimedOut = false;
   const queuedUnbind = enqueuePushOperation(async () => {
     if (queueTimedOut) return false;
-    const current = captured ? logoutGuard : pushAccountGuard();
+    const current = logoutGuard;
     if (!current()) return false;
     const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
     // A first registration may fail after the server accepted it. Keep the
@@ -869,11 +869,10 @@ export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Prom
     );
   } catch {
     queueTimedOut = true;
-    // Fence late register/rebind completions before writing recovery state.
-    // Keep the queue ordered: a later account rebind runs after that request.
-    pushOperationRevision++;
+    // The start-of-logout revision already fenced earlier work. Recovery must
+    // keep that owner: a replacement account may already be queued behind us.
     try {
-      unbound = await failPushUnbind();
+      unbound = await failPushUnbind(logoutGuard);
     } catch {
       // Local cleanup failures must not prevent clearing the auth session.
       if (__DEV__) console.warn("[push] logout recovery could not be persisted");
@@ -882,7 +881,7 @@ export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Prom
   }
   // Each cleanup is independent: a badge failure must not retain tray entries
   // or a cached registration that could skip the next account's bind.
-  await Promise.allSettled([
+  if (logoutGuard()) await Promise.allSettled([
     withPushTimeout(
       () => Notifications.dismissAllNotificationsAsync(),
       PUSH_NATIVE_UNREGISTER_TIMEOUT_MS,
