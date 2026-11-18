@@ -124,6 +124,9 @@
   "pnpm": {
     "overrides": {
       "@react-navigation/bottom-tabs>@react-navigation/elements": "2.9.14"
+    },
+    "patchedDependencies": {
+      "expo-secure-store@55.0.12": "patches/expo-secure-store@55.0.12.patch"
     }
   }
 }
