@@ -798,21 +798,46 @@ export async function clearPendingPushSyncSignal(): Promise<void> {
   }
 }
 
-export async function deactivatePushOnLogout(): Promise<boolean> {
+type PushLogoutCapture = { accessToken?: string; registration: PendingPushUnbind | null };
+
+export async function capturePushLogout(accessToken?: string): Promise<PushLogoutCapture> {
+  const token = lastKnownNativeToken?.token ?? await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+  const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
+  const provider = lastKnownNativeToken?.provider ?? (platform === "ios" || platform === "android" ? resolveProvider(platform) : null);
+  return { accessToken, registration: token && provider && (platform === "ios" || platform === "android")
+    ? { token, platform, provider, createdAt: new Date().toISOString(), nativeUnregisterPending: true }
+    : await loadPendingUnbind() };
+}
+
+export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Promise<boolean> {
+  if (captured) pushOperationRevision++;
+  const logoutGuard = pushAccountGuard();
+  if (captured) {
+    // Fence a register already in flight. Persist recovery before any network
+    // wait so a cold start suppresses stale-account notification delivery.
+    if (captured.registration) {
+      try { await setPendingUnbind(captured.registration); } catch (error) {
+        // Even a recovery-record fault must try to invalidate native delivery.
+        if (logoutGuard()) await unregisterNativePush();
+        throw error;
+      }
+    }
+  }
   let queueTimedOut = false;
   const queuedUnbind = enqueuePushOperation(async () => {
     if (queueTimedOut) return false;
-    const current = pushAccountGuard();
+    const current = captured ? logoutGuard : pushAccountGuard();
+    if (!current()) return false;
     const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
     // A first registration may fail after the server accepted it. Keep the
     // token in memory until logout reaches this queue so the authenticated
     // DELETE still has a chance to detach that uncertain registration.
-    const token = lastKnownNativeToken?.token ?? storedToken;
-    const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
+    const token = captured?.registration?.token ?? lastKnownNativeToken?.token ?? storedToken;
+    const platform = captured?.registration?.platform ?? lastKnownNativeToken?.platform ?? resolvePlatform();
     const pending = await loadPendingUnbind();
     if (!current()) return false;
     const provider =
-      lastKnownNativeToken?.provider ??
+      captured?.registration?.provider ?? lastKnownNativeToken?.provider ??
       (platform === "ios" || platform === "android"
         ? resolveProvider(platform)
         : null);
@@ -823,7 +848,8 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
       return !pending;
     }
     try {
-      await mobileApi.unregisterPushToken({ token, provider, platform });
+      if (captured?.accessToken) await mobileApi.unregisterPushToken({ token, provider, platform }, captured.accessToken);
+      else await mobileApi.unregisterPushToken({ token, provider, platform });
       if (!current()) return false;
       if (!pending || pending.token === token) await clearPendingUnbind();
       await clearLocalPushRegistrationState();

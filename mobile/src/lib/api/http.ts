@@ -813,9 +813,11 @@ export async function rotatePushTokenRequest(
 }
 
 export async function unregisterPushTokenRequest(
-  payload: PushTokenRegisterRequest
+  payload: PushTokenRegisterRequest,
+  capturedAccessToken?: string,
 ): Promise<void> {
   await requestJson<MessageResponse>("/notifications/devices/current", {
+    ...(capturedAccessToken ? { requiresAuth: false, headers: { Authorization: `Bearer ${capturedAccessToken}` } } : {}),
     method: "DELETE",
     body: buildPushDevicePayload(payload),
   });

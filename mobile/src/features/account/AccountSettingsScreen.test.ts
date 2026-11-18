@@ -276,3 +276,25 @@ test("Quick access (the Duo rail's list) is offered only where the window shows 
   assert.equal(JSON.stringify(duo.pushes.at(-1)), '["QuickAccessSettings"]');
   duo.harness.unmount();
 });
+
+
+test('M2622-03 sign-out waits for durability, blocks double taps and offers retry after failure', async () => {
+  let resolve!: () => void, reject!: (reason: unknown) => void, calls = 0;
+  const env = setupSettingsScreen('./AccountSettingsScreen.tsx', 'AccountSettingsScreen', {
+    signOut: () => { calls++; return new Promise<void>((yes, no) => { resolve = yes; reject = no; }); },
+  });
+  try {
+    const confirm = () => { env.row('Sign Out').props.onPress(); return env.alerts.at(-1)!.buttons![1].onPress!; };
+    const press = confirm(); press(); press();
+    await env.harness.settle();
+    assert.equal(calls, 1);
+    assert.equal(env.row('Signing out...').props.disabled, true);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast, null);
+    reject(new Error('disk unavailable')); await env.harness.settle();
+    assert.equal(env.row('Sign Out').props.disabled, false);
+    assert.match(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, /Couldn't sign out.*try again/);
+    confirm()(); resolve(); await env.harness.settle();
+    assert.equal(calls, 2);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, 'You are signed out.');
+  } finally { env.harness.unmount(); }
+});

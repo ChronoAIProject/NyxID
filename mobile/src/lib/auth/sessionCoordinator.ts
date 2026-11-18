@@ -107,8 +107,9 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         // Tombstone first prevents interrupted cleanup resurrecting legacy auth.
         await write(null);
         legacyCleanupComplete = false;
-        await removeLegacy();
-        await storage.deleteItemAsync(SESSION_RECORD_KEY);
+        await removeLegacy().then(() => storage.deleteItemAsync(SESSION_RECORD_KEY)).catch(() => {
+          // The durable tombstone already establishes sign-out. Retry cleanup on load.
+        });
       });
     },
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {

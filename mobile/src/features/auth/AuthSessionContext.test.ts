@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { createSessionCoordinator, SESSION_RECORD_KEY } from '../../lib/auth/sessionCoordinator';
 import { hookHarness, deferred } from '../assistant/assistantHookTestHarness';
 function setup(initialPending?: Promise<unknown>) {
   let generation = 0, failures = 100, reads = 0, now = 0;
@@ -18,7 +19,7 @@ function setup(initialPending?: Promise<unknown>) {
       persistAuthSession: async () => {generation++;}, clearStoredAuthSession: async () => {generation++;}},
     '../../lib/auth/authAccount': {getAuthAccountId: () => null, setAuthAccountId: () => {}},
     '../../lib/auth/authEpoch': {advanceAuthEpoch: () => {}},
-    '../../lib/notifications/pushNotifications': {activatePushAfterLogin: async () => {}, deactivatePushOnLogout: async () => {}},
+    '../../lib/notifications/pushNotifications': {capturePushLogout: async () => ({}), activatePushAfterLogin: async () => {}, deactivatePushOnLogout: async () => {}},
     '../../lib/notifications/approvalRefreshSignal': {clearPendingApprovalRefreshSignal: () => {}},
     '../../lib/api/http': {refreshAccessTokenIfNeeded: async () => {}, setSessionInvalidationListener: () => {}},
     '../../lib/env': {ALLOWED_EMAILS: [], isEmailAllowed: () => true},
@@ -58,4 +59,46 @@ test('P3 pending restore never replaces an explicit login or sign-out', async ()
       assert.equal(e.value().isRestoring,false);
     } finally {e.h.unmount();}
   }
+});
+
+
+test('M2622-03 durable sign-out retries a failed tombstone without waiting for push teardown', async () => {
+  const values = new Map<string, string>(); let fail = false, account: string | null = 'account';
+  const storage = { getItemAsync: async (k: string) => values.get(k) ?? null,
+    setItemAsync: async (k: string, v: string) => { if (fail) throw Error('disk'); values.set(k,v); },
+    deleteItemAsync: async (k: string) => { values.delete(k); } };
+  const coordinator = createSessionCoordinator(storage, () => {});
+  await coordinator.persist({accessToken:'token',refreshToken:'refresh',userId:'account'});
+  const push = deferred<void>(); let teardowns = 0;
+  const client = {clear() {}, cancelQueries: async () => {}};
+  const h = hookHarness<any>({
+    'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type,props})},
+    'react-native': {AppState: {currentState:'active',addEventListener: () => ({remove() {}})}},
+    '@tanstack/react-query': {useQueryClient: () => client},
+    '../../lib/auth/sessionStore': {authSessionGeneration: coordinator.generation,loadStoredAuthSession: coordinator.load,persistAuthSession: coordinator.persist,clearStoredAuthSession: coordinator.clear},
+    '../../lib/auth/authAccount': {getAuthAccountId: () => account,setAuthAccountId: (v: string | null) => {account=v;}},
+    '../../lib/auth/authEpoch': {advanceAuthEpoch() {}},
+    '../../lib/notifications/pushNotifications': {activatePushAfterLogin: async () => {},capturePushLogout: async () => ({accessToken:'token'}),deactivatePushOnLogout: async () => {teardowns++; await push.promise;}},
+    '../../lib/notifications/approvalRefreshSignal': {clearPendingApprovalRefreshSignal() {}},
+    '../../lib/api/http': {refreshAccessTokenIfNeeded: async () => {},setSessionInvalidationListener() {}},
+    '../../lib/env': {ALLOWED_EMAILS:[],isEmailAllowed: () => true},
+    '../../lib/telemetry': Object.fromEntries(['reset','identify','shutdownTelemetry','initTelemetry','readExpoTelemetryConfig'].map(k => [k, () => {}])),
+    '../../lib/consent': {useMobileConsent: () => ({enabled:false,isHydrated:true})},
+  }, {__DEV__:false});
+  const {AuthSessionProvider} = h.load(fileURLToPath(new URL('./AuthSessionContext.tsx',import.meta.url))) as any;
+  h.mount(() => AuthSessionProvider({children:null}));
+  try {
+    await h.settle(); const value = () => h.value().props.value;
+    fail=true;
+    // A held push must not hide the durable-write rejection.
+    let rejected=false; const first=value().signOut().catch(() => {rejected=true;});
+    await h.settle(); assert.equal(rejected,true); await first;
+    assert.equal(teardowns,0); assert.equal(value().isAuthenticated,true); assert.equal(account,'account');
+    assert.ok(await createSessionCoordinator(storage,()=>{}).load());
+    fail=false; let complete=false; const retry=value().signOut().then(() => {complete=true;});
+    await h.settle(); assert.equal(complete,true); await retry;
+    assert.equal(value().isAuthenticated,false); assert.equal(account,null); assert.equal(teardowns,1);
+    assert.equal(await createSessionCoordinator(storage,()=>{}).load(),null);
+    assert.ok(!values.has(SESSION_RECORD_KEY) || JSON.parse(values.get(SESSION_RECORD_KEY)!).session===null);
+  } finally {push.resolve(); h.unmount();}
 });

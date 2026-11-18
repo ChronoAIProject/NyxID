@@ -16,6 +16,7 @@ import {
 import {
   activatePushAfterLogin,
   deactivatePushOnLogout,
+  capturePushLogout,
 } from "../../lib/notifications/pushNotifications";
 import { clearPendingApprovalRefreshSignal } from "../../lib/notifications/approvalRefreshSignal";
 import { getCurrentUserProfileRequest, refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
@@ -52,37 +53,41 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
   useEffect(() => { void crashLifecycle?.setRestoring(isRestoring); }, [isRestoring]);
-  const isSigningOutRef = useRef(false);
+  const admittedSessionRef = useRef<StoredAuthSession | null>(null);
+  const signOutFlight = useRef<Promise<void> | null>(null);
   const authIntentRef = useRef(0);
 
-  const performSignOut = useCallback(async () => {
-    if (isSigningOutRef.current) return;
-    isSigningOutRef.current = true;
-    crashLifecycle?.disarm();
+  const performSignOut = useCallback((): Promise<void> => {
+    if (signOutFlight.current) return signOutFlight.current;
     authIntentRef.current++;
-    setAuthAccountId(null);
-    advanceAuthEpoch();
     const expectedGeneration = authSessionGeneration();
-    telemetryReset();
-    try {
-      await deactivatePushOnLogout();
-      // A generic refresh hint may outlive a blurred Activity route. Never
-      // carry that previous user's pending work into the next auth session.
-      clearPendingApprovalRefreshSignal();
-      // Clear telemetry identity before we wipe auth state so the
-      // very next event carries a fresh anon distinct_id rather than
-      // the ex-user's id. Safe no-op when telemetry is off.
-      telemetryReset();
-      if (authSessionGeneration() !== expectedGeneration) return;
+    const run = (async () => {
+      // Capture credentials/registration before clearing; no queue or network
+      // teardown may delay the authoritative local sign-out.
+      const push = await capturePushLogout(admittedSessionRef.current?.accessToken);
+      if (authSessionGeneration() !== expectedGeneration)
+        throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       await clearStoredAuthSession();
-      if (authSessionGeneration() === expectedGeneration + 1) {
-        queryClient.clear();
-        setIsAuthenticated(false);
-        setIsRestoring(false);
-      }
-    } finally {
-      isSigningOutRef.current = false;
-    }
+      if (authSessionGeneration() !== expectedGeneration + 1)
+        throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
+      crashLifecycle?.disarm();
+      admittedSessionRef.current = null;
+      setAuthAccountId(null);
+      advanceAuthEpoch();
+      clearPendingApprovalRefreshSignal();
+      telemetryReset();
+      queryClient.clear();
+      setIsAuthenticated(false);
+      setIsRestoring(false);
+      // The durable tombstone owns success. Pending-unbind recovery and native
+      // cleanup are independent and use the captured, old account credentials.
+      void deactivatePushOnLogout(push).catch((error) => {
+        if (__DEV__) console.warn("[push] post-sign-out cleanup failed", error);
+      });
+    })();
+    const flight = run.finally(() => { if (signOutFlight.current === flight) signOutFlight.current = null; });
+    signOutFlight.current = flight;
+    return flight;
   }, [queryClient]);
 
   // Register the HTTP-layer session invalidation hook so that a 401
@@ -90,7 +95,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   // + push cleanup) instead of silently clearing SecureStore.
   useEffect(() => {
     setSessionInvalidationListener(() => {
-      void performSignOut();
+      void performSignOut().catch((error) => {
+        if (__DEV__) console.warn("[auth] durable sign-out failed; retry required", error);
+      });
     });
     return () => setSessionInvalidationListener(null);
   }, [performSignOut]);
@@ -180,6 +187,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       .then((session) => {
         if (!active || settled) return;
           if (superseded()) return settle();
+        admittedSessionRef.current = session;
         setIsAuthenticated(Boolean(session));
         setAuthAccountId(
           session ? (decodeJwtSub(session.accessToken) ?? session.userId ?? null)
@@ -273,6 +281,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       }
 
       if (authSessionGeneration() !== expectedGeneration) throw new Error("auth_session_changed");
+      admittedSessionRef.current = session;
       setAuthAccountId(nextAccountId);
       setIsAuthenticated(true);
       setIsRestoring(false);

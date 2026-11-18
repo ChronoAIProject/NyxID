@@ -27,10 +27,14 @@ export function persistAuthSession(session: StoredAuthSession) {
   advanceAuthEpoch();
   return coordinator.persist(session);
 }
-export function clearStoredAuthSession() {
-  setAuthAccountId(null);
-  advanceAuthEpoch();
-  return coordinator.clear();
+export async function clearStoredAuthSession() {
+  const clearing = coordinator.clear();
+  const expected = coordinator.generation();
+  await clearing;
+  if (coordinator.generation() === expected) {
+    setAuthAccountId(null);
+    advanceAuthEpoch();
+  }
 }
 export const commitRefreshedAuthSession = coordinator.commitRefresh;
 export const authSessionGeneration = coordinator.generation;
