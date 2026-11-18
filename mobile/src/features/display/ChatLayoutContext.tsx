@@ -103,7 +103,8 @@ export function useComposerHeight() {
         keyboard: Keyboard,
         appState: AppState,
         dimensions: Dimensions,
-        windowHeight: () => Dimensions.get("window").height,
+        windowHeight: () =>
+          Dimensions.get(Platform.OS === "android" ? "screen" : "window").height,
         afterLayout: requestAnimationFrame,
         cancelLayout: cancelAnimationFrame,
         onFrame: (frame) =>

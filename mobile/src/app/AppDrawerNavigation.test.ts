@@ -133,6 +133,7 @@ function setup(
 ) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
+  let keyboardDismissals = 0;
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
@@ -281,6 +282,7 @@ function setup(
     newAssistantChatParams,
     workspaceSidebarLayout,
     findNodeHandle: () => 300,
+    Keyboard: { dismiss: () => { keyboardDismissals++; } },
     ...Object.fromEntries(
       [
         "NavigationContainer",
@@ -384,6 +386,7 @@ function setup(
   };
   return {
     sequence,
+    keyboardDismissals: () => keyboardDismissals,
     watchdogs: () => [...timers.values()],
     expireWatchdog: () => {
       const pending = [...timers.values()];
@@ -1434,6 +1437,26 @@ test("on wide windows the sidebar starts closed; Menu opens and hides it, labell
   narrow.navigator().props.onOpenMenu();
   narrow.flush();
   assert.equal(narrow.find("WorkspacePushShell").props.visible, true, "the drawer opens");
+});
+
+test("opening navigation dismisses the composer keyboard on compact and persistent sidebars", () => {
+  for (const width of [390, 1194]) {
+    const env = setup(false, width);
+    env.blockNavigation(true);
+    env.navigator().props.onOpenMenu();
+    assert.equal(env.keyboardDismissals(), 0, "a blocked navigation keeps focus");
+    env.blockNavigation(false);
+    env.navigator().props.onOpenMenu();
+    env.flush();
+    assert.equal(env.keyboardDismissals(), 1);
+    assert.equal(width === 390 ? env.shell().props.visible : !env.shell().props.sidebarCollapsed, true);
+    env.navigator().props.onOpenMenu();
+    env.flush();
+    assert.equal(env.keyboardDismissals(), 1, "closing the sidebar leaves focus alone");
+  }
+  const compact = setup();
+  compact.shell().props.onRevealStart();
+  assert.equal(compact.keyboardDismissals(), 1, "edge reveal also releases the composer");
 });
 
 test("critical writes block persistent sidebar Settings and QR/terminal sheet shortcuts", () => {

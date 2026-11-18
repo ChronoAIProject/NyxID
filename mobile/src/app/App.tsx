@@ -41,6 +41,7 @@ import {
   ActivityIndicator,
   AppState,
   findNodeHandle,
+  Keyboard,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -748,8 +749,10 @@ function ThemedAppShell({
     )
       return;
     pendingMenuFocus.current = undefined;
-    if (!drawerPresented)
+    if (!drawerPresented) {
       drawerOrigin.current = workspaceFocus.capture(accessibility.primaryKey);
+      Keyboard.dismiss();
+    }
     setDrawerPresented(true);
   }
   function toggleSidebar() {
@@ -762,6 +765,7 @@ function ThemedAppShell({
     const showing = !persistentSidebarOpen;
     setPersistentSidebarOpen(showing);
     if (showing) {
+      Keyboard.dismiss();
       workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
       workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
         findNodeHandle(sidebarFocus.current),
@@ -776,6 +780,7 @@ function ThemedAppShell({
         !accessibility.sheetOpen &&
         !isNavigationBlocked()
       ) {
+        Keyboard.dismiss();
         workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
         workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
           findNodeHandle(sidebarFocus.current),

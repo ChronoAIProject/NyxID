@@ -32,6 +32,7 @@ import {
 import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -259,9 +260,15 @@ function ManualCodeModal({
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
   const normalizedCode = normalizeAuthDeviceUserCode(value);
+  // The Android dialog owns a separate window. The activity's Keyboard cache
+  // can stay empty while that dialog has resized around its focused input.
+  const dialogSize = useRef({ width: 0, fullHeight: 0, height: 0 });
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      dialogSize.current = { width: 0, fullHeight: 0, height: 0 };
+      return;
+    }
     const timeout = setTimeout(() => inputRef.current?.focus(), 180);
     return () => clearTimeout(timeout);
   }, [visible]);
@@ -271,13 +278,38 @@ function ManualCodeModal({
       visible={visible}
       transparent
       animationType={reducedMotion ? "none" : "slide"}
-      statusBarTranslucent
-      onRequestClose={onDismiss}
+      // Android Modal applies adjustResize and fitsSystemWindows when the
+      // status bar is opaque, keeping its own content above the dialog IME.
+      statusBarTranslucent={false}
+      onRequestClose={() => {
+        const { height, fullHeight } = dialogSize.current;
+        if (
+          Platform.OS === "android" &&
+          (Keyboard.isVisible() ||
+            (height < fullHeight && inputRef.current?.isFocused()))
+        ) {
+          Keyboard.dismiss();
+          return;
+        }
+        onDismiss();
+      }}
     >
       <KeyboardAvoidingView
         accessibilityViewIsModal
         style={styles.modalRoot}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
+        enabled={Platform.OS === "ios"}
+        onLayout={({ nativeEvent: { layout } }) => {
+          if (Platform.OS !== "android") return;
+          const { width, height } = layout;
+          const previous = dialogSize.current;
+          dialogSize.current = {
+            width,
+            height,
+            fullHeight:
+              previous.width === width ? Math.max(previous.fullHeight, height) : height,
+          };
+        }}
       >
         <Pressable
           accessibilityRole="button"
@@ -285,11 +317,15 @@ function ManualCodeModal({
           style={styles.modalBackdrop}
           onPress={onDismiss}
         />
-        <View
-          style={[
+        <ScrollView
+          style={styles.modalScroll}
+          contentContainerStyle={[
             styles.modalCard,
             { paddingBottom: Math.max(insets.bottom, 16) },
           ]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+          automaticallyAdjustKeyboardInsets={false}
         >
           <View style={styles.modalHeader}>
             <View style={styles.modalHeaderCopy}>
@@ -359,7 +395,7 @@ function ManualCodeModal({
             disabled={isPending || coolingDown || !normalizedCode}
             onPress={onSubmit}
           />
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </Modal>
   );

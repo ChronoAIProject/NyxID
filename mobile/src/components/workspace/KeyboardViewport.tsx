@@ -80,7 +80,11 @@ export function KeyboardViewport({
       keyboard: Keyboard,
       appState: AppState,
       dimensions: Dimensions,
-      windowHeight: () => Dimensions.get("window").height,
+      // Android emits screen coordinates even after adjustResize shortens
+      // Dimensions.window. Validating against that shorter height can discard
+      // the IME entirely, including any remaining overlap on OEM keyboards.
+      windowHeight: () =>
+        Dimensions.get(Platform.OS === "android" ? "screen" : "window").height,
       afterLayout: requestAnimationFrame,
       cancelLayout: cancelAnimationFrame,
       onFrame: (frame, event) => {

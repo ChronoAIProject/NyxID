@@ -38,12 +38,14 @@ function setup({
   platform = "ios",
   geometry,
   avatar = false,
+  workspace = false,
 }: {
   resized?: boolean;
   reduced?: boolean;
   platform?: string;
   geometry?: Geometry;
   avatar?: boolean;
+  workspace?: boolean;
 } = {}) {
   const listeners = new Map<
     string,
@@ -79,6 +81,7 @@ function setup({
       "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
       "react-native": {
         View: "View",
+        Text: "Text",
         ScrollView: "ScrollView",
         TextInput: textInput,
         Platform: { OS: platform },
@@ -97,7 +100,7 @@ function setup({
         },
         Dimensions: {
           get: (name: string) => {
-            assert.equal(name, "window");
+            assert.ok(name === "window" || name === "screen");
             return { height: windowHeight };
           },
           addEventListener: () => ({ remove() {} }),
@@ -117,6 +120,7 @@ function setup({
       },
       "../../app/WorkspaceHeader": { useWorkspaceSheet: () => null },
       "react-native-safe-area-context": {
+        SafeAreaView: "SafeAreaView",
         useSafeAreaInsets: () => ({ top: 0, bottom: 34 }),
         useSafeAreaFrame: () => geometry?.provider ?? { y: 0, height: 852 },
       },
@@ -145,10 +149,9 @@ function setup({
     "./KeyboardScrollView",
     h.load(path("../workspace/KeyboardScrollView.tsx")),
   );
-  h.mock(
-    "../workspace/ScrollEdgeFades",
-    h.load(path("../workspace/ScrollEdgeFades.tsx")),
-  );
+  const scrollEdges = h.load(path("../workspace/ScrollEdgeFades.tsx"));
+  h.mock("../workspace/ScrollEdgeFades", scrollEdges);
+  h.mock("./ScrollEdgeFades", scrollEdges);
   const { SettingsPage, SettingsTextField } = h.load(
     path("./SettingsList.tsx"),
   ) as {
@@ -156,8 +159,17 @@ function setup({
     SettingsTextField: (props: unknown) => Element;
   };
   const forwarded = { current: null as unknown };
-  h.mount(() =>
-    SettingsPage({
+  if (workspace) {
+    const { WorkspacePage, Field } = h.load(path("../workspace/WorkspaceUI.tsx")) as {
+      WorkspacePage: (props: unknown) => Element;
+      Field: (props: unknown) => Element;
+    };
+    h.mount(() => WorkspacePage({
+      title: "New agent",
+      children: Field({ label: "Personality and tone", multiline: true, value: "Draft" }),
+    }));
+  } else {
+    h.mount(() => SettingsPage({
       scrollRef: forwarded,
       children: SettingsTextField({
         accessibilityLabel: avatar ? "Avatar" : "Add a memory",
@@ -165,8 +177,8 @@ function setup({
         multiline: !avatar,
         value: "Draft",
       }),
-    }),
-  );
+    }));
+  }
   const all = () => nodes(h.value());
   const scroll = () => all().find((node) => node.type === "ScrollView")!;
   const viewport = () =>
@@ -338,6 +350,41 @@ test("SettingsPage focus reveal honors Reduce Motion and works with the Android 
   assert.equal(env.scrolls[0]?.animated, false);
   env.h.unmount();
 });
+
+for (const geometry of [
+  {
+    view: { y: 80, height: 780 },
+    keyboard: { screenY: 563, height: 351 },
+    provider: { y: 0, height: 914 },
+    windowHeight: 914,
+  },
+  {
+    view: { y: 80, height: 600 },
+    keyboard: { screenY: 470, height: 292 },
+    provider: { y: 0, height: 762 },
+    windowHeight: 762,
+  },
+]) {
+  test(`agent creation reveals its complete Personality field above Android IME in a ${geometry.windowHeight}pt window`, () => {
+    const env = setup({ workspace: true, platform: "android", geometry });
+    const viewports = env.all().filter((node) =>
+      Array.isArray(node.props.style) && typeof node.props.onLayout === "function"
+    );
+    assert.equal(viewports.length, 1, "one measured viewport owns keyboard space");
+    assert.ok(env.all().some((node) =>
+      node.props.accessibilityLabel === "Personality and tone" && node.props.multiline === true
+    ));
+    env.resetField(geometry.keyboard.screenY - 40, 116);
+    env.focus();
+    env.show();
+    assert.ok(env.scrolls.length > 0, "focus triggers an actual native scroll command");
+    assert.ok(env.fieldBottom() <= geometry.keyboard.screenY - spacing.lg, "the full multiline field is above the IME");
+    env.resetField(geometry.keyboard.screenY - 20, 140);
+    env.contentSizeChange();
+    assert.ok(env.fieldBottom() <= geometry.keyboard.screenY - spacing.lg, "additional lines remain reachable while the IME stays open");
+    env.h.unmount();
+  });
+}
 
 test("late SettingsPage field measurements cannot scroll after blur, keyboard hide, background, scroll or unmount", () => {
   for (const boundary of [

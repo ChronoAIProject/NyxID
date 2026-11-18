@@ -99,7 +99,7 @@ export function WorkspacePage({
     <RailInsetView style={styles.fill}>
     <PageScrollView
       fadeColor={colors.bg}
-
+      keyboardAware
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       contentContainerStyle={[styles.content, contentStyle]}
@@ -136,7 +136,7 @@ export function WorkspacePage({
       edges={workspaceBodyEdges(cornerSensor)}
       style={[styles.fill, { backgroundColor: colors.bg }]}
     >
-      <KeyboardViewport>{body}</KeyboardViewport>
+      {scroll ? body : <KeyboardViewport>{body}</KeyboardViewport>}
     </SafeAreaView>
   );
 }
