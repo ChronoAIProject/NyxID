@@ -120,7 +120,16 @@ impl BillingService {
             return Err(conflict("Sandbox billing account changed"));
         }
         self.verify_sandbox_admission_provider(&quote).await?;
-        if let Some(lago) = self.lago.as_deref() {
+        if wallet.stripe_enrollment.is_some() {
+            let lago = self
+                .lago
+                .as_deref()
+                .ok_or_else(|| unavailable("Lago is unavailable"))?;
+            super::super::purchases::ensure_usage_period(&self.db, lago, &wallet).await?;
+        }
+        if wallet.stripe_enrollment.is_none()
+            && let Some(lago) = self.lago.as_deref()
+        {
             let _ = super::super::taxes::ensure_fresh(
                 &self.db,
                 lago,
@@ -214,7 +223,7 @@ impl BillingService {
                     candidate, LayerReservation {
                         layer:BillingLayer::Platform, metric:price.metric, lago_metric_code:price.lago_metric_code.clone(), estimated_quantity:quantities[*index],
                         credits_per_unit_micros:rate / 1_000_000, credits_per_unit_pico:Some(rate), reserved_credits:Credits::ZERO,
-                        allowance_reservations:vec![], grant_reservations:vec![], tax_cache_ttl_secs:self.config.billing_rate_cache_ttl_secs, applied_tax:None,
+                        allowance_reservations:vec![], grant_reservations:vec![], tax_cache_ttl_secs:self.config.billing_rate_cache_ttl_secs, credit_only: false, applied_tax:None,
                     }, now).await?;
                 let mut row = meter::reserved_row(&context, BillingLayer::Platform, price.metric, price.lago_metric_code.clone(), Some(&reservation), None);
                 row.funding.as_mut().ok_or_else(|| unavailable("Sandbox funding result is missing"))?.settlement_rate = Some(price.credits_per_unit);

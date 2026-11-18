@@ -238,7 +238,12 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
 | `LAGO_PLAN_CODE` | `starter` | Lago plan code used by owner wallet provisioning/backfill when creating the owner's subscription. |
-| `LAGO_PAYMENT_PROVIDER_CODE` | *(empty)* | Code of the Lago Stripe payment provider connection. When set, newly created Lago customers are linked to it (`sync_with_provider: true`) so `POST /api/v1/billing/topup` can generate checkout URLs. Unset leaves customers unlinked and top-ups fail with `no_linked_payment_provider`; existing customers must be linked manually in the Lago dashboard. |
+| `LAGO_PAYMENT_PROVIDER_CODE` | *(empty)* | Links newly provisioned customers to a payment provider for Lago-managed checkout. Leave unset when provisioning a Stripe purchase wallet. Legacy checkout requires a linked provider. |
+| `BILLING_STRIPE_PURCHASES` | *(empty)* | Stripe account, mode, Portal configuration, product tax code and USD offer settings as JSON. Enrollment is per wallet. See [Stripe-owned credit purchases](BILLING_OPERATIONS.md#stripe-owned-credit-purchases). |
+| `BILLING_STRIPE_PURCHASE_KEY` | *(empty)* | Stripe API credential for the configured account and mode. |
+| `BILLING_STRIPE_PURCHASE_WEBHOOK_SECRET` | *(empty)* | Endpoint signing secret for `/api/v1/webhooks/stripe-billing`. |
+| `BILLING_STRIPE_PURCHASE_PREVIOUS_WEBHOOK_SECRET` | *(empty)* | Retiring signing secret during a Stripe webhook secret rotation. |
+| `BILLING_LAGO_EXTERNAL_PURCHASE_SECRET` | *(empty)* | Shared secret for the Lago external purchase extension in addition to Lago API authentication. |
 | `LAGO_WEBHOOK_SECRET` | *(empty)* | Lago webhook verification secret for `POST /api/v1/webhooks/lago`; redacted from config debug output. Required to accept Lago-originated wallet/subscription updates. |
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
 | `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of read-only price and per-owner tax profiles used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
@@ -344,15 +349,15 @@ X channel billing also uses these controls. With `BILLING_ENABLED=true`, configu
 
 Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
 
-`POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. `POST /api/v1/billing/topup` creates a Lago wallet transaction, then uses Lago's documented `POST /api/v1/wallet_transactions/{lago_id}/payment_url` endpoint to obtain the provider-hosted Stripe checkout URL. Personal owners may manage their own wallet; only org admins may provision or top up an org wallet. Org members may continue consuming authorized org resources, which charge the org wallet, but cannot mutate it. NyxID never directly increments local credits; local balance changes only after Lago webhook/reconcile confirms the wallet balance.
+`POST /api/v1/billing/wallet` provisions the owner in Lago and creates a local `billing_wallet` cache idempotently. For a Stripe-enrolled wallet, `POST /api/v1/billing/topup` opens Stripe Checkout for the quoted credit quantity. After Stripe confirms the payment, NyxID settles that quantity in Lago and verifies the balance. Legacy wallets obtain their hosted checkout through Lago's `POST /api/v1/wallet_transactions/{lago_id}/payment_url`. Personal owners manage their own wallets. Organization wallet management requires org admin access.
 
 Before enabling paid top-ups for users, run a deployed sandbox verification:
 
 ```bash
-nyxid billing verify-topup-flow --amount-credits 1 --open
+nyxid billing verify-topup-flow --amount-credits 10 --open
 ```
 
-Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
+Complete the Stripe sandbox checkout opened by the command. The verifier checks that the checkout is Stripe-backed and the reconciled wallet balance increases by the purchased quantity. A 100-credit purchase adds 100 credits even if the total payment includes tax.
 
 Human operators can inspect defaults with `nyxid admin billing config show`,
 prices with `nyxid admin billing service show <slug>` and

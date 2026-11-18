@@ -350,6 +350,7 @@ mod tests {
             balance_credits: None,
             dedupe_key: None,
             wallet_id: Some("wallet-sweep".to_string()),
+            stripe_payment: None,
             created_at: Utc::now(),
         }
     }

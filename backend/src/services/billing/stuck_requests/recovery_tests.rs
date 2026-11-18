@@ -613,11 +613,28 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
         "STUCK_REQUEST_BATCH requests={ended} commands={commands} elapsed_ms={}",
         elapsed.as_millis()
     );
+    // The first pass can publish at most 50 of 52 requests. Leave one of the
+    // remaining rows at the same committed boundary even when Mongo is fast.
+    let meters = f.db.collection::<Document>(METERS);
+    let remaining = meters
+        .find_one(doc! {"released":false, "quantity": null})
+        .await
+        .unwrap()
+        .unwrap();
+    let request = remaining.get_str("billing_request_id").unwrap();
+    at(Phase::AfterCommit, terminal::publish(&f.db, request)).await;
+    assert_eq!(
+        meters
+            .count_documents(doc! {"billing_request_id": request,
+            "released": false, "quantity": 0_i64, "finalized_at": {"$type": "date"}})
+            .await
+            .unwrap(),
+        1
+    );
     for _ in 0..10 {
         recovery::recover(&f.db).await.unwrap();
-        if f.db
-            .collection::<Document>(METERS)
-            .count_documents(doc! {"released":false})
+        if meters
+            .count_documents(doc! {"released":false, "quantity": null})
             .await
             .unwrap()
             == 0
@@ -625,6 +642,25 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
             break;
         }
     }
+    let remaining = meters
+        .count_documents(doc! {"released": false})
+        .await
+        .unwrap();
+    let finalized = meters
+        .count_documents(
+            doc! {"released": false, "quantity": 0_i64, "finalized_at": {"$type": "date"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining, finalized,
+        "bounded passes must publish every terminal outcome"
+    );
+    assert!(finalized >= 1);
+    // A pass can expire between publication and settlement. Run the same
+    // recovery sweeps that follow stuck-request recovery in reconciliation.
+    finish(&f).await;
+    println!("STUCK_REQUEST_FINALIZED_ROWS_RECOVERED {finalized}");
     assert_eq!(
         f.db.collection::<Document>(METERS)
             .count_documents(doc! {"released":false})
@@ -639,6 +675,14 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
             .unwrap(),
         52
     );
+    let wallet =
+        f.db.collection::<crate::models::billing_wallet::BillingWallet>("billing_wallet")
+            .find_one(doc! {"owner_id": &f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
     f.count();
     recovery::recover(&f.db).await.unwrap();
     let idle = f.count();

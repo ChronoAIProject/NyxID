@@ -3,6 +3,7 @@ import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { useOrgs } from "@/hooks/use-orgs";
 import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -28,6 +29,7 @@ import {
   useBillingWallet,
   useProvisionBillingWallet,
   useTopUpBilling,
+  createStripePortal,
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
 import { AvailableBenefits } from "@/components/billing/available-benefits";
@@ -70,7 +72,8 @@ export function BillingPage({
   const admins = (orgs.data ?? []).filter(
     (org) => org.your_role === "admin" || org.your_role === "owner",
   );
-  const ownerId = search.ownerId;
+  const actorId = useAuthStore((state) => state.user?.id);
+  const ownerId = search.ownerId === actorId ? undefined : search.ownerId;
   const selected = admins.find((org) => org.id === ownerId);
   const allowed = !ownerId || Boolean(selected);
   function selectOwner(value: string) {
@@ -246,7 +249,7 @@ function BillingContent({
     selectionKey,
     search.tab,
   ]);
-  const topUpReady = Boolean(wallet) && billingReady && !needsSubscription;
+  const topUpReady = Boolean(wallet) && billingReady && !needsSubscription && (!wallet?.stripe_funded || !!wallet.stripe_purchase_offer);
   const topUpSettled =
     !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
   // `action=topup` opens Add credits once the wallet can take a top-up (else
@@ -272,6 +275,20 @@ function BillingContent({
       toast.success(translateUi("Billing wallet provisioned"));
     } catch (error) {
       toast.error(translateErrorMessage(errorMessage(error, "Failed to provision billing wallet")));
+    }
+  }
+
+  const [portalPending, setPortalPending] = useState(false);
+  async function handleStripePortal() {
+    setPortalPending(true);
+    try {
+      const url = await createStripePortal(ownerId);
+      rememberBillingCheckout(actorId, ownerId, presentation);
+      openExternal(url);
+    } catch (error) {
+      toast.error(translateErrorMessage(errorMessage(error, "Unable to open Stripe billing settings")));
+    } finally {
+      setPortalPending(false);
     }
   }
 
@@ -343,13 +360,18 @@ function BillingContent({
             />
           )}
           {!ownerId && <BillingMachines />}
-          <BillingBill
+          {wallet?.stripe_purchase_offer && (
+            <Button variant="outline" isLoading={portalPending} onClick={() => void handleStripePortal()}>
+              {translateUi("Manage billing details")}
+            </Button>
+          )}
+          {!wallet?.stripe_funded && <BillingBill
             enabled={
               billingReady &&
               (!ownerId || Boolean(wallet?.lago_subscription_id))
             }
             ownerId={ownerId}
-          />
+          />}
           <BillingTopUpHistory ownerId={ownerId} presentation={presentation} />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">

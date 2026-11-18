@@ -21,6 +21,8 @@ use super::lago_client::{
 // Six client timeouts allow delayed responses/read replicas to settle; the
 // provider's unique active customer/code index also fences a late first POST.
 const WALLET_CREATE_QUIET_SECS: u64 = HTTP_TIMEOUT_SECS * 6;
+const MIN_TOPUP_CREDITS: i64 = 10;
+const MAX_TOPUP_CREDITS: i64 = 10_000_000;
 use crate::services::coordination_service::{LeaseStore, LeaseToken, cluster_lease_runtime};
 
 #[derive(Clone, Copy)]
@@ -265,6 +267,7 @@ async fn provision_under_lease(
     let wallet = BillingWallet {
         snapshot_generation: 0,
         tax_generation: 0,
+        stripe_enrollment: None,
         tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner_id.to_string(),
@@ -385,18 +388,13 @@ pub async fn create_topup_checkout(
     amount_credits: i64,
     idempotency_key: &str,
 ) -> AppResult<TopUpCheckout> {
-    if amount_credits <= 0 {
-        return Err(AppError::BadRequest(
-            "amount_credits must be greater than 0".to_string(),
-        ));
-    }
-    if amount_credits > 10_000_000 {
-        return Err(AppError::BadRequest(
-            "amount_credits must be at most 10000000".to_string(),
-        ));
-    }
     let idempotency_key = normalize_idempotency_key(idempotency_key)?;
     if let Some(existing) = find_topup_session(db, owner_id, &idempotency_key).await? {
+        if existing.stripe_purchase.is_some() {
+            return Err(AppError::Conflict(
+                "This purchase requires Stripe billing".into(),
+            ));
+        }
         if existing.amount_credits != amount_credits {
             return Err(AppError::Conflict(
                 "idempotency_key was already used with a different amount_credits".to_string(),
@@ -411,6 +409,7 @@ pub async fn create_topup_checkout(
             });
         }
     }
+    validate_new_topup_amount(amount_credits)?;
 
     let provisioned = ensure_owner_wallet(db, lago, owner_id, options).await?;
     let Some(lago_wallet_id) = provisioned.wallet.lago_wallet_id.clone() else {
@@ -427,6 +426,7 @@ pub async fn create_topup_checkout(
         idempotency_key,
         amount_credits,
         lago_wallet_id: lago_wallet_id.clone(),
+        stripe_purchase: None,
         lago_wallet_transaction_id: None,
         lago_invoice_id: None,
         payment_url: None,
@@ -441,61 +441,47 @@ pub async fn create_topup_checkout(
         updated_at: now,
     };
 
-    match db
-        .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
-        .insert_one(&pending_session)
-        .await
-    {
-        Ok(_) => {}
-        Err(error) if is_duplicate_key_error(&error) => {
+    if !insert_legacy_topup(db, &provisioned.wallet.id, &pending_session).await? {
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(HTTP_TIMEOUT_SECS);
+        loop {
             let existing = find_topup_session_by_id(db, &pending_session.id)
                 .await?
                 .ok_or_else(|| {
                     AppError::Internal(
-                        "billing top-up insert raced but existing session was not found"
-                            .to_string(),
+                        "Billing top-up order was not found after a concurrent insert".into(),
                     )
                 })?;
             if existing.amount_credits != amount_credits {
                 return Err(AppError::Conflict(
-                    "idempotency_key was already used with a different amount_credits".to_string(),
+                    "idempotency_key was already used with a different amount_credits".into(),
                 ));
             }
             if existing.payment_url.is_some()
-                && matches!(existing.status, BillingTopUpStatus::CheckoutCreated)
+                && existing.status == BillingTopUpStatus::CheckoutCreated
             {
                 return Ok(TopUpCheckout {
                     session: existing,
                     reused: true,
                 });
             }
-            if matches!(existing.status, BillingTopUpStatus::Failed) {
-                let update = db
+            if existing.status == BillingTopUpStatus::Failed {
+                let claimed = db
                     .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
                     .update_one(
-                        doc! { "_id": &existing.id, "status": "failed" },
-                        doc! {
-                            "$set": {
-                                "status": "pending",
-                                "updated_at": bson::DateTime::from_chrono(now),
-                            }
-                        },
+                        doc! {"_id": &existing.id, "status": "failed"},
+                        doc! {"$set": {"status": "pending", "updated_at": bson::DateTime::now()}},
                     )
                     .await?;
-                if update.matched_count == 1 {
-                    // This retry now owns the provider call.
-                } else {
-                    return Err(AppError::Conflict(
-                        "billing top-up checkout is already being created".to_string(),
-                    ));
+                if claimed.matched_count == 1 {
+                    break;
                 }
-            } else {
-                return Err(AppError::Conflict(
-                    "billing top-up checkout is already being created".to_string(),
-                ));
             }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(AppError::Conflict("Billing top-up checkout is already being created. Retry the same idempotency key.".into()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(75)).await;
         }
-        Err(error) => return Err(error.into()),
     }
 
     let external_id = format!("nyxid-topup:{session_id}");
@@ -613,6 +599,72 @@ async fn owner_provision_input(
     })
 }
 
+async fn insert_legacy_topup(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    order: &BillingTopUpSession,
+) -> AppResult<bool> {
+    use mongodb::options::{ReadConcern, WriteConcern};
+
+    let creation_nonce = Uuid::new_v4().to_string();
+    let mut record = bson::to_document(order)
+        .map_err(|_| AppError::Internal("Could not encode billing top-up order".into()))?;
+    record.insert("legacy_creation_nonce", creation_nonce.as_str());
+    let orders = db.collection::<bson::Document>(BILLING_TOPUP_SESSIONS);
+    let wallets = db.collection::<BillingWallet>(BILLING_WALLET);
+    let mut session = db.client().start_session().await?;
+    let result = session
+        .start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .and_run(
+            (wallets, orders.clone(), wallet_id.to_owned(), record),
+            |session, context| {
+                Box::pin(async move {
+                    let (wallets, orders, wallet_id, record) = context;
+                    // Both enrollment and creation write this wallet in their
+                    // transaction. Retry a write conflict with a new snapshot.
+                    let matched = wallets
+                        .update_one(
+                            doc! {"_id": wallet_id.as_str(), "stripe_enrollment": null},
+                            doc! {"$inc": {"legacy_topup_generation": 1_i64}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    if matched.matched_count == 0 {
+                        return crate::services::api_key_mutation_service::transaction_result(Err(
+                            AppError::Conflict(
+                                "The wallet now uses Stripe purchases. Retry checkout.".into(),
+                            ),
+                        ));
+                    }
+                    orders.insert_one(&*record).session(&mut *session).await?;
+                    Ok(())
+                })
+            },
+        )
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if is_duplicate_key_error(&error) => Ok(false),
+        Err(error) if error.contains_label("UnknownTransactionCommitResult") => {
+            // Dispatch only from a majority-visible receipt for this exact
+            // attempt. The deterministic order ID is shared by contenders.
+            let majority_orders = db.collection_with_options::<bson::Document>(
+                BILLING_TOPUP_SESSIONS,
+                mongodb::options::CollectionOptions::builder()
+                    .read_concern(ReadConcern::majority())
+                    .build(),
+            );
+            match majority_orders.find_one(doc! {"_id": &order.id}).await? {
+                Some(found) => Ok(found.get_str("legacy_creation_nonce").ok() == Some(creation_nonce.as_str())),
+                None => Err(AppError::BillingProviderUnavailable("Billing checkout creation could not be confirmed. Retry the same idempotency key.".into())),
+            }
+        }
+        Err(error) => Err(crate::services::api_key_mutation_service::map_transaction_error(error)),
+    }
+}
+
 async fn find_topup_session(
     db: &mongodb::Database,
     owner_id: &str,
@@ -637,7 +689,21 @@ async fn find_topup_session_by_id(
         .map_err(Into::into)
 }
 
-fn normalize_idempotency_key(idempotency_key: &str) -> AppResult<String> {
+pub(super) fn validate_new_topup_amount(amount: i64) -> AppResult<()> {
+    if amount < MIN_TOPUP_CREDITS {
+        return Err(AppError::BadRequest(format!(
+            "Minimum credit purchase is {MIN_TOPUP_CREDITS} credits"
+        )));
+    }
+    if amount > MAX_TOPUP_CREDITS {
+        return Err(AppError::BadRequest(format!(
+            "amount_credits must be at most {MAX_TOPUP_CREDITS}"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn normalize_idempotency_key(idempotency_key: &str) -> AppResult<String> {
     let value = idempotency_key.trim();
     if value.is_empty() {
         return Err(AppError::BadRequest(
@@ -660,12 +726,12 @@ fn normalize_idempotency_key(idempotency_key: &str) -> AppResult<String> {
     Ok(value.to_string())
 }
 
-fn deterministic_topup_session_id(owner_id: &str, idempotency_key: &str) -> String {
+pub(crate) fn deterministic_topup_session_id(owner_id: &str, idempotency_key: &str) -> String {
     let digest = sha2::Sha256::digest(format!("{owner_id}:{idempotency_key}").as_bytes());
     format!("btu_{}", hex::encode(&digest[..16]))
 }
 
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     matches!(
         error.kind.as_ref(),
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
@@ -1340,6 +1406,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topup_concurrent_distinct_keys_commit_and_same_key_dispatches_once() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("legacy_topup_concurrent_fence")
+                .await;
+        let owner_id = insert_owner(&db, "concurrent-topup@example.com").await;
+        let lago = FakeLago::default();
+        ensure_owner_wallet(&db, &lago, &owner_id, wallet_options(0))
+            .await
+            .unwrap();
+        let barrier = Barrier::new(6);
+        let results = futures::future::join_all(
+            [
+                "key-a",
+                "key-b",
+                "key-c",
+                "shared-key",
+                "shared-key",
+                "shared-key",
+            ]
+            .into_iter()
+            .map(|key| {
+                let db = &db;
+                let lago = &lago;
+                let owner_id = &owner_id;
+                let barrier = &barrier;
+                async move {
+                    barrier.wait().await;
+                    create_topup_checkout(db, lago, owner_id, wallet_options(0), 20, key)
+                        .await
+                        .unwrap()
+                }
+            }),
+        )
+        .await;
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 4);
+        assert_eq!(results.iter().filter(|checkout| checkout.reused).count(), 2);
+        assert_eq!(results[3].session.id, results[4].session.id);
+        assert_eq!(results[4].session.id, results[5].session.id);
+    }
+
+    #[tokio::test]
     async fn topup_rejects_idempotency_reuse_with_different_amount() {
         let Some(db) = connect_test_database("billing_topup_conflict").await else {
             return;
@@ -1358,22 +1465,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn topup_rejects_non_positive_amount() {
+    async fn topup_rejects_new_orders_outside_the_purchase_limits() {
         let Some(db) = connect_test_database("billing_topup_nonpositive").await else {
             return;
         };
         let owner_id = insert_owner(&db, "nonpositive@example.com").await;
         let lago = FakeLago::default();
 
-        for amount in [0_i64, -100] {
+        for amount in [-100, 0, 9, 10_000_001] {
             let error =
                 create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), amount, "topup-np")
                     .await
-                    .expect_err("non-positive amount must be rejected");
+                    .expect_err("out-of-range amount must be rejected");
             assert!(
                 matches!(error, crate::errors::AppError::BadRequest(_)),
                 "amount_credits = {amount} should be rejected with BadRequest, got {error:?}"
             );
+            if amount == 9 {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Minimum credit purchase is 10 credits")
+                );
+            }
         }
         // Guard rejects before any Lago call or top-up session write.
         assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 0);
@@ -1383,6 +1497,77 @@ mod tests {
             .await
             .expect("count top-up sessions");
         assert_eq!(session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn topup_accepts_minimum_default_presets_and_maximum() {
+        let db = connect_test_database("billing_topup_limits").await.unwrap();
+        let owner_id = insert_owner(&db, "purchase-limits@example.com").await;
+        let lago = FakeLago::default();
+        for amount in [10, 20, 50, 100, 500, 10_000_000] {
+            let key = format!("purchase-{amount}");
+            let checkout =
+                create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), amount, &key)
+                    .await
+                    .unwrap();
+            assert_eq!(checkout.session.amount_credits, amount);
+            assert!(!checkout.reused);
+        }
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    async fn topup_replays_existing_orders_below_the_new_minimum() {
+        let db = connect_test_database("billing_topup_legacy_minimum")
+            .await
+            .unwrap();
+        let owner = insert_owner(&db, "legacy-purchase@example.com").await;
+        let lago = FakeLago::default();
+        let key = "legacy-purchase";
+        let first = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 10, key)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(BILLING_TOPUP_SESSIONS)
+            .update_one(
+                doc! { "_id": &first.session.id },
+                doc! { "$set": { "amount_credits": 9_i64 } },
+            )
+            .await
+            .unwrap();
+        let replay = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 9, key)
+            .await
+            .unwrap();
+        assert!(replay.reused);
+        assert_eq!(replay.session.payment_url, first.session.payment_url);
+        assert_eq!(replay.session.amount_credits, 9);
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 1);
+
+        let sessions = db.collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS);
+        for status in ["pending", "failed"] {
+            sessions
+                .update_one(
+                    doc! { "_id": &first.session.id },
+                    doc! { "$set": { "status": status }, "$unset": { "payment_url": "" } },
+                )
+                .await
+                .unwrap();
+            let before = sessions
+                .find_one(doc! { "_id": &first.session.id })
+                .await
+                .unwrap();
+            let error = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 9, key)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, crate::errors::AppError::BadRequest(_)));
+            assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                sessions
+                    .find_one(doc! { "_id": &first.session.id })
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
     }
 
     #[tokio::test]

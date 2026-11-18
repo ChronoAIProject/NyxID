@@ -719,6 +719,7 @@ fn charge(
             service_limit_key: None,
         }],
         tax_cache_ttl_secs: 60,
+        credit_only: false,
         applied_tax: None,
     };
     (row, layer)

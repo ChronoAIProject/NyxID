@@ -260,6 +260,12 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(mocks.wallet).not.toHaveBeenCalled();
     expect(mocks.usage).not.toHaveBeenCalled();
   });
+  it("opens personal billing on Stripe's return URL for the signed-in payer", async () => {
+    await renderPage(`/billing?ownerId=${ACTOR}`);
+    expect(screen.getByRole("combobox", { name: "Billing owner" })).toHaveTextContent("Personal");
+    expect(mocks.wallet).toHaveBeenLastCalledWith(undefined);
+    expect(mocks.history).toHaveBeenLastCalledWith(1, 10, "30d", undefined);
+  });
   it("requires explicit org provisioning and submits the selected owner", async () => {
     mocks.wallet.mockReturnValue(query(null));
     await renderPage(`/billing?ownerId=${ORG}`);

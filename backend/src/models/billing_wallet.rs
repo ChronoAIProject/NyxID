@@ -81,6 +81,24 @@ crate::exact_credit_model! {
     }
 }
 
+/// An explicitly enrolled wallet starts a dedicated Stripe-funded billing period.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct StripeWalletEnrollment {
+    pub stripe_account_id: String,
+    #[serde(default)]
+    pub livemode: bool,
+    pub stripe_customer_id: String,
+    pub lago_wallet_id: String,
+    pub lago_subscription_id: String,
+    pub plan_code: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub usage_verified_until: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub activated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub reversal_holds: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct BillingWallet {
     #[serde(rename = "_id")]
@@ -98,6 +116,9 @@ pub struct BillingWallet {
     /// Orders owner tax invalidation independently of balance snapshots.
     #[serde(default)]
     pub tax_generation: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub stripe_enrollment: Option<StripeWalletEnrollment>,
     /// A real write conflict for cold/changed-plan tax publication.
     #[serde(default)]
     #[schema(ignore)]
@@ -174,6 +195,7 @@ mod tests {
         let wallet = BillingWallet {
             snapshot_generation: 0,
             tax_generation: 0,
+            stripe_enrollment: None,
             tax_guard_token: None,
             id: "wallet-1".to_string(),
             owner_id: "owner-1".to_string(),

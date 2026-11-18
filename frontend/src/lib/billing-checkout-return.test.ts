@@ -21,6 +21,18 @@ it("never changes explicit navigation or another person's selection", () => {
   expect(consumeBillingCheckoutReturn(org, {})).toBeUndefined();
   expect(consumeBillingCheckoutReturn(actor, {})).toBeUndefined();
 });
+it("restores the panel from Stripe's owner-bound return and respects other destinations", () => {
+  for (const ownerId of [org, undefined]) {
+    rememberBillingCheckout(actor, ownerId, "panel");
+    expect(consumeBillingCheckoutReturn(actor, { ownerId: ownerId ?? actor })).toEqual({
+      to: "/assistant", search: { panel: "billing", panelOwnerId: ownerId },
+    });
+  }
+  rememberBillingCheckout(actor, undefined, "panel");
+  expect(consumeBillingCheckoutReturn(actor, { ownerId: org })).toBeUndefined();
+  rememberBillingCheckout(actor, org, "panel");
+  expect(consumeBillingCheckoutReturn(actor, { ownerId: org, tab: "usage" })).toBeUndefined();
+});
 it("expires metadata after two hours and leaves ordinary personal return unchanged", () => {
   rememberBillingCheckout(actor, org, "page");
   vi.advanceTimersByTime(2 * 60 * 60 * 1000);

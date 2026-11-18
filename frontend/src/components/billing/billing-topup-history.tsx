@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/select";
 import { credits, number, periods, timestamp } from "@/lib/billing-display";
 import type { BillingUsagePeriod } from "@/schemas/billing";
-import { useTopUpHistory, openInvoiceReceipt } from "@/hooks/use-billing";
+import { useTopUpHistory, openInvoiceReceipt, openStripePurchaseDocument } from "@/hooks/use-billing";
 import { openExternal } from "@/lib/navigation";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -57,9 +57,9 @@ function TopUpHistory({
   const total = historyQuery.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / 10));
   const currentPage = page;
-  async function handleReceipt(invoiceId: string) {
+  async function handleReceipt(invoiceId: string, stripe = false) {
     try {
-      await openInvoiceReceipt(invoiceId, ownerId);
+      await (stripe ? openStripePurchaseDocument(invoiceId, ownerId) : openInvoiceReceipt(invoiceId, ownerId));
     } catch (error) {
       toast.error(
         translateErrorMessage(error instanceof Error
@@ -98,6 +98,10 @@ function TopUpHistory({
           }
         }}
       >{translateUi("Resume payment")}</Button>
+    ) : payment.stripe?.document_available ? (
+      <Button variant="outline" size="sm" onClick={() => void handleReceipt(payment.id, true)}>
+        {translateUi("View purchase document")}
+      </Button>
     ) : payment.receipt_available && !!payment.lago_invoice_id ? (
       <Button
         variant="outline"
@@ -110,7 +114,7 @@ function TopUpHistory({
   const status = (payment: (typeof visible)[number]) => (
     <Badge
       variant={
-        payment.status === "paid"
+        payment.status === "paid" || payment.status === "credits_available"
           ? "success"
           : payment.status === "expired"
             ? "warning"
@@ -120,9 +124,38 @@ function TopUpHistory({
       }
       className="capitalize"
     >
-      {payment.status}
+      {payment.status === "paid_credits_pending" ? translateUi("Paid, credits pending")
+        : payment.status === "credits_available" ? translateUi("Credits available")
+          : payment.status === "reversal_review" ? translateUi("Payment under review")
+          : payment.status === "payment_reversed" ? translateUi("Payment adjustment")
+            : payment.status}
     </Badge>
   );
+  const stripeAmount = (payment: (typeof visible)[number]) => {
+    if (!payment.stripe) return payment.invoice_number ?? "—";
+    const { subtotal_minor, tax_minor, total_minor, currency, refunded_minor, reversals } = payment.stripe;
+    const returnedCredits = reversals?.reduce((sum, event) => sum + event.returned_credits, 0) ?? 0;
+    const money = new Intl.NumberFormat(getFormattingLocale(), { style: "currency", currency });
+    return total_minor === null
+      ? money.format(subtotal_minor / 100)
+      : <>{money.format(total_minor / 100)}
+          {tax_minor !== null && tax_minor > 0 && (
+            <div className="type-secondary text-muted-foreground">
+              {translateUi("Includes {{tax}} tax", { tax: money.format(tax_minor / 100) })}
+            </div>
+          )}
+          {!!refunded_minor && (
+            <div className="type-secondary text-muted-foreground">
+              {translateUi("Refunded {{amount}}", { amount: money.format(refunded_minor / 100) })}
+            </div>
+          )}
+          {returnedCredits > 0 && (
+            <div className="type-secondary text-muted-foreground">
+              {translateUi("Credits reversed: {{quantity}}", { quantity: number(returnedCredits) })}
+            </div>
+          )}
+        </>;
+  };
   return (
     <Card className="topup-history-card">
       <CardHeader className="history-heading">
@@ -160,7 +193,7 @@ function TopUpHistory({
                 <TableHead>{translateUi("Date")}</TableHead>
                 <TableHead className="text-right">{translateUi("Credits")}</TableHead>
                 <TableHead>{translateUi("Credit expiry")}</TableHead>
-                <TableHead>{translateUi("Invoice")}</TableHead>
+                <TableHead>{visible.some((payment) => payment.stripe) ? translateUi("Purchase amount") : translateUi("Invoice")}</TableHead>
                 <TableHead>{translateUi("Status")}</TableHead>
                 <TableHead className="text-right">{translateUi("Actions")}</TableHead>
               </TableRow>
@@ -174,7 +207,7 @@ function TopUpHistory({
                       {number(payment.amount_credits)}
                     </TableCell>
                     <TableCell>{expiry(payment)}</TableCell>
-                    <TableCell>{payment.invoice_number ?? "—"}</TableCell>
+                    <TableCell>{stripeAmount(payment)}</TableCell>
                     <TableCell>{status(payment)}</TableCell>
                     <TableCell className="text-right">
                       {action(payment)}
@@ -206,8 +239,8 @@ function TopUpHistory({
                     <dd>{timestamp(payment.created_at)}</dd>
                   </div>
                   <div>
-                    <dt>{translateUi("Invoice")}</dt>
-                    <dd>{payment.invoice_number ?? "—"}</dd>
+                    <dt>{visible.some((payment) => payment.stripe) ? translateUi("Purchase amount") : translateUi("Invoice")}</dt>
+                    <dd>{stripeAmount(payment)}</dd>
                   </div>
                   <div>
                     <dt>{translateUi("Credit expiry")}</dt>

@@ -2,6 +2,7 @@ mod bills;
 pub(crate) mod hold_release;
 mod operations;
 mod org_wallet;
+mod stripe_purchases;
 mod taxes;
 mod usage;
 pub(crate) mod usage_checkpoints;
@@ -221,6 +222,7 @@ pub(crate) struct FakeLago {
     wallet_creates: AtomicUsize,
     topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
+    external_purchases: Option<stripe_purchases::LagoPurchaseFixture>,
     balance_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
@@ -245,6 +247,50 @@ impl FakeLago {
 
 #[async_trait]
 impl LagoApi for FakeLago {
+    async fn record_external_credit_refund(
+        &self,
+        _wallet: &BillingWallet,
+        _purchase_id: &str,
+        refund: &crate::services::billing::lago_client::external_purchases::ExternalReversal<'_>,
+        _secret: &str,
+    ) -> AppResult<String> {
+        self.external_purchases
+            .as_ref()
+            .ok_or_else(|| AppError::BillingProviderUnavailable("fixture unavailable".into()))?
+            .apply_reversal(refund)
+    }
+
+    async fn verify_external_credit_wallet(
+        &self,
+        _: &BillingWallet,
+        _: &str,
+        _: &str,
+    ) -> AppResult<()> {
+        self.external_purchases
+            .as_ref()
+            .map(|_| ())
+            .ok_or_else(|| AppError::BillingProviderUnavailable("fixture unavailable".into()))
+    }
+
+    async fn record_external_credit_purchase(
+        &self,
+        wallet: &BillingWallet,
+        payment: &crate::services::billing::lago_client::external_purchases::ExternalPayment,
+        _: &str,
+    ) -> AppResult<crate::services::billing::lago_client::external_purchases::ExternalPurchaseReceipt>
+    {
+        self.external_purchases
+            .as_ref()
+            .ok_or_else(|| AppError::BillingProviderUnavailable("fixture unavailable".into()))?
+            .apply(wallet, payment)
+    }
+
+    async fn wallet_transactions(
+        &self,
+        _: &str,
+    ) -> AppResult<Vec<crate::services::billing::lago_client::LagoWalletTransaction>> {
+        Ok(vec![])
+    }
     async fn tax_config(
         &self,
         _: &str,
@@ -266,6 +312,10 @@ impl LagoApi for FakeLago {
             ));
         }
         let mut config = crate::services::billing::taxes::zero_config();
+        if self.external_purchases.is_some() {
+            config.plan["amount_cents"] = serde_json::json!(0);
+            config.plan["amount_currency"] = serde_json::json!("USD");
+        }
         if let Some(rate) = &self.tax_rate {
             config.customer["taxes"] = serde_json::json!([{"code":"gst","name":"GST","rate":rate}]);
         }
@@ -354,6 +404,9 @@ impl LagoApi for FakeLago {
     }
 
     async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+        if let Some(fixture) = &self.external_purchases {
+            return Ok(fixture.balance());
+        }
         if let Some((entered, resume)) = &self.balance_read_gate {
             entered.notify_one();
             resume.notified().await;

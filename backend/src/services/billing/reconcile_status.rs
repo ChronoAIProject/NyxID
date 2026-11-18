@@ -28,6 +28,8 @@ const STEPS: &[&str] = &[
     "grant_ledger",
     "ledger_anchor",
     "settlement_recovery",
+    "stripe_usage_periods",
+    "stripe_purchases",
     "topup_expiry",
     "service_prices",
     "model_prices",

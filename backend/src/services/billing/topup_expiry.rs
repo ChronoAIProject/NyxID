@@ -193,6 +193,7 @@ pub async fn expire_purchased_credits(
                             { "active_topup_expiry": null },
                         ],
                         "pending_topup_expiry_credits": { "$in": [0_i64, null] },
+                        "stripe_enrollment.reversal_holds.0": { "$exists": false },
                         // Recompute if a concurrent request changed protected funds.
                         "$expr": { "$and": [
                             { "$eq": [{ "$ifNull": ["$reserved_credits", 0_i64] }, wallet.reserved_credits] },
@@ -827,6 +828,17 @@ fn purchased_remaining(
     wallet_balance: Credits,
     protected_credits: Credits,
 ) -> AppResult<Vec<ExpiringPurchase>> {
+    let mut reversed = HashMap::<String, Credits>::new();
+    for transaction in &transactions {
+        if transaction.status == "settled"
+            && transaction.transaction_type == "outbound"
+            && transaction.transaction_status == "voided"
+            && let Some(id) = &transaction.reversed_purchase_transaction_id
+        {
+            let amount = reversed.entry(id.clone()).or_default();
+            *amount = amount.checked_add(transaction.credit_amount)?;
+        }
+    }
     let mut purchased: Vec<LagoWalletTransaction> = transactions
         .into_iter()
         .filter(is_settled_purchase)
@@ -837,10 +849,6 @@ fn purchased_remaining(
             .cmp(&right.settled_at.unwrap_or(right.created_at))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let total = purchased
-        .iter()
-        .map(|transaction| transaction.credit_amount)
-        .try_fold(Credits::ZERO, Credits::checked_add)?;
     let traceable = purchased
         .iter()
         .all(|transaction| transaction.remaining_credit.is_some());
@@ -855,15 +863,33 @@ fn purchased_remaining(
             })
             .collect::<Vec<_>>()
     } else {
+        let nominal = purchased
+            .iter()
+            .map(|transaction| {
+                let adjustment = reversed.remove(&transaction.id).unwrap_or_default();
+                if adjustment < Credits::ZERO || adjustment > transaction.credit_amount {
+                    return Err(crate::errors::AppError::BillingProviderUnavailable(
+                        "Invalid Lago purchase reversal history".into(),
+                    ));
+                }
+                Ok(transaction.credit_amount.checked_sub(adjustment)?)
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        if !reversed.is_empty() {
+            return Err(crate::errors::AppError::BillingProviderUnavailable(
+                "Lago reversal history references an unknown purchase".into(),
+            ));
+        }
+        let total = Credits::checked_sum(nominal.iter().copied())?;
         let mut consumed = total
             .checked_sub(wallet_balance.max(Credits::ZERO))?
             .max(Credits::ZERO);
-        purchased
-            .iter()
-            .map(|transaction| {
-                let spent = consumed.min(transaction.credit_amount);
+        nominal
+            .into_iter()
+            .map(|amount| {
+                let spent = consumed.min(amount);
                 consumed = consumed.checked_sub(spent)?;
-                transaction.credit_amount.checked_sub(spent)
+                amount.checked_sub(spent)
             })
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -1057,6 +1083,7 @@ mod tests {
             credit_amount: crate::models::credits::Credits::from_micros(credits),
             remaining_credit: remaining.map(crate::models::credits::Credits::from_micros),
             name: None,
+            reversed_purchase_transaction_id: None,
             settled_at: Some(settled_at),
             created_at: settled_at,
         }
@@ -1377,6 +1404,7 @@ mod tests {
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
                 tax_generation: 0,
+                stripe_enrollment: None,
                 tax_guard_token: None,
                 id: "wallet-1".to_string(),
                 owner_id: "owner-1".to_string(),
@@ -1406,6 +1434,7 @@ mod tests {
                 owner_id: "owner-1".to_string(),
                 idempotency_key: "topup-key-1".to_string(),
                 amount_credits: 5,
+                stripe_purchase: None,
                 lago_wallet_id: "lago-wallet-1".to_string(),
                 lago_wallet_transaction_id: Some("purchase-1".to_string()),
                 lago_invoice_id: Some("invoice-1".to_string()),
@@ -1512,6 +1541,7 @@ mod tests {
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
                 tax_generation: 0,
+                stripe_enrollment: None,
                 tax_guard_token: None,
                 id: "wallet-recover".to_string(),
                 owner_id: "owner-recover".to_string(),
@@ -1586,6 +1616,7 @@ mod tests {
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
                 tax_generation: 0,
+                stripe_enrollment: None,
                 tax_guard_token: None,
                 id: "wallet-race".to_string(),
                 owner_id: "owner-race".to_string(),

@@ -133,6 +133,8 @@ pub struct TopUpResponse {
     pub idempotency_key: String,
     pub checkout_url: String,
     pub payment_provider: Option<String>,
+    #[serde(default)]
+    pub stripe_funded: bool,
     pub lago_wallet_transaction_id: Option<String>,
     pub lago_invoice_id: Option<String>,
     pub status: String,
@@ -264,7 +266,11 @@ async fn verify_topup_flow(
         bail!("poll_interval_secs must be greater than 0");
     }
 
-    let starting_wallet: BillingWalletResponse = api.get("/billing/wallet").await?;
+    let wallet_path = owner_id
+        .as_deref()
+        .map(|id| format!("/billing/wallet?owner_id={}", urlencoding::encode(id)))
+        .unwrap_or_else(|| "/billing/wallet".into());
+    let starting_wallet: BillingWalletResponse = api.get(&wallet_path).await?;
     let key =
         idempotency_key.unwrap_or_else(|| format!("nyxid-cli-verify-topup-{}", Uuid::new_v4()));
     let topup: TopUpResponse = api
@@ -286,14 +292,14 @@ async fn verify_topup_flow(
     if !topup.checkout_url.starts_with("https://") {
         bail!("top-up checkout_url must be HTTPS");
     }
-    if topup.lago_wallet_transaction_id.is_none() {
+    if topup.lago_wallet_transaction_id.is_none() && !topup.stripe_funded {
         bail!("top-up response is missing lago_wallet_transaction_id");
     }
     if open && let Err(error) = crate::browser::open_browser(&topup.checkout_url) {
         eprintln!("Could not open checkout URL: {error}");
     }
 
-    eprintln!("Complete the Stripe sandbox checkout, then leave this command running.");
+    eprintln!("Complete the hosted Stripe purchase, then leave this command running.");
     let start_exact = starting_wallet
         .balance
         .clone()
@@ -302,7 +308,7 @@ async fn verify_topup_flow(
     let deadline = Instant::now() + timeout;
     let mut final_wallet = starting_wallet.clone();
     while Instant::now() < deadline {
-        let wallet: BillingWalletResponse = api.get("/billing/wallet").await?;
+        let wallet: BillingWalletResponse = api.get(&wallet_path).await?;
         if add_whole_amount(
             &wallet
                 .balance
@@ -1004,6 +1010,34 @@ mod tests {
         })
         .await
         .expect("topup should succeed");
+    }
+
+    #[tokio::test]
+    async fn topup_reports_server_purchase_minimum() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/billing/topup"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "bad_request",
+                "error_code": 1000,
+                "message": "Minimum credit purchase is 10 credits"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = run(BillingCommands::Topup {
+            amount_credits: 9,
+            idempotency_key: Some("below-minimum".to_string()),
+            owner_id: None,
+            open: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Minimum credit purchase is 10 credits")
+        );
     }
 
     #[tokio::test]

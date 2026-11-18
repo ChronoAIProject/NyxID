@@ -166,6 +166,7 @@ async fn fixture(label: &str) -> Fixture {
     let config = crate::config::AppConfig {
         billing_enabled: true,
         billing_allocations_enabled: false,
+        billing_stripe_purchases: None,
         ..test_utils::test_app_config()
     };
     let lago = Arc::new(LocalLago {

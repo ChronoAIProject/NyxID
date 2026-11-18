@@ -85,6 +85,7 @@ pub(super) async fn fixture(
         allowance_reservations: vec![],
         grant_reservations: vec![],
         tax_cache_ttl_secs: 900,
+        credit_only: false,
         applied_tax: None,
     }];
     (db, ctx, wallet, layers)

@@ -189,6 +189,20 @@ pub fn snapshot(profile: &BillingTaxProfile, metric: &str) -> AppResult<AppliedU
         fingerprint: profile.fingerprint.clone(),
     })
 }
+
+pub(super) fn require_zero_usage_tax(profile: &BillingTaxProfile) -> AppResult<()> {
+    if profile
+        .default_taxes
+        .iter()
+        .chain(profile.metric_taxes.values().flatten())
+        .any(|tax| tax.rate_percent != Credits::ZERO)
+    {
+        return Err(AppError::BillingProviderUnavailable(
+            "Stripe-funded wallets require a Lago period with zero usage tax".into(),
+        ));
+    }
+    Ok(())
+}
 fn fresh(profile: &BillingTaxProfile, wallet: &BillingWallet, ttl: u64) -> bool {
     !profile.fingerprint.is_empty()
         && wallet.lago_subscription_id.as_deref() == Some(profile.subscription_id.as_str())
@@ -399,6 +413,25 @@ pub async fn reserve_gross_in_session(
     layer: &mut LayerReservation,
     base: Credits,
 ) -> AppResult<Credits> {
+    if let Some(enrollment) = &wallet.stripe_enrollment {
+        if !enrollment.reversal_holds.is_empty() {
+            return Err(AppError::WalletPaymentReview);
+        }
+        if wallet.lago_wallet_id.as_deref() != Some(enrollment.lago_wallet_id.as_str())
+            || wallet.lago_subscription_id.as_deref()
+                != Some(enrollment.lago_subscription_id.as_str())
+            || wallet.has_payment_instrument
+            || !enrollment
+                .usage_verified_until
+                .is_some_and(|until| until > Utc::now())
+        {
+            return Err(AppError::BillingProviderUnavailable(
+                "The Stripe-funded Lago usage period requires verification".into(),
+            ));
+        }
+        layer.credit_only = true;
+        return Ok(base);
+    }
     if base == Credits::ZERO {
         return Ok(base);
     }

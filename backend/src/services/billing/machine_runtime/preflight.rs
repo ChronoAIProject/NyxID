@@ -239,7 +239,9 @@ impl BillingService {
                 .ok_or_else(|| invalid("allowance estimate overflow"))?;
         }
         let wallet_funds = wallet.available_credits()?.max(Credits::ZERO);
-        let wallet_seconds = if wallet_funds > Credits::ZERO {
+        let wallet_seconds = if wallet.stripe_enrollment.is_some() {
+            wallet_funds.pico() / rate.credits_per_second.pico()
+        } else if wallet_funds > Credits::ZERO {
             let lago = self
                 .lago
                 .as_deref()

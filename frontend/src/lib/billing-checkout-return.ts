@@ -29,12 +29,13 @@ export function billingCheckoutReturn(actorId: string | undefined, search: Recor
     if (!raw || !actorId) return undefined;
     const parsed = recordSchema.safeParse(JSON.parse(raw));
     if (!parsed.success || parsed.data.actorId !== actorId || parsed.data.expiresAt <= Date.now() || parsed.data.expiresAt > Date.now() + MAX_AGE_MS) return undefined;
-    // Explicit navigation always wins. Only the provider's bare return consumes
-    // the saved selection; it is then carried by normal URL/query-cache state.
-    if (Object.values(search).some((value) => value !== undefined)) return undefined;
     const { ownerId, presentation } = parsed.data;
+    // Lago returns to /billing. Stripe also names the payer in its return URL.
+    const params = Object.entries(search).filter(([, value]) => value !== undefined);
+    const stripeReturn = params.length === 1 && search.ownerId === (ownerId ?? actorId);
+    if (params.length && !stripeReturn) return undefined;
     if (presentation === "panel") return { to: "/assistant" as const, search: { panel: "billing" as const, panelOwnerId: ownerId } };
-    if (ownerId) return { to: "/billing" as const, search: { ownerId } };
+    if (ownerId && !stripeReturn) return { to: "/billing" as const, search: { ownerId } };
   } catch { /* Storage denial or stale data must never change authority. */ }
   return undefined;
 }

@@ -921,7 +921,7 @@ pub(super) fn reserved_row(
                 })
                 .transpose()
                 .expect("validated tariff rate"),
-            tax_accounting: true,
+            tax_accounting: !item.credit_only,
             applied_tax: item.applied_tax.clone(),
             credits_per_unit_pico: item.credits_per_unit_pico,
             credits_per_unit_micros: layer
@@ -1434,6 +1434,7 @@ mod tests {
                             allowance_reservations: Vec::new(),
                             grant_reservations: Vec::new(),
                             tax_cache_ttl_secs: 900,
+                            credit_only: false,
                             applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                         }],
                     })
@@ -1679,6 +1680,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -1765,6 +1767,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -1947,6 +1950,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -2067,6 +2071,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -2151,6 +2156,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -2311,6 +2317,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -2441,6 +2448,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             }],
         };
@@ -2561,6 +2569,7 @@ mod tests {
                         allowance_reservations: Vec::new(),
                         grant_reservations: Vec::new(),
                         tax_cache_ttl_secs: 900,
+                        credit_only: false,
                         applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
                     },
                 )
@@ -2699,6 +2708,7 @@ mod tests {
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
                 tax_generation: 0,
+                stripe_enrollment: None,
                 tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),

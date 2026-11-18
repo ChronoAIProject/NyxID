@@ -182,6 +182,7 @@ impl BillingService {
             .lago
             .as_deref()
             .ok_or_else(|| unavailable("billing provider is not configured"))?;
+        super::purchases::ensure_usage_period(&self.db, lago, &wallet).await?;
         let subscription = lago
             .runtime_subscription(wallet.lago_subscription_id.as_deref().unwrap())
             .await
@@ -343,9 +344,10 @@ impl BillingService {
         let wallet = self.runtime_prerequisites(owner_id, &rate).await?;
         let candidates =
             funding::prepare_machine_window_funding(&self.db, owner_id, None, SKU, now).await?;
-        if !candidates
-            .benefits_cover(&self.db, seconds, rate.credits_per_second)
-            .await?
+        if wallet.stripe_enrollment.is_none()
+            && !candidates
+                .benefits_cover(&self.db, seconds, rate.credits_per_second)
+                .await?
         {
             let lago = self
                 .lago
@@ -687,6 +689,7 @@ impl BillingService {
                 allowance_reservations: vec![],
                 grant_reservations: vec![],
                 tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+                credit_only: false,
                 applied_tax: None,
             },
             Utc::now(),
@@ -747,7 +750,7 @@ impl BillingService {
                 credits_per_unit_micros: layer.credits_per_unit_micros,
                 credits_per_unit_pico: layer.credits_per_unit_pico,
                 settlement_rate: Some(run.rate.credits_per_second),
-                tax_accounting: true,
+                tax_accounting: !layer.credit_only,
                 applied_tax: layer.applied_tax.clone(),
                 allowance_reservations: layer.allowance_reservations.clone(),
                 grant_reservations: layer.grant_reservations.clone(),

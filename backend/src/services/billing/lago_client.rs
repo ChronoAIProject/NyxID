@@ -95,6 +95,37 @@ impl<T> ProviderDispatch<T> {
 
 #[async_trait]
 pub trait LagoApi: Send + Sync {
+    fn credit_period_config(&self) -> Option<&external_purchases::CreditPeriodConfig> {
+        None
+    }
+
+    async fn record_external_credit_refund(
+        &self,
+        _wallet: &crate::models::billing_wallet::BillingWallet,
+        _purchase_id: &str,
+        _refund: &external_purchases::ExternalReversal<'_>,
+        _secret: &str,
+    ) -> AppResult<String> {
+        Err(external_purchases::unavailable())
+    }
+
+    async fn verify_external_credit_wallet(
+        &self,
+        _wallet: &crate::models::billing_wallet::BillingWallet,
+        _account_id: &str,
+        _secret: &str,
+    ) -> AppResult<()> {
+        Err(external_purchases::unavailable())
+    }
+
+    async fn record_external_credit_purchase(
+        &self,
+        _wallet: &crate::models::billing_wallet::BillingWallet,
+        _payment: &external_purchases::ExternalPayment,
+        _secret: &str,
+    ) -> AppResult<external_purchases::ExternalPurchaseReceipt> {
+        Err(external_purchases::unavailable())
+    }
     async fn tax_config(
         &self,
         _customer_id: &str,
@@ -315,6 +346,7 @@ pub struct SandboxProviderSnapshot {
     pub rates: Vec<PlanRate>,
 }
 
+pub(crate) mod external_purchases;
 mod sandbox;
 
 /// A per-unit price from a Lago plan charge, converted to micro-credits
@@ -345,6 +377,7 @@ pub struct LagoClient {
     base_url: String,
     api_key: String,
     payment_provider_code: Option<String>,
+    credit_period_config: Option<external_purchases::CreditPeriodConfig>,
     http: reqwest::Client,
 }
 
@@ -611,6 +644,7 @@ impl LagoClient {
             base_url,
             api_key,
             payment_provider_code: None,
+            credit_period_config: None,
             http,
         })
     }
@@ -619,6 +653,14 @@ impl LagoClient {
     /// (a "stripe" connection code) so top-up checkout URLs can be generated.
     pub fn with_payment_provider_code(mut self, code: Option<String>) -> Self {
         self.payment_provider_code = code;
+        self
+    }
+
+    pub(crate) fn with_credit_period_config(
+        mut self,
+        config: Option<external_purchases::CreditPeriodConfig>,
+    ) -> Self {
+        self.credit_period_config = config;
         self
     }
 
@@ -693,6 +735,41 @@ impl LagoClient {
 
 #[async_trait]
 impl LagoApi for LagoClient {
+    fn credit_period_config(&self) -> Option<&external_purchases::CreditPeriodConfig> {
+        self.credit_period_config.as_ref()
+    }
+
+    async fn record_external_credit_refund(
+        &self,
+        wallet: &crate::models::billing_wallet::BillingWallet,
+        purchase_id: &str,
+        refund: &external_purchases::ExternalReversal<'_>,
+        secret: &str,
+    ) -> AppResult<String> {
+        self.post_external_credit_refund(wallet, purchase_id, refund, secret)
+            .await
+    }
+
+    async fn verify_external_credit_wallet(
+        &self,
+        wallet: &crate::models::billing_wallet::BillingWallet,
+        account_id: &str,
+        secret: &str,
+    ) -> AppResult<()> {
+        self.read_external_credit_capability(wallet, account_id, secret)
+            .await
+    }
+
+    async fn record_external_credit_purchase(
+        &self,
+        wallet: &crate::models::billing_wallet::BillingWallet,
+        payment: &external_purchases::ExternalPayment,
+        secret: &str,
+    ) -> AppResult<external_purchases::ExternalPurchaseReceipt> {
+        self.post_external_credit_purchase(wallet, payment, secret)
+            .await
+    }
+
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
         if let Some(existing) = self
             .get_one_by_external_id("customers", "customer", &owner.external_customer_id)
@@ -1788,6 +1865,7 @@ pub struct LagoWalletTransaction {
     pub credit_amount: Credits,
     pub remaining_credit: Option<Credits>,
     pub name: Option<String>,
+    pub reversed_purchase_transaction_id: Option<String>,
     pub settled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -2268,6 +2346,15 @@ fn wallet_transaction_from_value(value: &Value) -> Option<LagoWalletTransaction>
             _ => return None,
         },
         name: value_string(value, &["name"]),
+        reversed_purchase_transaction_id: value
+            .get("metadata")
+            .and_then(Value::as_array)
+            .and_then(|metadata| {
+                metadata
+                    .iter()
+                    .find(|field| field["key"] == "nyxid_reversed_purchase_transaction_id")
+            })
+            .and_then(|field| value_string(field, &["value"])),
         settled_at: value_string(value, &["settled_at"])
             .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok()),
         created_at,

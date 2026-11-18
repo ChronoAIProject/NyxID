@@ -1135,6 +1135,7 @@ mod tests {
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
             billing_allocations_enabled: false,
+            billing_stripe_purchases: None,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),

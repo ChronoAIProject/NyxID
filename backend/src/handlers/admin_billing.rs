@@ -14,6 +14,7 @@ use crate::{
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -359,4 +360,134 @@ pub async fn update_service_billing(
     ))
     .await?;
     Ok(Json(service_row(&state, &service_id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StripeEnrollmentRequest {
+    owner_id: uuid::Uuid,
+    stripe_customer_id: String,
+}
+
+pub async fn enroll_stripe_wallet(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(input): Json<StripeEnrollmentRequest>,
+) -> AppResult<StatusCode> {
+    require_admin(&state, &auth).await?;
+    state
+        .billing
+        .enroll_stripe_wallet(
+            &input.owner_id.to_string(),
+            &input.stripe_customer_id,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            state.audit_chain_hmac_key.as_slice(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct StripeReversalResponse {
+    provider_id: String,
+    status: String,
+    amount_minor: i64,
+    decision: Option<StripeReversalDecisionResponse>,
+    finance_correction_required: bool,
+    finance_correction: Option<StripeFinanceCorrectionResponse>,
+}
+
+#[derive(Serialize)]
+pub struct StripeFinanceCorrectionResponse {
+    reference: String,
+    acknowledged_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize)]
+pub struct StripeReversalDecisionResponse {
+    decision_id: String,
+    action: crate::models::billing_topup_session::StripeReversalAction,
+    credits: i64,
+    reason: String,
+    state: crate::models::billing_topup_session::StripeReversalState,
+    lago_void_transaction_id: Option<String>,
+}
+
+pub async fn list_stripe_reversals(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(purchase_id): Path<String>,
+) -> AppResult<Json<Vec<StripeReversalResponse>>> {
+    require_admin(&state, &auth).await?;
+    let events = state.billing.stripe_reversals(&purchase_id).await?;
+    Ok(Json(
+        events
+            .into_iter()
+            .map(|event| StripeReversalResponse {
+                finance_correction_required:
+                    crate::services::billing::purchases::reversals::requires_finance_correction(
+                        &event,
+                    ),
+                finance_correction: event.finance_correction.map(|correction| {
+                    StripeFinanceCorrectionResponse {
+                        reference: correction.reference,
+                        acknowledged_at: correction.acknowledged_at,
+                    }
+                }),
+                provider_id: event.provider_id,
+                status: event.status,
+                amount_minor: event.amount_minor,
+                decision: event
+                    .decision
+                    .map(|decision| StripeReversalDecisionResponse {
+                        decision_id: decision.decision_id,
+                        action: decision.action,
+                        credits: decision.credits,
+                        reason: decision.reason,
+                        state: decision.state,
+                        lago_void_transaction_id: decision.lago_void_transaction_id,
+                    }),
+            })
+            .collect(),
+    ))
+}
+
+pub async fn acknowledge_stripe_finance_correction(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((purchase_id, provider_id)): Path<(String, String)>,
+    Json(input): Json<crate::services::billing::purchases::reversals::FinanceCorrection>,
+) -> AppResult<StatusCode> {
+    require_admin(&state, &auth).await?;
+    state
+        .billing
+        .acknowledge_stripe_finance_correction(
+            &purchase_id,
+            &provider_id,
+            input,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            state.audit_chain_hmac_key.as_slice(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn resolve_stripe_reversal(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((purchase_id, provider_id)): Path<(String, String)>,
+    Json(input): Json<crate::services::billing::purchases::reversals::Resolution>,
+) -> AppResult<StatusCode> {
+    require_admin(&state, &auth).await?;
+    state
+        .billing
+        .resolve_stripe_reversal(
+            &purchase_id,
+            &provider_id,
+            input,
+            &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+            state.audit_chain_hmac_key.as_slice(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }

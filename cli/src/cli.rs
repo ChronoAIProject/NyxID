@@ -2231,7 +2231,7 @@ pub enum BillingCommands {
     },
     /// Create a hosted wallet top-up checkout
     Topup {
-        /// Credits to add
+        /// Credits to add (10–10,000,000 for new orders)
         #[arg(long)]
         amount_credits: i64,
         /// Retry-safe idempotency key
@@ -2246,10 +2246,10 @@ pub enum BillingCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Verify the deployed Lago + Stripe wallet top-up flow
+    /// Start a purchase and verify that payment increases the wallet balance
     VerifyTopupFlow {
         /// Credits to add in the verification top-up
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 10)]
         amount_credits: i64,
         /// Fresh retry-safe idempotency key; omit to generate one
         #[arg(long)]

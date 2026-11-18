@@ -82,8 +82,21 @@ pub struct BillingLedgerEntry {
     pub dedupe_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripe_payment: Option<StripeLedgerPayment>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct StripeLedgerPayment {
+    pub account_id: String,
+    pub checkout_id: String,
+    pub payment_intent_id: String,
+    pub currency: String,
+    pub subtotal_minor: i64,
+    pub tax_minor: i64,
+    pub total_minor: i64,
 }
 
 impl BillingLedgerEventType {

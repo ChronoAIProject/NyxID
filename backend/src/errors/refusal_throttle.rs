@@ -248,7 +248,8 @@ impl AppError {
             | Self::ManagedExecutionPending(_)
             | Self::ErasurePreparing
             | Self::PlanEntitlementRequired(_)
-            | Self::WalletSuspended => false,
+            | Self::WalletSuspended
+            | Self::WalletPaymentReview => false,
         };
         counted
             && self.status_code().is_client_error()

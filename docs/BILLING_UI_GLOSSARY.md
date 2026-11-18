@@ -20,7 +20,7 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 
 | Term                              | Meaning                                                                                                                                                                                                                                                                                                               |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Credit**                        | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency. Wallet amounts retain up to twelve decimal places. Top-up inputs remain whole credits.                                                                           |
+| **Credit**                        | The unit used for service usage. Lago wallets use USD internally with `rate_amount: "1"`. Each Stripe offer sets its own purchase price per whole credit. Wallet accounting supports up to twelve decimal places.                                                                           |
 | **Exact credits / credit micros** | Money uses decimal-credit strings and BigInt picocredits. Legacy integer micros remain display compatibility fields (one millionth of a credit), truncated after aggregation. Wallet debit equals its exact funded share. Normal display uses six decimals; a smaller nonzero value displays `<0.000001`, never zero. |
 | **Layer**                         | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row.                                                                                                                                                                                    |
 
@@ -328,8 +328,8 @@ not "you have no wallet", since `GET /billing/wallet` auto-provisions when Lago 
 
 | UI element                                 | Meaning                                                                                                                                                                                                                                                            |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **"Add credits through hosted checkout."** | Payment runs through Stripe _underneath Lago_; NyxID never touches card data.                                                                                                                                                                                      |
-| **Credits input**                          | Whole credits to buy = whole USD. Range **1 to 10,000,000**, step 1, default 100 — enforced on both sides (`billing.tsx:69-75`; `services/billing/provisioning.rs:119-128`). Not an invoice total: no fees or tax shown.                                           |
+| **Hosted checkout** | Enrolled wallets use Stripe Checkout and Stripe calculates applicable tax on the purchase. Legacy wallets open the checkout supplied by Lago. |
+| **Credits input** | Enter whole credits. The USD 1 launch offer has a USD 10 minimum, USD 20 default and USD 20, 50, 100 and 500 presets. At another unit price, each preset buys the whole credits within its budget. The default stays within the offer's minimum and maximum. The displayed USD amount is the price of the selected credits before any checkout tax. |
 | **Continue to payment**                    | `POST /billing/topup` with a fresh browser-generated UUID as `idempotency_key`, then **navigates the current tab** to the hosted `checkout_url` (`openExternal` = `window.location.assign`, `lib/navigation.ts:4-6`). Clicking it does not mean payment succeeded. |
 
 | Concept                     | Meaning                                                                                                                                                                                                |
@@ -571,13 +571,20 @@ timeouts return HTTP 503 and the client does not automatically retry.
 Backed by `GET /api/v1/billing/topups?page=&per_page=&period=` (`handlers/billing.rs:429-558`),
 newest first, 10 per page, with its own period selector and server pagination. Loading
 failures show a retry action rather than an empty history. On phones, the same fields
-stack into purchase rows. NyxID stores only that a checkout was created; the payment outcome is read
-live from Lago's credit invoices on each request.
+stack into purchase rows. For an enrolled wallet the purchase row records Stripe's
+confirmed monetary amounts. The Credits column shows the quantity ordered.
+After payment clears, **Paid, credits pending** becomes **Credits available**
+once Lago confirms delivery. A **View purchase document** action opens the
+owner's Stripe invoice when it is ready. An adjustment shows the monetary
+refund and the quantity of credits actually reversed. **Payment under review**
+means a refund or dispute still needs resolution.
+
+For legacy purchases the payment outcome comes from Lago's credit invoices.
 
 | Column            | Meaning                                                                                                                                                                                                                                               |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Date**          | When the **checkout was created** (`created_at`) — not when payment completed, and not Lago's invoice issuing date, even on a Paid row.                                                                                                               |
-| **Credits**       | Credits requested (= USD).                                                                                                                                                                                                                            |
+| **Credits**       | Whole credits requested.                                                                                                                                                                                                                            |
 | **Credit expiry** | Purchased-credit expiry date, or expired date and exact expired amount. Paid purchases awaiting expiry synchronization show Pending sync.                                                                                                             |
 | **Invoice**       | Lago's human-facing invoice number. `—` while unresolved — invoice attachment is asynchronous, and the handler backfills the link through Lago's wallet transactions when it can.                                                                     |
 | **Status**        | See below.                                                                                                                                                                                                                                            |
@@ -658,7 +665,7 @@ unclassified requests/costs. Recent activity is included alongside summaries;
 validation status indicates whether the reporting journal was stable for the
 read. Existing activity/outcome/feedback sections keep their own semantics.
 
-## Current bill, taxes and usage invoices
+## Legacy current bill, taxes and usage invoices
 
 The personal Billing tab includes **Current bill** and **Past usage invoices**.
 The current bill is the open calendar billing period in Lago: each wallet-funded
@@ -675,8 +682,9 @@ statuses appear as **Paid**, **Pending** or **Failed**.
 Past usage invoices are finalized subscription invoices. **Invoice total** is
 before prepaid credits. **Prepaid credits applied** explains how much the wallet
 paid; **Amount due** is the remaining payable balance. Each invoice includes its
-historical named tax rows and a **Download receipt** action. Top-up history
-continues to show the separate untaxed invoices for buying credits.
+historical named tax rows and a **Download receipt** action. Legacy top-up history
+shows the separate untaxed invoices for buying credits. Stripe-funded owners
+see their purchase documents in Top-up history and credits consumed in Usage.
 
 Grant- and allowance-funded quantities never reach Lago, are not taxed and are
 intentionally absent from these bills. Usage remains the place to inspect those

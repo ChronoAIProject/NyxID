@@ -1497,6 +1497,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
         .route(
+            "/billing/stripe/enroll",
+            post(handlers::admin_billing::enroll_stripe_wallet),
+        )
+        .route(
+            "/billing/stripe/purchases/{purchase_id}/reversals",
+            get(handlers::admin_billing::list_stripe_reversals),
+        )
+        .route(
+            "/billing/stripe/purchases/{purchase_id}/reversals/{provider_id}",
+            post(handlers::admin_billing::resolve_stripe_reversal),
+        )
+        .route(
+            "/billing/stripe/purchases/{purchase_id}/reversals/{provider_id}/finance-correction",
+            put(handlers::admin_billing::acknowledge_stripe_finance_correction),
+        )
+        .route(
             "/billing/cma-rate-cards",
             get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
         )
@@ -2115,6 +2131,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/wallet/view", get(handlers::billing::view_wallet))
         .route("/topup", post(handlers::billing::create_topup))
         .route("/topups", get(handlers::billing::list_topups))
+        .route(
+            "/topups/{order_id}/document",
+            get(handlers::billing::download_stripe_purchase),
+        )
+        .route(
+            "/stripe-portal",
+            post(handlers::billing::create_stripe_portal),
+        )
         .route("/bill", get(handlers::billing::get_bill))
         .route("/invoices", get(handlers::billing::list_invoices))
         .route("/benefits", get(handlers::billing_benefits::get))
@@ -3830,7 +3854,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Webhook routes -- unauthenticated (verified by secret token)
     let webhook_routes = Router::new()
         .route("/telegram", post(handlers::webhooks::telegram_webhook))
-        .route("/lago", post(handlers::billing::lago_webhook));
+        .route("/lago", post(handlers::billing::lago_webhook))
+        .route(
+            "/stripe-billing",
+            post(handlers::billing::stripe_billing_webhook),
+        );
     let trigger_webhook_routes = Router::new()
         .route(
             "/{trigger_id}",

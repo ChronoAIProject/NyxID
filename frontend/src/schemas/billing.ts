@@ -192,14 +192,32 @@ export const billingWalletResponseSchema = z.object({
   created_at: z.string().min(1),
   updated_at: z.string().min(1),
   created: z.boolean(),
+  stripe_funded: z.boolean().optional(),
+  stripe_purchase_offer: z
+    .object({
+      unit_amount_minor: z.number().int().positive(),
+      minimum_credits: z.number().int().positive(),
+      maximum_credits: z.number().int().positive(),
+    })
+    .optional(),
 });
 
 export const provisionBillingWalletRequestSchema = z.object({
   owner_id: z.string().min(1).optional(),
 });
 
+export const MIN_TOP_UP_CREDITS = 10;
+export const MAX_TOP_UP_CREDITS = 10_000_000;
+export const TOP_UP_PRESETS_USD = [20, 50, 100, 500] as const;
+
+export const topUpAmountSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(MAX_TOP_UP_CREDITS);
+
 export const topUpBillingRequestSchema = z.object({
-  amount_credits: z.number().int().positive().max(10_000_000),
+  amount_credits: topUpAmountSchema,
   idempotency_key: z.string().trim().min(8).max(128),
   owner_id: z.string().min(1).optional(),
 });
@@ -231,7 +249,34 @@ export const topUpHistoryEntrySchema = z.object({
   id: z.string().min(1),
   created_at: z.string().min(1),
   amount_credits: z.number().int(),
-  status: z.enum(["paid", "pending", "expired", "failed", "voided"]),
+  status: z.enum([
+    "paid",
+    "pending",
+    "expired",
+    "failed",
+    "voided",
+    "paid_credits_pending",
+    "credits_available",
+    "reversal_review",
+    "payment_reversed",
+  ]),
+  stripe: z
+    .object({
+      currency: z.literal("usd"),
+      subtotal_minor: z.number().int().positive(),
+      tax_minor: z.number().int().nonnegative().nullable(),
+      total_minor: z.number().int().positive().nullable(),
+      document_available: z.boolean(),
+      refunded_minor: z.number().int().nonnegative().optional(),
+      reversals: z
+        .array(
+          z.object({
+            returned_credits: z.number().int().nonnegative(),
+          }),
+        )
+        .optional(),
+    })
+    .optional(),
   invoice_number: z.string().nullable().optional(),
   lago_invoice_id: z.string().nullable().optional(),
   checkout_url: z.string().nullable().optional(),
