@@ -1,6 +1,9 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../i18n/appTranslation";
 import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
+import { DynamicTypeText as Text } from "./DynamicTypeText";
 import { ChevronRight } from "lucide-react-native";
 import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -24,24 +27,24 @@ function decisionColor(c: ThemeColors, status: ChallengeStatus): string {
 
 // DESIGN.md §Interaction Rules: status badges always Title Case.
 function decisionLabel(status: ChallengeStatus): string {
-  if (status === "APPROVED") return "Approved";
-  if (status === "DENIED") return "Denied";
-  if (status === "PENDING") return "Pending";
-  return "Expired";
+  if (status === "APPROVED") return translateApp("Approved");
+  if (status === "DENIED") return translateApp("Denied");
+  if (status === "PENDING") return translateApp("Pending");
+  return translateApp("Expired");
 }
 
 function channelLabel(channel?: string | null): string | undefined {
   if (!channel?.trim()) return undefined;
-  if (channel === "web") return "Web";
+  if (channel === "web") return translateApp("Web");
   if (channel === "telegram") return "Telegram";
-  if (channel === "mobile" || channel === "push") return "Mobile";
+  if (channel === "mobile" || channel === "push") return translateApp("Mobile");
   return channel;
 }
 
 function formatTime(dateStr: string): string | undefined {
   const d = new Date(dateStr);
   if (!Number.isFinite(d.getTime())) return undefined;
-  return d.toLocaleString("en-US", {
+  return d.toLocaleString(appLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -67,6 +70,7 @@ export function HistoryCard({
   last = true,
   onPress,
 }: HistoryCardProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -76,8 +80,9 @@ export function HistoryCard({
   const requester = recordedRequester(item);
   const decidedAt = item.decided_at ? formatTime(item.decided_at) : undefined;
   const requestedAt = formatTime(item.created_at);
-  const riskLabel =
-    item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1);
+  const riskLabel = translateApp(
+    item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1),
+  );
   const decision = decisionLabel(item.status);
 
   return (
@@ -91,7 +96,7 @@ export function HistoryCard({
         accessibilityRole={onPress ? "button" : undefined}
         accessibilityLabel={`${decision}: ${summary}`}
         accessibilityHint={
-          onPress ? "View approval request details" : undefined
+          onPress ? translateApp("View approval request details") : undefined
         }
       >
         <View style={styles.tile}>
@@ -103,16 +108,12 @@ export function HistoryCard({
           </Text>
           <Text style={styles.secondary}>{summary}</Text>
           {requester ? (
-            <Text style={styles.meta}>Requested by {requester}</Text>
+            <Text style={styles.meta}>
+              {translateApp("Requested by {{name}}", { name: requester })}</Text>
           ) : null}
           <Text style={styles.meta}>
-            {channel ? `via ${channel} · ` : ""}
-            {decidedAt
-              ? `Decided ${decidedAt}`
-              : requestedAt
-                ? `Requested ${requestedAt}`
-                : "Time not recorded"}
-            {item.risk_level !== "unknown" ? ` · ${riskLabel} risk` : ""}
+            {(channel ? (decidedAt
+              ? (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Decided {{time}} · {{risk}} risk", { channel: channel, time: decidedAt, risk: riskLabel }) : translateApp("via {{channel}} · Decided {{time}}", { channel: channel, time: decidedAt })) : (requestedAt ? (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Requested {{time}} · {{risk}} risk", { channel: channel, time: requestedAt, risk: riskLabel }) : translateApp("via {{channel}} · Requested {{time}}", { channel: channel, time: requestedAt })) : (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Time not recorded · {{risk}} risk", { channel: channel, risk: riskLabel }) : translateApp("via {{channel}} · Time not recorded", { channel: channel })))) : (decidedAt ? (item.risk_level !== "unknown" ? translateApp("Decided {{time}} · {{risk}} risk", { time: decidedAt, risk: riskLabel }) : translateApp("Decided {{time}}", { time: decidedAt })) : (requestedAt ? (item.risk_level !== "unknown" ? translateApp("Requested {{time}} · {{risk}} risk", { time: requestedAt, risk: riskLabel }) : translateApp("Requested {{time}}", { time: requestedAt })) : (item.risk_level !== "unknown" ? translateApp("Time not recorded · {{risk}} risk", { risk: riskLabel }) : translateApp("Time not recorded")))))}
           </Text>
         </View>
         <Text
@@ -128,11 +129,12 @@ export function HistoryCard({
 
 /** A date group's title, in the small caps of an iOS grouped list. */
 export function HistorySectionHeader({ title }: { title: string }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   return (
     <Text accessibilityRole="header" style={styles.sectionHeader}>
-      {title.toUpperCase()}
+      {title}
     </Text>
   );
 }
@@ -161,8 +163,7 @@ const createStyles = (c: ThemeColors) =>
     meta: { ...typeScale.small, color: c.textMuted },
     value: { ...typeScale.label, flexShrink: 0 },
     sectionHeader: {
-      ...typeScale.small,
-      letterSpacing: 0.6,
+      ...typeScale.groupLabel,
       color: c.textMuted,
       paddingHorizontal: spacing.xxl,
     },

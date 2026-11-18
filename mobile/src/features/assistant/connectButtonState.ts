@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { z } from "zod";
 import type { connectLinkPreviewSchema } from "./connectLinkContracts";
 
@@ -28,25 +29,28 @@ export function connectButtonState(
     preview.status === "expired" ||
     (preview.status === "pending" && Date.parse(preview.expires_at) <= now);
   if (preview.status === "completed")
-    return { label: `${name} connected`, detail: "Connected", disabled: true, tone: "done" };
+    return { label: translateApp("{{name}} connected", { name: name}), detail: translateApp("Connected"), disabled: true, tone: "done" };
   if (preview.status === "cancelled")
     return {
-      label: `Connect ${name}`,
-      detail: "This link was cancelled. Ask NyxBot for a new one.",
+      label: translateApp("Connect {{name}}", {name: name }),
+      detail: translateApp(
+        "This link was cancelled. Ask NyxBot for a new one.",
+      ),
       disabled: true,
       tone: "closed",
     };
   if (expired)
     return {
-      label: `Connect ${name}`,
-      detail: "This link expired. Ask NyxBot for a new one.",
+      label: translateApp("Connect {{name}}", {name: name }),
+      detail: translateApp("This link expired. Ask NyxBot for a new one."),
       disabled: true,
       tone: "closed",
     };
   const minutes = Math.max(1, Math.ceil((Date.parse(preview.expires_at) - now) / 60_000));
   return {
-    label: `Connect ${name}`,
-    detail: `Waiting for you · link expires in ${minutes} min`,
+    label: translateApp("Connect {{name}}", {name: name }),
+    detail: translateApp("Waiting for you · link expires in {{minutes}} min", {minutes: minutes,
+    }),
     disabled: false,
     tone: "ready",
   };

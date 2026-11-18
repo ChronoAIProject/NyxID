@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 
 // Server capability and per-thread eligibility still gate every voice entry.
@@ -67,12 +68,17 @@ export function voiceTariff(option: VoiceOption) {
             price.sync_status === "synced" && price.metric.includes("tokens"),
         )
       : [];
-    return `No NyxID ${tokens.length ? "duration" : "voice"} charge. Your provider’s charges still apply.${tokens
+    return (tokens.length ? translateApp("No NyxID duration charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
       .map(
         (price) =>
           ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
       )
-      .join("")}`;
+      .join("") }) : translateApp("No NyxID voice charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
+          .map(
+            (price) =>
+              ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
+          )
+          .join("") }));
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -81,7 +87,7 @@ export function voiceTariff(option: VoiceOption) {
     (price) =>
       price.metric === "voice_seconds" && price.sync_status === "synced",
   );
-  if (!duration) return "Voice tariff unavailable.";
+  if (!duration) return translateApp("Voice tariff unavailable.");
   const extras = prices.filter(
     (price) =>
       price.sync_status === "synced" &&
@@ -91,12 +97,15 @@ export function voiceTariff(option: VoiceOption) {
           price.metric.includes("tokens")) ||
         option.voice.billing_metrics.some((metric) => metric === price.metric)),
   );
-  return `${duration.credits_per_unit} credits per second${extras
+  return translateApp("{{credits}} credits per second{{totalCost}}.", {
+    credits: duration.credits_per_unit,
+    totalCost: extras
     .map(
       (price) =>
         ` plus ${price.credits_per_unit} per ${price.metric === "requests" ? "start" : price.metric.replaceAll("_", " ")}`,
     )
-    .join("")}.`;
+    .join(""),
+  });
 }
 
 export function voiceElapsed(

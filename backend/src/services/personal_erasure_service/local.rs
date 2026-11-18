@@ -10,11 +10,15 @@ const PAGE: i64 = 32;
 
 /// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
 /// the durable domain shape and intentionally remains unchanged for old jobs.
-pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 4;
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 5;
 
 pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
+        (
+            m::client_error_report::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (
             m::assistant_cma_sandbox::COLLECTION_NAME,
             doc! {"user_id":owner},
@@ -1453,4 +1457,22 @@ pub(super) static BEFORE_NODE_DRAIN: std::sync::LazyLock<
 #[cfg(test)]
 fn before_node_drain_test_hook(db: &Database) -> Option<std::sync::Arc<BeforeNodeDrainHook>> {
     BEFORE_NODE_DRAIN.get(db.name()).map(|entry| entry.clone())
+}
+
+#[cfg(test)]
+mod crash_inventory_tests {
+    #[test]
+    fn crash_reports_are_erased_by_owner_and_anonymous_counters_are_retained() {
+        let rows = super::inventory("owner-sentinel");
+        assert!(
+            rows.iter()
+                .any(|(name, filter)| *name == "client_error_reports"
+                    && filter.get_str("user_id") == Ok("owner-sentinel"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|(name, _)| *name == "client_error_report_counters")
+        );
+    }
 }

@@ -25,6 +25,7 @@ test("session rows name the browser/app and device instead of the raw user agent
       "NyxID app on iPhone",
     ],
     ["NyxID mobile", "NyxID app"],
+    ["NyxIDWatch/1.0.4 (watchOS 11.2; Watch7,3)", "NyxID on Apple Watch"],
     ["nyxid-cli/0.77.0", "NyxID CLI"],
     ["", "Unknown device"],
     [null, "Unknown device"],

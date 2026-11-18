@@ -11,6 +11,8 @@ import {
 import { ArrowUp, AudioLines, Plus, Square } from "lucide-react-native";
 import { useTheme } from "../../theme/ThemeContext";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
+import { FLOATING_SURFACE_SHADOW } from "../../components/workspace/workspaceFloatingSurface";
+import { chatComposerFocus } from "./chatComposerFocus";
 
 /**
  * One filled pill shared by personal, contextual and group chats. Touching it gives a small ChatGPT-like bounce: a
@@ -30,6 +32,8 @@ export function ChatComposerFrame({
   const reducedMotion = useReducedMotion();
   const [scale] = useState(() => new Animated.Value(1));
   const press = () => {
+    // Touches on the composer (input, toolbar, mention list) never blur it.
+    chatComposerFocus.touchStartInComposer();
     if (!bounce || reducedMotion) return;
     scale.stopAnimation();
     Animated.sequence([
@@ -66,9 +70,27 @@ export function ChatComposerFrame({
   );
 }
 
-/** Controls sit below the full-width text area, with Send/Stop at the trailing edge. */
-export function ChatComposerRow({ children }: { children: ReactNode }) {
-  return <View style={styles.row}>{children}</View>;
+/**
+ * Controls sit below the full-width text area, with Send/Stop at the trailing
+ * edge. `overlay` lays the same row over an idle input's single line instead;
+ * its empty middle passes touches through to the input beneath.
+ */
+export function ChatComposerRow({
+  children,
+  overlay = false,
+}: {
+  children: ReactNode;
+  overlay?: boolean;
+}) {
+  return (
+    <View
+      testID="chat-composer-toolbar"
+      pointerEvents={overlay ? "box-none" : "auto"}
+      style={[styles.row, overlay && styles.overlayRow]}
+    >
+      {children}
+    </View>
+  );
 }
 
 export function ComposerAttachButton({
@@ -161,13 +183,17 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     gap: 6,
   },
-  lightLift: {
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 1,
-    shadowRadius: 10,
-    elevation: 3,
-  },
+  // Shared with the floating header controls and the quick rail.
+  lightLift: FLOATING_SURFACE_SHADOW,
   row: { flexDirection: "row", alignItems: "flex-end", minHeight: 44 },
+  overlayRow: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: "center",
+  },
   target: {
     width: 44,
     height: 44,

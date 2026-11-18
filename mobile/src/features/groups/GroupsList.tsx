@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { AgentAvatarStack } from "../../components/AgentAvatar";
 import { SkeletonCards } from "../../components/Skeleton";
 import { useEffect } from "react";
@@ -25,6 +27,7 @@ export function GroupsList({
   onOpenGroup: (id: string) => void;
   onCreate: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { epoch, active, online, available } = useGroupAvailability();
   const live = useGroupsLive(epoch, active, available);
@@ -52,17 +55,21 @@ export function GroupsList({
     <>
       <CollaborationEntry key={epoch} onOpenGroup={onOpenGroup} />
       {!online && (
-        <Notice message="You're offline. Reconnect to refresh your crews." />
+        <Notice message={translateApp(
+            "You're offline. Reconnect to refresh your crews.",
+          )}
+        />
       )}
       {query.isPending && (
-        <SkeletonCards count={2} accessibilityLabel="Loading crews" />
+        <SkeletonCards count={2} accessibilityLabel={translateApp("Loading crews")}
+        />
       )}
       {query.isError && (
         <>
           <Notice tone="error" message={groupError(query.error)} />
           <ActionButton
             variant="secondary"
-            label="Retry crews"
+            label={translateApp("Retry crews")}
             onPress={() => void query.refetch()}
             disabled={!active}
           />
@@ -72,7 +79,9 @@ export function GroupsList({
         <Pressable
           key={group.id}
           accessibilityRole="button"
-          accessibilityLabel={`Open crew ${group.name}`}
+          accessibilityLabel={translateApp("Open crew {{name}}", {
+            name: group.name,
+          })}
           onPress={() => onOpenGroup(group.id)}
         >
           <Card>
@@ -85,8 +94,12 @@ export function GroupsList({
               }}
             >
               {group.working_agent_ids.length
-                ? `${group.working_agent_ids.length} working`
-                : `${group.members.filter((member) => !member.destroyed).length} agents`}
+                ? translateApp("{{count}} working", {
+                    count: group.working_agent_ids.length,
+                  })
+                : translateApp("{{count}} agents", {
+                    count: group.members.filter((member) => !member.destroyed).length,
+                  })}
             </Label>
             <View style={styles.row}>
               <AgentAvatarStack agents={group.members} size="lg" />
@@ -108,14 +121,16 @@ export function GroupsList({
       ))}
       {!query.isPending && !query.isError && !query.data?.length && (
         <Card>
-          <Label>Work together</Label>
+          <Label>{translateApp("Work together")}</Label>
           <Label muted>
-            Put several agents in one chat. Mention one with @ to ask it
-            directly; NyxBot answers the rest.
+            {translateApp(
+              "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest.",
+            )}
           </Label>
         </Card>
       )}
-      <ActionButton label="Create crew" onPress={onCreate} disabled={!active} />
+      <ActionButton label={translateApp("Create crew")}
+        onPress={onCreate} disabled={!active} />
     </>
   );
 }

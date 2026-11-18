@@ -666,6 +666,22 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
+## Verified Mobile Login Links (Optional)
+
+Android uses the existing [Android App Links](#android-app-links) identity settings
+below. iOS uses the existing `APNS_TEAM_ID` and `APNS_TOPIC` to serve
+`/.well-known/apple-app-site-association`; the APNs push private key is not
+required for that file.
+
+The additive `app_verification_uri` in device-login responses requires an HTTPS
+origin-only `BASE_URL`, a different `FRONTEND_URL` origin (scheme, host and port),
+and a configured Apple (nonblank team + topic) or Android app-link identity.
+Identity configuration alone does not verify that external associations work.
+Its `/login/device?user_code=…` fallback redirects to the configured frontend
+approval page; the backend returns 404 for a same-origin target to avoid a loop.
+HTTP local development retains the ordinary web verification QR without a tap target. See the
+[mobile app-link runbook](../mobile/docs/APP_LINKS.md) for rollout and device checks.
+
 ## SMTP (Reserved; currently unused)
 
 | Variable | Description |
@@ -908,3 +924,36 @@ once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
+
+## Crash diagnostics
+
+See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project
+settings and readiness required before activation. All diagnostics defaults off.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CRASH_REPORTS_SENTRY_DSN_WEB` | empty | Optional HTTPS Sentry web project DSN; invalid values fail startup. |
+| `CRASH_REPORTS_SENTRY_DSN_MOBILE` | empty | Optional separate mobile project DSN; no vendor SDK on clients. |
+| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30; empty or whitespace uses the default. |
+| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400; empty or whitespace uses the default. |
+| `CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN` | empty | Build-only symbol upload token; never VITE-prefixed or in runtime image. |
+| `CRASH_ARTIFACTS_SENTRY_ORG` | empty | Build-only Sentry organization. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_WEB` | empty | Build-only web artifact project. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE` | empty | Build-only mobile artifact project. |
+| `NYXID_CRASH_ARTIFACT_ID` | generated per mobile build | UUID embedded in `extra.crashArtifactId`; no authority or secret. |
+
+Docker accepts optional BuildKit secret `crash_artifacts_sentry`, a JSON object
+containing the auth-token, organization and web-project variables. Configuring
+only part of the required upload settings fails the build. Runtime export and
+build upload credentials are independent. Vendor projects must have retention
+≤30 days, IP storage prevention and server-side scrubbing on, separate projects,
+and owner acceptance of local-link deletion plus vendor expiry.
+
+`CRASH_REPORTS_EXPORT_INTERVAL_SECS=0` disables crash export even with configured
+DSNs: new rows have export status `disabled`, existing pending rows are not
+worked and TTL-expire, and ingestion health displays “Export disabled”. Web
+private maps are retained only when upload is configured or
+`CRASH_ARTIFACTS_RETAIN=1`; all builds remove public maps and assert no public
+`sourceMappingURL`. The frontend image publication workflow passes optional
+GitHub secret `CRASH_ARTIFACTS_SENTRY` as BuildKit `crash_artifacts_sentry`.
+Missing/empty secrets perform no upload or uploader dependency installation.

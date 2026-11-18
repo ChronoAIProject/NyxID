@@ -9,6 +9,7 @@ import {
   type NavigationState,
 } from "@react-navigation/routers";
 import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
+import { workspaceChatNavigationAction } from "./workspaceChatNavigation";
 import { navigationLinkingConfig } from "./navigationLinking";
 import { desktopRouteParams } from "../features/machines/desktopEntry";
 import {
@@ -190,6 +191,31 @@ test("Settings alone uses a sheet, preserving the complete content history on cl
   }
   assert.equal(dismissWorkspaceSheetAction(caller), null);
   assert.equal(dismissWorkspaceSheetAction(undefined), null);
+});
+
+test("a thread chosen in the quick rail's Recent chats sheet replaces the sheet with that thread", () => {
+  const caller = pushContent(fixture(), "Machines");
+  const sheet = apply(caller, openWorkspaceSheetAction("RecentChats"));
+  assert.equal(selected(selected(sheet).state!).name, "RecentChats");
+  for (const target of [
+    { kind: "agent", agentId: "duo", conversationId: "nyxa-recent" },
+    { kind: "group", groupId: "nyxg-recent" },
+  ] as const) {
+    const next = apply(sheet, workspaceChatNavigationAction(sheet, target));
+    assert.deepEqual(
+      next.routes.map((route) => route.name),
+      ["Workspace"],
+      "the sheet is gone",
+    );
+    const shown = selected(selected(next).state!);
+    if (target.kind === "group") {
+      assert.equal(shown.name, "GroupChat");
+      assert.equal((shown.params as any).groupId, target.groupId);
+    } else {
+      assert.equal(shown.name, "Assistant");
+      assert.equal((shown.params as any).conversationId, target.conversationId);
+    }
+  }
 });
 
 test("main navigation from a Settings quick action closes that sheet before showing the addressed approval", () => {

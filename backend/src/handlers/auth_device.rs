@@ -62,6 +62,9 @@ pub struct AuthDeviceRequestResponse {
     pub user_code: String,
     pub verification_uri: String,
     pub verification_uri_complete: String,
+    /// First-party app link when native identity and separate HTTPS API origin are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_verification_uri: Option<String>,
     pub expires_in: i64,
     pub interval: u32,
 }
@@ -235,6 +238,10 @@ async fn request_device(
     );
 
     Ok(Json(AuthDeviceRequestResponse {
+        app_verification_uri: super::mobile_app_links::app_verification_uri(
+            &state.config,
+            &initiated.user_code,
+        ),
         device_code: initiated.device_code,
         user_code: initiated.user_code,
         verification_uri,

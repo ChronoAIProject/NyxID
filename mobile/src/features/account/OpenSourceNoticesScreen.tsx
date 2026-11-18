@@ -6,14 +6,17 @@ import { terminalLicenses } from "../ssh/terminalAssets.generated";
 import { reflowTerminalLicenses } from "./terminalLicenseText";
 import { fonts, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 export function OpenSourceNoticesScreen(
   _props: SheetScreenProps<"OpenSourceNotices">,
 ) {
   const { colors } = useTheme();
+  const railIndicator = useRailScrollIndicator();
   return (
     <SettingsPage>
       <ScrollView
+        {...railIndicator}
         style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator

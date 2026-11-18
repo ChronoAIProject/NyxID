@@ -20,6 +20,9 @@
  * at once per build, so it cannot spin.
  */
 
+let reloading = false;
+export function isAssetRecoveryReloading(): boolean { return reloading; }
+
 const STORAGE_KEY = "nyxid_chunk_reload";
 
 /**
@@ -140,6 +143,7 @@ export function recoverFromAssetError(
     return "exhausted";
   }
 
+  reloading = true;
   reload();
   return "reloading";
 }

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
@@ -24,6 +26,7 @@ export function AssistantMessageNotices({
   message: AssistantMessage;
   onOpenBilling: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [details, setDetails] = useState(false);
   const [review, setReview] = useState(false);
@@ -43,25 +46,23 @@ export function AssistantMessageNotices({
       await Clipboard.setStringAsync(text);
       setCopied(success);
     } catch {
-      setCopied("Copy failed. Select the text above.");
+      setCopied(translateApp("Copy failed. Select the text above."));
     }
   }
   return (
     <View style={styles.container}>
       {message.steering ? (
-        <Label muted>
-          Steering ·{" "}
-          {steeringNotice(message.steering.code, message.steering.outcome)}
+        <Label muted>{translateApp("Steering · {{code}}", { code: steeringNotice(message.steering.code, message.steering.outcome) })}
         </Label>
       ) : null}
       {message.error_code === "cancelled" ? (
         <Label
           accessibilityRole="text"
-          accessibilityLabel="Turn stopped"
+          accessibilityLabel={translateApp("Turn stopped")}
           accessibilityLiveRegion="polite"
           muted
         >
-          Stopped
+          {translateApp("Stopped")}
         </Label>
       ) : null}
       {error ? (
@@ -85,11 +86,13 @@ export function AssistantMessageNotices({
       (billingCodes.includes(message.error_code ?? "") || detail) ? (
         <View style={styles.actions}>
           {billingCodes.includes(message.error_code ?? "") ? (
-            <QuietButton label="Usage & credits" opens onPress={onOpenBilling} />
+            <QuietButton label={translateApp("Usage & credits")}
+              opens onPress={onOpenBilling} />
           ) : null}
           {detail ? (
             <QuietButton
-              label={details ? "Hide details" : "Details"}
+              label={details ? translateApp("Hide details") : translateApp("Details")
+              }
               expanded={details}
               onPress={() => setDetails((value) => !value)}
             />
@@ -103,43 +106,67 @@ export function AssistantMessageNotices({
               {failure?.source === "nyxid" &&
               failure.code === "guest_model_route_required" ? (
                 <Label muted>
-                  Send one message to this agent as its owner using its
-                  configured provider to record the route for guest replies.
+                  {translateApp(
+                    "Send one message to this agent as its owner using its configured provider to record the route for guest replies.",
+                  )}
                 </Label>
               ) : null}
               <Label selectable muted mono>
                 {[
                   detail.attempts != null
-                    ? `attempts: ${detail.attempts}`
+                    ? translateApp("attempts: {{count}}", {
+                        count: detail.attempts,
+                      })
                     : null,
                   detail.capacity_wait_ms
-                    ? `capacity: waited ${formatCapacityWait(detail.capacity_wait_ms)} for capacity`
+                    ? translateApp("capacity: waited {{duration}} for capacity", {
+                        duration: formatCapacityWait(detail.capacity_wait_ms),
+                      })
                     : null,
-                  `stage: ${detail.stage}`,
+                  translateApp("stage: {{details}}", { details: detail.stage}),
                   failure
-                    ? `cause: ${[failure.source, failure.stage, failure.code, failure.http_status != null ? `HTTP ${failure.http_status}` : null, failure.nyxid_error_code != null ? `NyxID ${failure.nyxid_error_code}` : null].filter(Boolean).join(" / ")}`
+                    ? translateApp("cause: {{code}}", {
+                        code: [failure.source, failure.stage, failure.code, failure.http_status != null ? `HTTP ${failure.http_status}` : null, failure.nyxid_error_code != null ? `NyxID ${failure.nyxid_error_code}` : null].filter(Boolean).join(" / "),
+                      })
                     : null,
                   detail.http_status != null
-                    ? `http: ${detail.http_status}`
+                    ? translateApp("http: {{code}}", {
+                        code: detail.http_status,
+                      })
                     : null,
                   message.upstream_error_code
-                    ? `upstream: ${message.upstream_error_code}`
+                    ? translateApp("upstream: {{code}}", {
+                        code: message.upstream_error_code,
+                      })
                     : null,
-                  `turn: ${detail.turn_id}`,
-                  detail.response_id ? `response: ${detail.response_id}` : null,
+                  translateApp("turn: {{details}}", { details: detail.turn_id }),
+                  detail.response_id ? translateApp("response: {{details}}", {
+                        details: detail.response_id,
+                      })
+                    : null,
                   detail.upstream_request_id
-                    ? `request: ${detail.upstream_request_id}`
+                    ? translateApp("request: {{details}}", {
+                        details: detail.upstream_request_id,
+                      })
                     : null,
-                  `continuations: ${detail.continuations}`,
-                  `at: ${new Date(detail.occurred_at).toLocaleString()}`,
+                  translateApp("continuations: {{count}}", {
+                    count: detail.continuations,
+                  }),
+                  translateApp("at: {{date}}", {
+                    date: new Date(detail.occurred_at).toLocaleString(
+                      appLocale(),
+                    ),
+                  }),
                 ]
                   .filter(Boolean)
                   .join("\n")}
               </Label>
               <QuietButton
-                label="Copy diagnostic ID"
+                label={translateApp("Copy diagnostic ID")}
                 onPress={() =>
-                  void copy(diagnosticId(message), "Diagnostic ID copied.")
+                  void copy(diagnosticId(message),
+                    translateApp("Diagnostic ID copied."),
+                  )
                 }
               />
             </View>
@@ -152,7 +179,7 @@ export function AssistantMessageNotices({
           {recovery.text != null ? (
             <>
               <QuietButton
-                label="Review request"
+                label={translateApp("Review request")}
                 expanded={review}
                 onPress={() => setReview((value) => !value)}
               />
@@ -160,13 +187,12 @@ export function AssistantMessageNotices({
                 <View style={[styles.details, { borderColor: colors.border }]}>
                   <Label selectable>{recovery.text}</Label>
                   {recovery.attachments.length ? (
-                    <Label muted>
-                      Attachments: {recovery.attachments.join(", ")}
+                    <Label muted>{translateApp("Attachments: {{attachments}}", { attachments: recovery.attachments.join(", ") })}
                     </Label>
                   ) : null}
                   <QuietButton
-                    label="Copy request"
-                    onPress={() => void copy(recovery.text!, "Request copied.")}
+                    label={translateApp("Copy request")}
+                    onPress={() => void copy(recovery.text!, translateApp("Request copied."))}
                   />
                 </View>
               ) : null}
@@ -203,6 +229,7 @@ export function QuietButton({
   disabled?: boolean;
   icon?: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable

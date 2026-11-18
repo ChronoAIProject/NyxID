@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { AssistantSseDecoder } from "./assistantStream";
 import type { AssistantTurnEvent } from "./assistantTypes";
 
@@ -39,7 +40,7 @@ export async function readAssistantResponse(
       total += result.value.byteLength;
       if (total > 12 * 1024 * 1024) {
         if (terminal) break;
-        throw new Error("Assistant response exceeded its limit.");
+        throw new Error(translateApp("Assistant response exceeded its limit."));
       }
       if (terminal) continue;
       for (const event of frames.push(
@@ -52,7 +53,9 @@ export async function readAssistantResponse(
     }
     if (!terminal)
       throw new Error(
-        "The connection was interrupted. The assistant may still be working.",
+        translateApp(
+          "The connection was interrupted. The assistant may still be working.",
+        ),
       );
   } finally {
     // One cancellation owner: request abort errors the native stream. Calling
@@ -76,7 +79,9 @@ async function readWithDeadline(
           controller.abort();
           reject(
             new Error(
-              "The connection was interrupted. Refresh history before sending again.",
+              translateApp(
+                "The connection was interrupted. Refresh history before sending again.",
+              ),
             ),
           );
         }, milliseconds);

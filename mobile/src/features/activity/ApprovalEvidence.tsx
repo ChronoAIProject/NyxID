@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import {
   SettingsGroup,
   SettingsRow,
@@ -8,8 +10,8 @@ import type { ChallengeDetail } from "../../lib/api/types";
 export function approvalExpiryLabel(challenge: ChallengeDetail) {
   const expiry = Date.parse(challenge.expires_at);
   return Number.isFinite(expiry)
-    ? new Date(expiry).toLocaleString()
-    : "Not verified";
+    ? new Date(expiry).toLocaleString(appLocale())
+    : translateApp("Not verified");
 }
 
 /** Tool arguments pretty-printed when they are JSON, verbatim otherwise. */
@@ -29,10 +31,11 @@ export function ApprovalEvidence({
 }: {
   challenge: ChallengeDetail;
 }) {
+  useAppLanguage();
   const argumentsText = approvalArgumentsText(challenge);
   if (!argumentsText) return null;
   return (
-    <SettingsGroup title="Tool arguments" inset={false}>
+    <SettingsGroup title={translateApp("Tool arguments")} inset={false}>
       <SettingsRow label={argumentsText} mono selectable />
     </SettingsGroup>
   );

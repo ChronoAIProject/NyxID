@@ -90,7 +90,7 @@ describe("account-bound device restrictions", () => {
     store.getState().bindAccount("account-a");
     store.getState().setConsent(true);
     expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.account-a")!)).toEqual({
-      enabled: true, asked: true,
+      enabled: true, asked: true, policy: 1,
     });
     vi.resetModules();
     const reloaded = await loadFreshStore();
@@ -184,5 +184,11 @@ it("reports persistence failure, keeps account denial isolated, and clears error
   store.getState().bindAccount("a"); expect(store.getState().persistenceError).toBe(true);
   localStorage.setItem = original; store.getState().setConsent(false);
   expect(store.getState()).toMatchObject({ enabled: false, persistenceError: false });
-  expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.a")!)).toEqual({ enabled: false, asked: true });
+  expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.a")!)).toEqual({ enabled: false, asked: true, policy: 1 });
+});
+
+it("legacy bound choices read as policy one and updated acknowledgement survives reload", async () => {
+  localStorage.setItem("nyxid.telemetry_consent.v3.a", JSON.stringify({enabled:true,asked:true}));
+  let store=await loadFreshStore();store.getState().bindAccount("a");expect(store.getState().policy).toBe(1);
+  store.getState().setConsent(true,2);vi.resetModules();store=await loadFreshStore();store.getState().bindAccount("a");expect(store.getState().policy).toBe(2);
 });

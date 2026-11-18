@@ -1,0 +1,215 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { URL, fileURLToPath } from "node:url";
+import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { lightColors } from "../../theme/mobileTheme";
+
+type Element = { type: unknown; props: Record<string, any> };
+const elements = (node: Element): Element[] => [
+  node,
+  ...[node.props.children]
+    .flat(Infinity)
+    .flatMap((child) => (child?.props ? elements(child) : [])),
+];
+/** Render the screen's own small row components (no hooks of their own beyond mocks). */
+const expand = (node: Element): Element => {
+  if (typeof node.type === "function" && ["AddRow", "OrderButton"].includes(node.type.name))
+    return expand((node.type as (props: object) => Element)(node.props));
+  const render = (child: unknown): unknown =>
+    Array.isArray(child)
+      ? child.map(render)
+      : child && typeof child === "object" && "props" in child
+        ? expand(child as Element)
+        : child;
+  return { ...node, props: { ...node.props, children: render(node.props.children) } };
+};
+// The harness evaluates the screen in its own realm: compare objects as JSON.
+const same = (actual: unknown, expected: unknown, message = "") =>
+  assert.equal(JSON.stringify(actual), JSON.stringify(expected), message);
+
+const AGENT = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
+const OTHER = "22222222-3333-4444-8555-666666666666";
+const GONE = "11111111-2222-4333-8444-555555555555";
+const CREW = "nyxg-0123456789abcdef0123456789abcdef";
+const destination = (id: string) => ({ kind: "destination", id });
+const DEFAULT = ["new_chat", "notifications", "scan_qr", "recent_chats", "settings"].map(destination);
+
+function setup({
+  items = DEFAULT,
+  customized = false,
+  loaded = true,
+  loadError = null as unknown,
+  saveError = null as unknown,
+  sources = {
+    agents: [
+      { id: AGENT, name: "researcher", display_name: "Research", kind: "specialist", status: "idle" },
+      { id: OTHER, name: "nyxbot", display_name: "NyxBot", kind: "nyxbot", status: "running" },
+    ],
+    crews: [{ id: CREW, name: "Launch crew", members: [] }],
+  } as Record<string, unknown>,
+} = {}) {
+  const calls: unknown[][] = [];
+  const quick = {
+    state: { items, customized },
+    loaded,
+    loadError,
+    saveError,
+    save: (next: unknown) => calls.push(["save", next]),
+    reset: () => calls.push(["reset"]),
+    clearSaveError: () => calls.push(["clear"]),
+    retry: () => calls.push(["retry"]),
+  };
+  const jsx = (type: unknown, props: Element["props"]) => ({ type, props });
+  const h = hookHarness<Element>({
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "react-native": {
+      Pressable: "Pressable",
+      View: "View",
+      StyleSheet: { create: (value: unknown) => value },
+    },
+    "lucide-react-native": Object.fromEntries(
+      ["ChevronDown", "ChevronUp", "Minus", "Plus"].map((name) => [name, name]),
+    ),
+    "../../components/settings/SettingsList": Object.fromEntries(
+      ["SettingsPage", "SettingsGroup", "SettingsRow"].map((name) => [name, name]),
+    ),
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "./QuickAccessGlyph": { QuickAccessGlyph: "QuickAccessGlyph" },
+    "./useQuickAccess": { useQuickAccess: () => quick },
+    "./useQuickAccessSources": {
+      useQuickAccessSources: () => sources,
+    },
+  });
+  const { QuickAccessSettingsScreen } = h.load(
+    fileURLToPath(new URL("./QuickAccessSettingsScreen.tsx", import.meta.url)),
+  ) as { QuickAccessSettingsScreen: (props: unknown) => Element };
+  h.mount(() => QuickAccessSettingsScreen({}));
+  const page = expand(h.value());
+  const groups = elements(page).filter((n) => n.type === "SettingsGroup");
+  const group = (title: string | undefined) =>
+    groups.find((g) => g.props.title === title)!;
+  const rows = (g: Element) => elements(g).filter((n) => n.type === "SettingsRow");
+  return { page, groups, group, rows, calls };
+}
+
+const orderButtons = (row: Element) =>
+  elements(expand(row.props.accessory)).filter((n) => n.type === "Pressable");
+
+test("the rail's list in order: each item moves up, down or out, and every change saves the new order", () => {
+  const x = setup();
+  const current = x.rows(x.group("Your shortcuts"));
+  assert.deepEqual(
+    current.map((row) => row.props.label),
+    ["New chat", "Notifications", "Scan QR code", "Recent chats", "Settings"],
+  );
+  // Each shows the rail's mark (the side menu's icon).
+  assert.equal(current[0]!.props.leading.type, "QuickAccessGlyph");
+  const [up, down, remove] = orderButtons(current[0]!);
+  // Complete spoken labels; the first cannot move up, the last not down.
+  same(
+    [up, down, remove].map((button) => [button!.props.accessibilityLabel, button!.props.disabled]),
+    [
+      ["Move New chat up", true],
+      ["Move New chat down", false],
+      ["Remove New chat", false],
+    ],
+  );
+  assert.equal(orderButtons(current.at(-1)!)[1]!.props.disabled, true);
+  down!.props.onPress();
+  orderButtons(current[2]!)[2]!.props.onPress();
+  same(x.calls, [
+    ["clear"],
+    ["save", [destination("notifications"), destination("new_chat"), ...DEFAULT.slice(2)]],
+    ["clear"],
+    ["save", [...DEFAULT.slice(0, 2), ...DEFAULT.slice(3)]],
+  ]);
+  // The footer says where it shows and that it syncs.
+  assert.match(x.group("Your shortcuts").props.footer, /Saved to your account/);
+});
+
+test("add from the menu, an agent or a crew; only what is not there yet, live agents only; at most 12", () => {
+  const x = setup({ items: [destination("new_chat"), { kind: "agent", id: AGENT }] });
+  const menu = x.rows(x.group("Add from the menu"));
+  assert.equal(menu.length, 12, "13 destinations, minus New chat");
+  assert.equal(menu.some((row) => row.props.label === "New chat"), false);
+  const machines = menu.find((row) => row.props.label === "Machines")!;
+  assert.equal(machines.props.accessibilityLabel, "Add Machines");
+  assert.equal(machines.props.disabled, false);
+  machines.props.onPress();
+  assert.deepEqual(
+    x.rows(x.group("Add an agent")).map((row) => row.props.label),
+    ["NyxBot"],
+    "Research is already pinned",
+  );
+  x.rows(x.group("Add an agent"))[0]!.props.onPress();
+  x.rows(x.group("Add a crew"))[0]!.props.onPress();
+  same(x.calls.filter(([kind]) => kind === "save"), [
+    ["save", [destination("new_chat"), { kind: "agent", id: AGENT }, destination("machines")]],
+    ["save", [destination("new_chat"), { kind: "agent", id: AGENT }, { kind: "agent", id: OTHER }]],
+    ["save", [destination("new_chat"), { kind: "agent", id: AGENT }, { kind: "crew", id: CREW }]],
+  ]);
+  // Full: every add is disabled and the footer says why.
+  const twelve = [
+    "new_chat", "notifications", "scan_qr", "terminal_login_code", "recent_chats", "automations",
+    "machines", "plugins", "activity", "create_agent", "settings", "agents",
+  ].map(destination);
+  const full = setup({ items: twelve, customized: true });
+  assert.ok(full.rows(full.group("Add from the menu")).every((row) => row.props.disabled));
+  assert.ok(full.rows(full.group("Add an agent")).every((row) => row.props.disabled));
+  assert.match(full.group("Add from the menu").props.footer, /up to 12 items/);
+});
+
+test("a deleted agent or crew stays listed (so it can be removed) but is marked as not shown", () => {
+  const x = setup({
+    items: [{ kind: "agent", id: GONE }, { kind: "crew", id: "nyxg-ffffffffffffffffffffffffffffffff" }],
+    customized: true,
+  });
+  const [agent, crew] = x.rows(x.group("Your shortcuts"));
+  assert.equal(agent!.props.label, "Agent unavailable");
+  assert.equal(crew!.props.label, "Crew unavailable");
+  assert.match(agent!.props.detail, /deleted or you no longer have access/);
+  assert.equal(orderButtons(agent!)[2]!.props.accessibilityLabel, "Remove Agent unavailable");
+  // While the lists load, they read as loading rather than unavailable.
+  const loading = setup({
+    items: [{ kind: "agent", id: AGENT }],
+    customized: true,
+    sources: {},
+  });
+  const row = loading.rows(loading.group("Your shortcuts"))[0]!;
+  assert.equal(row.props.label, "Loading…");
+  assert.equal(row.props.detail, undefined);
+});
+
+test("reset returns to the default; editing waits for the saved list; failures are explained", () => {
+  const fresh = setup();
+  const reset = (x: ReturnType<typeof setup>) =>
+    x.groups
+      .flatMap((g) => x.rows(g))
+      .find((row) => row.props.label === "Reset to default")!;
+  assert.equal(reset(fresh).props.disabled, true, "already the default");
+  const custom = setup({ items: [destination("plugins")], customized: true });
+  assert.equal(reset(custom).props.disabled, false);
+  reset(custom).props.onPress();
+  same(custom.calls, [["clear"], ["reset"]]);
+  // Before the saved list loads nothing can be changed over the placeholder.
+  const loading = setup({ loaded: false });
+  assert.deepEqual(
+    loading.rows(loading.group("Your shortcuts")).map((row) => row.props.label),
+    ["Loading…"],
+  );
+  assert.ok(loading.rows(loading.group("Add from the menu")).every((row) => row.props.disabled));
+  assert.equal(reset(loading).props.disabled, true);
+  // A failed load offers Retry; a failed save says the old list is back.
+  const failed = setup({ loaded: false, loadError: new Error("offline") });
+  const retry = failed.groups.flatMap((g) => failed.rows(g)).find((row) => row.props.label === "Retry")!;
+  retry.props.onPress();
+  same(failed.calls, [["retry"]]);
+  const unsaved = setup({ saveError: new Error("offline"), customized: true });
+  assert.equal(
+    unsaved.group("Your shortcuts").props.footer,
+    "Couldn't save quick access. Your previous list is back.",
+  );
+  // An empty list is shown as such.
+  const empty = setup({ items: [], customized: true });
+  assert.match(empty.rows(empty.group("Your shortcuts"))[0]!.props.label, /Nothing in quick access yet/);
+});

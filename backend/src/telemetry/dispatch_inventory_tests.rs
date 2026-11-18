@@ -7,7 +7,7 @@ type Inventory = BTreeMap<(String, String), usize>;
 fn inventory(source: &str, file: &str, found: &mut Inventory) {
     let functions = regex::Regex::new(r"\bfn\s+(\w+)\s*\(").unwrap();
     let calls = regex::Regex::new(
-        r#"\.\s*track\s*\(|TelemetryClient\s*::\s*track\s*\(|analytics_dispatch_service\s*::\s*begin\s*\(|\bCaptureJob\s*\{|"[^"\n]*/capture/[^"\n]*""#,
+        r#"\.\s*track\s*\(|TelemetryClient\s*::\s*track\s*\(|analytics_dispatch_service\s*::\s*begin\s*\(|\bCaptureJob\s*\{|\.body\s*\(\s*envelope\s*\(|"[^"\n]*/envelope/[^"\n]*"|"[^"\n]*/capture/[^"\n]*""#,
     ).unwrap();
     for call in calls.find_iter(source) {
         let function = functions
@@ -41,6 +41,8 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
     let mut found = Inventory::new();
     visit(&root, &root, &mut found);
     let expected: Inventory = [
+        // Startup-only validated destination construction; performs no I/O.
+        ("config.rs", "parse_inner", 1),
         // Local test capture exercises successful provider exchange through
         // live account/device consent and verifies pre-auth dispatch denial.
         (
@@ -56,6 +58,12 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
         (
             "services/telemetry_erasure_service.rs",
             "weak_inherited_options_cannot_weaken_registry_dispatch_or_completion_evidence",
+            1,
+        ),
+        ("services/crash_report_export/sentry.rs", "submit", 1),
+        (
+            "services/crash_report_export/sentry_tests.rs",
+            "exported_bytes_and_headers_have_no_personal_sentinels_or_request_context",
             1,
         ),
         ("telemetry/context.rs", "emit_event", 1),

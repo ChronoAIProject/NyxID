@@ -21,6 +21,9 @@ import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
 
+import { installCrashReporting, crashRootOptions } from "./lib/crash-reporting/install";
+import { subscribeCrashPermission } from "./lib/crash-reporting/permission-refresh";
+installCrashReporting();
 installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -44,6 +47,7 @@ const queryClient = new QueryClient({
     },
   },
 });
+subscribeCrashPermission(queryClient);
 
 subscribeAssistantIdentity(() => {
   queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
@@ -186,7 +190,7 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-void appLanguageReady.then(() => createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement, crashRootOptions).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Root />

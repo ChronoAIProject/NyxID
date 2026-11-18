@@ -1,14 +1,18 @@
-import { Pressable, StyleSheet, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { Bell } from "lucide-react-native";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { radius, typeScale } from "../../theme/designTokens";
+import { FloatingButton } from "../../components/FloatingControl";
 import { useTheme } from "../../theme/ThemeContext";
 import {
   notificationBadge,
   notificationBellLabel,
 } from "./notificationPresentation";
 
-/** Header bell: a compact 99+ count pill tinted amber for waiting decisions. */
+/**
+ * Header bell: the shared floating glass button with a compact 99+ count pill
+ * tinted amber for waiting decisions.
+ */
 export function NotificationBell({
   unread,
   needsDecision,
@@ -24,17 +28,11 @@ export function NotificationBell({
   const badge = notificationBadge(unread > 0 ? unread : needsDecision);
   const attention = needsDecision > 0;
   return (
-    <Pressable
-      accessibilityRole="button"
+    <FloatingButton
       accessibilityLabel={notificationBellLabel(unread, needsDecision)}
-      accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
       testID="notification-bell"
-      style={({ pressed }) => [
-        styles.button,
-        { opacity: disabled ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
     >
       <View testID="notification-bell-glyph" style={styles.glyph}>
         <Bell size={21} color={colors.textPrimary} />
@@ -57,18 +55,11 @@ export function NotificationBell({
           </View>
         ) : null}
       </View>
-    </Pressable>
+    </FloatingButton>
   );
 }
 
 const styles = StyleSheet.create({
-  button: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.md,
-  },
   glyph: { position: "relative", width: 21, height: 21 },
   badgeRing: {
     position: "absolute",
