@@ -592,13 +592,19 @@ mod tests {
             Some("operation")
         );
         let encoded = serde_json::to_string(&projected).unwrap();
-        for secret in [
+        for (index, marker) in [
             "secret-retirement-key",
             "secret-idempotency-key",
             "private-request-hash",
             "request_ciphertext",
-        ] {
-            assert!(!encoded.contains(secret), "projection leaked {secret}");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                !encoded.contains(marker),
+                "projection leaked redacted field #{index}"
+            );
         }
     }
 
