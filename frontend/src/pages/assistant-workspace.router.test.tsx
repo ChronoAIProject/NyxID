@@ -392,7 +392,7 @@ for (const nyxagent of [true, false]) {
   ])(`opens %s over the ${nyxagent ? "NyxAgent" : "legacy"} view`, async (panel, panelTab, title, tab) => {
     setEngine(nyxagent);
     const router = await open(`/assistant/plugins?panel=${panel}&panelTab=${panelTab}`);
-    const dialog = await screen.findByRole("dialog", { name: panel === "settings" ? tab : title });
+    const dialog = await screen.findByRole("dialog", { name: title });
     if (panel === "settings") expect(within(dialog).getByRole("heading", { name: tab })).toBeVisible();
     else expect(within(dialog).getByRole("tab", { name: tab })).toHaveAttribute("data-state", "active");
     expect(screen.getByRole("heading", { name: "Plugins workspace content", hidden: true })).toBeInTheDocument();
@@ -402,9 +402,9 @@ for (const nyxagent of [true, false]) {
   });
 }
 
-it.each(["display", "display/layout", "display/colors"])("names the %s peer view Display in the dialog and heading", async section => {
+it.each(["display", "display/layout", "display/colors"])("keeps the Account Settings dialog name while the %s peer view is titled Display", async section => {
   await open(`/assistant/plugins?panel=settings&panelTab=${section}`);
-  const dialog = await screen.findByRole("dialog", { name: "Display" });
+  const dialog = await screen.findByRole("dialog", { name: "Account Settings" });
   expect(within(dialog).getByRole("heading", { name: "Display" })).toBeVisible();
   const segment = section === "display" ? "Appearance" : section === "display/layout" ? "Layout" : "Colors";
   expect(within(dialog).getByRole("tab", { name: segment })).toHaveAttribute("data-state", "active");
@@ -605,12 +605,15 @@ it.each([
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(router.state.location.search).toEqual(initial);
   await act(() => router.history.forward());
-  await screen.findByRole("dialog", { name: "Security" });
+  const reopened = await screen.findByRole("dialog", { name: "Account Settings" });
+  expect(within(reopened).getByRole("heading", { name: "Security" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(router.state.location.search).toEqual(initial));
   expect(router.history.length).toBe(3);
   await act(() => router.history.back());
-  expect(await screen.findByRole("dialog", { name: "Security" })).toBeVisible();
+  const back = await screen.findByRole("dialog", { name: "Account Settings" });
+  expect(back).toBeVisible();
+  expect(within(back).getByRole("heading", { name: "Security" })).toBeVisible();
 });
 
 it("pushes Billing opening and tabs while section navigation keeps Back-to-close", async () => {

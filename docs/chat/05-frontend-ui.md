@@ -760,12 +760,36 @@ viewports work in the desktop dialog and full-width mobile sheet.
 
 ## Account, agent and billing section navigation
 
-Account Settings opens at `?panel=settings` with six icon disclosures: Profile,
-Security, Sessions, MCP, Display and Privacy. Profile shows the loaded display name (email when absent),
-Security the loaded MFA state, Sessions the loaded active-session count, and
-Display the local theme. Keep loaded summaries during background refreshes;
-omit remote summaries before first load and on error. The Studio `/settings`
-page keeps its header and uses the same tree with `tab` instead of `panelTab`.
+Account Settings trials two panes when the editing container has at least 42rem
+available width, in both `?panel=settings` and Studio `/settings`. The sidebar
+shows search, then Profile, Security, Sessions and Privacy, followed by a divider
+and Display and MCP. Category labels have icons and one `aria-current` selection;
+no sidebar summaries. The content region has the category title and scrolls
+independently. Opening without `panelTab`/`tab` shows Profile without writing the
+URL. Delete account opens inside the pane and Back returns to Security. The
+assistant dialog keeps the accessible name Account Settings and uses the existing
+`max-w-4xl` width and fixed height. Studio retains its page header and route.
+
+Below 42rem, keep the six icon disclosures and drill-in pages: Profile, Security,
+Sessions, MCP, Display and Privacy. Profile shows the loaded display name (email
+when absent), Security the loaded MFA state, Sessions the loaded active-session
+count, and Display the local theme. Keep loaded summaries during background
+refreshes; omit them before first load and on error. Narrow opens read
+`/users/me` and `/sessions` for those summaries. Wide opens read only `/users/me`;
+Sessions first reads `/sessions` when visited. Both layouts defer onboarding
+bindings, public config and analytics consent to first visits of Security, MCP
+and Privacy respectively. Retained categories share their existing queries.
+
+Sidebar search matches categories and individual rendered labels from the same
+translated definitions as workspace search; password settings are absent for
+accounts without a password. Results name the setting and category. Selection
+replaces the section URL and scrolls, focuses and briefly highlights the actual
+setting, including its Display view or MCP client. Empty search shows categories;
+no matches is plain text. Arrow keys move between navigation items; activation
+focuses the pane heading. Escape clears a nonempty search before the usual
+dialog dismissal. One viewport save bar spans the content pane, and drafts,
+review, discard, step-up and immediate-control behavior are shared across widths.
+The Studio `/settings` page uses `tab` instead of `panelTab`.
 Existing category URLs remain valid. Sections are:
 
 - `profile`, `sessions`, `privacy`: the existing short editors/lists.
@@ -774,7 +798,7 @@ Existing category URLs remain valid. Sections are:
 - `mcp`: one page with a Cursor / Claude Code / Codex client selector.
 - `display`: Appearance (theme, motion/reset, text size and spacing),
   `display/layout` (chat and sidebar) and `display/colors` (three color groups, preview and readability checks for the theme being edited).
-  These are addressed peer views in one retained shell titled Display; the segments name the views. Back returns to Account Settings.
+  These are addressed peer views in one retained shell titled Display; the segments name the views. On phones, Back returns to Account Settings.
 
 Agent details keeps Overview, Access (`grants`), Skills, Memory and Channels tabs.
 `?agent=<id>&details=<section>` extends the existing tab contract. Overview edits

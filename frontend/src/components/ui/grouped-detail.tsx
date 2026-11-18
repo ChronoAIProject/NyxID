@@ -25,6 +25,7 @@ import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-dr
 export function GroupedDetail({
   open,
   compactHeader = false,
+  showBack = true,
   forceMount = false,
   draftOwner,
   searchPage,
@@ -38,6 +39,7 @@ export function GroupedDetail({
 }: {
   readonly open: boolean;
   readonly compactHeader?: boolean;
+  readonly showBack?: boolean;
   readonly forceMount?: boolean;
   readonly draftOwner?: string;
   readonly searchPage?: string;
@@ -128,10 +130,10 @@ export function GroupedDetail({
       className={`${container === document.body ? "fixed" : "absolute"} inset-0 z-10 flex flex-col bg-background p-4`}
     >
       <CompactChrome enabled={compactHeader && active} className={`shrink-0 pb-4${compactHeader ? " pr-6 [[data-compact=true]]:pb-2" : ""}`}>
-        <Button variant="ghost" onClick={async () => { if (!guard || await guard.confirmDiscard(owner)) onBack(); }}>
+        {showBack && <Button variant="ghost" onClick={async () => { if (!guard || await guard.confirmDiscard(owner)) onBack(); }}>
           <ChevronLeft aria-hidden />
           {backLabel}
-        </Button>
+        </Button>}
         <h2
           aria-label={title}
           tabIndex={-1}

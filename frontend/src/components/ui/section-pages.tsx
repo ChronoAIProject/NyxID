@@ -13,6 +13,7 @@ export function SectionPages<S extends string>({
   navigate,
   render,
   available = {},
+  showRootBack = true,
 }: {
   readonly sections: readonly S[];
   readonly titles: Record<S, string>;
@@ -21,6 +22,7 @@ export function SectionPages<S extends string>({
   readonly rootTitle: string;
   readonly navigate: (section?: S) => void;
   readonly render: (section: S) => ReactNode;
+  readonly showRootBack?: boolean;
   readonly available?: Partial<Record<S, boolean>>;
 }) {
   const paths = sectionNavigation(sections);
@@ -38,6 +40,7 @@ export function SectionPages<S extends string>({
         draftOwner={`section/${section}`}
         open={ancestry.includes(section)}
         compactHeader={selected === section}
+        showBack={showRootBack || Boolean(paths.parent(section))}
         level={paths.ancestry(section).length - (root ? 1 : 0)}
         searchPage={section}
         onReveal={() => navigate(section)}

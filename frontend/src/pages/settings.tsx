@@ -2,7 +2,9 @@ import { SegmentedControl, SegmentedControlList, SegmentedControlTrigger } from 
 import { useSectionSearchParam } from "@/hooks/use-section-search-param";
 import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
 import { SectionPages } from "@/components/ui/section-pages";
-import { GroupedDetailContext } from "@/lib/grouped-detail";
+import { SectionWorkspace } from "@/components/ui/section-workspace";
+import { useSectionLayout } from "@/hooks/use-section-layout";
+import { accountSettingsSearchEntries } from "@/lib/settings-search";
 import { ACCOUNT_SETTINGS_SECTIONS, ACCOUNT_SETTINGS_TITLES, accountSettingsPageTitle, accountSettingsSections, type AccountSettingsSection } from "@/lib/account-settings-sections";
 import { useThemeStore } from "@/stores/theme-store";
 import { UserRound, ShieldCheck, Monitor, Plug, Palette, LockKeyhole } from "lucide-react";
@@ -73,7 +75,7 @@ import {
   GroupedDecisionDraft,
 } from "@/components/ui/grouped-dialog";
 import { FormViewport } from "@/components/ui/form-viewport";
-import { CompactScroll } from "@/components/ui/compact-title";
+import { CompactChrome, CompactScroll } from "@/components/ui/compact-title";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import {
   DialogDescription,
@@ -140,16 +142,19 @@ function SettingsContent({
   const selected = accountSettingsSections.normalize(raw);
   const user = useUser();
   const mode = useThemeStore(state => state.mode);
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => api.get<readonly Session[]>("/sessions") });
-  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  const [setLayoutContainer, wideLayout] = useSectionLayout();
+  const wide = wideLayout === true;
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => api.get<readonly Session[]>("/sessions"), enabled: wideLayout === false });
+  const [revealRequest, setRevealRequest] = useState<{ setting?: string }>();
   const availability = {};
-  const current = accountSettingsSections.available(selected, availability);
+  const canonical = accountSettingsSections.available(selected, availability);
+  const current = canonical ?? (wide ? "profile" : undefined);
   function go(section?: AccountSettingsSection, ifUnchanged = false) {
     if (presentation === "panel") void account.update({ panelTab: section }, "replace", { force: true, ifUnchanged });
     else void navigate({ to: "/settings", search: { ...searchParams, tab: section }, replace: true });
   }
   useEffect(() => {
-    if (settled && raw !== current) go(current, true);
+    if (settled && raw !== canonical) go(canonical, true);
   });
   const icons = { profile: UserRound, security: ShieldCheck, sessions: Monitor, mcp: Plug, display: Palette, privacy: LockKeyhole };
   function disclosures(parent?: AccountSettingsSection) {
@@ -168,25 +173,45 @@ function SettingsContent({
     if (section === "privacy") return <PrivacyTab />;
     if (section === "security") return <><SecurityTab section={section} /><OwnedOnboardingBindings />{disclosures(section)}</>;
     if (section === "security/delete") return <SecurityTab section={section} />;
-    if (section === "mcp") return <McpTab />;
+    if (section === "mcp") return <McpTab reveal={revealRequest} />;
     return <DisplayViews section={current?.startsWith("display/") ? current : "display"} navigate={go} />;
   }
   return <GroupedFormScope viewport>
     <section aria-label={translateUi("Account settings")} className="flex min-h-0 flex-1 flex-col">
       {presentation === "page" && <PageHeader title={translateUi("Account Settings")} description={translateUi("Manage your account settings and preferences.")} />}
+      {presentation === "panel" && !current && <CompactChrome className="shrink-0 pr-6"><h2 className="type-card-title">{translateUi("Account Settings")}</h2></CompactChrome>}
       <FormViewport className="flex min-h-0 flex-1 flex-col">
-        <div ref={setContainer} className={`relative flex min-h-0 flex-1 flex-col${presentation === "page" ? " h-[min(48rem,80dvh)] min-h-96" : ""}`}>
-          <GroupedDetailContext.Provider value={{ container, visible: true }}>
+        <div ref={setLayoutContainer} className={`relative flex min-h-0 flex-1 flex-col${presentation === "page" ? " h-[min(48rem,80dvh)] min-h-96" : ""}`}>
+          <SectionWorkspace wide={wide} selected={current} title={translateUi("Account Settings")} searchLabel={translateUi("Search settings")}
+            groups={[["profile", "security", "sessions", "privacy"], ["display", "mcp"]].map(group => group.map(value => {
+              const section = value as keyof typeof icons;
+              const Icon = icons[section];
+              return { section, label: translateUi(accountSettingsPageTitle(section)), icon: <Icon aria-hidden className="size-[1.125em] shrink-0 text-text-tertiary" /> };
+            }))}
+            searchItems={accountSettingsSearchEntries(user.data?.has_password === true).map(entry => ({ ...entry, target: () => accountSettingTarget(entry.label, entry.section) }))}
+            navigate={(section, setting) => { setRevealRequest({ setting }); go(section); }}>
             <CompactScroll active={!current} hidden={Boolean(current)} style={current ? { display: "none" } : undefined} className="assistant-scrollbar flex-1 space-y-6 pb-6">
               {disclosures()}
             </CompactScroll>
-            <SectionPages sections={ACCOUNT_SETTINGS_SECTIONS.filter(section => !section.startsWith("display/"))} titles={{ ...ACCOUNT_SETTINGS_TITLES, display: accountSettingsPageTitle("display") }} selected={current?.startsWith("display/") ? "display" : current} rootTitle="Account Settings" available={availability} navigate={go} render={page} />
-          </GroupedDetailContext.Provider>
+            <SectionPages sections={ACCOUNT_SETTINGS_SECTIONS.filter(section => !section.startsWith("display/"))} titles={{ ...ACCOUNT_SETTINGS_TITLES, display: accountSettingsPageTitle("display") }} selected={current?.startsWith("display/") ? "display" : current} rootTitle="Account Settings" available={availability} navigate={go} render={page} showRootBack={!wide} />
+          </SectionWorkspace>
         </div>
       </FormViewport>
-      <GroupedFormBar viewport />
+      <div className={wide ? "pl-56" : undefined}><GroupedFormBar viewport /></div>
     </section>
   </GroupedFormScope>;
+}
+
+/** Resolve actual rendered labels, including non-input rows and native labelled controls. */
+function accountSettingTarget(label: string, section: AccountSettingsSection) {
+  const page = document.querySelector<HTMLElement>(`[data-section-pane] [data-grouped-section="${section.split("/")[0] === "display" ? "display" : section}"]:not([hidden])`);
+  if (!page) return null;
+  const candidates = [...page.querySelectorAll<HTMLElement>("label,[aria-label],h3,p,button,span")]
+    .filter(element => !element.closest("[hidden],[inert]") && (element.getAttribute("aria-label") === label || element.textContent?.trim() === label));
+  const target = candidates.find(element => element.tagName === "LABEL") ?? candidates[0];
+  if (!target) return [accountSettingsPageTitle(section), ACCOUNT_SETTINGS_TITLES[section]].map(value => translateUi(value)).includes(label) ? page.querySelector<HTMLElement>("h2") : null;
+  const control = target instanceof HTMLLabelElement ? target.control : null;
+  return control instanceof HTMLElement && !control.matches(":disabled") ? control : target;
 }
 
 function DisplayViews({ section, navigate }: { readonly section: AccountSettingsSection; readonly navigate: (section: AccountSettingsSection) => void }) {
@@ -783,10 +808,18 @@ function CopyInlineButton({
   );
 }
 
-function McpTab() {
+function McpTab({ reveal }: { readonly reveal?: { setting?: string } }) {
   useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
-  const [client, setClient] = useState("cursor");
+  const requestedClient = reveal?.setting === ACCOUNT_FIELD_LABELS.installToCursor ? "cursor"
+    : reveal?.setting === ACCOUNT_FIELD_LABELS.installToClaudeCode ? "claude-code"
+    : reveal?.setting === ACCOUNT_FIELD_LABELS.installToCodex ? "codex" : undefined;
+  const [client, setClient] = useState(requestedClient ?? "cursor");
+  const [previousReveal, setPreviousReveal] = useState(reveal);
+  if (previousReveal !== reveal) {
+    setPreviousReveal(reveal);
+    if (requestedClient) setClient(requestedClient);
+  }
 
   if (isLoading) {
     return <Skeleton className="h-64 w-full" />;

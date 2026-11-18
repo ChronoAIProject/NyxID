@@ -1,4 +1,3 @@
-import { accountSettingsSections, accountSettingsPageTitle } from "@/lib/account-settings-sections";
 import { billingSections, BILLING_SECTION_TITLES } from "@/lib/billing-sections";
 import { parseNyxBotSettingsSection, NYXBOT_SETTINGS_TITLES } from "@/lib/assistant/nyxbot-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -25,7 +24,7 @@ const Billing = lazy(() => import("@/pages/billing").then((m) => ({ default: m.B
 const NyxBot = lazy(() => import("./nyxbot-settings-content").then((m) => ({ default: m.NyxBotSettingsContent })));
 const Notifications = lazy(() => import("./notifications-panel").then((m) => ({ default: m.NotificationsPanel })));
 const panels: Record<Exclude<AccountPanel, "notifications">, { title: string; description: string; width: string }> = {
-  settings: { title: "Account Settings", description: "Manage your account settings and preferences.", width: "md:max-w-3xl" },
+  settings: { title: "Account Settings", description: "Manage your account settings and preferences.", width: "md:max-w-4xl" },
   billing: { title: "Billing & Usage", description: "Your balance, benefits, and usage in one place.", width: "md:max-w-5xl" },
   nyxbot: { title: "NyxBot settings", description: "Manage permissions, tasks, automations, notifications, and chats for your agents.", width: "md:max-w-2xl" },
 };
@@ -61,9 +60,8 @@ export function AssistantAccountPanel() {
   }
   const panel = panels[current.panel];
   const section = current.panel === "nyxbot" ? parseNyxBotSettingsSection(current.panelTab) : undefined;
-  const accountSection = current.panel === "settings" ? accountSettingsSections.parse(current.panelTab) : undefined;
   const billingSection = current.panel === "billing" ? billingSections.parse(current.panelSection) : undefined;
-  const dialogTitle = section ? NYXBOT_SETTINGS_TITLES[section] : accountSection ? accountSettingsPageTitle(accountSection) : billingSection ? BILLING_SECTION_TITLES[billingSection] : panel.title;
+  const dialogTitle = current.panel === "settings" ? panel.title : section ? NYXBOT_SETTINGS_TITLES[section] : billingSection ? BILLING_SECTION_TITLES[billingSection] : panel.title;
   return (
     <GroupedDialog
       open
@@ -79,7 +77,7 @@ export function AssistantAccountPanel() {
       >
         <DialogTitle asChild><span className="sr-only">{translateUi(dialogTitle)}</span></DialogTitle>
         <DialogDescription className="sr-only">{translateUi(panel.description)}</DialogDescription>
-        {current.panel !== "nyxbot" && !accountSection && !billingSection && <CompactChrome className="shrink-0 pr-6"><h2 className="type-card-title">{translateUi(panel.title)}</h2></CompactChrome>}
+        {current.panel === "billing" && !billingSection && <CompactChrome className="shrink-0 pr-6"><h2 className="type-card-title">{translateUi(panel.title)}</h2></CompactChrome>}
         <div className="flex min-h-0 flex-1 flex-col" style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
           <DialogFocusReturnContext value={true}>
           <Suspense fallback={<p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{translateUi(panel.title)}...</p>}>

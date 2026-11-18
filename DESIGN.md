@@ -438,6 +438,17 @@ availability rules between navigation and search; retain the original form owner
 when its fields are spread across pages. Section cleanup waits for the address and
 rendered route to agree, so a pending navigation cannot erase its destination.
 
+Account Settings alone trials a sidebar and content pane when its available
+container width reaches 42rem. Use the existing selected navigation treatment,
+category icons and a divider between account and app categories; labels have no
+summaries beside visible content. Sidebar search indexes rendered setting labels
+in the current language and uses the drawer's focus/scroll/highlight reveal.
+An absent section shows Profile without a URL write. The pane retains visited
+forms, scrolls independently and owns the same pinned save bar. At narrower
+widths retain the summary root and drill-ins. Keep the dialog name Account
+Settings; title the content region with its category. NyxBot, Billing and agent
+details keep their existing navigation during this trial.
+
 `GroupedFormScope viewport` gives
 the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a compact row with `py-2`, right-aligned Discard and Save changes; wrap actions to another row when needed and allow long button labels to wrap within their insets. Announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
@@ -913,6 +924,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-18 | Trial a sidebar and content pane for wide Account Settings only | Search and categories stay beside independently scrolling content at 42rem of available width; phones retain the summary root. Default Profile does not rewrite the URL. |
 | 2026-11-17 | Consolidate settings pages after the first version over-split | Short choices and fields edit inline; related forms share a page. Roots stay short, lists are capped, and existing saves, authority, billing figures and history remain intact. |
 | 2026-11-17 | Account, agent and billing settings use focused section trees | Short roots expose current values; retained pages keep existing saves and authority fences. Slash paths support deep links and translated field-label search. New drill-ins and parent Back replace; Billing tabs/owner/filters still push, and cleanup replaces. Settings navigation and agent tabs add no entries; formerly local agent-sheet buttons retain no-entry opening/closing. Billing figures and checkout contracts are unchanged. |
 | 2026-11-16 | NyxBot settings use a URL-addressable hierarchy | Short category groups lead to retained focused pages with nested permission, task, automation and channel settings. Section navigation replaces history; one scope preserves reviewed saves and drafts. Live values refresh pristine fields, and NyxBot may change safe settings while approval widening stays with the owner. |

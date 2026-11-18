@@ -140,6 +140,7 @@
   "Run this command in your terminal to add NyxID as an MCP server in Claude Code.": "在終端機中執行此命令，將 NyxID 作為 MCP 伺服器新增至 Claude Code。",
   "Run this command in your terminal to add NyxID as an MCP server in Codex CLI.": "在終端機中執行此命令，將 NyxID 作為 MCP 伺服器新增至 Codex CLI。",
   "Save Preferences": "儲存偏好設定",
+  "Search settings": "搜尋設定",
   "Send approval requests via Telegram.": "透過 Telegram 傳送核准請求。",
   "Send notifications to your registered devices.": "傳送通知到你已註冊的裝置。",
   "Session revoked": "工作階段已撤銷",

@@ -1,3 +1,4 @@
+import { useSearchReveal } from "@/hooks/use-search-reveal";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { CompactScroll } from "@/components/ui/compact-title";
@@ -156,8 +157,7 @@ export function AgentDrawerSearch({
     return () => observer.disconnect();
   }, [open, searchLabel, title, host]);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
-  const [pending, setPending] = useState<DrawerSearchEntry>();
-  const [highlighted, setHighlighted] = useState<HTMLElement>();
+  const setPending = useSearchReveal(container, Boolean(query.trim()), input);
   const [opening, setOpening] = useState(false);
   const searching = Boolean(query.trim());
   const matches = matchDrawerEntries(context.entries, query);
@@ -198,41 +198,6 @@ export function AgentDrawerSearch({
     container.addEventListener("keydown", keydown, true);
     return () => container.removeEventListener("keydown", keydown, true);
   }, [container, searching, setQuery, setOpen]);
-  useEffect(() => {
-    if (!pending || !container || searching) return;
-    let frame = 0, attempts = 0;
-    const focus = () => {
-      const target =
-        pending.target?.() ??
-        [
-          ...container.querySelectorAll<HTMLElement>(
-            "[data-drawer-search-target]",
-          ),
-        ].find((element) => element.dataset.drawerSearchTarget === pending.id);
-      if (target?.isConnected && !target.closest("[hidden],[inert]")) {
-        target.scrollIntoView?.({ block: "center", behavior: "instant" });
-        if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
-        target.focus({ preventScroll: true });
-        setHighlighted(target);
-        setPending(undefined);
-      } else if (++attempts < 120) frame = requestAnimationFrame(focus);
-      else {
-        input.current?.focus();
-        setPending(undefined);
-      }
-    };
-    frame = requestAnimationFrame(focus);
-    return () => {
-      cancelAnimationFrame(frame);
-
-    };
-  }, [pending, container, searching]);
-  useEffect(() => {
-    if (!highlighted) return;
-    highlighted.setAttribute("data-search-highlight", "");
-    const timer = setTimeout(() => setHighlighted(undefined), 1600);
-    return () => { clearTimeout(timer); highlighted.removeAttribute("data-search-highlight"); };
-  }, [highlighted]);
   async function reveal(entry: DrawerSearchEntry) {
     if (opening) return;
     setOpening(true);

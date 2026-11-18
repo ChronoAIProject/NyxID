@@ -83,6 +83,22 @@ it("keeps exact account requests limited to visible summaries and first-visited 
   else { expect(stages).toEqual(requestsBaseline.account); }
 }, CONTRACT_TIMEOUT);
 
+it("keeps wide account requests behind their first category visit, with Profile visible on open", async () => {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    return this.parentElement?.hasAttribute("data-form-viewport") ? { ...original.call(this), width: 800 } : original.call(this);
+  });
+  const { go, requests } = await open("account");
+  expect(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+  const stages: Record<string, string[]> = { root: requests.splice(0).sort() };
+  for (const section of ["profile", "security", "security/delete", "sessions", "mcp", "display", "display/layout", "display/colors", "privacy"]) {
+    await go(section); stages[section] = requests.splice(0).sort();
+  }
+  expect(stages).toEqual({ ...requestsBaseline.account, root: ["/users/me"], sessions: ["/sessions"] });
+  for (const section of Object.keys(stages).filter(section => section !== "root")) await go(section);
+  expect(requests).toEqual([]);
+}, CONTRACT_TIMEOUT);
+
 it("keeps billing requests lazy and does not refetch when moving among retained pages", async () => {
   const { go, requests } = await open("billing");
   const stages: Record<string, string[]> = { root: requests.splice(0).sort() };

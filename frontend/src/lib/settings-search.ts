@@ -1,6 +1,9 @@
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
   ACCOUNT_SETTINGS_LABELS,
+  ACCOUNT_FIELD_LABELS,
+  ACCOUNT_SETTINGS_SECTIONS,
+  accountSettingsPageTitle,
   ACCOUNT_SETTINGS_TITLES,
   type AccountSettingsSection,
 } from "./account-settings-sections";
@@ -22,14 +25,29 @@ import { BILLING_METRICS } from "@/schemas/billing-metrics";
 import { billingMetricLabel } from "./billing-units";
 import { ACCESS_MODE_LABEL } from "./assistant/nyxbot-labels";
 
+const PASSWORD_LABELS = new Set<string>([
+  ACCOUNT_FIELD_LABELS.currentPassword,
+  ACCOUNT_FIELD_LABELS.newPassword,
+  ACCOUNT_FIELD_LABELS.confirmNewPassword,
+]);
+
 /** Use the current locale and the same labels that each editor renders. */
+export function accountSettingsSearchEntries(hasPassword = true) {
+  return ACCOUNT_SETTINGS_SECTIONS.flatMap(section =>
+    [ACCOUNT_SETTINGS_TITLES[section], ...(ACCOUNT_SETTINGS_LABELS[section] ?? [])]
+      .filter(label => hasPassword || !PASSWORD_LABELS.has(label))
+      .map((label, index) => ({
+        id: `${section}:${index}`,
+        section,
+        setting: label,
+        label: translateUi(label),
+        hint: translateUi(accountSettingsPageTitle(section.split("/")[0] as AccountSettingsSection)),
+      })),
+  );
+}
+
 export function accountSettingsSearchTerms(section: AccountSettingsSection): string[] {
-  return [
-    section,
-    ...[ACCOUNT_SETTINGS_TITLES[section], ...(ACCOUNT_SETTINGS_LABELS[section] ?? [])].map(
-      (label) => translateUi(label),
-    ),
-  ];
+  return [section, ...accountSettingsSearchEntries().filter(entry => entry.section === section).map(entry => entry.label)];
 }
 export function billingSearchTerms(section: BillingSection): string[] {
   const labels = [BILLING_SECTION_TITLES[section], ...(BILLING_SECTION_LABELS[section] ?? [])].map(

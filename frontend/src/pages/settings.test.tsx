@@ -1,3 +1,6 @@
+import { appI18n } from "@/i18n/instance";
+import zhCN from "@/i18n/locales/app/zh-CN";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -69,6 +72,8 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   useAuthStore.setState(initialAuth);
+  vi.restoreAllMocks();
+  void appI18n.changeLanguage("en");
   expect(unexpectedRequests).toEqual([]);
 });
 
@@ -87,7 +92,7 @@ async function open(
       route === "/settings" ? <SettingsPage /> : <SettingsPage presentation="panel" />,
   });
   const history = createMemoryHistory({
-    initialEntries: [route === "/settings" ? `${route}?tab=${tab}` : `${route}?c=chat&mock=1&panel=settings&panelTab=${tab}`],
+    initialEntries: [route === "/settings" ? `${route}${tab ? `?tab=${tab}` : ""}` : `${route}?c=chat&mock=1&panel=settings${tab ? `&panelTab=${tab}` : ""}`],
   });
   const router = createRouter({ routeTree: root.addChildren([page]), history });
   const client = new QueryClient({
@@ -105,7 +110,7 @@ async function open(
   visit = async (section) => {
     await act(() => router.navigate({ to: route, search: route === "/settings" ? { tab: section } : { c: "chat", mock: 1, panel: "settings", panelTab: section }, replace: true }));
   };
-  await screen.findByRole("region", { name: "Account settings" });
+  await screen.findByRole("region", { name: translateUi("Account settings") });
   return { router, history, client };
 }
 
@@ -672,5 +677,91 @@ describe("MFA security settings", () => {
     if (hasPassword) await user.type(within(dialog).getByLabelText("Password"), "current-password");
     await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
     await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
+  });
+});
+
+
+describe.each(["/settings", "/assistant"] as const)("wide Account Settings at %s", route => {
+  beforeEach(() => {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-form-viewport") || this.parentElement?.hasAttribute("data-form-viewport")
+        ? { ...original.call(this), width: 800 } : original.call(this);
+    });
+  });
+  it("defaults to Profile without writing the URL and replaces category choices with one selected item", async () => {
+    const { history } = await open(route, "");
+    const initial = history.location.href;
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    expect(within(navigation).getByRole("button", { name: "Profile" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+    expect(history.location.href).toBe(initial);
+    expect(new URL(history.location.href, "https://nyxid.test").searchParams.has(route === "/settings" ? "tab" : "panelTab")).toBe(false);
+    expect(screen.queryByRole("button", { name: "Account Settings" })).not.toBeInTheDocument();
+    const user = userEvent.setup({ delay: null });
+    within(navigation).getByRole("button", { name: "Profile" }).focus();
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(within(navigation).getByRole("button", { name: "Security" })).toHaveAttribute("aria-current", "page");
+    expect(navigation.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Security" })).toHaveFocus();
+    expect(history.length).toBe(1);
+    expect(history.location.search).toContain(route === "/settings" ? "tab=security" : "panelTab=security");
+  });
+  it("retains drafts and the single viewport save bar while choosing categories and returning from Delete", async () => {
+    await open(route, "profile");
+    const user = userEvent.setup({ delay: null });
+    await user.type(screen.getByRole("textbox", { name: "Name" }), " draft");
+    const bar = screen.getByRole("region", { name: "Unsaved changes" });
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    await user.click(within(navigation).getByRole("button", { name: "Security" }));
+    await user.click(screen.getByRole("button", { name: "Delete account" }));
+    await user.click(within(screen.getByRole("region", { name: "Delete account" })).getByRole("button", { name: "Security" }));
+    expect(bar).toBeVisible();
+    expect(bar.closest("[data-section-pane], [data-compact-scroll]")).toBeNull();
+    await user.click(within(navigation).getByRole("button", { name: "Profile" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader draft");
+    expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader");
+    expect(transport.mock.calls.filter(([, options]) => options?.method === "PUT")).toEqual([]);
+  });
+  it.each(["en", "zh-CN"])("searches rendered labels in %s, reveals the addressed setting and hides unavailable fields", async language => {
+    appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+    await appI18n.changeLanguage(language);
+    await open(route, "display/colors");
+    const user = userEvent.setup({ delay: null });
+    const navigation = screen.getByRole("navigation", { name: translateUi("Account Settings") });
+    const search = within(navigation).getByRole("searchbox", { name: translateUi("Search settings") });
+    await user.type(search, translateUi("Maximum composer height"));
+    const result = within(navigation).getByRole("button", { name: `${translateUi("Maximum composer height")} ${translateUi("Display")}` });
+    await user.click(result);
+    await waitFor(() => expect(screen.getByRole("slider", { name: translateUi("Maximum composer height") })).toHaveFocus());
+    expect(screen.getByRole("slider", { name: translateUi("Maximum composer height") })).toHaveAttribute("data-search-highlight");
+    expect(search).toHaveValue("");
+    await user.type(search, translateUi("New Password"));
+    expect(within(navigation).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(navigation).getByText(translateUi("No results found"))).toBeVisible();
+    await user.keyboard("{Escape}");
+    expect(search).toHaveValue("");
+    expect(within(navigation).getAllByRole("button")).toHaveLength(6);
+  });
+  it("reveals a hidden MCP client and can select the same setting again after changing clients", async () => {
+    await open(route, "mcp");
+    const user = userEvent.setup({ delay: null });
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    const search = within(navigation).getByRole("searchbox", { name: "Search settings" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await user.type(search, "Install to Codex");
+      await user.click(within(navigation).getByRole("button", { name: "Install to Codex MCP" }));
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Install to Codex" })).toHaveFocus());
+      expect(screen.getByRole("tab", { name: "Codex" })).toHaveAttribute("data-state", "active");
+      await user.click(screen.getByRole("tab", { name: "Cursor" }));
+    }
+  });
+  it.each(["security/delete", "display/layout", "display/colors"])("opens the %s deep link inside the pane", async section => {
+    await open(route, section);
+    expect(screen.getByRole("heading", { name: section.startsWith("display") ? "Display" : "Delete account" })).toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    expect(within(navigation).getByRole("button", { name: section.startsWith("display") ? "Display" : "Security" })).toHaveAttribute("aria-current", "page");
   });
 });
