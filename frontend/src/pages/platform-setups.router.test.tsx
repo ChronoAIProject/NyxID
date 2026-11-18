@@ -586,7 +586,7 @@ it("refetches a rejected revision and requires fresh review before adopting it",
     { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
   ]);
   expect(fixture.draftReads).toHaveLength(2);
-  expect(new URL(fixture.draftReads[1], "http://localhost").searchParams.get("binding_id")).toBe(setupBinding.id);
+  expect(new URL(fixture.draftReads[1]!, "http://localhost").searchParams.get("binding_id")).toBe(setupBinding.id);
   expect(fixture.saved).toHaveLength(0);
   expectSingleModule();
   await user.click(screen.getByRole("checkbox"));
@@ -613,12 +613,12 @@ it("preserves the newer review of B when pending adoption of A succeeds", async 
   const gate = deferred();
   fixture.adoptionGate = gate.promise;
   try {
-    await user.click(boxes[0]);
-    await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[0]);
+    await user.click(boxes[0]!);
+    await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[0]!);
     await waitFor(() => expect(fixture.writes).toHaveLength(1));
-    await user.click(boxes[1]);
+    await user.click(boxes[1]!);
     expect(boxes[1]).toBeChecked();
-    expect(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]!).toBeDisabled();
   } finally {
     await act(() => gate.resolve());
   }
@@ -683,14 +683,15 @@ it("preserves review B when pending adoption A gets a definitive refusal", async
   const user = userEvent.setup();
   await user.selectOptions(screen.getByLabelText("Linked chat"), setupBinding.id);
   const boxes = await screen.findAllByRole("checkbox");
+  expect(boxes).toHaveLength(2);
   const gate = deferred();
   fixture.adoptionGate = gate.promise;
   try {
-    await user.click(boxes[0]);
-    await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[0]);
+    await user.click(boxes[0]!);
+    await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[0]!);
     await waitFor(() => expect(fixture.writes).toHaveLength(1));
     fixture.drafts = [platformSetup({ revision: 4 }), second];
-    await user.click(boxes[1]);
+    await user.click(boxes[1]!);
     expect(boxes[1]).toBeChecked();
   } finally {
     await act(() => gate.resolve());
@@ -699,10 +700,10 @@ it("preserves review B when pending adoption A gets a definitive refusal", async
   await expectSettled();
   expect(screen.getAllByRole("checkbox")[0]).not.toBeChecked();
   expect(screen.getAllByRole("checkbox")[1]).toBeChecked();
-  expect(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]).toBeEnabled();
+  expect(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]!).toBeEnabled();
   expect(fixture.writes).toHaveLength(1);
   expect(fixture.saved).toHaveLength(0);
-  await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]);
+  await user.click(screen.getAllByRole("button", { name: "Adopt reviewed draft" })[1]!);
   await expectSettled();
   await waitFor(() => expect(fixture.saved).toEqual([second]));
   expect(fixture.writes).toHaveLength(2);
