@@ -510,7 +510,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
                   ? null : current,
               );
               mutation.mutate(submitted, {
-                onSuccess: () => setReview(null),
+                onSuccess: clearSubmittedReview,
                 onError: (error) => {
                   if (isDefinitiveDraftError(error, "adopt")) clearSubmittedReview();
                 },
