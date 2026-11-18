@@ -194,34 +194,6 @@ impl Runtime {
         Ok(Self { auth, fixtures })
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests(
-        db: mongodb::Database,
-        key: &[u8; 32],
-        fixtures: Vec<InspectionFixture>,
-    ) -> Self {
-        Self::new(
-            db,
-            &hex::encode(key),
-            &serde_json::to_string(
-                &fixtures
-                    .iter()
-                    .map(|fixture| {
-                        serde_json::json!({
-                            "case_id": fixture.case_id,
-                            "platform": fixture.platform,
-                            "conversation_id": fixture.conversation_id,
-                            "bot_id": fixture.bot_id,
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .expect("serialize fixtures"),
-            false,
-        )
-        .expect("valid inspection test runtime")
-    }
-
     pub async fn authenticate(
         &self,
         headers: &axum::http::HeaderMap,
