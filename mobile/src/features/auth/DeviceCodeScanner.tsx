@@ -1,6 +1,6 @@
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -31,6 +31,7 @@ import {
   fonts,
 } from "../../theme/designTokens";
 import { extractLoginRequestFromQr } from "./deviceUserCode";
+import { claimSystemStatusActivity } from "../../lib/systemStatusActivity";
 
 type DeviceCodeScannerProps = {
   onCancel: () => void;
@@ -58,8 +59,17 @@ export function DeviceCodeScanner({
   const [scanError, setScanError] = useState<string | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
   const [permissionPending, setPermissionPending] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
   const scanHandled = useRef(false);
   const reticleSize = Math.max(196, Math.min(272, width - 64, height * 0.35));
+
+  useLayoutEffect(() => {
+    if (!permission?.granted) {
+      setCameraReady(false);
+      return;
+    }
+    if (cameraReady) return claimSystemStatusActivity();
+  }, [permission?.granted, cameraReady]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -260,6 +270,8 @@ export function DeviceCodeScanner({
       <StatusBar style="light" />
       <CameraView
         style={StyleSheet.absoluteFill}
+        onCameraReady={() => setCameraReady(true)}
+        onMountError={() => setCameraReady(false)}
         facing="back"
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
         onBarcodeScanned={

@@ -610,18 +610,17 @@ test("a list taller than the column scrolls inside its glass capsule (no indicat
     identity: { label: "NyxBot. Choose agent", agent: { id: "n", name: "NyxBot", kind: "nyxbot" }, onPress() {} },
     more: { label: "Chat options", onPress() {} },
   };
-  // The folded Duo's column: 160pt (below the cluster) to 644pt (the
-  // composer's bottom) is 484pt.
+  // The folded Duo's column: 196pt to the composer's 640pt bottom is 444pt.
   for (const [withHeader, height] of [
-    [true, 484 - 44 - 12 - 12 - (3 * 44 + 2 * 4)], // below it, the ☰/agent/⋯ capsule
-    [false, 484 - 44 - 12],
+    [true, 444 - 44 - 12 - 12 - (3 * 44 + 2 * 4)], // below it, the ☰/agent/⋯ capsule
+    [false, 444 - 44 - 12],
   ] as const) {
     const x = setup({ enabled: true, unread: 0 }, "light", false, withHeader ? header : null, twelve);
     // Before the column is measured the capsule hugs.
     assert.equal(flat(capsules(x.h.value()).group.props.style).height, undefined);
     const column = nodes(x.h.value()).find((n) => n.props.testID === "quick-rail-column")!;
     assert.equal(column.props.pointerEvents, "box-none");
-    column.props.onLayout({ nativeEvent: { layout: { height: 484 } } });
+    column.props.onLayout({ nativeEvent: { layout: { height: 444 } } });
     x.h.render();
     const group = capsules(x.h.value()).group;
     // The glass capsule keeps its place and takes the room left; its items
@@ -633,10 +632,10 @@ test("a list taller than the column scrolls inside its glass capsule (no indicat
     assert.equal(pressables(scroll).length, 12);
     x.h.unmount();
   }
-  // Five entries fit: the capsule hugs them, no scroll view.
+  // The default five fit without scrolling above the aligned chat controls.
   const x = setup({ enabled: true, unread: 0 }, "light", false, header);
   const column = nodes(x.h.value()).find((n) => n.props.testID === "quick-rail-column")!;
-  column.props.onLayout({ nativeEvent: { layout: { height: 484 } } });
+  column.props.onLayout({ nativeEvent: { layout: { height: 444 } } });
   x.h.render();
   const group = capsules(x.h.value()).group;
   assert.equal(flat(group.props.style).height, undefined);

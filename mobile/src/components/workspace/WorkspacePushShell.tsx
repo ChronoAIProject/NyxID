@@ -63,6 +63,7 @@ import {
   WorkspaceColumnHeaderContext,
   type WorkspaceColumnHeaderControls,
 } from "./workspaceColumnHeader";
+import { useWorkspaceStatusOffset } from "./useWorkspaceStatusOffset";
 
 export type WorkspaceContentTransitionHandle = {
   fadeOut: (onHidden: () => void) => void;
@@ -117,6 +118,9 @@ export function WorkspacePushShell(props: Props) {
   // This posture's measured cluster (folded or unfolded): the rail starts
   // just below it.
   const cluster = workspaceStatusCluster(windowMetrics);
+  const statusOffset = useWorkspaceStatusOffset(
+    quickRailAvailable, width, height, insets.top,
+  );
   // The focused chat's bar controls (registered while it is focused): full
   // screen moves them into the column below the restore capsule.
   const [columnHeader, setColumnHeader] = useState<{
@@ -622,7 +626,7 @@ export function WorkspacePushShell(props: Props) {
             onTouchEnd={chatComposerFocus.workspaceTouchEnd}
             style={[
               styles.quickRailHost,
-              workspaceQuickRailFrame(insets.top, insets.bottom, cluster),
+              workspaceQuickRailFrame(insets.top, insets.bottom, cluster, statusOffset),
             ]}
           >
             {props.quickRail!(

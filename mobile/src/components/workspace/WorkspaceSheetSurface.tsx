@@ -82,19 +82,19 @@ export function WorkspaceSheetSurface({
     viewport?.windowWidth === width && viewport.windowHeight === height
       ? viewport
       : { width, height };
-  const wide = available.width >= CENTERED_SHEET_MIN_WIDTH;
-  // The folded Duo: the sheet ends before the quick rail's column, which
-  // stays in view beside it (under the scrim; a tap there dismisses).
-  const railReserve = workspaceSheetRailReserve({
-    width: available.width,
-    height: available.height,
+  // Classify the device from the window, not the keyboard-resized host: the
+  // Duo must keep its bottom-sheet presentation when the keyboard opens.
+  const railWindow = workspaceQuickRailAvailable({
+    width,
+    height,
     rightInset: insets.right,
   });
-  // Whether the window behind this sheet shows the quick rail (measured with
-  // the window's own insets, before the panel rewrites them).
-  const railWindow = workspaceQuickRailAvailable({
-    width: available.width,
-    height: available.height,
+  const wide = available.width >= CENTERED_SHEET_MIN_WIDTH && !railWindow;
+  // Both Duo postures keep the sheet attached to the bottom, ending before
+  // the quick rail (under the scrim; a tap there dismisses).
+  const railReserve = workspaceSheetRailReserve({
+    width,
+    height,
     rightInset: insets.right,
   });
   const gap = insets.top + (wide ? 24 : 10);

@@ -86,23 +86,33 @@ export function workspaceQuickRailAvailable(metrics: WorkspaceWindowMetrics) {
 
 /**
  * How much of a window's trailing edge a bottom sheet leaves to the quick
- * rail: on a narrow corner-sensor window (the folded Duo) the sheet ends 8pt
+ * rail: on a corner-sensor window (either Duo posture) the sheet ends 8pt
  * before the rail's column, so the column stays in view beside it, never
- * under the sheet. Centered sheets (wide windows) and windows without the
- * rail reserve nothing.
+ * under the sheet. Windows without the rail reserve nothing.
  */
 export function workspaceSheetRailReserve(metrics: WorkspaceWindowMetrics) {
-  if (metrics.width >= CENTERED_SHEET_MIN_WIDTH) return 0;
   if (!workspaceQuickRailAvailable(metrics)) return 0;
   const frame = workspaceQuickRailFrame(0, 0);
   return frame.right + frame.width + spacing.sm;
 }
 
-/** The rail's top: just below this posture's measured cluster (the folded
- * height where unmeasured), or a taller top inset. */
-function quickRailTop(topInset: number, cluster?: WorkspaceStatusCluster) {
-  return (
-    Math.max(cluster?.bottom ?? DUO_SENSOR_BOTTOM, topInset) + QUICK_RAIL_GAP
+// Move only with capture activity or a system status-column expansion.
+// Cap the extra offset at 36pt so the default folded chat rail (444pt tall)
+// starts at 196pt and
+// ends at the composer's 640pt baseline (678pt window − 34pt safe area −
+// 4pt page padding). All five shortcuts fit without scrolling.
+export const QUICK_RAIL_MAX_STATUS_OFFSET = 36;
+
+/** Idle: just below the cluster. Active: move immediately, up to the cap. */
+function quickRailTop(
+  topInset: number,
+  cluster?: WorkspaceStatusCluster,
+  statusOffset = 0,
+) {
+  const idleTop = (cluster?.bottom ?? DUO_SENSOR_BOTTOM) + QUICK_RAIL_GAP;
+  return Math.min(
+    idleTop + QUICK_RAIL_MAX_STATUS_OFFSET,
+    Math.max(idleTop + Math.max(0, statusOffset), topInset + QUICK_RAIL_GAP),
   );
 }
 
@@ -117,10 +127,12 @@ export function workspaceQuickRailFrame(
   topInset: number,
   bottomInset: number,
   cluster?: WorkspaceStatusCluster,
+  statusOffset = 0,
 ) {
   return {
-    top: quickRailTop(topInset, cluster),
-    bottom: Math.max(0, bottomInset),
+    top: quickRailTop(topInset, cluster, statusOffset),
+    // ChatSurface keeps 4pt below the composer inside the bottom safe area.
+    bottom: Math.max(0, bottomInset) + spacing.xs,
     right: DUO_STATUS_COLUMN_CENTER_FROM_RIGHT - QUICK_RAIL_WIDTH / 2,
     width: QUICK_RAIL_WIDTH,
   };
@@ -135,8 +147,9 @@ export function workspaceQuickRailFrame(
 export function workspaceQuickRailToggleFrame(
   topInset: number,
   cluster?: WorkspaceStatusCluster,
+  statusOffset = 0,
 ) {
-  const top = quickRailTop(topInset, cluster);
+  const top = quickRailTop(topInset, cluster, statusOffset);
   return {
     top,
     right: DUO_STATUS_COLUMN_CENTER_FROM_RIGHT - QUICK_RAIL_TAB_SIZE / 2,

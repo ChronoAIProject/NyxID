@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Platform, StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
 import { claimVoiceAudioSession } from "./audioSessionOwnership";
+import { claimSystemStatusActivity } from "../../../lib/systemStatusActivity";
 import { createNativeOpenAIMedia } from "./createNativeOpenAIMedia";
 import type {
   VoiceMediaAdapter,
@@ -34,6 +35,7 @@ const closedError = () => new Error(translateApp("Voice audio was closed."));
 /** No authentication material is ever passed to the local media document. */
 export class NativeVoiceMedia implements VoiceMediaAdapter {
   private audioOwner?: ReturnType<typeof claimVoiceAudioSession>;
+  private releaseStatus?: () => void;
   private send?: (message: Record<string, unknown>) => void;
   private ready = false;
   private closed = true;
@@ -110,6 +112,14 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       return;
     }
     if (this.closed || event.generation !== this.generation) return;
+    if (event.type === "capture" && typeof event.active === "boolean") {
+      if (event.active) this.releaseStatus ??= claimSystemStatusActivity();
+      else {
+        this.releaseStatus?.();
+        this.releaseStatus = undefined;
+      }
+      return;
+    }
     if (event.type === "diagnostic") {
       const stages = new Set([
         "runtime",
@@ -552,6 +562,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       }
     }
     audioOwner?.release();
+    this.releaseStatus?.();
+    this.releaseStatus = undefined;
     this.telemetry = { playback_ms: 0, playback_audible: false };
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);

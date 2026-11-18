@@ -1,4 +1,5 @@
 import { translateApp } from "../../../i18n/appTranslation";
+import { claimSystemStatusActivity } from "../../../lib/systemStatusActivity";
 import type {
   VoiceMediaAdapter,
   VoiceMediaEvent,
@@ -80,6 +81,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   private generation = 0;
   private peer?: NativeAudioPeer;
   private stream?: NativeAudioStream;
+  private releaseStatus?: () => void;
   private channel?: NativeAudioChannel;
   private remoteTracks = new Set<NativeAudioTrack>();
   private disposers: (() => void)[] = [];
@@ -207,6 +209,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
           throw closedError();
         }
         this.stream = stream;
+        this.releaseStatus = claimSystemStatusActivity();
         for (const track of stream.getTracks()) track.enabled = false;
         return stream;
       });
@@ -553,6 +556,8 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     }
     this.peer = undefined;
     if (this.stream) this.releaseStream(this.stream);
+    this.releaseStatus?.();
+    this.releaseStatus = undefined;
     this.stream = undefined;
     this.inputEnabled = this.speakerMuted = this.providerReady = false;
     this.telemetry = { playback_ms: 0, playback_audible: false };
