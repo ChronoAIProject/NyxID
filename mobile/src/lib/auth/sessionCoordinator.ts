@@ -11,6 +11,11 @@ type RecordValue = { version: 2; session: Omit<StoredAuthSession, 'sessionGenera
 export function createSessionCoordinator(storage: SessionStorage, bind: (actor: string | null) => void) {
   let generation = 0;
   let legacyCleanupComplete = false;
+  let known: { generation: number; session: StoredAuthSession | null } | undefined;
+  function remember(session: StoredAuthSession | null, expected: number) {
+    if (generation === expected) known = { generation: expected, session };
+    return session;
+  }
   let pendingSuccessor: { generation: number; session: StoredAuthSession } | null = null;
   async function persistSuccessor(candidate: NonNullable<typeof pendingSuccessor>, attempts: number) {
     // The server has already retired the predecessor. Publish memory first and
@@ -62,12 +67,12 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       if (value.version !== 2 || (value.session !== null && (!value.session || typeof value.session.accessToken !== 'string' || !value.session.accessToken)))
         throw new Error('auth_session_storage_invalid');
       if (generation === expectedGeneration) await removeLegacy().catch(() => {});
-      return value.session ? { ...normalize(value.session), sessionGeneration: expectedGeneration } : null;
+      return remember(value.session ? { ...normalize(value.session), sessionGeneration: expectedGeneration } : null, expectedGeneration);
     }
     const [accessToken, refreshToken, expires, userId] = await Promise.all(LEGACY_KEYS.slice(0,4).map(key => storage.getItemAsync(key)));
     if (!accessToken) {
       if (generation === expectedGeneration && (refreshToken || expires || userId)) await removeLegacy();
-      return null;
+      return remember(null, expectedGeneration);
     }
     const accessTokenExpiresAt = expires ? Number(expires) : NaN;
     const session: StoredAuthSession = { accessToken, refreshToken: refreshToken ?? undefined,
@@ -78,7 +83,7 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       // record is durable, interruptions during cleanup cannot lose a session.
       try { await write(session); await removeLegacy(); } catch { /* Retry next load. */ }
     }
-    return session;
+    return remember(session, expectedGeneration);
   }
   return {
     generation: () => generation,
@@ -90,10 +95,11 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     persist(session: StoredAuthSession) {
-      const expected = ++generation; pendingSuccessor = null; bind(null);
+      const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) throw new Error('auth_session_changed');
         await write(session);
+        remember({ ...normalize(session), sessionGeneration: expected }, expected);
         // A cleanup failure cannot turn a durable login into a failed login.
         await removeLegacy().catch(() => {});
         if (generation !== expected) throw new Error('auth_session_changed');
@@ -101,11 +107,12 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
       });
     },
     clear() {
-      const expected = ++generation; pendingSuccessor = null; bind(null);
+      const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) return;
         // Tombstone first prevents interrupted cleanup resurrecting legacy auth.
         await write(null);
+        remember(null, expected);
         legacyCleanupComplete = false;
         await removeLegacy().then(() => storage.deleteItemAsync(SESSION_RECORD_KEY)).catch(() => {
           // The durable tombstone already establishes sign-out. Retry cleanup on load.
@@ -115,11 +122,14 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {
       return serial(async () => {
         if (generation !== expected.sessionGeneration) return false;
-        const current = await read(expected.sessionGeneration);
+        // The captured predecessor was loaded by this coordinator. Retain the
+        // server's successor before any further fallible native operation.
+        const current = known?.generation === generation ? known.session : await read(expected.sessionGeneration);
         if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
           || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
         const candidate = { generation, session: normalize(next) };
         pendingSuccessor = candidate;
+        remember({ ...candidate.session, sessionGeneration: generation }, generation);
         await persistSuccessor(candidate, 3);
         if (generation !== expected.sessionGeneration) return false;
         bind(decodeJwtSub(next.accessToken) ?? null);

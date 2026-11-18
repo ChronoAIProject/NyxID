@@ -57,3 +57,29 @@ test('N6 later loads make one persistence attempt while commit retains its three
   e.fail(0);await e.coordinator.load();assert.equal(e.writes(),1);
   assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken,'successor');
 });
+
+test('M2622-01 a successful response never loses its successor to a post-response native read fault', async () => {
+  const e=fixture(); await e.coordinator.persist(old);
+  const originalRead=e.storage.getItemAsync; let failRead=false; const used:string[]=[];
+  e.storage.getItemAsync=async key => {if(failRead) {failRead=false;throw Error('temporary read');}return originalRead(key);};
+  const refresh=createSessionRefresh({load:e.coordinator.load,commit:e.coordinator.commitRefresh,expiresAt:v=>v,request:async value=>{
+    used.push(value); failRead=true;
+    return {access_token:token('a',used.length),refresh_token:`successor-${used.length}`,expires_in:60};
+  }});
+  assert.ok(await refresh());
+  // The fault is still armed: commit performed no fallible post-response read.
+  await assert.rejects(e.coordinator.load(), /temporary read/);
+  assert.equal((await e.coordinator.load())?.refreshToken,'successor-1');
+  assert.ok(await refresh()); assert.deepEqual(used,['old','successor-1']);
+  assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken,'successor-2');
+});
+test('M2622-01 known predecessor and subject fencing rejects mismatches and replacement flights', async () => {
+  const e=fixture();await e.coordinator.persist(old);const captured=(await e.coordinator.load())!;
+  const original=e.storage.getItemAsync;e.storage.getItemAsync=async()=>{throw Error('must not read');};
+  assert.equal(await e.coordinator.commitRefresh({...captured,refreshToken:'wrong'},next),false);
+  assert.equal(await e.coordinator.commitRefresh(captured,{accessToken:token('b',1),refreshToken:'other'}),false);
+  e.storage.getItemAsync=original;
+  await e.coordinator.persist({accessToken:token('b',0),refreshToken:'b'});
+  assert.equal(await e.coordinator.commitRefresh(captured,next),false);
+  assert.equal((await e.coordinator.load())?.refreshToken,'b');
+});
