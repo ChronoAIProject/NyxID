@@ -371,11 +371,17 @@ Browser tests also check direct entry, reload, history, keyboard activation,
 validation/errors and revocation of the selected chat.
 
 The synchronous guard blocks in-flight and double-click repeats. Account,
-binding-generation or chat changes clear consent; each new instance requires a
-fresh review. A successfully loaded list that drops the selected binding also
-clears the selection; refetch errors retain it. The server fences live binding
-and draft revisions, with same-owner/binding/generation adoption idempotent.
-Callbacks from an unmounted review cannot clear a new review's consent.
+binding-generation or chat changes clear consent; a loaded list dropping the
+selected binding clears the selection, while refetch errors retain it. The server
+fences binding and draft revisions and makes same-owner/binding/generation
+replays idempotent; unmounted callbacks cannot clear a new review.
+
+Adoption success or definitive refusal (403/404/409) clears only the submitted
+id/revision's consent; a newer review survives. Refusals refresh the exact chat's
+drafts for fresh acknowledgement; transient failures permit explicit retry of
+the same snapshot. A draft-read denial (403/404) replaces cached private facts
+with a denial marker and clears consent. Retry restores authorized facts with
+consent unchecked; transient errors cannot revive discarded facts.
 
 The `Frontend` CI job runs the router/adoption regressions through `npm run test`.
 The browser suite runs separately with the dedicated configuration shown above.
