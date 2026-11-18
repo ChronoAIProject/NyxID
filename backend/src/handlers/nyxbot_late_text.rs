@@ -147,31 +147,24 @@ pub(super) async fn send(
                 .await?;
                 return Ok(None);
             }
-            let remaining = (deadline - Utc::now())
-                .to_std()
-                .unwrap_or_default()
-                .min(Duration::from_secs(20));
             let result = preparation::with_effect(
                 guard,
-                tokio::time::timeout(
-                    remaining,
-                    dispatch_occurrence(
-                        state,
-                        event,
-                        d,
-                        channel,
-                        conversation,
-                        part.text.as_deref().unwrap_or_default(),
-                        None,
-                    ),
+                dispatch_occurrence(
+                    state,
+                    event,
+                    d,
+                    channel,
+                    conversation,
+                    part.text.as_deref().unwrap_or_default(),
+                    deadline,
                 ),
             )
             .await;
-            // The effect guard's definite refusal happens before the request.
-            // Other errors remain uncertain; their HTTP status is never synthesized.
+            // HTTP failures are classified at the transport boundary. Local
+            // preparation/authority failures must not authorize a re-ask.
             let reply = match result {
-                Ok(Ok(reply)) => reply,
-                Ok(Err(error)) if error.is_forbidden() => crate::models::gateway_reply::Reply {
+                Ok(reply) => reply,
+                Err(error) if error.is_forbidden() => crate::models::gateway_reply::Reply {
                     outcome: crate::models::gateway_reply::Outcome::Rejected,
                     observation: Default::default(),
                 },
@@ -402,21 +395,20 @@ pub(super) async fn resume_receipt(state: &AppState, event: &NyxbotEvent) -> App
             }) as futures::future::BoxFuture<'static, AppResult<()>>
         })
     };
-    let remaining = (wait.deadline - Utc::now())
-        .to_std()
-        .unwrap_or_default()
-        .min(Duration::from_secs(20));
     let reply = preparation::with_effect(
         guard,
-        tokio::time::timeout(
-            remaining,
-            dispatch_occurrence(state, event, d, channel, &conversation, &text, None),
+        dispatch_occurrence(
+            state,
+            event,
+            d,
+            channel,
+            &conversation,
+            &text,
+            wait.deadline,
         ),
     )
     .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_else(|| preparation::gateway::unknown(Default::default()));
+    .unwrap_or_else(|_| preparation::gateway::unknown(wait.observation.clone()));
     let reason = if reply.outcome == Outcome::Pending {
         "gateway_reply_waiting"
     } else {
