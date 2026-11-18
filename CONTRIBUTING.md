@@ -370,7 +370,7 @@ including when a PR changes its base branch.
 | Gate | Checks |
 | --- | --- |
 | PR into `dev` | CI helper tests and workflow permissions. Changed paths select Rust formatting and library/binary Clippy, Google Permissions, CLI tests, wizard freshness, frontend lint/build and all frontend tests in five shards, Mobile, SDK, plugin validators and Oracle Worker Test. The Claude repository-size check runs on every PR. CI configuration changes select every fast check. |
-| Push to `dev` | Full suite across all paths, including all-targets Clippy, backend tests, coverage thresholds, KMS feature builds, Machine Container E2E, backend image inputs and the release image build. The frontend also builds its Docker inputs. After both dev images build successfully, Publish Dev Images deploys the backend and frontend to staging and verifies their commits. |
+| Push to `dev` | Full suite across all paths, including all-targets Clippy, backend tests, coverage thresholds, KMS feature builds, Machine Container E2E, backend image inputs and the release image build. The frontend also builds its Docker inputs. Publish Dev Images finishes the running image pair and keeps one pending pair. After both images succeed, it advances staging in Git ancestry order, backend first, and verifies both commits. |
 | Release PR from `dev` into `main` | Full suite across all paths, including PR coverage comparisons. Wait for the required checks and choose **Create a merge commit**. A push to `main` starts Publish Images. |
 
 A test-only Rust compile error or Clippy lint can first surface on the full
