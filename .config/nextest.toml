@@ -122,5 +122,5 @@ threads-required = "num-cpus"
 # A failCommand write-boundary matrix owns the server-wide failpoint until its
 # injection is cleared; other failpoint tests must not replace it concurrently.
 [[profile.ci.overrides]]
-filter = "test(db::startup_migration_tests::startup_migration_)"
+filter = "test(db::startup_migration_tests::startup_migration_) | test(::route_sync::route_write_boundaries)"
 threads-required = "num-cpus"
