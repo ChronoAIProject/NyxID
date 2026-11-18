@@ -722,3 +722,60 @@ it("retains authorized facts and consent after a transient draft read failure", 
   expect(adoptionButton()).toBeEnabled();
   expect(fixture.writes).toEqual([]);
 });
+
+
+it("invalidates only the submitted chat after a definitive refusal with no review observer", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  const gate = deferred();
+  fixture.adoptionGate = gate.promise;
+  fixture.drafts = [platformSetup({ revision: 4 })];
+  const invalidation = vi.spyOn(client, "invalidateQueries");
+  try {
+    await user.click(adoptionButton());
+    await waitFor(() => expect(fixture.writes).toHaveLength(1));
+    await user.selectOptions(screen.getByLabelText("Linked chat"), "");
+    await act(() => gate.resolve());
+    await expectSettled();
+    expect(invalidation).toHaveBeenCalledExactlyOnceWith({
+      queryKey: ["onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation],
+      exact: true,
+    });
+    expect(client.getQueryState(["onboarding", setupActor.id, "setups"])?.isInvalidated).toBe(false);
+    expect(fixture.writes).toHaveLength(1);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expectSingleModule();
+  } finally {
+    await act(() => gate.resolve());
+    await expectSettled();
+    invalidation.mockRestore();
+  }
+});
+
+it("preserves the refusal and releases the guard if its exact-query refresh rejects", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  fixture.drafts = [platformSetup({ revision: 4 })];
+  const invalidation = vi.spyOn(client, "invalidateQueries").mockRejectedValueOnce(new Error("Fixture refresh failed."));
+  try {
+    await user.click(adoptionButton());
+    await screen.findByText("Anonymous draft expired or changed");
+    await expectSettled();
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(adoptionButton()).toBeDisabled();
+    expect(screen.queryByText("Fixture refresh failed.")).not.toBeInTheDocument();
+    expect(fixture.writes).toHaveLength(1);
+    await act(() => client.invalidateQueries({
+      queryKey: ["onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation], exact: true,
+    }));
+    await screen.findByText("Telegram cafe · revision 4");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(adoptionButton());
+    await screen.findByText("No unowned drafts remain for this chat.");
+    await expectSettled();
+    expect(fixture.writes).toHaveLength(2);
+    expect(fixture.adoptionBodies[1]).toEqual({ revision: 4, binding_id: setupBinding.id, binding_generation: setupBinding.generation });
+  } finally {
+    invalidation.mockRestore();
+  }
+});
