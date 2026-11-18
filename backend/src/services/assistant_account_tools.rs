@@ -1146,7 +1146,7 @@ impl AccountTools<'_> {
             }
             "list_nodes" | "delete_node" => Box::pin(self.dispatch_nodes(user, name, args)),
             "list_approval_configs" | "set_approval_mode" | "list_pending_approvals" => {
-                Box::pin(self.dispatch_approvals(user, name, args))
+                Box::pin(self.dispatch_approvals(user, auth, name, args))
             }
             _ => Box::pin(async { Err(AppError::NotFound("Account tool not found".into())) }),
         }
@@ -1559,7 +1559,13 @@ impl AccountTools<'_> {
         }
     }
 
-    async fn dispatch_approvals(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+    async fn dispatch_approvals(
+        &self,
+        user: &str,
+        auth: &AuthUser,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<Value> {
         match name {
             "list_approval_configs" => {
                 let rows = approval_service::list_service_approval_configs(self.db, user).await?;
@@ -1583,7 +1589,7 @@ impl AccountTools<'_> {
                 let mode = serde_json::from_value(args["approval_mode"].clone())
                     .map_err(|_| AppError::ValidationError("Invalid approval mode".into()))?;
                 let id = service.catalog_service_id.as_deref().unwrap_or(&service.id);
-                let row = approval_service::set_service_approval_config(
+                let row = approval_service::set_config(
                     self.db,
                     user,
                     id,
@@ -1592,6 +1598,10 @@ impl AccountTools<'_> {
                     Some(&mode),
                     None,
                     None,
+                    approval_service::ConfigAudit {
+                        actor: audit_service::AuditActor::from_auth_user(auth),
+                        user_service_id: Some(service.id.clone()),
+                    },
                 )
                 .await?;
                 Ok(json!({
