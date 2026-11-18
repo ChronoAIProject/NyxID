@@ -96,7 +96,7 @@ class GateReuseTests(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {})
         self.assertEqual(set(workflow["jobs"]), {"main-merge-guard"})
         guard = workflow["jobs"]["main-merge-guard"]
-        self.assertEqual(guard.get("permissions", {}), {})
+        self.assertEqual(guard["permissions"], {"contents": "read"})
         self.assertNotIn("needs", guard)
         self.assertNotIn("if", guard)
         step, = guard["steps"]
@@ -106,23 +106,57 @@ class GateReuseTests(unittest.TestCase):
             "BASE": "${{ github.base_ref }}",
             "HEAD_BRANCH": "${{ github.head_ref }}",
             "HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
+            "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+            "GH_TOKEN": "${{ github.token }}",
         })
 
     def test_main_guard_checks_both_release_source_fields_without_checkout(self):
         path = Path(".github/workflows/main-merge-guard.yml")
         guard = strict_load_workflow(path.read_text())["jobs"]["main-merge-guard"]
         step, = guard["steps"]
-        cases = [("main", "dev", "o/r", 0), ("main", "feature", "o/r", 1),
-                 ("main", "dev", "fork/r", 1), ("main", "Dev", "o/r", 1),
-                 ("dev", "feature", "fork/r", 0), ("rollup-fix", "dev", "fork/r", 0)]
-        for base, head, repo, expected in cases:
-            with self.subTest(base=base, head=head, repo=repo):
-                result = subprocess.run(["bash", "-c", step["run"]], text=True, capture_output=True,
-                    env={**os.environ, "BASE": base, "HEAD_BRANCH": head, "HEAD_REPO": repo,
-                         "GITHUB_REPOSITORY": "o/r"})
-                self.assertEqual(result.returncode, expected)
-                if expected:
-                    self.assertEqual(len(result.stdout.splitlines()), 1)
+        branch = "release/2026-11-19"
+        sha = "ab" * 20
+        # An empty status means that this case must bypass the API.
+        cases = [
+            ("main", "dev", "o/r", "", "", True),
+            ("main", branch, "o/r", sha, "behind", True),
+            ("main", branch + "-2", "o/r", sha, "identical", True),
+            ("main", "release/2028-02-29-10", "o/r", sha, "behind", True),
+            ("main", branch, "o/r", sha, "ahead", False),
+            ("main", branch, "o/r", sha, "diverged", False),
+            ("main", branch, "o/r", sha, "unknown", False),
+            ("main", branch, "o/r", sha, "api-error", False),
+            ("main", branch, "o/r", "1234567", "", False),
+            ("main", branch, "o/r", "g" * 40, "", False),
+            ("main", "dev", "fork/r", sha, "", False),
+            ("main", branch, "fork/r", sha, "", False),
+            ("dev", "feature", "fork/r", "", "", True),
+            ("rollup-fix", "dev", "fork/r", "", "", True),
+        ]
+        for name in ("feature", "Dev", "release/", "release/../x", "release/2026-13-40",
+                     "release/2026-02-29", branch + "-1", branch + "-02", branch + "/extra"):
+            cases.append(("main", name, "o/r", sha, "", False))
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = Path(tmp, "gh")
+            gh.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n'
+                          '[ "$GH_TOKEN" = test ] || exit 2\n'
+                          '[ "$STATUS" != api-error ] || exit 1\necho "$STATUS"\n')
+            gh.chmod(0o755)
+            calls = Path(tmp, "calls")
+            for base, head, repo, commit, status, allowed in cases:
+                with self.subTest(base=base, head=head, repo=repo, status=status, commit=commit):
+                    calls.write_text("")
+                    result = subprocess.run(["bash", "-e", "-c", step["run"]], text=True,
+                        capture_output=True, env={
+                            "BASE": base, "HEAD_BRANCH": head, "HEAD_REPO": repo, "HEAD_SHA": commit,
+                            "GITHUB_REPOSITORY": "o/r", "GH_TOKEN": "test", "STATUS": status,
+                            "PATH": tmp + os.pathsep + os.environ["PATH"], "CALLS": str(calls),
+                        })
+                    self.assertEqual(result.returncode, 0 if allowed else 1, result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(),
+                                     [f"api repos/o/r/compare/dev...{sha} --jq .status"] if status else [])
+                    if not allowed:
+                        self.assertTrue(result.stdout.startswith("::error::"), result.stdout)
 
     def test_profile_selection_preserves_reusable_and_filtered_events(self):
         jobs = strict_load_workflow(Path(".github/workflows/ci.yml").read_text())["jobs"]
@@ -525,6 +559,33 @@ class GateReuseTests(unittest.TestCase):
                 self.assertEqual(decision.tested_tree, tested_tree)
                 self.assertEqual(decision.run_id, run["id"])
                 self.assertFalse(responses)
+
+    def test_snapshot_reuse_checks_the_pr_branch_and_synthetic_merge_tree(self):
+        branch = "release/2026-11-19"
+        merge = "a" * 40
+        pr = self._pr()
+        pr["head"]["ref"] = branch
+        for run_branch, merge_tree, reason in (
+            (branch, "tree", "tree_match"), (branch, "older", "tree_mismatch"),
+            ("dev", "tree", "release_head_branch_mismatch"),
+            (branch + "-2", "tree", "release_head_branch_mismatch"),
+        ):
+            with self.subTest(run_branch=run_branch, merge_tree=merge_tree):
+                run = {"id": 7, "head_sha": "head", "head_branch": run_branch,
+                       "event": "pull_request", "status": "completed", "conclusion": "success",
+                       "path": ".github/workflows/ci.yml", "head_repository": {"full_name": "o/r"},
+                       "referenced_workflows": [{
+                           "path": f"o/r/.github/workflows/backend-tests.yml@{merge}",
+                           "ref": "refs/pull/2063/merge", "sha": merge,
+                       }]}
+                responses = {
+                    "repos/o/r/commits/main/pulls": [pr],
+                    "repos/o/r/actions/workflows/ci.yml/runs?event=pull_request"
+                    "&head_sha=head&per_page=100&branch=release%2F2026-11-19": {"workflow_runs": [run]},
+                    "repos/{repo}/actions/runs/7/jobs?per_page=100": {"jobs": decision_jobs()},
+                }
+                decision = self._decide(responses.__getitem__, tree={"main": "tree", merge: merge_tree}.__getitem__)
+                self.assertEqual(decision.reason, reason)
 
     def test_release_workflow_reference_must_identify_one_tested_commit(self):
         commit = "a" * 40
