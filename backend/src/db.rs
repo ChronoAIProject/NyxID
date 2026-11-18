@@ -4792,7 +4792,6 @@ pub async fn migrate_to_unified_collections(
     migrate_provider_tokens(db, keys).await?;
     migrate_service_connections(db, keys).await?;
     migrate_node_service_bindings(db).await?;
-    tracing::info!("Unified collection migration complete");
     Ok(())
 }
 
@@ -5005,6 +5004,53 @@ async fn resolve_migration_user_service_slug(
         base_slug,
         &existing_slugs,
     ))
+}
+
+fn migration_binding_order(a: &NodeServiceBinding, b: &NodeServiceBinding) -> std::cmp::Ordering {
+    a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id))
+}
+
+async fn primary_migration_binding(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    owner: &str,
+    catalog: &str,
+) -> mongodb::error::Result<Option<NodeServiceBinding>> {
+    let mut bindings = db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .find(doc! {"user_id": owner, "service_id": catalog, "is_active": true})
+        .session(&mut *session)
+        .await?;
+    let mut primary = None;
+    while let Some(binding) = bindings.next(session).await.transpose()? {
+        // Deserialize first: bindings predating the priority field have priority zero.
+        if primary
+            .as_ref()
+            .is_none_or(|p| migration_binding_order(&binding, p).is_lt())
+        {
+            primary = Some(binding);
+        }
+    }
+    Ok(primary)
+}
+
+async fn insert_migrated_connection(
+    db: &Database,
+    session: &mut crate::services::service_history::transaction::Transaction,
+    mut connection: UserService,
+) -> mongodb::error::Result<()> {
+    if let Some(catalog) = &connection.catalog_service_id
+        && let Some(primary) =
+            primary_migration_binding(db, session, &connection.user_id, catalog).await?
+    {
+        connection.node_id = Some(primary.node_id);
+        connection.node_priority = primary.priority;
+    }
+    crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+        .insert_one(&connection)
+        .session(session)
+        .await?;
+    Ok(())
 }
 
 /// Migrate UserProviderTokens to the unified UserEndpoint + UserApiKey + UserService model.
@@ -5438,7 +5484,7 @@ pub(crate) async fn migrate_provider_tokens(
                 crate::services::service_history::collection::<UserEndpoint>(&db, USER_ENDPOINTS)
                     .insert_one(&endpoint).session(&mut *session).await?;
                 keys_collection.insert_one(&api_key).session(&mut *session).await?;
-                services.insert_one(&user_service).session(&mut *session).await?;
+                insert_migrated_connection(&db, session, user_service).await?;
                 Ok(true)
             }.await;
             crate::services::api_key_mutation_service::transaction_result(operation)
@@ -5744,7 +5790,7 @@ pub(crate) async fn migrate_service_connections(
                         || services.find_one(doc!{"user_id":&conn.user_id,"catalog_service_id":&conn.service_id,"is_active":true}).session(&mut *session).await?.is_some(){return Ok(false);}
                     crate::services::service_history::collection::<UserEndpoint>(&db,USER_ENDPOINTS).insert_one(&endpoint).session(&mut *session).await?;
                     keys.insert_one(&api_key).session(&mut *session).await?;
-                    services.insert_one(&user_service).session(&mut *session).await?;
+                    insert_migrated_connection(&db, session, user_service).await?;
                     Ok(true)
                 }.await;
                 crate::services::api_key_mutation_service::transaction_result(operation)
@@ -5775,67 +5821,40 @@ pub(crate) async fn migrate_service_connections(
     Ok(())
 }
 
-/// Migrate NodeServiceBindings: attach node_id + priority to matching UserService records.
-/// For bindings with no existing UserService (e.g. SSH-only services configured purely
-/// through NodeServiceBinding), create the full record set (endpoint + api_key + service).
+/// Import a legacy-only owner/catalog. Existing connections own their route, including a clear.
 async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     use crate::services::service_history::{collection, context, transaction};
 
-    let bindings: Vec<NodeServiceBinding> = db
+    let mut bindings: Vec<NodeServiceBinding> = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
         .find(doc! { "is_active": true })
         .await?
         .try_collect()
         .await?;
 
-    let mut updated = 0u64;
+    bindings.sort_unstable_by(migration_binding_order);
+    let mut seen = HashSet::new();
     let mut created = 0u64;
+    let services = collection::<Document>(db, USER_SERVICES);
     for binding in &bindings {
-        // Try to update existing UserService (created by provider_token or connection migration)
-        let result = crate::services::service_history::collection::<Document>(db, USER_SERVICES)
-            .update_one(
-                doc! {
-                    "user_id": &binding.user_id,
-                    "catalog_service_id": &binding.service_id,
-                    "is_active": true,
-                },
-                doc! {
-                    "$set": {
-                        "node_id": &binding.node_id,
-                        "node_priority": binding.priority,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
-
-        if result.modified_count > 0 {
-            updated += 1;
+        if !seen.insert((&binding.user_id, &binding.service_id)) {
             continue;
         }
-
-        // No existing UserService was updated -- check if one already exists
-        let already_exists =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &binding.user_id,
-                    "catalog_service_id": &binding.service_id,
-                    "is_active": true,
-                })
-                .await?;
-        if already_exists.is_some() {
-            continue;
-        }
-
-        // Check idempotency by source
-        let migrated_before =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .find_one(doc! {
-                    "source": "migration_node_binding",
-                    "source_id": &binding.id,
-                })
-                .await?;
-        if migrated_before.is_some() {
+        let active_connection = doc! {
+            "user_id": &binding.user_id, "catalog_service_id": &binding.service_id, "is_active": true,
+        };
+        let source = doc! { "source": "migration_node_binding", "source_id": &binding.id };
+        if services
+            .find_one(doc! { "$or": [active_connection.clone(), source.clone()] })
+            .projection(doc! { "_id": 1 })
+            .await?
+            .is_some()
+            || collection::<Document>(db, USER_API_KEYS)
+                .find_one(source)
+                .projection(doc! { "_id": 1 })
+                .await?
+                .is_some()
+        {
             continue;
         }
 
@@ -5880,160 +5899,187 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             );
         }
 
-        let now = Utc::now();
-        let endpoint_id = uuid::Uuid::new_v4().to_string();
-        let api_key_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-
-        let is_ssh = service.service_type == "ssh";
-        let ep_url = if is_ssh {
-            service
-                .ssh_config
-                .as_ref()
-                .map(|c| format!("ssh://{}:{}", c.host, c.port))
-                .unwrap_or_default()
-        } else {
-            service.base_url.clone()
-        };
-
-        let credential_type = if is_ssh {
-            "ssh_certificate".to_string()
-        } else {
-            "node_managed".to_string()
-        };
-
-        // Create UserEndpoint
-        let endpoint = UserEndpoint {
-            id: endpoint_id.clone(),
-            user_id: binding.user_id.clone(),
-            label: service.name.clone(),
-            url: ep_url,
-            catalog_service_id: Some(service.id.clone()),
-            openapi_spec_url: service.openapi_spec_url.clone(),
-            recommended_skills: None,
-            created_at: now,
-            updated_at: now,
-        };
-        // Create UserApiKey (placeholder -- node-managed or SSH certificate)
-        let api_key = UserApiKey {
-            secret_context_versions: Default::default(),
-            oauth_app_observation: None,
-            credential_source: None,
-            id: api_key_id.clone(),
-            user_id: binding.user_id.clone(),
-            label: service.name.clone(),
-            credential_type,
-            credential_encrypted: None,
-            access_token_encrypted: None,
-            refresh_token_encrypted: None,
-            token_scopes: None,
-            expires_at: None,
-            provider_config_id: None,
-            connection_id: None,
-            oauth_attempt_nonce: None,
-            user_oauth_client_id_encrypted: None,
-            user_oauth_client_secret_encrypted: None,
-            status: "active".to_string(),
-            last_used_at: None,
-            last_authorized_at: None,
-            error_message: None,
-            source: Some("migration_node_binding".to_string()),
-            source_id: Some(binding.id.clone()),
-            created_at: now,
-            updated_at: now,
-            credential_epoch: 1,
-        };
-        // Create UserService with node routing
-        let inherited_identity = inherited_identity_fields(Some(&service));
-        let user_service = UserService {
-            deleted_at: None,
-            created_by: None,
-            last_change: None,
-            id: service_id,
-            user_id: binding.user_id.clone(),
-            slug,
-            endpoint_id: endpoint_id.clone(),
-            api_key_id: Some(api_key_id.clone()),
-            credential_binding: None,
-            auth_method: service.auth_method.clone(),
-            auth_key_name: service.auth_key_name.clone(),
-            catalog_service_id: Some(service.id.clone()),
-            icon_url: None,
-            node_id: Some(binding.node_id.clone()),
-            node_priority: binding.priority,
-            service_type: service.service_type.clone(),
-            ssh_auth_mode: if service.service_type == "ssh" {
-                service
-                    .ssh_config
-                    .as_ref()
-                    .map(|ssh| ssh.ssh_auth_mode)
-                    .unwrap_or(SshAuthMode::ProxyOnly)
-            } else {
-                SshAuthMode::ProxyOnly
-            },
-            admin_only: false,
-            ssh_node_keys_stale: false,
-            identity_propagation_mode: inherited_identity.identity_propagation_mode,
-            identity_include_user_id: inherited_identity.identity_include_user_id,
-            identity_include_email: inherited_identity.identity_include_email,
-            identity_include_name: inherited_identity.identity_include_name,
-            identity_jwt_audience: inherited_identity.identity_jwt_audience,
-            forward_access_token: inherited_identity.forward_access_token,
-            inject_delegation_token: inherited_identity.inject_delegation_token,
-            delegation_token_scope: inherited_identity.delegation_token_scope,
-            custom_user_agent: None,
-            default_request_headers: None,
-            ws_frame_injections: service.ws_frame_injections.clone(),
-            is_active: true,
-            source: Some("migration_node_binding".to_string()),
-            source_id: Some(binding.id.clone()),
-            source_app_id: None,
-            created_at: now,
-            updated_at: now,
-            state_version: 1,
-            rotation_predecessor_id: None,
-            credential_verification: None,
-        };
-        let inserted = context::scope(
+        let result = context::scope(
             context::system("node_binding_migration"),
             transaction::run(db, async |session| {
+                let Some(primary) =
+                    primary_migration_binding(db, session, &binding.user_id, &binding.service_id)
+                        .await?
+                else {
+                    return Ok(false);
+                };
+                let source = doc! { "source": "migration_node_binding", "source_id": &primary.id };
                 let keys = collection::<UserApiKey>(db, USER_API_KEYS);
-                let services = collection::<UserService>(db, USER_SERVICES);
-                // Another startup may have migrated this source after our reads.
-                if keys.find_one(doc! {
-                    "source": "migration_node_binding", "source_id": &binding.id,
-                }).session(&mut *session).await?.is_some()
-                    || services.find_one(doc! {
-                        "$or": [
-                            { "source": "migration_node_binding", "source_id": &binding.id },
-                            { "user_id": &binding.user_id, "catalog_service_id": &binding.service_id, "is_active": true },
-                        ],
-                    }).session(&mut *session).await?.is_some()
+                if keys
+                    .find_one(source.clone())
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                    || services
+                        .find_one(doc! {"$or": [source, active_connection.clone()]})
+                        .session(&mut *session)
+                        .await?
+                        .is_some()
                 {
                     return Ok(false);
                 }
-                // The source marker must never commit without the complete graph.
-                // Journal writes enlist in this transaction too; rollback needs no deletes.
+                let (endpoint, api_key, user_service) =
+                    node_binding_import_records(&primary, &service, &slug);
                 collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .insert_one(&endpoint).session(&mut *session).await?;
+                    .insert_one(&endpoint)
+                    .session(&mut *session)
+                    .await?;
                 keys.insert_one(&api_key).session(&mut *session).await?;
-                services.insert_one(&user_service).session(&mut *session).await?;
+                collection::<UserService>(db, USER_SERVICES)
+                    .insert_one(&user_service)
+                    .session(&mut *session)
+                    .await?;
                 Ok(true)
             }),
-        ).await?;
-        if inserted {
-            created += 1;
+        )
+        .await;
+        match result {
+            Ok(true) => created += 1,
+            Ok(false) => {}
+            Err(error)
+                if is_duplicate_key_error(&error)
+                    && services
+                        .find_one(active_connection)
+                        .projection(doc! {"_id": 1})
+                        .await?
+                        .is_some() => {}
+            Err(error) => return Err(error.into()),
         }
     }
-
-    if updated > 0 || created > 0 {
+    if created > 0 {
         tracing::info!(
-            updated,
             created,
             "Migrated node service bindings to unified collections"
         );
     }
     Ok(())
+}
+
+fn node_binding_import_records(
+    binding: &NodeServiceBinding,
+    service: &DownstreamService,
+    slug: &str,
+) -> (UserEndpoint, UserApiKey, UserService) {
+    let now = Utc::now();
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let api_key_id = uuid::Uuid::new_v4().to_string();
+    let service_id = uuid::Uuid::new_v4().to_string();
+
+    let is_ssh = service.service_type == "ssh";
+    let ep_url = if is_ssh {
+        service
+            .ssh_config
+            .as_ref()
+            .map(|c| format!("ssh://{}:{}", c.host, c.port))
+            .unwrap_or_default()
+    } else {
+        service.base_url.clone()
+    };
+
+    let credential_type = if is_ssh {
+        "ssh_certificate".to_string()
+    } else {
+        "node_managed".to_string()
+    };
+
+    // Create UserEndpoint
+    let endpoint = UserEndpoint {
+        id: endpoint_id.clone(),
+        user_id: binding.user_id.clone(),
+        label: service.name.clone(),
+        url: ep_url,
+        catalog_service_id: Some(service.id.clone()),
+        openapi_spec_url: service.openapi_spec_url.clone(),
+        recommended_skills: None,
+        created_at: now,
+        updated_at: now,
+    };
+    // Create UserApiKey (placeholder -- node-managed or SSH certificate)
+    let api_key = UserApiKey {
+        secret_context_versions: Default::default(),
+        oauth_app_observation: None,
+        credential_source: None,
+        id: api_key_id.clone(),
+        user_id: binding.user_id.clone(),
+        label: service.name.clone(),
+        credential_type,
+        credential_encrypted: None,
+        access_token_encrypted: None,
+        refresh_token_encrypted: None,
+        token_scopes: None,
+        expires_at: None,
+        provider_config_id: None,
+        connection_id: None,
+        oauth_attempt_nonce: None,
+        user_oauth_client_id_encrypted: None,
+        user_oauth_client_secret_encrypted: None,
+        status: "active".to_string(),
+        last_used_at: None,
+        last_authorized_at: None,
+        error_message: None,
+        source: Some("migration_node_binding".to_string()),
+        source_id: Some(binding.id.clone()),
+        created_at: now,
+        updated_at: now,
+        credential_epoch: 1,
+    };
+    // Create UserService with node routing
+    let inherited_identity = inherited_identity_fields(Some(service));
+    let user_service = UserService {
+        deleted_at: None,
+        created_by: None,
+        last_change: None,
+        id: service_id,
+        user_id: binding.user_id.clone(),
+        slug: slug.to_owned(),
+        endpoint_id: endpoint_id.clone(),
+        api_key_id: Some(api_key_id.clone()),
+        credential_binding: None,
+        auth_method: service.auth_method.clone(),
+        auth_key_name: service.auth_key_name.clone(),
+        catalog_service_id: Some(service.id.clone()),
+        icon_url: None,
+        node_id: Some(binding.node_id.clone()),
+        node_priority: binding.priority,
+        service_type: service.service_type.clone(),
+        ssh_auth_mode: if service.service_type == "ssh" {
+            service
+                .ssh_config
+                .as_ref()
+                .map(|ssh| ssh.ssh_auth_mode)
+                .unwrap_or(SshAuthMode::ProxyOnly)
+        } else {
+            SshAuthMode::ProxyOnly
+        },
+        admin_only: false,
+        ssh_node_keys_stale: false,
+        identity_propagation_mode: inherited_identity.identity_propagation_mode,
+        identity_include_user_id: inherited_identity.identity_include_user_id,
+        identity_include_email: inherited_identity.identity_include_email,
+        identity_include_name: inherited_identity.identity_include_name,
+        identity_jwt_audience: inherited_identity.identity_jwt_audience,
+        forward_access_token: inherited_identity.forward_access_token,
+        inject_delegation_token: inherited_identity.inject_delegation_token,
+        delegation_token_scope: inherited_identity.delegation_token_scope,
+        custom_user_agent: None,
+        default_request_headers: None,
+        ws_frame_injections: service.ws_frame_injections.clone(),
+        is_active: true,
+        source: Some("migration_node_binding".to_string()),
+        source_id: Some(binding.id.clone()),
+        source_app_id: None,
+        created_at: now,
+        updated_at: now,
+        state_version: 1,
+        rotation_predecessor_id: None,
+        credential_verification: None,
+    };
+    (endpoint, api_key, user_service)
 }
 
 #[cfg(test)]

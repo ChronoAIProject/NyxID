@@ -23,6 +23,8 @@ struct Write {
 #[derive(Default)]
 struct Trace {
     enabled: bool,
+    commands: std::collections::BTreeMap<String, usize>,
+    commit_session: Option<Document>,
     writes: Vec<Write>,
     requests: HashMap<i32, usize>,
 }
@@ -30,14 +32,21 @@ struct Trace {
 #[derive(Clone, Copy, Debug)]
 enum Migration {
     NodeCreate,
-    NodeUpdate,
+    ProviderToken,
+    ServiceConnection,
     DuplicateCleanup,
 }
 
 impl Migration {
     async fn run(self, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
         match self {
-            Self::NodeCreate | Self::NodeUpdate => migrate_node_service_bindings(db).await,
+            Self::NodeCreate => migrate_node_service_bindings(db).await,
+            Self::ProviderToken => {
+                migrate_provider_tokens(db, &crate::test_utils::test_encryption_keys()).await
+            }
+            Self::ServiceConnection => {
+                migrate_service_connections(db, &crate::test_utils::test_encryption_keys()).await
+            }
             Self::DuplicateCleanup => cleanup_duplicate_migration_services(db).await,
         }
     }
@@ -163,15 +172,30 @@ async fn fixture(migration: Migration) -> Fixture {
             })
             .await
             .unwrap();
-        if matches!(migration, Migration::NodeUpdate) {
-            migrate_node_service_bindings(&db).await.unwrap();
-            db.collection::<Document>(USER_SERVICES)
-                .update_one(
-                    doc! {},
-                    doc! {"$set": {"node_id": bson::Bson::Null, "node_priority": 0}},
-                )
-                .await
-                .unwrap();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let date = bson::DateTime::from_chrono(now);
+        match migration {
+            Migration::ProviderToken => {
+                let provider = uuid::Uuid::new_v4().to_string();
+                db.collection::<Document>(DOWNSTREAM_SERVICES)
+                    .update_one(
+                        doc! {"_id": &catalog.id},
+                        doc! {"$set": {"provider_config_id": &provider}},
+                    )
+                    .await
+                    .unwrap();
+                db.collection::<Document>(USER_PROVIDER_TOKENS).insert_one(doc! {
+                    "_id": source_id, "user_id": &owner, "provider_config_id": provider,
+                    "token_type": "oauth2", "status": "active", "created_at": date, "updated_at": date,
+                }).await.unwrap();
+            }
+            Migration::ServiceConnection => {
+                db.collection::<Document>(USER_SERVICE_CONNECTIONS).insert_one(doc! {
+                    "_id": source_id, "user_id": &owner, "service_id": &catalog.id, "credential_encrypted": bson::Bson::Null,
+                    "is_active": true, "created_at": date, "updated_at": date,
+                }).await.unwrap();
+            }
+            _ => {}
         }
     }
     Fixture {
@@ -199,8 +223,18 @@ async fn monitored(db: &Database) -> (Database, String, Arc<Mutex<Trace>>) {
         if !trace.enabled {
             return;
         }
+        if let CommandEvent::Started(event) = &event {
+            *trace
+                .commands
+                .entry(event.command_name.clone())
+                .or_default() += 1;
+        }
         match event {
             CommandEvent::Started(event) if WRITES.contains(&event.command_name.as_str()) => {
+                if event.command_name == "commitTransaction" {
+                    trace.commit_session =
+                        Some(event.command.get_document("lsid").unwrap().clone());
+                }
                 let index = trace.writes.len();
                 trace.requests.insert(event.request_id, index);
                 trace.writes.push(Write {
@@ -294,7 +328,13 @@ async fn assert_converged(fixture: &Fixture, migration: Migration) -> Vec<String
     } else {
         assert_eq!(service.node_id.as_deref(), Some(fixture.node.as_str()));
         assert_eq!(service.node_priority, 7);
-        assert_eq!(service.source.as_deref(), Some("migration_node_binding"));
+        let source = match migration {
+            Migration::ProviderToken => "migration_provider_token",
+            Migration::ServiceConnection => "migration_connection",
+            Migration::NodeCreate => "migration_node_binding",
+            Migration::DuplicateCleanup => unreachable!(),
+        };
+        assert_eq!(service.source.as_deref(), Some(source));
         assert_eq!(service.source_id.as_deref(), key.get_str("source_id").ok());
     }
     let mut actions: Vec<String> = db
@@ -314,6 +354,8 @@ async fn assert_converged(fixture: &Fixture, migration: Migration) -> Vec<String
 }
 
 async fn restart_at_every_write(migration: Migration) {
+    // failCommand has one configuration per mongod, even with appName filtering.
+    let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
     let reference = fixture(migration).await;
     let (db, _, trace) = monitored(&reference.db).await;
     migration.run(&db).await.unwrap();
@@ -360,7 +402,27 @@ async fn restart_at_every_write(migration: Migration) {
             (cutoff < baseline.len()).then_some(cutoff),
             "{migration:?} cutoff {cutoff}: failure did not hit the requested write: {writes:?}"
         );
+        if writes
+            .iter()
+            .any(|w| w.failed && w.command == "commitTransaction")
+        {
+            // failCommand rejects the commit before mongod sees it. Release the
+            // abandoned transaction before restarting against its locked rows.
+            let session = trace.lock().unwrap().commit_session.clone().unwrap();
+            admin
+                .run_command(doc! { "killSessions": [session] })
+                .await
+                .unwrap();
+        }
         let after_interruption = snapshot(&fixture.db).await;
+        if matches!(
+            migration,
+            Migration::NodeCreate | Migration::ProviderToken | Migration::ServiceConnection
+        ) && let Some(row) = after_interruption[2].first()
+        {
+            assert_eq!(row.get_str("node_id").unwrap(), fixture.node);
+            assert_eq!(row.get_i32("node_priority").unwrap(), 7);
+        }
         // A fresh client cannot retain the interrupted invocation's session or state.
         let restarted = Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
             .await
@@ -401,11 +463,19 @@ async fn startup_migration_node_binding_recovers_after_every_write() {
 }
 
 #[tokio::test]
-async fn startup_migration_existing_node_route_recovers_after_every_write() {
-    restart_at_every_write(Migration::NodeUpdate).await;
+async fn startup_migration_provider_token_imports_route_at_every_write_boundary() {
+    restart_at_every_write(Migration::ProviderToken).await;
+}
+
+#[tokio::test]
+async fn startup_migration_service_connection_imports_route_at_every_write_boundary() {
+    restart_at_every_write(Migration::ServiceConnection).await;
 }
 
 #[tokio::test]
 async fn startup_migration_duplicate_cleanup_recovers_after_every_write() {
     restart_at_every_write(Migration::DuplicateCleanup).await;
 }
+
+#[path = "node_binding_restart_tests.rs"]
+mod node_binding_restart_tests;
