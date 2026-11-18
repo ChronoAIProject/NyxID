@@ -134,6 +134,8 @@ export const billingUsageRowSchema = z.object({
   bytes: z.number().int(),
   events: z.number().int().nonnegative(),
   lago_acked: z.boolean(),
+  /** False when the row comes from a permanent summary without request detail. */
+  detail_retained: z.boolean().optional().default(true),
   billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
   token_breakdown: billingTokenBreakdownSchema.nullable().optional(),
@@ -155,6 +157,8 @@ export const billingUsageResponseSchema = z.object({
   job_id: z.string().uuid().nullable().optional(),
   owner_id: z.string().min(1),
   period: z.string().min(1),
+  /** Earliest source time covered by the answer. */
+  covers_from: z.string().optional(),
   rows: z.array(billingUsageRowSchema),
   totals: billingUsageTotalsSchema,
   billing: billingReadOnlyBlockSchema,

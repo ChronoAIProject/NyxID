@@ -303,15 +303,6 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
                 chrono::Utc::now(),
             ),
             Checkpoint::Current(state) => {
-                if let Ok(since) = state.raw.get_datetime("usage_warming_since") {
-                    items.push(BillingStartupDiagnostic {
-                        code: "billing_usage_warming".into(),
-                        summary: "Usage comparison is warming".into(),
-                        detail: "Delivery capture is active; period coverage is unverified and numeric comparison is not enabled.".into(),
-                        remediation: "No action is required during capture rollout.".into(),
-                        detected_at: since.to_chrono(),
-                    });
-                }
                 if state.failures.is_empty() {
                     return items;
                 }
@@ -332,6 +323,8 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
         },
     };
     items.push(BillingStartupDiagnostic {
+        severity: super::DiagnosticSeverity::Action,
+        technical_details: None,
         code: "billing_reconcile_steps".into(),
         summary: "Billing maintenance has failed steps".into(),
         detail,

@@ -406,6 +406,28 @@ groups and restarts to install the unique index.
 
 ## Rolling deploys and graceful drain
 
+Server mode installs SIGTERM and ctrl-c receivers before configuration or database
+IO, and retains the same receivers through shutdown. Startup never cancels an
+awaited step on a signal. It checks at three safe points: after configuration,
+after the read-only database connection and transaction-capability check, and
+immediately before either listener binds. At the first two points it exits with
+status 0 without application writes or workers. After the database checkpoint,
+startup finishes through the bind checkpoint, including migrations and worker
+initialization. A pending signal there prevents both binds and the process-start
+audit, runs the existing drain for workers already started, then exits with
+status 0. A second signal is retained during startup and skips the drain wait
+once that checkpoint is reached; it never interrupts a startup step.
+
+For a startup signal, the configured drain budget starts at signal receipt.
+Remaining startup consumes that budget: with budget B and remaining startup S,
+at most max(B - S, 0) remains for drain and cleanup. This does not place a deadline
+on startup itself. If a startup operation stalls beyond B, the process reaches
+cleanup late, with no budget remaining; a platform kill can still interrupt it.
+Under the normal startup duration (less than ten seconds), the default 25-second
+budget includes the remaining startup and drain. One-shot commands install no
+server signal receivers; database command modes also start no billing or chain
+verification workers. After binding, shutdown follows the serving behavior below.
+
 SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
@@ -643,6 +665,18 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
 
+### Upgrading large databases
+
+Before rolling out this version to a large database, pre-build the 23 erasure
+and export indexes using the exact owner and export-selector commands in the
+[personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md).
+This is required for large collections such as `refresh_tokens`, `nyxbot_events`,
+`assistant_messages`, `trigger_deliveries`, and channel receipts. Startup awaits
+these builds before either listener binds, so a long first build can exhaust
+readiness/startup probe allowances. Pre-building lets the current replicas keep
+serving during the build; startup then reuses the compatible existing indexes.
+No existing index needs to be dropped, renamed, or rebuilt.
+
 ### Collections Created
 
 NyxID uses 29 MongoDB collections, all created automatically at startup:
@@ -737,6 +771,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 ## Reverse Proxy Configuration
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
+
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
 
 ### Caddy (Recommended)
 
@@ -1786,3 +1830,84 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 - Ensure SPA fallback is configured (serve `index.html` for all routes)
 - Check browser console for CORS errors
 - Verify the API URL in the frontend build matches the backend URL
+
+
+## MongoDB pool saturation
+
+Budget `DATABASE_MAX_CONNECTIONS` per process and per MongoDB server. A starting
+recommendation for bursty assistant workloads is 50 per replica: 50 primary
+application sockets for one replica, 100 for two. Include deployment surge,
+other clients, two monitoring sockets per server per replica, and the minimum
+pools on other members. Keep the projected peak below 80% of the database's
+per-node connection limit. Confirm the Atlas tier's actual limit before choosing
+a deployment setting. A larger pool supplies headroom but cannot repair a lock
+cycle. The current configuration default remains 10.
+
+Change-stream getMore calls use pooled connections while waiting. NyxID has
+assistant live, execution-enrollment and machine-access change-stream consumers.
+The HTTP requests-per-second limit and per-owner turn limits do not bound the
+number of concurrent operations across the process.
+
+NyxID warns when a server pool stays fully occupied for at least one second and
+when a completed or failed checkout took at least one second. The warnings share
+a 30-second rate limit per server pool. They contain the configured maximum and
+elapsed milliseconds, with no command contents or account identifiers. Full
+occupancy is not proof of queued requests or deadlock; correlate it with MongoDB
+transaction/operation and resource telemetry. It is deliberately not reported as
+an exact queue length because the driver's CMAP events cannot track cancellation
+of individual waiters.
+
+Rust MongoDB driver 3.5.2 does not apply a checkout-wait deadline. Its parsed
+`waitQueueTimeoutMS` is not connected to the checkout implementation, and
+`socketTimeoutMS` is unsupported. Server-selection and connection-establishment
+timeouts do not bound checkout. Do not rely on those settings to limit a saturated
+pool's wait. A future checkout-only timeout needs driver support and a reviewed
+retryable error contract; cancelling a write after dispatch can leave an unknown
+outcome.
+
+On normal replica sets, a transaction returns its connection between commands;
+load-balanced topology pins a physical connection, and sharded transactions pin
+a mongos address. Independently, a database operation waiting on an uncommitted
+write occupies a connection. Enough such operations can prevent the writer's
+COMMIT from acquiring a connection. Keep writes in the intended session and
+avoid nested writers against a fence already held by their caller.
+
+Ordinary chained audit appends serialize through one process-wide async gate,
+before any database work. Queued callers hold no connection. They share a
+120-second queue/retry budget, allowing the default 60-second server transaction
+lifetime plus 60 seconds for cleanup and recovery; conflicts retry with capped jittered
+backoff instead of an eight-attempt limit. This is a retry budget, not a general
+MongoDB timeout: it does not cancel a dispatched command or an uncertain commit.
+Existing shorter caller deadlines still apply. An awaited audit can delay its
+request or background job; the existing error handling remains in place.
+
+Each attempt still reads the tail and inserts in a short transaction: a plain
+unique insert under the gate can strand COMMIT with pool one and can wait beyond
+the retry deadline. Transactional conflicts release the socket so the holder
+and retry clock can progress. A successful append adds one COMMIT command.
+Caller-owned in-session appends do not take the process gate. Stored audit rows,
+UUID replay checks and hash bytes do not change; mixed versions remain readable,
+but old replicas retain the ordinary-insert starvation and eight-attempt loss
+risks. Rollback restores those risks.
+
+The queue is in memory. Deadline exhaustion, shorter caller timeouts or process
+loss can still drop best-effort ordinary audits. Required security-effect
+intents retain and retry their own payloads; chain verification cannot reconstruct
+an ordinary audit entry that was never saved. Serialization has a throughput
+ceiling set by database round-trip latency; compare observed audit volume with
+measured append throughput before considering ordered batching.
+
+An ordinary audit caller still waiting for the gate after one second emits a
+warning with `queue_wait_ms` and `waiting` (queued callers only, excluding the
+holder). The warning repeats at most once per 30 seconds per process across all
+waiters, including while the holder remains blocked. Cancellation and queue
+deadlines remove waiters from the count. No audit content is logged, and the
+warning does no database work.
+
+A 5 ms majority commit alone caps the serial appender below 200 entries/second
+per replica; 10 ms caps it below 100. Tail reads, inserts, network latency and
+conflict retries lower those ceilings further. Sustained arrivals above capacity
+grow the in-memory queue; each caller has at most its remaining 120-second
+queue/retry budget (or a shorter caller deadline) before failing. Best-effort
+entries can then be lost. The warning exposes queue pressure; it does not add a
+durable queue, admission limit or batching.

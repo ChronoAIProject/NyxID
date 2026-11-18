@@ -12,6 +12,9 @@ use mongodb::event::{EventHandler, command::CommandEvent};
 use serde_json::json;
 use std::sync::Mutex;
 
+#[path = "tax_refresh_budget_tests.rs"]
+mod tax_refresh_budget_tests;
+
 #[derive(Default)]
 struct Provider {
     calls: Mutex<Vec<String>>,
@@ -108,6 +111,7 @@ impl LagoApi for Provider {
     }
     async fn tax_config(&self, c: &str, _: &str) -> AppResult<LagoTaxConfig> {
         self.call("tax", c)?;
+        tax_refresh_budget_tests::on_tax_read(c).await;
         self.race(Step::Taxes).await;
         Ok(billing::taxes::zero_config())
     }
@@ -191,9 +195,17 @@ impl Step {
                     .await
             }
             Self::Compare => {
-                f.reconciler
-                    .compare_finalized_usage(f.provider.as_ref(), &mut stats)
-                    .await
+                let runtime = crate::services::coordination_service::cluster_lease_runtime();
+                let token =
+                    LeaseStore::acquire(&f.db, RECONCILE_LEASE, &runtime.holder, runtime.ttl)
+                        .await?
+                        .expect("fixture lease");
+                let result = f
+                    .reconciler
+                    .compare_finalized_usage(f.provider.as_ref(), &mut stats, &token)
+                    .await;
+                LeaseStore::release(&f.db, &token).await?;
+                result
             }
             Self::Wallet => {
                 f.reconciler
@@ -460,7 +472,20 @@ async fn provider_step_comparison_warms_without_reading_usage() {
     f.commands.lock().unwrap().clear();
     Step::Compare.run(&f).await.unwrap();
     assert!(f.provider.calls.lock().unwrap().is_empty());
-    assert!(f.commands.lock().unwrap().is_empty());
+    assert_eq!(
+        f.commands.lock().unwrap().as_slice(),
+        [
+            "findAndModify:coordination_leases",
+            "aggregate:billing_usage_comparison_control",
+            "find:security_rollouts",
+            "find:security_replicas",
+            "findAndModify:billing_usage_comparison_control",
+            "find:billing_usage_comparison_control",
+            "find:billing_wallet",
+            "delete:coordination_leases",
+        ],
+        "coverage and discovery never read the old aggregate's poisoned meter row"
+    );
     f.db.drop().await.unwrap();
 }
 regression!(provider_step_wallet_isolates_bad_wallet, Wallet);
@@ -481,7 +506,7 @@ async fn provider_step_clean_command_counts() {
             Step::Prices => (2, 18),
             Step::Machine => (1, 17),
             Step::Push => (2, 9),
-            Step::Compare => (0, 0),
+            Step::Compare => (8, 8), // Six coverage/discovery commands plus the test lease.
             Step::Wallet => (1, 11),
             Step::Rates => (4, 8),
         };

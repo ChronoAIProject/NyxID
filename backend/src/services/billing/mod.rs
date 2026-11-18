@@ -2,6 +2,9 @@ pub mod allowances;
 pub mod amounts;
 pub mod bill;
 pub mod config;
+#[cfg(test)]
+mod diagnostic_tests;
+mod diagnostic_text;
 pub mod funding;
 pub mod grants;
 mod hold_conservation;
@@ -37,6 +40,7 @@ mod targets;
 pub mod taxes;
 pub mod topup_expiry;
 pub(crate) mod usage_checkpoint;
+pub(crate) mod usage_comparison;
 pub(crate) mod usage_delivery;
 pub mod usage_rollup;
 pub mod webhook;
@@ -52,6 +56,7 @@ use futures::TryStreamExt;
 use lago_client::{LagoApi, LagoClient};
 use mongodb::bson::{Document, doc};
 
+pub use crate::models::startup_diagnostic::DiagnosticSeverity;
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
 pub use route_context::{BillingRouteContext, NodeIntent};
@@ -60,6 +65,8 @@ pub use route_inventory::BillingIngress;
 #[derive(Clone, Debug)]
 pub struct BillingStartupDiagnostic {
     pub code: String,
+    pub severity: DiagnosticSeverity,
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -102,6 +109,8 @@ pub async fn startup_diagnostics(
             format!("{count} failed documents; first keys: {}", keys.join(", "))
         };
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code: "billing_exact_cutover".into(),
             summary: "Billing cutover is pending".into(),
             detail,
@@ -122,6 +131,8 @@ pub async fn startup_diagnostics(
         .await?;
     if let Some(marker) = rollup {
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Info,
+            technical_details: None,
             code: "billing_rollup_normalization".into(),
             summary: "Billing analytics normalization is in progress".into(),
             detail: marker
@@ -151,6 +162,8 @@ pub async fn startup_diagnostics(
                 _ => "provider_repair_unverified",
             };
             items.push(BillingStartupDiagnostic {
+                severity: DiagnosticSeverity::Action,
+                technical_details: None,
                 code: format!("billing_plan_repair:{id}"),
                 summary: "A managed Lago plan charge could not be repaired".into(),
                 detail: format!("Plan {plan}; metric {metric}; reason {reason}"),
@@ -175,6 +188,8 @@ pub async fn startup_diagnostics(
             })
             .unwrap_or_default();
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code: "billing_invalid_rates".into(),
             summary: "Some Lago metrics cannot be billed".into(),
             detail: format!("Rejected metrics: {rejected}"),
@@ -194,6 +209,8 @@ pub async fn startup_diagnostics(
         .await?
     {
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code:"billing_pool_recovery".into(),
             summary:"Pool recovery has observed errors".into(),
             detail:format!("{} recovery failures; recent requests: {}", diagnostic.failures,
@@ -203,6 +220,7 @@ pub async fn startup_diagnostics(
         });
     }
     items.extend(reconcile_status::diagnostics(db).await);
+    items.extend(usage_comparison::diagnostics(db).await?);
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
     items.extend(stuck_requests::diagnostics(db).await?);

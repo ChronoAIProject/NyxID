@@ -10,6 +10,7 @@ pub mod admin_helpers;
 pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
+pub mod admin_personal_erasure;
 pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
@@ -74,6 +75,8 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+#[cfg(test)]
+mod key_authority_audit_tests;
 pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;

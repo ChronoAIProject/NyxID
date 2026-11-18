@@ -247,6 +247,7 @@
   "NyxID provides the key.": "NyxID 提供金鑰。",
   "NyxID's {{value0}} app": "NyxID 的 {{value0}} 應用程式",
   "NyxID's {{value0}} key": "NyxID 的 {{value0}} 金鑰",
+  "Older than 30 days": "30 天以前",
   "One count per metered request": "每個計量請求計為一次",
   "Only an admin of {{value1}} can add credits to it.": "只有 {{value1}} 的管理員才能為其新增額度。",
   "Or enter an amount": "或輸入金額",

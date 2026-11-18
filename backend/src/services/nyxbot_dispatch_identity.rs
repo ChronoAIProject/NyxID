@@ -57,21 +57,46 @@ pub async fn alias_result(
     channel: &str,
     key: &str,
 ) -> AppResult<AliasOutcome> {
+    alias_response(db, event, channel, key, None).await
+}
+
+pub async fn alias_response(
+    db: &Database,
+    event: &str,
+    channel: &str,
+    key: &str,
+    response: Option<&crate::models::nyxbot_response_read::Command>,
+) -> AppResult<AliasOutcome> {
+    let mut stages = vec![doc! {"$set":{"dispatch_identity":{"$mergeObjects":[
+        {"$ifNull":["$dispatch_identity",{}]},
+        {"keys":{"$let":{"vars":{"keys":{"$ifNull":["$dispatch_identity.keys",[]]}},"in":{
+            "$cond":[
+                {"$or":[{"$in":[key,"$$keys"]},{"$lt":[{"$size":"$$keys"},MAX_ALIASES]}]},
+                {"$setUnion":["$$keys",[key]]},"$$keys"
+            ]
+        }}}}
+    ]}}}];
+    if let Some(command) = response {
+        let value = bson::to_bson(command)
+            .map_err(|_| AppError::Internal("Response alias unavailable".into()))?;
+        for field in ["response_read", "response_read_pending"] {
+            let reference = format!("${field}");
+            let commands = format!("{reference}.commands");
+            stages.push(doc! {"$set":{field:{"$cond":[
+                {"$and":[{"$eq":[format!("{reference}.version"),1]},
+                    {"$gt":[format!("{reference}.expires_at"),"$$NOW"]},
+                    {"$in":[key,"$dispatch_identity.keys"]},
+                    {"$not":[{"$in":[&command.response_id,{"$ifNull":[format!("{commands}.response_id"),[]]}]}]},
+                    {"$lt":[{"$size":{"$ifNull":[&commands,[]]}},MAX_ALIASES]}]},
+                {"$mergeObjects":[&reference,{"commands":{"$concatArrays":[&commands,{"$literal":[value.clone()]}]}}]},
+                {"$ifNull":[&reference,"$$REMOVE"]}
+            ]}}});
+        }
+    }
     let row = db
         .collection::<bson::Document>(EVENTS_COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {"_id":event,"channel_id":channel},
-            vec![doc! {"$set":{"dispatch_identity":{"$mergeObjects":[
-                {"$ifNull":["$dispatch_identity",{}]},
-                {"keys":{"$let":{"vars":{"keys":{"$ifNull":["$dispatch_identity.keys",[]]}},"in":{
-                    "$cond":[
-                        {"$or":[{"$in":[key,"$$keys"]},{"$lt":[{"$size":"$$keys"},MAX_ALIASES]}]},
-                        {"$setUnion":["$$keys",[key]]},"$$keys"
-                    ]
-                }}}}
-            ]}}}],
-        )
-        .projection(doc! {"dispatch_identity.keys":1})
+        .find_one_and_update(doc! {"_id":event,"channel_id":channel}, stages)
+        .projection(doc! {"dispatch_identity.keys":1,"response_read.commands":1,"response_read_pending.commands":1})
         .return_document(ReturnDocument::After)
         .await
         .map_err(|error| {
@@ -91,6 +116,23 @@ pub async fn alias_result(
     let Some(row) = row else {
         return Ok(AliasOutcome::Missing);
     };
+    if let Some(command) = response {
+        for field in ["response_read", "response_read_pending"] {
+            if let Ok(mapping) = row.get_document(field)
+                && let Ok(commands) = mapping.get_array("commands")
+                && commands
+                    .iter()
+                    .filter_map(|v| v.as_document())
+                    .any(|saved| {
+                        saved.get_str("response_id").ok() == Some(command.response_id.as_str())
+                            && saved.get_str("request_hash").ok()
+                                != Some(command.request_hash.as_str())
+                    })
+            {
+                return Err(AppError::Conflict("response_command_changed".into()));
+            }
+        }
+    }
     let keys = row
         .get_document("dispatch_identity")
         .ok()

@@ -110,7 +110,7 @@ interface DocFile {
 }
 
 // Public, indexable routes outside the docs tree.
-const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
+const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms", "/data-deletion"]
 
 function docsSync(): Plugin {
   const srcDir = path.resolve(__dirname, "../docs/site")
@@ -369,6 +369,7 @@ export default defineConfig({
         // Static legal / redirect stub pages — no branching logic.
         "src/pages/privacy.tsx",
         "src/pages/terms.tsx",
+        "src/pages/data-deletion.tsx",
         "src/pages/connections.tsx",
         "src/pages/services.tsx",
         "src/pages/providers-layout.tsx",

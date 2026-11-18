@@ -212,6 +212,17 @@ export async function apiFetch(
   return response;
 }
 
+/** Authenticated binary response helper used by attachment-style downloads. */
+export async function apiBlobClient(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<{ blob: Blob; filename?: string }> {
+  const response = await apiFetch(endpoint, options);
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = disposition.match(/filename="([^"]+)"/i);
+  return { blob: await response.blob(), filename: match?.[1] };
+}
+
 export const api = {
   get<T>(
     endpoint: string,

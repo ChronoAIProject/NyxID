@@ -941,7 +941,7 @@ pub async fn erasure_retry(
     Json(body): Json<ErasureDomainRetryRequest>,
 ) -> AppResult<Json<AdminActionResponse>> {
     crate::handlers::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
-    crate::services::personal_erasure_service::retry_domain(
+    let message = crate::services::personal_erasure_service::retry_domain(
         &state.db,
         &auth.user_id.to_string(),
         &user,
@@ -954,7 +954,7 @@ pub async fn erasure_retry(
     )
     .await?;
     Ok(Json(AdminActionResponse {
-        message: "Erasure domain queued for evidence re-evaluation".into(),
+        message: message.into(),
     }))
 }
 pub async fn erasure_reconcile(
@@ -1634,6 +1634,8 @@ pub struct ChainVerificationResponse {
 #[derive(Debug, Serialize)]
 pub struct StartupDiagnosticItem {
     pub code: String,
+    pub severity: crate::models::startup_diagnostic::DiagnosticSeverity,
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -1656,6 +1658,8 @@ async fn active_startup_diagnostics(
         .into_iter()
         .map(|diagnostic| StartupDiagnosticItem {
             code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
             summary: diagnostic.summary,
             detail: diagnostic.detail,
             remediation: diagnostic.remediation,
@@ -1668,6 +1672,8 @@ async fn active_startup_diagnostics(
             .into_iter()
             .map(|diagnostic| StartupDiagnosticItem {
                 code: diagnostic.code,
+                severity: diagnostic.severity,
+                technical_details: diagnostic.technical_details,
                 summary: diagnostic.summary,
                 detail: diagnostic.detail,
                 remediation: diagnostic.remediation,
@@ -1677,6 +1683,8 @@ async fn active_startup_diagnostics(
     if let Some(diagnostic) = crate::services::org_service::diagnostics::diagnostic(db).await? {
         items.push(StartupDiagnosticItem {
             code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
             summary: diagnostic.summary,
             detail: diagnostic.detail,
             remediation: diagnostic.remediation,
@@ -3432,6 +3440,7 @@ mod operator_route_tests {
             owner_deletion_policy: None,
             status: ErasureStatus::OperatorAction,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![
                 DomainCheckpoint {
                     domain: "local_inventory".into(),
@@ -3440,6 +3449,7 @@ mod operator_route_tests {
                     last_retry_key_hash: None,
                     last_retry_request_digest: None,
                     consecutive_failures: 8,
+                    remote_wait_started_at: None,
                     reason: Some("fixture_retry".into()),
                     cursor: None,
                     completed_at: None,
@@ -3451,6 +3461,7 @@ mod operator_route_tests {
                     last_retry_key_hash: None,
                     last_retry_request_digest: None,
                     consecutive_failures: 8,
+                    remote_wait_started_at: None,
                     reason: Some("fixture_retry".into()),
                     cursor: None,
                     completed_at: None,
@@ -3552,6 +3563,80 @@ mod operator_route_tests {
             .unwrap();
         assert_eq!(resolved.get_str("status"), Ok("complete"));
         assert!(!resolved.contains_key("capability_encrypted"));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn operator_erasure_retry_explains_remote_cleanup_precondition() {
+        use crate::models::personal_erasure::{DomainStatus, ErasureStatus, PersonalErasureJob};
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db =
+            crate::test_utils::connect_transaction_test_database("operator_remote_cleanup_retry")
+                .await;
+        let target = insert_user(&db, false, false).await;
+        let operator = insert_user(&db, false, true).await;
+        crate::services::personal_erasure_service::accept(&db, &target, &target, None)
+            .await
+            .unwrap();
+        let mut job = crate::services::personal_erasure_service::status(&db, &target)
+            .await
+            .unwrap()
+            .unwrap();
+        job.status = ErasureStatus::OperatorAction;
+        let domain = job
+            .domains
+            .iter_mut()
+            .find(|d| d.domain == "local_inventory")
+            .unwrap();
+        domain.status = DomainStatus::OperatorAction;
+        domain.reason = Some("remote_cleanup_wait_exceeded".into());
+        domain.remote_wait_started_at = Some(job.updated_at - chrono::Duration::hours(24));
+        db.collection::<PersonalErasureJob>("personal_erasure_jobs")
+            .replace_one(doc! {"_id":&job.id}, &job)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let key = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            let response = erasure_retry(
+                State(state.clone()),
+                test_auth_user(&operator),
+                Path(target.clone()),
+                Json(ErasureDomainRetryRequest {
+                    domain: "local_inventory".into(),
+                    job_id: job.id.clone(),
+                    expected_retry_generation: 0,
+                    idempotency_key: key.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.0.message,
+                "Erasure domain queued for evidence re-evaluation. Resolve the remaining remote cleanup dependencies. For a node-blocked Stop, bring the node online or, if permanently gone, have an administrator delete it via DELETE /api/v1/admin/nodes/{id}, then retry. Unresolved cleanup immediately returns to operator_action (remote_cleanup_wait_exceeded)"
+            );
+        }
+        let retried = crate::services::personal_erasure_service::status(&db, &target)
+            .await
+            .unwrap()
+            .unwrap();
+        let pending = retried
+            .domains
+            .iter()
+            .find(|d| d.domain == "local_inventory")
+            .unwrap();
+        assert_eq!(
+            pending.reason.as_deref(),
+            Some("remote_cleanup_verification_required")
+        );
+        assert_eq!(pending.status, DomainStatus::Pending);
+        assert_eq!(
+            db.collection::<bson::Document>("audit_log")
+                .count_documents(doc! {"event_type":"user.account.erasure_domain_retry"})
+                .await
+                .unwrap(),
+            1
+        );
         db.drop().await.unwrap();
     }
 
@@ -4464,3 +4549,7 @@ impl std::fmt::Debug for OAuthClientResponse {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "admin_integrity_tests.rs"]
+mod integrity_tests;

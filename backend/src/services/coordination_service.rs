@@ -17,43 +17,42 @@ use crate::models::coordination::{
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     let leases = db.collection::<Document>(LEASE_COLLECTION_NAME);
-    for index_name in [
-        format!("{LEASE_COLLECTION_NAME}_expiry_ttl"),
-        format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
-    ] {
-        // Concurrent startup drops are harmless; another replica may have
-        // removed a superseded definition first.
-        let _ = leases.drop_index(index_name).await;
-    }
-    leases
-        .update_many(
-            doc! {
-                "record_kind": { "$exists": false },
-                "checkpoint": { "$exists": true },
-            },
-            doc! { "$set": { "record_kind": "checkpoint" } },
-        )
-        .await?;
-    leases
-        .update_many(
-            doc! { "record_kind": { "$exists": false } },
-            doc! { "$set": { "record_kind": "ephemeral" } },
-        )
-        .await?;
-    leases
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name(format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"))
-                        .expire_after(Duration::from_secs(0))
-                        .partial_filter_expression(doc! { "record_kind": "ephemeral" })
-                        .build(),
-                )
+    let _ = leases
+        .drop_index(format!("{LEASE_COLLECTION_NAME}_expiry_ttl"))
+        .await;
+    let index = IndexModel::builder()
+        .keys(doc! { "expires_at": 1 })
+        .options(
+            IndexOptions::builder()
+                .expire_after(Duration::from_secs(0))
+                .partial_filter_expression(doc! { "record_kind": "ephemeral" })
                 .build(),
         )
-        .await?;
+        .build();
+    crate::db::ensure_named_index_with_retry(
+        &leases,
+        &format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
+        index,
+        || async {
+            leases
+                .update_many(
+                    doc! {
+                        "record_kind": { "$exists": false },
+                        "checkpoint": { "$exists": true },
+                    },
+                    doc! { "$set": { "record_kind": "checkpoint" } },
+                )
+                .await?;
+            leases
+                .update_many(
+                    doc! { "record_kind": { "$exists": false } },
+                    doc! { "$set": { "record_kind": "ephemeral" } },
+                )
+                .await?;
+            Ok(())
+        },
+    )
+    .await?;
 
     for collection_name in [
         REPLAY_COLLECTION_NAME,
@@ -470,6 +469,24 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// Refund only the exact fixed window originally reserved. The consumed
+    /// reservation token is owned by the caller, so it cannot refund twice.
+    pub(crate) async fn refund(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        reset_at: chrono::DateTime<chrono::Utc>,
+        window: Duration,
+    ) -> AppResult<()> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let start = reset_at - chrono::Duration::milliseconds(window_ms);
+        db.collection::<Document>(RATE_WINDOW_COLLECTION_NAME).update_one(
+            doc! {"_id": hash_parts(&[namespace, key]), "window_start": DateTime::from_chrono(start), "count": {"$gt": 0}},
+            doc! {"$inc": {"count": -1_i64}},
+        ).await?;
+        Ok(())
+    }
+
     /// A read-only shortcut; callers must still claim capacity with admit.
     pub async fn is_exhausted(
         db: &mongodb::Database,

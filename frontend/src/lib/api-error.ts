@@ -18,6 +18,7 @@ export class ApiError extends Error {
   readonly errorResponse: ApiErrorResponse;
   readonly requestId?: string;
   readonly traceId?: string;
+  readonly retryAfter?: number;
 
   constructor(
     status: number,
@@ -31,6 +32,8 @@ export class ApiError extends Error {
     this.errorResponse = response;
     this.requestId = diagnosticId(headers?.get("x-request-id"));
     this.traceId = diagnosticId(headers?.get("X-NyxID-Trace-Id"));
+    const retryAfter = Number(headers?.get("Retry-After"));
+    this.retryAfter = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined;
   }
 }
 

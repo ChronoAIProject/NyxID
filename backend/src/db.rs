@@ -1,4 +1,7 @@
+mod pool_monitor;
+
 use std::collections::HashSet;
+use std::future::Future;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -57,13 +60,16 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 
+#[cfg(test)]
+mod index_tests;
+
 /// Type alias for the MongoDB database handle used throughout the application.
 pub type DbHandle = Database;
 
 /// Create a configured MongoDB connection and return the database handle.
 ///
 /// Parses the connection string, configures the connection pool, verifies
-/// connectivity with a ping, and ensures all required indexes exist.
+/// connectivity and transaction support without writing application data.
 pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::error::Error> {
     let mut client_options = ClientOptions::parse(&config.database_url).await?;
 
@@ -73,6 +79,9 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     client_options.server_selection_timeout = Some(Duration::from_secs(10));
     client_options.max_idle_time = Some(Duration::from_secs(600));
 
+    #[cfg(test)]
+    crate::pool_starvation_tests::configure(&mut client_options);
+    pool_monitor::install(&mut client_options);
     let client = Client::with_options(client_options)?;
 
     // Extract database name from the connection string, default to "nyxid"
@@ -88,16 +97,24 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     tracing::info!("MongoDB connection established");
 
     require_transactions(&db).await?;
-    ensure_indexes(&db).await?;
-    tracing::info!("MongoDB indexes verified");
-
-    backfill_downstream_service_types(&db).await?;
-    migrate_legacy_api_spec_url(&db).await?;
-    crate::services::oracle_pool_service::migrate_legacy_default_model_label(&db).await?;
-    migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
-    backfill_onboarding_state(&db).await?;
-
     Ok(db)
+}
+
+/// Startup writes begin here, after the connection-only shutdown safe point.
+pub async fn initialize(db: &Database) -> Result<(), mongodb::error::Error> {
+    ensure_indexes(db).await?;
+    tracing::info!("MongoDB indexes verified");
+    if let Err(error) = crate::services::assistant_cma_legacy_service::initialize(db).await {
+        tracing::warn!(%error, "CMA legacy cutoff unavailable; untracked Sandboxes remain refused");
+    }
+
+    backfill_downstream_service_types(db).await?;
+    migrate_legacy_api_spec_url(db).await?;
+    crate::services::oracle_pool_service::migrate_legacy_default_model_label(db).await?;
+    migrate_remove_org_scoped_feature_flag_overrides(db).await?;
+    backfill_onboarding_state(db).await?;
+
+    Ok(())
 }
 
 /// Service configuration changes require an atomic mutation + history journal.
@@ -111,6 +128,88 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
         ));
     }
     Ok(())
+}
+
+async fn ensure_named_index(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    desired: IndexModel,
+) -> Result<(), mongodb::error::Error> {
+    ensure_named_index_with_retry(collection, name, desired, || async { Ok(()) }).await
+}
+
+/// Re-list after concurrent drop/build collisions, at most three attempts.
+/// The callback keeps coordination's backfill between removal and creation;
+/// a read or backfill error is never retried by this index-build policy.
+pub(crate) async fn ensure_named_index_with_retry<F, Fut>(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    mut desired: IndexModel,
+    mut before_create: F,
+) -> Result<(), mongodb::error::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), mongodb::error::Error>>,
+{
+    desired.options.get_or_insert_default().name = Some(name.to_owned());
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        if named_index_needs_replacement(collection, name, &desired).await? {
+            match collection.drop_index(name).await {
+                Ok(_) => {}
+                Err(error) if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(e) if e.code == 26 || e.code == 27) =>
+                    {}
+                Err(error) if attempt < 3 && is_retryable_index_build_error(&error) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        before_create().await?;
+        // Even a matching definition may be an in-progress build. Idempotent
+        // creation waits for it and surfaces its result without rebuilding it.
+        match collection.create_index(desired.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < 3 && is_retryable_index_build_error(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_retryable_index_build_error(error: &mongodb::error::Error) -> bool {
+    matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(command) if matches!(command.code, 276 | 12587)
+    )
+}
+
+async fn named_index_needs_replacement(
+    collection: &mongodb::Collection<Document>,
+    name: &str,
+    desired: &IndexModel,
+) -> Result<bool, mongodb::error::Error> {
+    let mut indexes = match collection.list_indexes().await {
+        Ok(indexes) => indexes,
+        Err(error) if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(e) if e.code == 26) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let wanted = desired.options.as_ref().expect("named index has options");
+    while let Some(index) = indexes.try_next().await? {
+        let options = index.options.unwrap_or_default();
+        if options.name.as_deref() != Some(name) {
+            continue;
+        }
+        // BSON document equality ignores order; compound index keys do not.
+        // Omitted boolean options have the same meaning as explicit false.
+        return Ok(!(index.keys.iter().eq(desired.keys.iter())
+            && options.unique.unwrap_or(false) == wanted.unique.unwrap_or(false)
+            && options.partial_filter_expression == wanted.partial_filter_expression
+            && options.sparse.unwrap_or(false) == wanted.sparse.unwrap_or(false)
+            && options.expire_after == wanted.expire_after));
+    }
+    Ok(false)
 }
 
 /// Create all required indexes for every collection.
@@ -426,22 +525,21 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // Migration: drop legacy non-partial unique index on email so the new
     // partial-unique index (filtered to user_type=person) can be created.
     // Org users do not need a unique email; they often share contact emails
-    // or have none at all. The drop is best-effort -- on fresh DBs the index
-    // does not exist yet, which is fine.
-    let _ = users.drop_index("email_1").await;
-    users
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "email": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "user_type": "person" })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    // or have none at all. Preserve the partial index once installed.
+    ensure_named_index(
+        &users,
+        "email_1",
+        IndexModel::builder()
+            .keys(doc! { "email": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "user_type": "person" })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     users
         .create_index(
             IndexModel::builder()
@@ -475,25 +573,23 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     // Social login lookup: find user by (provider, provider_id)
     // Drop old sparse index if it exists (sparse doesn't work with null values from serde)
-    let _ = users
-        .drop_index("social_provider_1_social_provider_id_1")
-        .await;
-    users
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "social_provider": 1, "social_provider_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "social_provider": { "$type": "string" },
-                            "social_provider_id": { "$type": "string" },
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &users,
+        "social_provider_1_social_provider_id_1",
+        IndexModel::builder()
+            .keys(doc! { "social_provider": 1, "social_provider_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "social_provider": { "$type": "string" },
+                        "social_provider_id": { "$type": "string" },
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     db.collection::<mongodb::bson::Document>(crate::models::login_approval::COLLECTION_NAME)
         .create_index(
@@ -660,20 +756,20 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
     // Migration: drop legacy non-partial unique index on slug so the new partial index can be created
-    let _ = services.drop_index("slug_1").await;
-    services
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "slug": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "is_active": true })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &services,
+        "slug_1",
+        IndexModel::builder()
+            .keys(doc! { "slug": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     // Non-partial slug lookup for read paths that must also see inactive
     // services (e.g. admin audit-log enrichment); the partial unique index
     // above only covers `is_active: true` rows and cannot serve those queries.
@@ -1715,20 +1811,20 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // ── nodes ──
     let nodes = db.collection::<mongodb::bson::Document>("nodes");
     // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
-    let _ = nodes.drop_index("user_id_1_name_1").await;
-    nodes
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1, "name": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "is_active": true })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &nodes,
+        "user_id_1_name_1",
+        IndexModel::builder()
+            .keys(doc! { "user_id": 1, "name": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
     nodes
         .create_index(
             IndexModel::builder()
@@ -1767,8 +1863,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     // ── node_service_bindings ──
     let nsb = db.collection::<mongodb::bson::Document>("node_service_bindings");
     // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
-    let _ = nsb.drop_index("node_id_1_service_id_1").await;
-    nsb.create_index(
+    ensure_named_index(
+        &nsb,
+        "node_id_1_service_id_1",
         IndexModel::builder()
             .keys(doc! { "node_id": 1, "service_id": 1 })
             .options(
@@ -2578,17 +2675,6 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
-    // Drop old sparse unique indexes that conflict with partial filter indexes
-    // (MongoDB won't replace an index with different options on the same keys)
-    let _ = db
-        .collection::<mongodb::bson::Document>("user_api_keys")
-        .drop_index("source_1_source_id_1")
-        .await;
-    let _ = db
-        .collection::<mongodb::bson::Document>("user_services")
-        .drop_index("source_1_source_id_1")
-        .await;
-
     // -- user_endpoints --
     let user_endpoints = db.collection::<mongodb::bson::Document>("user_endpoints");
     user_endpoints
@@ -2615,21 +2701,22 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
-    user_api_keys
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "source": 1, "source_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "source_id": { "$type": "string" }
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &user_api_keys,
+        "source_1_source_id_1",
+        IndexModel::builder()
+            .keys(doc! { "source": 1, "source_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "source_id": { "$type": "string" }
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     user_api_keys
         .create_index(
@@ -2735,21 +2822,22 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     user_services
         .create_index(IndexModel::builder().keys(doc! { "api_key_id": 1 }).build())
         .await?;
-    user_services
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "source": 1, "source_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {
-                            "source_id": { "$type": "string" }
-                        })
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_named_index(
+        &user_services,
+        "source_1_source_id_1",
+        IndexModel::builder()
+            .keys(doc! { "source": 1, "source_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! {
+                        "source_id": { "$type": "string" }
+                    })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // -- service_pools --
     let service_pools = db.collection::<mongodb::bson::Document>("service_pools");
@@ -3207,10 +3295,12 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     // must remain visible in the admin UI and must be distinguishable
     // from unknown nonces at redeem time. The plain index still
     // accelerates the range query in `redeem_invite` and admin filters.
-    let _ = org_invites.drop_index("expires_at_1").await;
-    org_invites
-        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
-        .await?;
+    ensure_named_index(
+        &org_invites,
+        "expires_at_1",
+        IndexModel::builder().keys(doc! { "expires_at": 1 }).build(),
+    )
+    .await?;
     org_invites
         .create_index(
             IndexModel::builder()
@@ -4152,6 +4242,7 @@ async fn persist_exact_service_semantic_effect_diagnostic(
             doc! {
                 "$set": {
                     "active": true,
+                    "severity": "action",
                     "code": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
                     "summary": "Exact-approval semantic uniqueness is not enforced by a database index.",
                     "detail": detail,
@@ -4713,6 +4804,8 @@ pub async fn migrate_to_unified_collections(
 async fn cleanup_duplicate_migration_services(
     db: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::service_history::{collection, context, transaction};
+
     // Find active migration-sourced UserService records with suffixed slugs
     // (the "-N" pattern produced by the slug collision resolver).
     let migration_services: Vec<UserService> =
@@ -4746,32 +4839,62 @@ async fn cleanup_duplicate_migration_services(
             None => continue, // No hyphen, not a suffixed slug
         };
 
-        // Verify the base slug record exists and is active for the same user + catalog service
-        let base_exists =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &svc.user_id,
-                    "slug": base_slug,
-                    "catalog_service_id": csid,
-                    "is_active": true,
-                })
-                .await?;
+        let deleted = context::scope(
+            context::system("duplicate_migration_cleanup"),
+            transaction::run(db, async |session| {
+                let services = collection::<UserService>(db, USER_SERVICES);
+                // Recheck eligibility and read current backing references in the
+                // deletion snapshot. A changed candidate can wait for the next run.
+                let Some(current) = services
+                    .find_one(doc! {
+                        "_id": &svc.id,
+                        "user_id": &svc.user_id,
+                        "slug": &svc.slug,
+                        "source": &svc.source,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok(false);
+                };
+                let base_exists = services
+                    .find_one(doc! {
+                        "user_id": &current.user_id,
+                        "slug": base_slug,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .is_some();
+                if !base_exists {
+                    return Ok(false);
+                }
 
-        if base_exists.is_none() {
+                // Keep the references and their cleanup atomic: a restart must
+                // never find the service gone with its backing rows left behind.
+                services
+                    .delete_one(doc! { "_id": &current.id })
+                    .session(&mut *session)
+                    .await?;
+                collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &current.endpoint_id })
+                    .session(&mut *session)
+                    .await?;
+                if let Some(ref ak_id) = current.api_key_id {
+                    collection::<UserApiKey>(db, USER_API_KEYS)
+                        .delete_one(doc! { "_id": ak_id })
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok(true)
+            }),
+        )
+        .await?;
+        if !deleted {
             continue;
-        }
-
-        // This is a migration-created suffix duplicate -- delete it and its associated records
-        let _ = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .delete_one(doc! { "_id": &svc.id })
-            .await;
-        let _ = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .delete_one(doc! { "_id": &svc.endpoint_id })
-            .await;
-        if let Some(ref ak_id) = svc.api_key_id {
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": ak_id })
-                .await;
         }
 
         tracing::info!(
@@ -5656,6 +5779,8 @@ pub(crate) async fn migrate_service_connections(
 /// For bindings with no existing UserService (e.g. SSH-only services configured purely
 /// through NodeServiceBinding), create the full record set (endpoint + api_key + service).
 async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::service_history::{collection, context, transaction};
+
     let bindings: Vec<NodeServiceBinding> = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
         .find(doc! { "is_active": true })
@@ -5789,10 +5914,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             created_at: now,
             updated_at: now,
         };
-        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .insert_one(&endpoint)
-            .await?;
-
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
             secret_context_versions: Default::default(),
@@ -5822,18 +5943,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .insert_one(&api_key)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            return Err(e.into());
-        }
-
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
@@ -5885,22 +5994,36 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             rotation_predecessor_id: None,
             credential_verification: None,
         };
-        if let Err(e) =
-            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-                .insert_one(&user_service)
-                .await
-        {
-            let _ =
-                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-                    .delete_one(doc! { "_id": &endpoint_id })
-                    .await;
-            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-                .delete_one(doc! { "_id": &api_key_id })
-                .await;
-            return Err(e.into());
+        let inserted = context::scope(
+            context::system("node_binding_migration"),
+            transaction::run(db, async |session| {
+                let keys = collection::<UserApiKey>(db, USER_API_KEYS);
+                let services = collection::<UserService>(db, USER_SERVICES);
+                // Another startup may have migrated this source after our reads.
+                if keys.find_one(doc! {
+                    "source": "migration_node_binding", "source_id": &binding.id,
+                }).session(&mut *session).await?.is_some()
+                    || services.find_one(doc! {
+                        "$or": [
+                            { "source": "migration_node_binding", "source_id": &binding.id },
+                            { "user_id": &binding.user_id, "catalog_service_id": &binding.service_id, "is_active": true },
+                        ],
+                    }).session(&mut *session).await?.is_some()
+                {
+                    return Ok(false);
+                }
+                // The source marker must never commit without the complete graph.
+                // Journal writes enlist in this transaction too; rollback needs no deletes.
+                collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .insert_one(&endpoint).session(&mut *session).await?;
+                keys.insert_one(&api_key).session(&mut *session).await?;
+                services.insert_one(&user_service).session(&mut *session).await?;
+                Ok(true)
+            }),
+        ).await?;
+        if inserted {
+            created += 1;
         }
-
-        created += 1;
     }
 
     if updated > 0 || created > 0 {
@@ -6659,6 +6782,7 @@ mod tests {
             .await
             .expect("load repeated startup diagnostic")
             .expect("repeated startup diagnostic");
+        assert_eq!(active.get_str("severity").unwrap(), "action");
         assert_eq!(
             active.get_datetime("detected_at").unwrap(),
             &first_detected_at,
@@ -7043,3 +7167,6 @@ mod tests {
         assert_eq!(fields.delegation_token_scope, "custom:scope");
     }
 }
+
+#[cfg(test)]
+mod startup_migration_tests;
