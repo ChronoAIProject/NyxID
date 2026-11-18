@@ -1,5 +1,8 @@
 import copy
 import fnmatch
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +76,45 @@ def decision_jobs():
 
 
 class GateReuseTests(unittest.TestCase):
+    def test_main_guard_checks_both_release_source_fields_without_checkout(self):
+        jobs = strict_load_workflow(Path(".github/workflows/ci.yml").read_text())["jobs"]
+        guard = jobs["main-merge-guard"]
+        self.assertEqual(guard["name"], "Main Merge Guard")
+        self.assertNotIn("needs", guard)
+        self.assertNotIn("main-merge-guard", jobs["ci-pass"]["needs"])
+        step, = guard["steps"]
+        cases = [("main", "dev", "o/r", 0), ("main", "feature", "o/r", 1),
+                 ("main", "dev", "fork/r", 1), ("main", "Dev", "o/r", 1),
+                 ("dev", "feature", "fork/r", 0), ("rollup-fix", "dev", "fork/r", 0)]
+        for base, head, repo, expected in cases:
+            with self.subTest(base=base, head=head, repo=repo):
+                result = subprocess.run(["bash", "-c", step["run"]], text=True, capture_output=True,
+                    env={**os.environ, "BASE": base, "HEAD_BRANCH": head, "HEAD_REPO": repo,
+                         "GITHUB_REPOSITORY": "o/r"})
+                self.assertEqual(result.returncode, expected)
+                if expected:
+                    self.assertEqual(len(result.stdout.splitlines()), 1)
+
+    def test_profile_selection_preserves_reusable_and_filtered_events(self):
+        jobs = strict_load_workflow(Path(".github/workflows/ci.yml").read_text())["jobs"]
+        step = next(s for s in jobs["changes"]["steps"] if s.get("id") == "profile")
+        cases = [
+            ("pull_request", "dev", "refs/pull/1/merge", "", "dev"),
+            ("pull_request", "main", "refs/pull/1/merge", "", "full"),
+            ("push", "", "refs/heads/dev", "", "full"),
+            ("push", "", "refs/heads/rollup-x", "", "filtered"),
+            ("pull_request", "chore/retire-builtin-oracle", "refs/pull/1/merge", "", "filtered"),
+            ("push", "", "refs/heads/main", "true", "filtered"),
+            ("pull_request", "dev", "refs/pull/1/merge", "false", "filtered"),
+        ]
+        for event, base, ref, called, profile in cases:
+            with self.subTest(event=event, base=base, ref=ref, called=called), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "output"
+                subprocess.run(["bash", "-c", step["run"]], check=True, env={**os.environ,
+                    "GITHUB_EVENT_NAME": event, "BASE": base, "GITHUB_REF": ref,
+                    "CALL_FORCE_ALL": called, "GITHUB_OUTPUT": str(output)})
+                self.assertEqual(output.read_text().strip(), f"profile={profile}")
+
     def test_machine_pr_paths_include_backend_cli_and_ci_without_broad_docs_or_frontend(self):
         workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
         workflow = workflows[".github/workflows/ci.yml"]
@@ -81,6 +123,7 @@ class GateReuseTests(unittest.TestCase):
         filters = strict_load_workflow(filter_step["with"]["filters"])
         condition = workflow["jobs"]["machine-container"]["if"]
         self.assertEqual(condition.strip(),
+                         "needs.changes.outputs.profile != 'dev' && "
                          "!(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'machine-container')) && "
                          "(inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true')")
         cases = {
@@ -171,6 +214,7 @@ class GateReuseTests(unittest.TestCase):
             with self.subTest(job=job_id):
                 self.assertFalse(_has_event_sensitive_steps(workflow["jobs"][job_id]))
                 self.assertEqual(analysis.reusable[job_id].exact_names, names)
+        self.assertIn("coverage-frontend", analysis.reusable)
         self.assertEqual(len(analysis.leaf_names), len(set(analysis.leaf_names)))
         self.assertNotIn("claude-plugin-validate", analysis.reusable)
         self.assertTrue(_has_event_sensitive_steps(workflow["jobs"]["claude-plugin-validate"]))
@@ -390,6 +434,120 @@ class GateReuseTests(unittest.TestCase):
         self.assertTrue(decision.reuse)
         self.assertEqual(decision.tested_tree, "tree")
         self.assertNotIn("base_sha", decision.payload())
+
+    def test_release_merge_uses_the_tested_merge_tree(self):
+        # The dev tip also belongs to a feature PR. Main's previous release
+        # merge is not an ancestor of dev. CI ran on a synthetic merge.
+        pr = self._pr()
+        pr["head"]["ref"] = "dev"
+        api, _, parent, ancestor = self._main_api(pr=pr, ancestor=False,
+            extra_head_prs=[self._pr(base="dev", merge="head")])
+        merge = "a" * 40
+        for tested_tree, run_pr_number, reusable in (
+            ("tree", 2063, True), ("older-tree", 2063, False), ("tree", 99, False),
+        ):
+            with self.subTest(tested_tree=tested_tree, run_pr_number=run_pr_number):
+                def release_api(path):
+                    result = api(path)
+                    if "actions/workflows/ci.yml/runs?" in path:
+                        run = result["workflow_runs"][0]
+                        run["head_branch"] = "dev"
+                        ref = f"refs/pull/{run_pr_number}/merge"
+                        run["referenced_workflows"] = [{
+                            "path": f"o/r/.github/workflows/backend-tests.yml@{ref}",
+                            "ref": ref, "sha": merge,
+                        }]
+                    return result
+                trees = {"main": "tree", "head": "dev-tree", merge: tested_tree}
+                decision = self._decide(release_api, tree=trees.__getitem__,
+                                        parent=parent, ancestor=ancestor)
+                self.assertEqual(decision.reuse, reusable, decision.reason)
+                if reusable:
+                    self.assertIn("backend-test", decision.jobs)
+                    self.assertEqual(decision.tested_tree, tested_tree)
+
+    def test_release_without_workflow_provenance_requires_original_head_proof(self):
+        pr = self._pr()
+        pr["head"]["ref"] = "dev"
+        run = {"id": 7, "head_sha": "head", "head_branch": "dev", "event": "pull_request",
+               "status": "completed", "conclusion": "success", "run_attempt": 1,
+               "path": ".github/workflows/ci.yml", "head_repository": {"full_name": "o/r"}}
+        for ancestor in (True, False):
+            api, tree, parent, is_ancestor = self._main_api(pr=pr, run=run, ancestor=ancestor)
+            def details(path):
+                if path.endswith("/actions/runs/7/attempts/1"):
+                    return {"referenced_workflows": []}
+                return api(path)
+            self.assertEqual(self._decide(details, tree=tree, parent=parent,
+                                           ancestor=is_ancestor).reuse, ancestor)
+
+    def test_unfetchable_release_merge_uses_the_exact_git_commit_api_tree(self):
+        merge = "a" * 40
+        published_tree = "b" * 40
+        ref = "refs/pull/2063/merge"
+        pr = self._pr()
+        pr["head"]["ref"] = "dev"
+        run = {"id": 7, "head_sha": "head", "head_branch": "dev", "event": "pull_request",
+               "status": "completed", "conclusion": "success", "path": ".github/workflows/ci.yml",
+               "head_repository": {"full_name": "o/r"}, "referenced_workflows": [{
+                   "path": f"o/r/.github/workflows/backend-tests.yml@{ref}", "ref": ref, "sha": merge,
+               }]}
+        api, _, _, _ = self._main_api(pr=pr, run=run)
+
+        def git_tree(commit):
+            if commit == "main":
+                return published_tree
+            self.assertEqual(commit, merge)
+            raise subprocess.CalledProcessError(128, ["git", "fetch", "origin", commit])
+
+        for response, reason in (
+            ({"sha": merge, "tree": {"sha": published_tree}}, "tree_match"),
+            ({"sha": merge, "tree": {"sha": "c" * 40}}, "tree_mismatch"),
+            (None, "lookup_error:OSError"),
+            ({"sha": "d" * 40, "tree": {"sha": published_tree}}, "release_test_tree_unavailable"),
+            ({"sha": merge, "tree": {"sha": "truncated"}}, "release_test_tree_unavailable"),
+        ):
+            with self.subTest(response=response):
+                requests = []
+
+                def release_api(path):
+                    if path == f"repos/o/r/git/commits/{merge}":
+                        requests.append(path)
+                        if response is None:
+                            raise OSError("commit unavailable")
+                        return response
+                    return api(path)
+
+                decision = self._decide(release_api, tree=git_tree)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(decision.reason, reason)
+                self.assertEqual(decision.reuse, reason == "tree_match")
+                if decision.reuse:
+                    self.assertIn("backend-test", decision.jobs)
+                else:
+                    self.assertFalse(decision.jobs)
+
+    def test_fast_profile_jobs_cannot_satisfy_full_gate(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        observed = [job("Rust Clippy (dev)"), job("Frontend (dev 1/5)"),
+                    job("Rust Clippy", "skipped"), job("Frontend", "skipped")]
+        analysis = analyze_workflow(workflow, workflows)
+        self.assertNotIn("rust-clippy-dev", analysis.candidates)
+        self.assertNotIn("frontend-dev", analysis.candidates)
+        self.assertFalse(assess_tree_and_jobs(workflow=workflow, reusable_workflows=workflows,
+            current_tree="tree", tested_tree="tree", jobs=observed, source="pull_request",
+            run={"id": 7}).reuse)
+
+    def test_base_and_profile_sensitive_steps_stay_on_main(self):
+        for marker in ("github.base_ref", "github.event.pull_request.base.ref",
+                       "needs.changes.outputs.profile"):
+            with self.subTest(marker=marker):
+                workflow = copy.deepcopy(WORKFLOW)
+                for job_id in ("frontend", "coverage-cli"):
+                    workflow["jobs"][job_id] = {"steps": [{"if": marker, "run": "test"}]}
+                    workflow["jobs"]["ci-pass"]["needs"].append(job_id)
+                    self.assertNotIn(job_id, analyze_workflow(workflow, WORKFLOWS).reusable)
 
     def test_missing_ci_workflow_path_is_ambiguous(self):
         api, tree, parent, ancestor = self._main_api()

@@ -1,5 +1,22 @@
 # CI performance and validation contracts
 
+## Branch gates
+
+| Event | CI selection |
+| --- | --- |
+| PR into `dev` | Changed paths select fast jobs. Rust Clippy checks the workspace's libraries and binaries with two Cargo jobs and its own incremental cache. The frontend runs lint and the production build alongside five Vitest shards. |
+| Push to `dev` | Full correctness suite, independent of changed paths. A running build finishes. GitHub keeps only the newest pending push. The commit shows the full CI result in Actions. |
+| PR into `main` | Full suite across all paths, including coverage comparisons and the release image. `Main Merge Guard` admits only the same repository's `dev` branch. Merge a passing release PR with a merge commit. |
+| Production publish | Publish Images calls the full gate. A release PR's successful jobs can count when Actions identifies the tested PR merge commit and its Git tree matches the published tree. |
+| Rollup and Oracle-retirement branches | Existing path selection. |
+
+The fast gate keeps the CI helper tests, workflow permissions, Rust formatting,
+plugin checks, Google Permissions, SDK, Mobile, CLI tests, wizard freshness and
+Oracle worker tests. Backend tests, workspace test-target compilation and lints,
+KMS feature builds, coverage, Machine Container E2E and Docker validation wait
+for the full run. PR updates cancel superseded runs. Branch protection requires
+`CI Pipeline` and the independent `Main Merge Guard`.
+
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses
 PR #2428 at `df20e4869`, its PR merge commit and the cold comparison at
