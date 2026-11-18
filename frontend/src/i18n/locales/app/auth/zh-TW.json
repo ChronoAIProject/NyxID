@@ -343,7 +343,7 @@
   "The requester suggested creating a new key. You can also choose a matching existing key.": "請求者建議建立一個新金鑰。你也可以選擇符合條件的現有金鑰。",
   "The selected accounts keep all their provider permissions.": "所選帳號保留其所有供應商權限。",
   "The signed-in account may have changed. Review account deletion and enter your email again.": "登入帳號可能已變更。請重新確認帳號刪除操作並再次輸入電子郵件。",
-  "The signed-in account may have changed. Review this connection and try again.": "登入的帳戶可能已變更。請檢查此連線並重試。",
+  "The signed-in account may have changed. Review this connection and try again.": "登入帳號可能已變更。請檢查此連線並重試。",
   "These services are required to continue. Cancel if you do not want to grant access.": "需要這些服務才能繼續。如果你不想授予存取權限，請取消。",
   "This app may receive the account information above and use the services you approve. Continue only if you trust it. You can revoke access later from Authorized Applications.": "此應用程式可能會接收上述帳號資訊並使用你核准的服務。請僅在你信任它時繼續。你之後可以在「已授權的應用程式」中撤銷存取權限。",
   "This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.": "此應用程式可能會接收上述帳號資訊並使用你核准的服務。你之後可以在「已授權的應用程式」中撤銷存取權限。",
