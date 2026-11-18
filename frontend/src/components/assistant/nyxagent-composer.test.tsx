@@ -179,3 +179,22 @@ it.each([true, false])("A2: recovery consumes only an admitted rejection (admitt
     expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Work account");
   }
 });
+
+it("A1: recovery reads a synchronous cache revocation before dispatch", async () => {
+  vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+  const view = mount(); await send();
+  await screen.findByRole("button", { name: "Send as new message" });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  act(() => {
+    view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]);
+    fireEvent.click(screen.getByRole("button", { name: "Send as new message" }));
+  });
+  expect(view.props.onSend).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Send as new message" })).toBeEnabled();
+});

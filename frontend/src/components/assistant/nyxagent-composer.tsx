@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Link2 } from "lucide-react";
@@ -19,6 +19,7 @@ import { ComposerSettings } from "./composer-settings";
 import { ComposerConnectionChip, ComposerConnectionPicker } from "./composer-connection-picker";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { composerConnectionUnavailableReason, formatComposerConnectionReason } from "@/lib/assistant/composer-connection";
+import { useCurrentKeysReader } from "@/hooks/use-current-keys";
 import { useKeys } from "@/hooks/use-keys";
 import type { NyxAgentAccessMode, NyxAgentConversation } from "@/schemas/assistant-nyxagent";
 
@@ -48,6 +49,19 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const pickerSelected = useRef(false);
   const [now, setNow] = useState(Date.now);
   const connections = useKeys();
+  const readCurrentKeys = useCurrentKeysReader();
+  const renderedAuthority = readCurrentKeys().authority;
+  const [heldConnection, setHeldConnection] = useState<string>();
+  const held = useRef<{ id: string; authority: string | undefined } | undefined>(undefined);
+  const [checkingSend, setCheckingSend] = useState(false);
+  const cancelHeldConnection = useCallback(() => {
+    held.current = undefined;
+    setHeldConnection(undefined);
+  }, []);
+  const closeConnectionPicker = useCallback(() => {
+    cancelHeldConnection();
+    setConnectionPickerOpen(false);
+  }, [cancelHeldConnection]);
   useEffect(() => {
     const current = Date.now();
     const next = Math.min(...(connections.data ?? [])
@@ -59,16 +73,20 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   }, [connections.data, now]);
   const connection = connections.data?.find((key) => key.id === connectionId);
   const unavailableReason = connection && composerConnectionUnavailableReason(connection, now);
-  const connectionUnavailableReason = connections.isError
+  const connectionUnavailableReason = connections.isFetching || checkingSend
+    ? translateUi("Checking availability…") : connections.isError
     ? translateUi("Could not load connections.")
     : connection ? unavailableReason ? formatComposerConnectionReason(unavailableReason) : null : translateUi("No longer listed");
   // Model setup may await a request before sending. Recheck the latest keys
   // and selection after that await rather than authorizing from its closure.
-  const liveSelection = useRef({ connectionId, connection, now, error: connections.isError });
-  useLayoutEffect(() => {
-    liveSelection.current = { connectionId, connection, now, error: connections.isError };
-  });
-  useEffect(() => { setConnectionId(undefined); setConnectionPickerOpen(false); }, [props.ownerUserId, props.draftKey, conversation?.id]);
+  const liveSelection = useRef(connectionId);
+  useLayoutEffect(() => { liveSelection.current = connectionId; });
+  useEffect(() => {
+    setConnectionId(undefined); closeConnectionPicker();
+  }, [props.ownerUserId, props.draftKey, conversation?.id, closeConnectionPicker]);
+  useEffect(() => {
+    if (!connections.isFetching) setCheckingSend(false);
+  }, [connections.isFetching, connections.data, connections.isError]);
   const capabilities = useQuery({
     queryKey: ["nyxagent-steer-capabilities", props.ownerUserId, conversation?.id],
     queryFn: () => nyxAgentTransport.capabilities(conversation!.id),
@@ -84,8 +102,8 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   const canSteer = Boolean(props.active && capabilities.data?.steer && turn?.steering_allowed && !turn.stop_requested);
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
   useEffect(() => {
-    if (connectionLocked) setConnectionPickerOpen(false);
-  }, [connectionLocked]);
+    if (connectionLocked) closeConnectionPicker();
+  }, [connectionLocked, closeConnectionPicker]);
 
   function openConnectionPicker(opener: "attachment" | "change") {
     if (connectionLocked) return;
@@ -93,7 +111,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     pickerSelected.current = false;
     setNow(Date.now());
     setConnectionPickerOpen(true);
-    if (!connections.isFetching) void connections.refetch();
+    if (!readCurrentKeys().isFetching) void connections.refetch();
   }
 
   function focusComposer(fallback: "attachment" | "change") {
@@ -101,19 +119,49 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     else (fallback === "change" ? connectionChange : attachmentTrigger).current?.focus({ preventScroll: true });
   }
 
+  function activateConnection(id: string): "accepted" | "held" | "refused" {
+    const current = readCurrentKeys();
+    const wallNow = Math.max(now, Date.now());
+    setNow(wallNow);
+    cancelHeldConnection();
+    if (current.authority !== renderedAuthority || current.isError) return "refused";
+    if (current.isFetching) {
+      held.current = { id, authority: current.authority };
+      setHeldConnection(id);
+      return "held";
+    }
+    const selected = current.data?.find((key) => key.id === id);
+    if (!selected || composerConnectionUnavailableReason(selected, wallNow)) return "refused";
+    pickerSelected.current = true;
+    setConnectionId(id);
+    return "accepted";
+  }
+
+  // Query observer notifications can be batched. Settlement always reads the
+  // cache again; closing, navigation and another activation cancel the hold.
+  useEffect(() => {
+    const pending = held.current;
+    if (!pending || !connectionPickerOpen || connectionLocked) return;
+    const current = readCurrentKeys();
+    if (pending.authority !== current.authority) { cancelHeldConnection(); return; }
+    if (current.isFetching) return;
+    if (activateConnection(pending.id) === "accepted") closeConnectionPicker();
+  });
+
   function checkConnection() {
-    const live = liveSelection.current;
-    const wallNow = Date.now();
-    const reason = live.connection && composerConnectionUnavailableReason(live.connection, Math.max(live.now, wallNow));
-    // Background tabs can throttle the expiry timer. Match the rendered reason
-    // to the wall-clock guard before the owner tries again.
-    if (reason && !composerConnectionUnavailableReason(live.connection!, live.now)) setNow(wallNow);
-    if (live.connectionId !== connectionId || (connectionId &&
-      (live.error || !live.connection || reason))) {
+    const current = readCurrentKeys();
+    const wallNow = Math.max(now, Date.now());
+    const row = current.data?.find((key) => key.id === connectionId);
+    const reason = row && composerConnectionUnavailableReason(row, wallNow);
+    if (reason && !composerConnectionUnavailableReason(row!, now)) setNow(wallNow);
+    if (liveSelection.current !== connectionId || (connectionId &&
+      (current.authority !== renderedAuthority || current.isError || current.isFetching || !row || reason))) {
+      if (current.isFetching) setCheckingSend(true);
       const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
       toast.error(translateUi(message), {
         id: "composer-connection-unavailable",
-        description: live.error ? translateUi("Could not load connections.")
+        description: current.isFetching ? translateUi("Checking availability…")
+          : current.isError ? translateUi("Could not load connections.")
           : reason ? formatComposerConnectionReason(reason) : translateUi("No longer listed"),
       });
       throw new Error(message);
@@ -152,16 +200,10 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     activePlaceholder={translateUi("Guide this running reply…")}
     sendLabel={canSteer ? translateUi("Send guidance") : translateUi("Send message")}
     controls={<>{props.controls}
-      <ComposerConnectionPicker open={connectionPickerOpen && !connectionLocked} onOpenChange={setConnectionPickerOpen}
+      <ComposerConnectionPicker open={connectionPickerOpen && !connectionLocked} onOpenChange={(open) => { if (open) setConnectionPickerOpen(true); else closeConnectionPicker(); }}
         now={now} onCloseAutoFocus={() => focusComposer(pickerSelected.current ? "change" : pickerOpener.current)}
         connections={connections.data ?? []} value={connectionId ?? ""}
-        onChange={(id) => {
-          const selected = connections.data?.find((key) => key.id === id);
-          if (selected && !connections.isError && !composerConnectionUnavailableReason(selected, now)) {
-            pickerSelected.current = true;
-            setConnectionId(id);
-          }
-        }}
+        onChange={activateConnection} checkingId={heldConnection} onCancelPending={cancelHeldConnection}
         loading={connections.isPending} error={connections.isError} onRetry={() => void connections.refetch()}
         disabled={connectionLocked} />
       {connectionId && <ComposerConnectionChip connection={connection} unavailableReason={connectionUnavailableReason}

@@ -31,22 +31,33 @@ export function ComposerConnectionPicker({
   disabled,
   now,
   onCloseAutoFocus,
+  checkingId,
+  onCancelPending,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly connections: readonly KeyInfo[];
   readonly value: string;
-  readonly onChange: (id: string) => void;
+  readonly onChange: (id: string) => "accepted" | "held" | "refused" | void;
   readonly loading: boolean;
   readonly error: boolean;
   readonly onRetry: () => void;
   readonly disabled: boolean;
   readonly now?: number;
+  readonly checkingId?: string;
+  readonly onCancelPending?: () => void;
   readonly onCloseAutoFocus?: () => void;
 }) {
   useUiTranslation();
   const reasonId = useId();
   const [search, setSearch] = useState("");
+  const [activationNow, setActivationNow] = useState(0);
+  const [wasOpen, setWasOpen] = useState(open);
+  // Parent-driven closes (navigation or a held choice settling) reset search too.
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (!open) setSearch("");
+  }
   const query = search.trim().toLocaleLowerCase();
   const groups = groupServiceConnections(connections)
     .map((group) => ({
@@ -116,24 +127,31 @@ export function ComposerConnectionPicker({
               >
                 <h3 className="type-body-strong">{group.name}</h3>
                 {group.connections.map((key) => {
-                  const reason = composerConnectionUnavailableReason(key, now);
+                  const reason = composerConnectionUnavailableReason(key, Math.max(now ?? Date.now(), activationNow));
                   return (
                     <button
                       key={key.id}
                       type="button"
                       disabled={disabled}
                       aria-disabled={Boolean(reason)}
+                      aria-busy={checkingId === key.id || undefined}
                       aria-labelledby={`${reasonId}-${key.id}-label ${reasonId}-${key.id}-owner`}
                       aria-describedby={
-                        reason ? `${reasonId}-${key.id}` : undefined
+                        reason || checkingId === key.id ? `${reasonId}-${key.id}` : undefined
                       }
                       aria-pressed={value === key.id}
                       className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-14 enabled:hover:bg-overlay aria-disabled:hover:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground disabled:cursor-not-allowed disabled:text-muted-foreground"
                       onClick={() => {
-                        if (disabled || reason) return;
-                        onChange(key.id);
-                        onOpenChange(false);
-                        setSearch("");
+                        if (disabled) return;
+                        onCancelPending?.();
+                        const currentNow = Math.max(now ?? 0, Date.now());
+                        setActivationNow(currentNow);
+                        if (composerConnectionUnavailableReason(key, currentNow)) return;
+                        const result = onChange(key.id);
+                        if (result === undefined || result === "accepted") {
+                          onOpenChange(false);
+                          setSearch("");
+                        }
                       }}
                     >
                       <span className="min-w-0 flex-1 break-words">
@@ -149,12 +167,12 @@ export function ComposerConnectionPicker({
                         >
                           {composerConnectionOwnerLabel(key)} · {key.slug}
                         </span>
-                        {reason && (
+                        {(reason || checkingId === key.id) && (
                           <span
                             id={`${reasonId}-${key.id}`}
                             className="block type-secondary text-destructive"
                           >
-                            {formatComposerConnectionReason(reason)}
+                            {checkingId === key.id ? translateUi("Checking availability…") : reason && formatComposerConnectionReason(reason)}
                           </span>
                         )}
                       </span>

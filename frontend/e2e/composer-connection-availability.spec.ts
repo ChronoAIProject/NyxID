@@ -1,4 +1,4 @@
-import { devices, expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page, type TestInfo } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { KeyInfo } from "../src/types/keys";
@@ -378,3 +378,89 @@ for (const variant of ["light", "dark", "mobile"] as const) {
     ).toBe(true);
   });
 }
+
+async function holdKeys(page: Page) {
+  let release!: (patch: Partial<KeyInfo>) => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<Partial<KeyInfo>>((resolve) => { release = resolve; });
+  await page.route("**/api/v1/keys", async (route) => {
+    entered();
+    const patch = await gate;
+    const keys = await page.evaluate(async () => (await import("/e2e/fixtures/composer-connections-state.ts")).serverConnections);
+    await route.fulfill({ json: { keys: keys.map((key) => key.id === "work" ? { ...key, ...patch } : key) } });
+  });
+  return { started, release };
+}
+
+async function remediationEvidence(page: Page, testInfo: TestInfo, name: string) {
+  const evidence = process.env.NYXID_CONNECTION_EVIDENCE_DIR;
+  if (evidence) await mkdir(evidence, { recursive: true });
+  await page.screenshot({
+    path: evidence ? path.join(evidence, `phase6-${name}.png`) : testInfo.outputPath(`phase6-${name}.png`),
+    fullPage: true,
+    animations: "disabled",
+  });
+}
+
+test("held refresh checks an activated option and fences selected-connection sends", async ({ page }, testInfo) => {
+  const held = await holdKeys(page);
+  const dialog = await openPicker(page);
+  await held.started;
+  const work = dialog.getByRole("button", { name: /Work documents/ });
+  await work.click();
+  await expect(dialog).toBeVisible();
+  await expect(work).toHaveAttribute("aria-busy", "true");
+  await expect(work).toHaveAccessibleDescription("Checking availability…");
+  await remediationEvidence(page, testInfo, "held-option");
+  held.release({ credential_missing: true });
+  await expect(work).toHaveAccessibleDescription("Credential missing");
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("group", { name: "Connection for this message" })).toHaveCount(0);
+  await remediationEvidence(page, testInfo, "settled-unavailable-option");
+  await page.keyboard.press("Escape");
+
+  const available = await holdKeys(page);
+  await openPicker(page);
+  await available.started;
+  available.release({ credential_missing: false });
+  await expect(work).toHaveAttribute("aria-disabled", "false");
+  await work.click();
+  await expect(dialog).not.toBeVisible();
+  const refresh = await holdKeys(page);
+  await openPicker(page);
+  await refresh.started;
+  await page.keyboard.press("Escape");
+  const input = page.locator("[data-composer-textbox]");
+  await input.fill("Keep until checked");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await input.press("Enter");
+  await expect(input).toHaveText("Keep until checked");
+  await expect(page.getByRole("group", { name: "Connection for this message" })).toContainText("Checking availability…");
+  await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
+  await remediationEvidence(page, testInfo, "checking-chip-retained-text");
+  refresh.release({ credential_missing: false });
+  await expect(page.getByRole("group", { name: "Connection for this message" })).not.toContainText("Checking availability…");
+  await input.press("Enter");
+  await expect(page.getByLabel("Submitted messages")).toHaveText("/service work\nKeep until checked");
+  await expect(page.getByText("Local send log · 1 messages")).toBeVisible();
+});
+
+test("activation catches expiry when the wall clock advances without timer delivery", async ({ page }, testInfo) => {
+  await page.clock.install();
+  const start = await page.evaluate(() => Date.now());
+  await update(page, { expires_at: new Date(start + 60000).toISOString() });
+  const dialog = await openPicker(page);
+  await expect.poll(() => page.evaluate(async () => {
+    const state = await import("/e2e/fixtures/composer-connections-state.ts");
+    return state.client.getQueryState(state.queryKey)?.fetchStatus;
+  })).toBe("idle");
+  const work = dialog.getByRole("button", { name: /Work documents/ });
+  await expect(work).toHaveAttribute("aria-disabled", "false");
+  await page.clock.setSystemTime(start + 70000);
+  await work.click();
+  await expect(dialog).toBeVisible();
+  await expect(work).toHaveAccessibleDescription("Credential expired");
+  await expect(page.getByRole("group", { name: "Connection for this message" })).toHaveCount(0);
+  await remediationEvidence(page, testInfo, "activation-expired-option");
+});

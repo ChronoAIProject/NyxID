@@ -17,6 +17,14 @@ vi.mock("@/hooks/use-keys", () => ({
     refetch: state.refetch,
   }),
 }));
+vi.mock("@/hooks/use-current-keys", () => ({
+  useCurrentKeysReader: () => () => ({
+    authority: undefined,
+    data: state.error ? undefined : state.data,
+    isError: state.error,
+    isFetching: state.fetching,
+  }),
+}));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -523,4 +531,59 @@ it("A2: consumes the override after an admitted interruption before the next mes
   expect(send.mock.calls.map((call) => call[0])).toEqual([
     "/service org-connection\nFirst message", "Different message",
   ]);
+});
+
+it.each(["click", "Enter", "Space"])("A3: refuses %s activation at wall-clock expiry without timer delivery", async (method) => {
+  const start = Date.now();
+  state.data = [{ ...connection, credential_type: "api_key", expires_at: new Date(start + 60000).toISOString() }];
+  mount();
+  await openPicker();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(start + 70000);
+  try {
+    const option = screen.getByRole("button", { name: /Work documents/ });
+    if (method === "click") fireEvent.click(option);
+    else { option.focus(); await userEvent.setup().keyboard(method === "Enter" ? "{Enter}" : " "); }
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(option).toHaveAccessibleDescription("Credential expired");
+    expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  } finally { clock.mockRestore(); }
+});
+it.each([
+  { credential_type: "oauth2" },
+  { credential_type: "api_key", node_id: "node", node_status: "offline", execution_unavailable_reason: null },
+])("A3: retains refresh and node fallback eligibility at activation: %j", async (patch) => {
+  const start = Date.now();
+  state.data = [{ ...connection, ...patch, expires_at: new Date(start + 60000).toISOString() } as KeyInfo];
+  mount(); await openPicker();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(start + 70000);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: /Work documents/ }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("This message");
+  } finally { clock.mockRestore(); }
+});
+
+it("A1: another activation replaces a hold; navigation cancels it and clears search", async () => {
+  state.data = [connection, { ...connection, id: "second", label: "Second account" }];
+  state.fetching = true;
+  const view = mount();
+  const user = await openPicker();
+  await user.click(screen.getByRole("button", { name: /Work documents/ }));
+  expect(screen.getByRole("button", { name: /Work documents/ })).toHaveAttribute("aria-busy", "true");
+  await user.click(screen.getByRole("button", { name: /Second account/ }));
+  expect(screen.getByRole("button", { name: /Second account/ })).toHaveAttribute("aria-busy", "true");
+  state.fetching = false; view.rerender();
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Second account");
+  state.fetching = true; view.rerender();
+  await openPicker();
+  await user.type(screen.getByRole("textbox", { name: "Search connections" }), "Work");
+  await user.click(screen.getByRole("button", { name: /Work documents/ }));
+  view.rerender("selection:other");
+  state.fetching = false; view.rerender("selection:other");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  await openPicker();
+  expect(screen.getByRole("textbox", { name: "Search connections" })).toHaveValue("");
+  expect(screen.getByRole("button", { name: /Second account/ })).toBeVisible();
 });

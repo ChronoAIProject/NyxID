@@ -49,6 +49,7 @@
   "Chats of {{value1}}": "{{value1}} 的聊天",
   "Check retry availability": "檢查是否可重試",
   "Check this assistant's configured model and model connection. Visitor setup retries automatically.": "請檢查此助理設定的模型及模型連線。訪客設定會自動重試。",
+  "Checking availability…": "正在檢查可用性…",
   "Checking file…": "正在檢查檔案…",
   "Checking…": "檢查中…",
   "Choose attachments": "選擇附件",

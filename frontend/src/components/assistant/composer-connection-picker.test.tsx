@@ -59,6 +59,15 @@ it("uses native disabled only while the entire picker is locked", () => {
   ).toBeDisabled();
 });
 
+it("uses the wall clock for expiry when no controlled time is provided", () => {
+  render(<ComposerConnectionPicker {...props} connections={[{
+    ...key, credential_missing: false, credential_type: "api_key",
+    expires_at: new Date(Date.now() - 1_000).toISOString(),
+  }]} />);
+  expect(screen.getByRole("button", { name: "Work Personal · work" }))
+    .toHaveAccessibleDescription("Credential expired");
+});
+
 it("shows a visible accessible reason when the backend supplies only whitespace", () => {
   render(<ComposerConnectionPicker {...props} connections={[{
     ...key,
@@ -69,6 +78,22 @@ it("shows a visible accessible reason when the backend supplies only whitespace"
   expect(option).toHaveAttribute("aria-disabled", "true");
   expect(option).toHaveAccessibleDescription("Connection unavailable");
   expect(screen.getByText("Connection unavailable")).toBeVisible();
+});
+
+it.each([
+  ["en", "Checking availability…"],
+  ["zh-CN", "正在检查可用性…"],
+  ["zh-TW", "正在檢查可用性…"],
+] as const)("exposes the held option's checking state in %s", async (language, description) => {
+  appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
+  appI18n.addResourceBundle("zh-TW", "app", zhTW, true, true);
+  await act(() => appI18n.changeLanguage(language));
+  render(<ComposerConnectionPicker {...props} connections={[{ ...key, credential_missing: false }]}
+    checkingId="work" />);
+  const option = screen.getByRole("button", { name: /Work/ });
+  expect(option).toHaveAttribute("aria-busy", "true");
+  expect(option).toHaveAccessibleDescription(description);
+  expect(screen.getByText(description)).toBeVisible();
 });
 
 it("localizes node and personal copy with literal names, and preserves unknown backend text", async () => {

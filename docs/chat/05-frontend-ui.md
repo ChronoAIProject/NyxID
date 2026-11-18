@@ -487,6 +487,35 @@ existing fallback semantics. Fixed templates localize backend node reasons;
 unknown statuses show a generic node-unavailable reason without the raw status.
 Node names and other unknown backend reasons remain literal text.
 
+打开选择器后的连接刷新尚未完成时，列表继续显示，但激活的选项进入“正在检查可用性”
+状态，向辅助技术暴露 busy 和原因描述。刷新成功后按最新缓存和当前时间重新检查：
+可用才完成选择并关闭；不可用则保留对话框和原因；错误则显示 Retry。关闭对话框、
+更换选项或导航会取消等待。已选连接刷新期间，发送在清空文本、草稿或附件前被拒绝，
+chip 和提示均显示检查状态；没有选择连接的发送及 steering 不受影响。每次 dispatch
+（包括 model 设置之后及恢复发送）均同步读取当前账号的查询缓存，避免 React 更新
+延迟漏过撤销。激活时也检查当前时间，到期凭证不关闭选择器。
+
+While the opening keys refresh is pending, cached rows stay visible and an
+activated option shows **Checking availability…**, exposed through busy state
+and an accessible description. Settlement rechecks the current cache and wall
+time: an available option is selected once and closes the dialog; an unavailable
+option keeps the dialog open with its reason; an error shows Retry. Closing,
+choosing another option or navigation cancels the hold. Sends with an override
+are refused before clearing text, drafts or uploads while keys are fetching;
+the chip and refusal toast show the checking state. Sends without an override
+and steering remain available. Every dispatch, including after model setup and
+recovery sends, reads the current actor's query cache synchronously. Activation
+also checks wall time, so an expired credential cannot close the picker.
+
+成功或已被服务端接纳的发送会消耗该消息的连接选择，即使后续响应流中断也不保留
+给下一条消息。已接纳的恢复发送同时消耗恢复提示，避免重复提交；接纳前明确拒绝
+仍保留选择、可编辑文本和原始附件以便重试。
+
+A fulfilled or admitted send consumes the one-message selection, including when
+the reply stream later fails. An admitted recovery send also consumes its notice
+and action, preventing another submission of that admitted text. A definite
+refusal before admission retains the choice, editable text and original uploads.
+
 Chip 始终提供文字按钮 **Change**（更改）和移除按钮，失效前后均可直接更换账号。
 这两个操作随 composer 一起锁定。精细指针设备在选择、关闭选择器或移除后，将焦点
 返回编辑器。粗指针设备不自动弹出键盘：成功选择后聚焦 Change；未选择就关闭时，
