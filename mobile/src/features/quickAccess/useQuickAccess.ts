@@ -169,7 +169,7 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     loadError: query.error,
     // Account-wide pending state survives closing/reopening the editor. Its
     // replacement observer must not edit over an older optimistic response.
-    saving: useIsMutating({ mutationKey: key, exact: true }) > 0,
+    saving: useIsMutating({ mutationKey: QUICK_ACCESS_MUTATION_KEY, exact: true }) > 0,
     saveError: mutation.error,
     save: (items: readonly QuickAccessItem[], complete?: () => void) => mutation.mutate({ items, authority: captureAuthority() }, { onSettled: complete }),
     reset: (complete?: () => void) => mutation.mutate({ reset: true, authority: captureAuthority() }, { onSettled: complete }),

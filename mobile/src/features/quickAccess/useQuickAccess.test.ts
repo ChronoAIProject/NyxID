@@ -442,6 +442,7 @@ test('P1-4 queued actions cannot dispatch or repopulate cache after account, epo
   for(const boundary of ['account','epoch','generation']) {
     let account='a',epoch=7,generation=1;const client=new QueryClient();t.after(()=>client.clear()); const gate=deferred<QuickAccessState>(); const requests:string[]=[];const observers:any[]=[];const pending:Promise<unknown>[]=[];
     const h=hookHarness<any>({
+      'react-native': {AppState: {currentState: 'active', addEventListener: () => ({remove() {}})}},
       '../../lib/auth/authEpoch':{getAuthEpoch:()=>epoch},
       '../../lib/auth/authAccount':{getAuthAccountId:()=>account},
       '../../lib/auth/sessionStore':{authSessionGeneration:()=>generation},

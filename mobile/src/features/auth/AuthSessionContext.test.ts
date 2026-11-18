@@ -14,6 +14,7 @@ function setup(initialPending?: Promise<unknown>, config?: {language: Language; 
   const session = { accessToken: 'token', refreshToken: 'refresh', userId: 'account' };
   let stored: typeof session | null = session;
   const h = hookHarness<any>({
+    "../../lib/crashReporting/runtime": {crashLifecycle: null},
     ...(config ? {'../../i18n/LanguageProvider': {useAppLanguage: () => ({language:config.language,t:(phrase:string)=>translate(config.language,phrase)})}} : {}),
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type, props})},
     'react-native': {AppState: appState},
@@ -76,6 +77,7 @@ test('M2622-03 durable sign-out retries a failed tombstone without waiting for p
   const push = deferred<void>(); let teardowns = 0;
   const client = {clear() {}, cancelQueries: async () => {}};
   const h = hookHarness<any>({
+    "../../lib/crashReporting/runtime": {crashLifecycle: null},
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type,props})},
     'react-native': {AppState: {currentState:'active',addEventListener: () => ({remove() {}})}},
     '@tanstack/react-query': {useQueryClient: () => client},
@@ -138,6 +140,7 @@ test('M2622-03 push capture faults cannot gate sign-out and teardown captures th
     const teardowns: any[] = [];
     const client = {clear() {}, cancelQueries: async () => {}};
     const h = hookHarness<any>({
+    "../../lib/crashReporting/runtime": {crashLifecycle: null},
       'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type, props})},
       'react-native': {AppState: {currentState: 'active', addEventListener: () => ({remove() {}})}},
       '@tanstack/react-query': {useQueryClient: () => client},

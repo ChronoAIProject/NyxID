@@ -284,7 +284,7 @@ test('M2622-03 sign-out waits for durability, blocks double taps and offers retr
     signOut: () => { calls++; return new Promise<void>((yes, no) => { resolve = yes; reject = no; }); },
   });
   try {
-    const confirm = () => { env.row('Sign Out').props.onPress(); return env.alerts.at(-1)!.buttons![1].onPress!; };
+    const confirm = () => { env.row('Sign Out').props.onPress(); return env.alerts.at(-1)!.buttons![1]!.onPress!; };
     const press = confirm(); press(); press();
     await env.harness.settle();
     assert.equal(calls, 1);

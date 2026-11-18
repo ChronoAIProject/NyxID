@@ -230,7 +230,7 @@ test('M2622-05 three accepted UI edits survive staggered server responses; pendi
   const jsx=(type:unknown,props:any)=>({type,props});
   const h=hookHarness<Element>({
     'react/jsx-runtime':{jsx,jsxs:jsx},
-    'react-native':{Pressable:'Pressable',View:'View',StyleSheet:{create:(v:unknown)=>v}},
+    'react-native':{AppState:{currentState:'active',addEventListener:()=>({remove(){}})},Pressable:'Pressable',View:'View',StyleSheet:{create:(v:unknown)=>v}},
     'lucide-react-native':Object.fromEntries(['ChevronDown','ChevronUp','Minus','Plus'].map(k=>[k,k])),
     '../../components/settings/SettingsList':Object.fromEntries(['SettingsPage','SettingsGroup','SettingsRow'].map(k=>[k,k])),
     '../../theme/ThemeContext':{useTheme:()=>({colors:lightColors})},
