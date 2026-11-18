@@ -228,7 +228,7 @@ per-effect reconciliation disclosure.
 ### Upgrade compatibility and repair cadence
 
 An in-flight job whose `local_inventory` checkpoint was completed by an older
-binary re-runs that domain when `local_inventory_revision` is below 4, before
+binary re-runs that domain when `local_inventory_revision` is below 5, before
 continuing to source cleanup. This binary stamps the current revision when its
 local-inventory checkpoint completes; its newly completed jobs need no repair
 scan.
@@ -864,7 +864,9 @@ exports still retain their query timeouts and report unavailable subsections.
 ## Crash diagnostics collections
 
 `client_error_reports` is owner-linked by `user_id` and is deleted by the local
-personal-erasure inventory. Admission uses the existing owner erasure barrier.
+personal-erasure inventory. Revision 5 reopens revision-4 and earlier local
+checkpoints, including completed jobs, to remove these reports. Admission uses
+the existing owner erasure barrier.
 `client_error_report_counters` contains only anonymous hourly platform/outcome
 counts with a 30-day TTL and has no owner to erase. Crash rows expire within 30
 days and all reads enforce expiry. Sentry events have no person/account/IP/UA

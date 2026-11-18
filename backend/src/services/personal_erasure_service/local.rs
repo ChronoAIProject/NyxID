@@ -10,7 +10,7 @@ const PAGE: i64 = 32;
 
 /// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
 /// the durable domain shape and intentionally remains unchanged for old jobs.
-pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 4;
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 5;
 
 pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;

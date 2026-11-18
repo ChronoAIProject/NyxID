@@ -1370,6 +1370,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revision_four_completed_job_erases_crash_reports_without_touching_other_owners() {
+        let (db, user) = super::super::tests::fixture().await;
+        let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let reports =
+            db.collection::<Document>(crate::models::client_error_report::COLLECTION_NAME);
+        let bystander = doc! {
+            "_id": "other-owner-report",
+            "user_id": uuid::Uuid::new_v4().to_string(),
+        };
+        reports
+            .insert_many([
+                doc! {"_id": "revision-four-leftover", "user_id": &user},
+                bystander.clone(),
+            ])
+            .await
+            .unwrap();
+        db.collection::<Document>(JOBS)
+            .update_one(
+                doc! {"_id": &accepted.id},
+                vec![doc! {"$set": {
+                    "status": "complete",
+                    "completed_at": "$$NOW",
+                    "local_inventory_revision": 4_i32,
+                    "retry_at": "$$NOW",
+                }}],
+            )
+            .await
+            .unwrap();
+
+        assert!(reconcile_completed_once(&state).await.unwrap());
+        assert_eq!(
+            reports
+                .count_documents(doc! {"user_id": &user})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reports
+                .find_one(doc! {"_id": "other-owner-report"})
+                .await
+                .unwrap(),
+            Some(bystander)
+        );
+        let repaired = db
+            .collection::<Document>(JOBS)
+            .find_one(doc! {"_id": &accepted.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.get_i32("local_inventory_revision"), Ok(5));
+        assert!(!reconcile_completed_once(&state).await.unwrap());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn completed_job_reconciliation_cleans_new_inventory_once_and_stamps_revision() {
         let (db, user) = super::super::tests::fixture().await;
         let accepted = super::super::accept(&db, &user, &user, None).await.unwrap();
