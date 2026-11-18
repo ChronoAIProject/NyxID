@@ -10,6 +10,28 @@ use mongodb::{ClientSession, Database};
 pub(crate) struct OwnerFenceCreationRace;
 
 pub(crate) const COLLECTION: &str = "personal_owner_write_fences";
+
+fn accepted_filter(owner: &str) -> Document {
+    doc! {"_id":owner,"erasure_accepted":true}
+}
+
+/// Observe accepted erasure without taking a write fence or changing revisions.
+/// Like write admission, check both the target and its canonical person owner.
+/// This is a read-time eligibility check, not a replacement for transactional
+/// fencing when a caller writes owned state.
+pub(crate) async fn is_erasure_accepted(db: &Database, owner: &str) -> AppResult<bool> {
+    let fences = db.collection::<Document>(COLLECTION);
+    if fences.find_one(accepted_filter(owner)).await?.is_some() {
+        return Ok(true);
+    }
+    let canonical = credential_owner(db, owner).await?;
+    Ok(canonical != owner
+        && fences
+            .find_one(accepted_filter(&canonical))
+            .await?
+            .is_some())
+}
+
 pub(crate) async fn fence_in_session(
     db: &Database,
     owner: &str,
@@ -45,7 +67,7 @@ pub(crate) async fn fence_in_session(
 async fn fence_one_in_session(db: &Database, owner: &str, tx: &mut ClientSession) -> AppResult<()> {
     if db
         .collection::<Document>(COLLECTION)
-        .find_one(doc! {"_id":owner,"erasure_accepted":true})
+        .find_one(accepted_filter(owner))
         .session(&mut *tx)
         .await?
         .is_some()
@@ -227,4 +249,116 @@ pub(crate) async fn insert_owned<T: serde::Serialize + Sync>(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_only_erasure_check_preserves_missing_open_and_accepted_fences() {
+        let db = crate::test_utils::connect_transaction_test_database("erasure_read_only").await;
+        let fences = db.collection::<Document>(COLLECTION);
+        assert!(!is_erasure_accepted(&db, "person").await.unwrap());
+        assert_eq!(fences.count_documents(doc! {}).await.unwrap(), 0);
+        for accepted in [false, true] {
+            let row = doc! {"_id":"person","erasure_accepted":accepted,"revision":7_i64};
+            fences
+                .replace_one(doc! {"_id":"person"}, &row)
+                .upsert(true)
+                .await
+                .unwrap();
+            assert_eq!(is_erasure_accepted(&db, "person").await.unwrap(), accepted);
+            assert_eq!(
+                fences
+                    .find_one(doc! {"_id":"person"})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                row
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_only_erasure_check_follows_canonical_and_legacy_service_account_owners() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("erasure_read_canonical").await;
+        let accounts = db.collection::<Document>(crate::models::service_account::COLLECTION_NAME);
+        let fences = db.collection::<Document>(COLLECTION);
+        let now = bson::DateTime::now();
+        let mut account = doc! {
+            "_id":"service-account","name":"Read fence fixture","client_id":"sa_fixture",
+            "client_secret_hash":"fixture","secret_prefix":"fixture","allowed_scopes":"proxy",
+            "is_active":true,"created_by":"creator","owner_user_id":"person",
+            "created_at":now,"updated_at":now,
+        };
+        accounts.insert_one(&account).await.unwrap();
+        // A distinct administrator/creator does not override the canonical owner.
+        fences
+            .insert_one(doc! {"_id":"creator","erasure_accepted":true})
+            .await
+            .unwrap();
+        assert!(!is_erasure_accepted(&db, "service-account").await.unwrap());
+        fences
+            .insert_one(doc! {"_id":"person","erasure_accepted":true})
+            .await
+            .unwrap();
+        assert!(is_erasure_accepted(&db, "service-account").await.unwrap());
+        assert_eq!(
+            accounts
+                .find_one(doc! {"_id":"service-account"})
+                .await
+                .unwrap()
+                .unwrap(),
+            account
+        );
+        assert!(
+            fences
+                .find_one(doc! {"_id":"service-account"})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Legacy accounts without owner_user_id use the creator, just like writers.
+        fences.delete_one(doc! {"_id":"person"}).await.unwrap();
+        account.remove("owner_user_id");
+        accounts
+            .replace_one(doc! {"_id":"service-account"}, &account)
+            .await
+            .unwrap();
+        assert!(is_erasure_accepted(&db, "service-account").await.unwrap());
+        assert_eq!(
+            accounts
+                .find_one(doc! {"_id":"service-account"})
+                .await
+                .unwrap()
+                .unwrap(),
+            account
+        );
+        assert_eq!(fences.count_documents(doc! {}).await.unwrap(), 1);
+        // The account's own negative fence remains authoritative independently.
+        fences.delete_one(doc! {"_id":"creator"}).await.unwrap();
+        let own_fence = doc! {"_id":"service-account","erasure_accepted":true,"revision":3_i64};
+        fences.insert_one(&own_fence).await.unwrap();
+        assert!(is_erasure_accepted(&db, "service-account").await.unwrap());
+        assert_eq!(
+            fences
+                .find_one(doc! {"_id":"service-account"})
+                .await
+                .unwrap()
+                .unwrap(),
+            own_fence
+        );
+        assert_eq!(
+            accounts
+                .find_one(doc! {"_id":"service-account"})
+                .await
+                .unwrap()
+                .unwrap(),
+            account
+        );
+        db.drop().await.unwrap();
+    }
 }

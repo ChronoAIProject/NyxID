@@ -26,11 +26,16 @@ pub(crate) static GATEWAY_HTTP_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(gateway_http_client);
 
 fn gateway_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .expect("gateway HTTP client")
+        .connect_timeout(Duration::from_secs(5));
+    // Like the shared proxy clients, tests must not reuse idle connections
+    // driven by another test's Tokio runtime. Wiremock reuses server ports;
+    // tearing down that runtime can otherwise drop an active dispatch task.
+    // Production uses one long-lived runtime and retains its normal pooling.
+    #[cfg(test)]
+    let builder = builder.pool_max_idle_per_host(0);
+    builder.build().expect("gateway HTTP client")
 }
 fn urlencode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()

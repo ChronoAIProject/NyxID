@@ -678,6 +678,9 @@ async fn change_creation(
     .await
 }
 
+#[path = "assistant_cma_reservation_admission.rs"]
+pub(super) mod reservation_admin;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn admit(
     db: &Database,
@@ -1460,10 +1463,16 @@ fn recover_occupied_sandbox<'a>(
                 "operation_id":bson::Bson::Null,"cma_agent_id":bson::Bson::Null,
                 "cma_sandbox_id":bson::Bson::Null},
             )
-            .await
-            .map_err(|_| recovery_slot_occupied())?;
+            .await;
+        let recoverable = match recoverable {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
+                return Err(recovery_slot_occupied());
+            }
+        };
         if recoverable.is_some() {
-            recover_creation_core(
+            let result = recover_creation_core(
                 db,
                 keys,
                 gateway,
@@ -1472,8 +1481,11 @@ fn recover_occupied_sandbox<'a>(
                 parent.generation,
                 CreationRecoveryAccess::Admission,
             )
-            .await
-            .map_err(|_| recovery_slot_occupied())?;
+            .await;
+            if result.is_err() {
+                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
+                return Err(recovery_slot_occupied());
+            }
         }
         Ok(())
     })
@@ -1687,6 +1699,11 @@ mod tests {
         mod legacy_sandboxes {
             use super::*;
             include!("assistant_cma_legacy_tests.rs");
+        }
+
+        mod admin_reservations {
+            use super::*;
+            include!("assistant_cma_reservation_tests.rs");
         }
 
         mod writer_cutover {
