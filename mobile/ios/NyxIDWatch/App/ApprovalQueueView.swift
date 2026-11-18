@@ -231,6 +231,8 @@ private struct Chip: View {
   var body: some View {
     Text(text)
       .font(.caption2.weight(.medium))
+      .lineLimit(1)
+      .minimumScaleFactor(0.8)
       .foregroundStyle(warning ? Color.red : Color.white)
       .padding(.horizontal, 7)
       .padding(.vertical, 3)
