@@ -2211,7 +2211,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
             config.proxy_max_body_size,

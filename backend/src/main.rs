@@ -1063,7 +1063,6 @@ async fn server_run(cli: Cli) {
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
@@ -2098,9 +2097,21 @@ async fn server_run(cli: Cli) {
         // ten percent; ordinary budgets reserve at most five seconds.
         let reserve = drain.cleanup_reserve();
         let work_deadline = drain.work_deadline();
+        // A peer with a failed connect can distinguish a graceful handover of
+        // a legacy socket from a crash with an unstealable live lease.
+        let identity = shutdown_state.replica_identity.clone();
+        let db = shutdown_state.db.clone();
+        let announce = async move {
+            let _ = db.collection::<mongodb::bson::Document>(models::node::COLLECTION_NAME)
+                .update_many(mongodb::bson::doc! { "connection_owner.generation_id": &identity.generation_id, "connection_owner.instance_name": &identity.instance_name },
+                    mongodb::bson::doc! { "$set": { "connection_owner.handover_pending": true } }).await;
+        };
         let finish = async {
+            tokio::pin!(announce);
+            let mut announced = false;
             let end = loop {
                 let end = tokio::select! {
+                    () = &mut announce, if !announced => { announced = true; continue; }
                     () = servers.failed() => End::ListenerFailure,
                     end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
                 };
