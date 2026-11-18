@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import quote
 
 
 WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -774,11 +775,13 @@ def decide_from_api(
             return _fallback("pull_request_head_missing", "main", current_tree=current_tree)
         head_sha = head["sha"]
         number_m, head_repository = _validated_merged_main_pr(pr_m, repository, sha, head_sha)
-        release = head_repository == repository and head.get("ref") == "dev"
+        head_branch = head.get("ref")
+        release = (head_repository == repository and isinstance(head_branch, str)
+                   and (head_branch == "dev" or head_branch.startswith("release/")))
         runs_response = api(
             f"repos/{repository}/actions/workflows/ci.yml/runs"
             f"?event=pull_request&head_sha={head_sha}&per_page=100"
-            + ("&branch=dev" if release else "")
+            + (f"&branch={quote(head_branch, safe='')}" if release else "")
         )
         runs = runs_response.get("workflow_runs", []) if isinstance(runs_response, Mapping) else runs_response
         runs = [run for run in (runs or []) if run.get("event") == "pull_request"]
@@ -807,7 +810,7 @@ def decide_from_api(
                 return _fallback("run_pull_request_mismatch", "main", current_tree=current_tree,
                                  head_sha=head_sha)
         if release:
-            if run.get("head_branch") != "dev":
+            if run.get("head_branch") != head_branch:
                 return _fallback("release_head_branch_mismatch", "main", current_tree=current_tree)
             # The dev tip can also introduce a feature PR, and the previous
             # main release merge need not be in dev's history. Identify the
