@@ -2561,21 +2561,6 @@ pub async fn update_key(
         .await?;
     }
 
-    // Auto-sync NodeServiceBinding when node_id changes. The actor owns
-    // the node, so it must be the one validated -- the binding owner
-    // (`user_id_str`) may be an org.
-    if body.node_id.is_some() {
-        node_service::sync_node_binding_for_user_service(
-            &state.db,
-            &user_id_str,
-            &actor,
-            view.catalog_service_id.as_deref(),
-            body.node_id.as_deref(),
-            view.node_id.as_deref(),
-        )
-        .await?;
-    }
-
     // The service mutation transaction queued the old node's removal. Resolve
     // current state again so a concurrent rebind cannot replay a stale removal.
     if body.node_id.is_some()
