@@ -928,7 +928,7 @@ for (const platform of ["ios", "android"] as const) test(`P11 wrong password is 
   const screen = setup({platform}); t.after(screen.harness.unmount);
   const scroller=elements(screen.harness.value()).find(e=>e.type==="KeyboardScrollView")!;
   const scrolls: unknown[]=[];
-  scroller.props.scrollRef.current={getNativeScrollRef:()=>({measureInWindow:(cb:any)=>cb(0,100,390,700)}),scrollTo:(v:unknown)=>scrolls.push(v)};
+  scroller.props.revealController.current={reveal:(view:unknown)=>scrolls.push(view)};
   screen.showKeyboard(); screen.change("Email","reviewer@example.test"); screen.change("Password","wrong");
   screen.setLogin(async()=>{throw new Error("Invalid email or password");});
   screen.submit().props.onPress(); await screen.harness.settle();
@@ -938,7 +938,7 @@ for (const platform of ["ios", "android"] as const) test(`P11 wrong password is 
   assert.ok(all.indexOf(alert)>all.indexOf(screen.input("Password")));
   alert.props.ref.current={measureInWindow:(cb:any)=>cb(20,650,350,48)};
   alert.props.onLayout();
-  assert.equal(scrolls.length,platform==="ios"?1:0);
+  assert.deepEqual(scrolls,[alert.props.ref.current],"banner delegates to the shared measured keyboard viewport");
   assert.deepEqual(screen.announcements,platform==="ios"?["Invalid email or password"]:[]);
   screen.harness.render(); assert.match(textContent(screen.harness.value()),/Invalid email or password/);
   screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Invalid email or password/);

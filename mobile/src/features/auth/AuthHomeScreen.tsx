@@ -14,8 +14,6 @@ import {
   ActivityIndicator,
   AccessibilityInfo,
   AppState,
-  Keyboard,
-  ScrollView,
   Linking,
   Platform,
   Pressable,
@@ -52,7 +50,7 @@ import { createFlowStyles } from "../../theme/flowStyles";
 import { BrandNebula, BreathingMark, RiseIn } from "../../components/brand/BrandNebula";
 import { Eye, EyeOff, LockKeyhole, Mail } from "lucide-react-native";
 import { PortalMarkLogo } from "../../components/brand/PortalMark";
-import { KeyboardScrollView } from "../../components/workspace/KeyboardScrollView";
+import { KeyboardScrollView, type KeyboardScrollViewHandle } from "../../components/workspace/KeyboardScrollView";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
@@ -203,46 +201,8 @@ export function AuthHomeScreen({ navigation }: Props) {
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
-  const scrollViewRef = useRef<ScrollView>(null);
+  const scrollController = useRef<KeyboardScrollViewHandle | null>(null);
   const errorBannerRef = useRef<View>(null);
-  const scrollOffset = useRef(0);
-  const focusRevision = useRef(0);
-
-  const revealFocusedInput = useCallback((input: Pick<View, "measureInWindow"> | null) => {
-    // Native insets handle the initial keyboard animation. A focus change
-    // with the keyboard already open does not always emit a new frame.
-    const revision = ++focusRevision.current;
-    const keyboard = Keyboard.metrics();
-    const scroller = scrollViewRef.current;
-    if (Platform.OS !== "ios" || !keyboard || !input || !scroller) return;
-    const viewport = scroller.getNativeScrollRef();
-    if (!viewport) return;
-    const measuredOffset = scrollOffset.current;
-    input.measureInWindow((_x, y, _width, height) => {
-      viewport.measureInWindow((_left, top, _viewWidth, viewHeight) => {
-        const currentKeyboard = Keyboard.metrics();
-        if (
-          revision !== focusRevision.current ||
-          scrollViewRef.current !== scroller ||
-          scrollOffset.current !== measuredOffset ||
-          currentKeyboard?.screenY !== keyboard.screenY
-        ) {
-          return;
-        }
-        const bottom = Math.min(top + viewHeight, keyboard.screenY);
-        const delta =
-          y < top + spacing.xl
-            ? y - top - spacing.xl
-            : Math.max(0, y + height + spacing.xl - bottom);
-        if (delta) {
-          scroller.scrollTo({
-            y: Math.max(0, measuredOffset + delta),
-            animated: true,
-          });
-        }
-      });
-    });
-  }, []);
 
   useEffect(() => {
     if (loginError && Platform.OS === "ios") {
@@ -506,8 +466,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <KeyboardScrollView
-        scrollRef={scrollViewRef}
-        onScroll={(event) => { scrollOffset.current = event.nativeEvent.contentOffset.y; }}
+        revealController={scrollController}
         style={flowStyles.content}
         contentContainerStyle={[
           flowStyles.scrollContent,
@@ -675,7 +634,7 @@ export function AuthHomeScreen({ navigation }: Props) {
         {loginError && (
           <View ref={errorBannerRef} style={styles.errorBanner}
             accessibilityRole="alert" accessibilityLiveRegion="assertive"
-            onLayout={() => revealFocusedInput(errorBannerRef.current)}>
+            onLayout={() => scrollController.current?.reveal(errorBannerRef.current)}>
             {loginError === "WAITLIST" ? (
               <>
                 <Text style={styles.errorText}>
