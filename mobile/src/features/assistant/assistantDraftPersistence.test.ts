@@ -36,7 +36,17 @@ test("a fresh JS process restores only the current account's scoped, encrypted t
     h.mock("./web-utils", h.load(join(aes, "web-utils.ts")));
     h.mock("./aes.types", h.load(join(aes, "aes.types.ts")));
     h.mock("./ExpoCryptoAES", h.load(join(aes, "ExpoCryptoAES.web.ts")));
-    h.mock("expo-crypto", h.load(join(aes, "index.ts")));
+    const expoCrypto = h.load(join(aes, "index.ts")) as typeof import("expo-crypto");
+    h.mock("expo-crypto", {
+      ...expoCrypto,
+      AESSealedData: {
+        fromCombined(bytes: Uint8Array) {
+          // Android's native SealedData constructor accepts ByteArray only.
+          assert.ok(bytes instanceof Uint8Array, "restore must decode persisted base64 first");
+          return expoCrypto.AESSealedData.fromCombined(bytes);
+        },
+      },
+    });
     return { accountChanged: () => accountChanged(), ...h.load(fileURLToPath(new URL("./assistantDraftPersistence.ts", import.meta.url))) as typeof import("./assistantDraftPersistence"), coordinator };
   }
   const original = launch();
@@ -52,6 +62,13 @@ test("a fresh JS process restores only the current account's scoped, encrypted t
   assert.equal(await reopened.readAssistantDraft("home", epoch), text);
   assert.equal(await reopened.readAssistantDraft("chat-one", epoch), "private reply");
   assert.equal(await reopened.readAssistantDraft("other-chat", epoch), undefined);
+  // A valid ciphertext still authenticates only under the original row's AAD.
+  const [homeRow, chatRow] = [...disk.keys()];
+  assert.ok(homeRow && chatRow);
+  const originalChat = disk.get(chatRow)!;
+  disk.set(chatRow, disk.get(homeRow)!);
+  await assert.rejects(reopened.readAssistantDraft("chat-one", epoch));
+  disk.set(chatRow, originalChat);
   const stale = reopened.readAssistantDraft("home", epoch);
   epoch++;
   account = "other-owner";

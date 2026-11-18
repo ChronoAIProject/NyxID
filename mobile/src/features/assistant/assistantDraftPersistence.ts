@@ -1,3 +1,4 @@
+import { toByteArray } from "base64-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AESEncryptionKey, AESSealedData, aesDecryptAsync, aesEncryptAsync } from "expo-crypto";
 import { getAuthAccountId, subscribeAuthAccount } from "../../lib/auth/authAccount";
@@ -50,7 +51,8 @@ export function readAssistantDraft(draft: string, epoch: number): Promise<string
     const key = await sessionDraftKey(target.generation);
     if (!key || !target.current()) return;
     const plaintext = await aesDecryptAsync(
-      AESSealedData.fromCombined(ciphertext),
+      // Expo Crypto on Android accepts the combined IV, ciphertext and tag as bytes.
+      AESSealedData.fromCombined(toByteArray(ciphertext)),
       await AESEncryptionKey.import(key, "base64"),
       { additionalData: encoder.encode(target.row) },
     );
