@@ -21,6 +21,8 @@ mod handlers;
 mod login_cli;
 mod models;
 mod mw;
+#[cfg(test)]
+mod pool_starvation_tests;
 mod redaction;
 mod routes;
 mod services;
