@@ -148,6 +148,8 @@ async fn change_request_commands() {
                 ("find", CONFIGS),
                 ("find", "notification_channels"),
                 ("insert", "notification_channels"),
+                // The baseline also reads this policy's remembered-approval expiry.
+                ("find", CONFIGS),
                 ("insert", GRANTS),
                 ("insert", INTENTS),
                 ("commitTransaction", ""),
