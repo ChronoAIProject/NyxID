@@ -529,7 +529,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
           >{translateUi("Adopt reviewed draft")}</Button>
         </div>
       ))}
-      {drafts?.length === 0 && (
+      {query.isSuccess && !query.isFetching && drafts?.length === 0 && (
         <p>{translateUi("No unowned drafts remain for this chat.")}</p>
       )}
     </div>

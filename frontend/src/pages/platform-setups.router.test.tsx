@@ -762,8 +762,11 @@ it("preserves the refusal and releases the guard if its exact-query refresh reje
     await user.click(adoptionButton());
     await screen.findByText("Anonymous draft expired or changed");
     await expectSettled();
-    expect(screen.getByRole("checkbox")).not.toBeChecked();
-    expect(adoptionButton()).toBeDisabled();
+    expect(screen.queryByText("Telegram cafe · revision 3")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Adopt reviewed draft" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("Fixture refresh failed.")).not.toBeInTheDocument();
     expect(fixture.writes).toHaveLength(1);
     await act(() => client.invalidateQueries({
@@ -780,3 +783,145 @@ it("preserves the refusal and releases the guard if its exact-query refresh reje
     invalidation.mockRestore();
   }
 });
+
+
+it("removes the rejected snapshot through failed refreshes until a new read succeeds", async () => {
+  const { fixture } = await openSetups();
+  const user = await reviewDraft();
+  const gate = deferred();
+  const queryKey = [
+    "onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation,
+  ];
+  fixture.adoptionGate = gate.promise;
+  try {
+    await user.click(adoptionButton());
+    await waitFor(() => expect(fixture.writes).toHaveLength(1));
+    fixture.drafts = [platformSetup({ revision: 4 })];
+    fixture.draftErrorStatus = 503;
+  } finally {
+    await act(() => gate.resolve());
+  }
+  await screen.findByText("Anonymous draft expired or changed");
+  await expectSettled();
+  const expectRejectedSnapshotGone = () => {
+    expect(screen.queryByText("Telegram cafe · revision 3")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Adopt reviewed draft" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No unowned drafts remain for this chat."),
+    ).not.toBeInTheDocument();
+    expect(client.getQueryState(queryKey)?.status).toBe("error");
+    expect(client.getQueryData(queryKey)).toEqual({ status: "ready", drafts: [] });
+    expect(fixture.adoptionBodies).toEqual([
+      { revision: 3, binding_id: setupBinding.id, binding_generation: 7 },
+    ]);
+    expectSingleModule();
+  };
+  await screen.findByText(
+    "Could not load drafts for this chat. Refresh your binding before trying again.",
+  );
+  expectRejectedSnapshotGone();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(fixture.draftReads).toHaveLength(3));
+  await waitFor(() => expect(client.isFetching({ queryKey, exact: true })).toBe(0));
+  expectRejectedSnapshotGone();
+  await waitFor(
+    () => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled(),
+    { timeout: 3_000 },
+  );
+  fixture.draftErrorStatus = 0;
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await screen.findByText("Telegram cafe · revision 4");
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(adoptionButton()).toBeDisabled();
+  expect(fixture.writes).toHaveLength(1);
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(adoptionButton());
+  await screen.findByText("No unowned drafts remain for this chat.");
+  await expectSettled();
+  expect(fixture.adoptionBodies).toEqual([
+    { revision: 3, binding_id: setupBinding.id, binding_generation: 7 },
+    { revision: 4, binding_id: setupBinding.id, binding_generation: 7 },
+  ]);
+  expect(fixture.saved.map((draft) => draft.revision)).toEqual([4]);
+});
+
+it("removes rejected A while preserving reviewed B after a failed conflict refresh", async () => {
+  const { fixture } = await openSetups();
+  const second = platformSetup({
+    id: "55555555-5555-4555-8555-555555555555",
+    facts: { ...platformSetup().facts, name: "Second draft" },
+  });
+  fixture.drafts.push(second);
+  const user = userEvent.setup();
+  await user.selectOptions(screen.getByLabelText("Linked chat"), setupBinding.id);
+  const boxes = await screen.findAllByRole("checkbox");
+  expect(boxes).toHaveLength(2);
+  const gate = deferred();
+  fixture.adoptionGate = gate.promise;
+  try {
+    await user.click(boxes[0]!);
+    await user.click(
+      screen.getAllByRole("button", { name: "Adopt reviewed draft" })[0]!,
+    );
+    await waitFor(() => expect(fixture.writes).toHaveLength(1));
+    fixture.drafts = [platformSetup({ revision: 4 }), second];
+    fixture.draftErrorStatus = 503;
+    await user.click(boxes[1]!);
+  } finally {
+    await act(() => gate.resolve());
+  }
+  await screen.findByText("Anonymous draft expired or changed");
+  await expectSettled();
+  expect(screen.queryByText("Telegram cafe · revision 3")).not.toBeInTheDocument();
+  expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+  expect(screen.getByRole("checkbox")).toBeChecked();
+  expect(adoptionButton()).toBeEnabled();
+  expect(fixture.writes).toHaveLength(1);
+  expect(fixture.saved).toHaveLength(0);
+  await user.click(adoptionButton());
+  await expectSettled();
+  expect(fixture.writes).toEqual([
+    `/onboarding/setups/${platformSetup().id}/adopt`,
+    `/onboarding/setups/${second.id}/adopt`,
+  ]);
+  expect(fixture.saved).toEqual([second]);
+  expectSingleModule();
+});
+
+it.each(["newer revision", "denied marker"] as const)(
+  "preserves a cached %s when an older adoption is refused",
+  async (cached) => {
+    const { fixture } = await openSetups();
+    const user = await reviewDraft();
+    const gate = deferred();
+    const queryKey = [
+      "onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation,
+    ];
+    const data = cached === "newer revision"
+      ? { status: "ready", drafts: [platformSetup({ revision: 4 })] }
+      : { status: "denied" };
+    fixture.adoptionGate = gate.promise;
+    try {
+      await user.click(adoptionButton());
+      await waitFor(() => expect(fixture.writes).toHaveLength(1));
+      fixture.drafts = [platformSetup({ revision: 4 })];
+      fixture.draftErrorStatus = 503;
+      act(() => client.setQueryData(queryKey, data));
+    } finally {
+      await act(() => gate.resolve());
+    }
+    await screen.findByText("Anonymous draft expired or changed");
+    await expectSettled();
+    expect(client.getQueryData(queryKey)).toEqual(data);
+    expect(fixture.writes).toHaveLength(1);
+    if (cached === "newer revision") {
+      expect(screen.getByText("Telegram cafe · revision 4")).toBeVisible();
+      expect(screen.getByRole("checkbox")).not.toBeChecked();
+    } else {
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    }
+  },
+);

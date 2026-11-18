@@ -545,12 +545,28 @@ export function useAdoptAnonymousDraft(binding: {
     // Hook callbacks run even after the review observer unmounts. Keep recovery
     // scoped to the exact chat/generation and preserve the original refusal if
     // refreshing fails; the owner can retry that read explicitly.
-    onError: (error) => {
-      if (isDefinitiveDraftError(error, "adopt"))
-        return client.invalidateQueries({
-          queryKey: ["onboarding", actor, "anonymous", binding.id, binding.generation],
-          exact: true,
-        }).catch(() => undefined);
+    onError: (error, submitted) => {
+      if (isDefinitiveDraftError(error, "adopt")) {
+        const queryKey = [
+          "onboarding",
+          actor,
+          "anonymous",
+          binding.id,
+          binding.generation,
+        ];
+        // A failed recovery read must not make the rejected snapshot actionable
+        // again. Preserve other drafts, newer revisions and a prior read denial.
+        client.setQueryData<AnonymousDraftsResult>(queryKey, (current) => {
+          if (current?.status !== "ready") return current;
+          return {
+            ...current,
+            drafts: current.drafts.filter(
+              (draft) => draft.id !== submitted.id || draft.revision !== submitted.revision,
+            ),
+          };
+        });
+        return client.invalidateQueries({ queryKey, exact: true }).catch(() => undefined);
+      }
     },
     onSuccess: () =>
       client.invalidateQueries({ queryKey: ["onboarding", actor] }),
