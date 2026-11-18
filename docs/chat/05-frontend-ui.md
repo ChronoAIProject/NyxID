@@ -496,6 +496,8 @@ chip 和提示均显示检查状态；没有选择连接的发送及 steering �
 延迟漏过撤销。激活时也检查当前时间，到期凭证不关闭选择器。
 检查状态使用中性弱化文字。后台刷新仅更新可见文字，保留 live region 的上次结果，
 避免每次窗口聚焦都播报；只有因刷新而拒绝发送后才播报检查状态，并提示就绪后再次发送。
+离线时暂停的刷新同样属于检查状态：保留缓存列表，但等待恢复联网并完成刷新后才能
+选择或使用覆盖连接发送；重新打开选择器不会重复发起刷新。
 
 While the opening keys refresh is pending, cached rows stay visible and an
 activated option shows **Checking availability…**, exposed through busy state
@@ -512,6 +514,9 @@ Checking uses neutral muted text. Background refreshes update the visual text
 while preserving the live region's last settled result, avoiding announcements
 on every window focus. Only a refused send announces checking and asks the owner
 to send again when the connection is ready.
+Refreshes paused while offline also count as checking: cached rows remain visible,
+but selection and override sends wait until the resumed refresh settles. Reopening
+the picker joins the paused refresh instead of starting another one.
 
 成功或已被服务端接纳的发送会消耗该消息的连接选择，即使后续响应流中断也不保留
 给下一条消息。已接纳的恢复发送同时消耗恢复提示，避免重复提交；接纳前明确拒绝

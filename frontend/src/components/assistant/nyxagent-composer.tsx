@@ -73,7 +73,8 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   }, [connections.data, now]);
   const connection = connections.data?.find((key) => key.id === connectionId);
   const unavailableReason = connection && composerConnectionUnavailableReason(connection, now);
-  const connectionChecking = connections.isFetching || checkingSend;
+  const connectionsRefreshing = connections.isFetching || connections.isPaused;
+  const connectionChecking = connectionsRefreshing || checkingSend;
   const connectionUnavailableReason = connections.isError
     ? translateUi("Could not load connections.")
     : connection ? unavailableReason ? formatComposerConnectionReason(unavailableReason) : null : translateUi("No longer listed");
@@ -85,8 +86,8 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     setConnectionId(undefined); closeConnectionPicker();
   }, [props.ownerUserId, props.draftKey, conversation?.id, closeConnectionPicker]);
   useEffect(() => {
-    if (!connections.isFetching) setCheckingSend(false);
-  }, [connections.isFetching, connections.data, connections.isError]);
+    if (!connectionsRefreshing) setCheckingSend(false);
+  }, [connectionsRefreshing, connections.data, connections.isError]);
   const capabilities = useQuery({
     queryKey: ["nyxagent-steer-capabilities", props.ownerUserId, conversation?.id],
     queryFn: () => nyxAgentTransport.capabilities(conversation!.id),
@@ -111,7 +112,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     pickerSelected.current = false;
     setNow(Date.now());
     setConnectionPickerOpen(true);
-    if (!readCurrentKeys().isFetching) void connections.refetch();
+    if (!readCurrentKeys().isRefreshing) void connections.refetch();
   }
 
   function focusComposer(fallback: "attachment" | "change") {
@@ -125,7 +126,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     setNow(wallNow);
     cancelHeldConnection();
     if (current.authority !== renderedAuthority || current.isError) return "refused";
-    if (current.isFetching) {
+    if (current.isRefreshing) {
       held.current = { id, authority: current.authority };
       setHeldConnection(id);
       return "held";
@@ -144,7 +145,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     if (!pending || !connectionPickerOpen || connectionLocked) return;
     const current = readCurrentKeys();
     if (pending.authority !== current.authority) { cancelHeldConnection(); return; }
-    if (current.isFetching) return;
+    if (current.isRefreshing) return;
     if (activateConnection(pending.id) === "accepted") closeConnectionPicker();
   });
 
@@ -155,15 +156,15 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
     const reason = row && composerConnectionUnavailableReason(row, wallNow);
     if (reason && !composerConnectionUnavailableReason(row!, now)) setNow(wallNow);
     if (liveSelection.current !== connectionId || (connectionId &&
-      (current.authority !== renderedAuthority || current.isError || current.isFetching || !row || reason))) {
-      if (current.isFetching) setCheckingSend(true);
+      (current.authority !== renderedAuthority || current.isError || current.isRefreshing || !row || reason))) {
+      if (current.isRefreshing) setCheckingSend(true);
       const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
-      const title = current.isFetching
+      const title = current.isRefreshing
         ? "Checking the selected connection. Send again when it's ready."
         : message;
       toast.error(translateUi(title), {
         id: "composer-connection-unavailable",
-        description: current.isFetching ? translateUi("Checking availability…")
+        description: current.isRefreshing ? translateUi("Checking availability…")
           : current.isError ? translateUi("Could not load connections.")
           : reason ? formatComposerConnectionReason(reason) : translateUi("No longer listed"),
       });

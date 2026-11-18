@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   data: [] as import("@/types/keys").KeyInfo[],
   error: false,
   fetching: false,
+  paused: false,
   refetch: vi.fn(),
 }));
 vi.mock("@/hooks/use-keys", () => ({
@@ -14,6 +15,7 @@ vi.mock("@/hooks/use-keys", () => ({
     isError: state.error,
     isPending: false,
     isFetching: state.fetching,
+    isPaused: state.paused,
     refetch: state.refetch,
   }),
 }));
@@ -22,7 +24,8 @@ vi.mock("@/hooks/use-current-keys", () => ({
     authority: undefined,
     data: state.error ? undefined : state.data,
     isError: state.error,
-    isFetching: state.fetching,
+    isRefreshing: state.fetching || state.paused,
+    fetchStatus: state.paused ? "paused" : state.fetching ? "fetching" : "idle",
   }),
 }));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -59,6 +62,7 @@ beforeEach(() => {
   state.data = [connection];
   state.error = false;
   state.fetching = false;
+  state.paused = false;
   state.refetch.mockClear();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });

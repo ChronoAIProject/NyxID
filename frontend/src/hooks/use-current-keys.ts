@@ -12,11 +12,13 @@ export function useCurrentKeysReader() {
     const authority = modeAQueryIdentity() ?? useAuthStore.getState().user?.id;
     const query = client.getQueryState<readonly KeyInfo[]>(["keys", "list", authority]);
     const isError = query?.status === "error";
+    const fetchStatus = query?.fetchStatus;
     return {
       authority,
       data: isError ? undefined : query?.data,
       isError,
-      isFetching: query?.fetchStatus === "fetching",
+      isRefreshing: fetchStatus !== undefined && fetchStatus !== "idle",
+      fetchStatus,
     };
   }, [client]);
 }

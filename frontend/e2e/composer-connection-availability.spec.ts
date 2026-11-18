@@ -509,3 +509,60 @@ test("activation catches expiry when the wall clock advances without timer deliv
   await expect(page.getByRole("group", { name: "Connection for this message" })).toHaveCount(0);
   await remediationEvidence(page, testInfo, "activation-expired-option");
 });
+
+test("offline refresh holds activation and refuses sends until the resumed refresh settles", async ({ page, context }, testInfo) => {
+  const fetchStatus = () => page.evaluate(async () => {
+    const state = await import("/e2e/fixtures/composer-connections-state.ts");
+    return state.client.getQueryState(state.queryKey)?.fetchStatus;
+  });
+  try {
+    const activation = await holdKeys(page);
+    await context.setOffline(true);
+    const dialog = await openPicker(page);
+    await expect.poll(fetchStatus).toBe("paused");
+    const work = dialog.getByRole("button", { name: /Work documents/ });
+    await work.click();
+    await expect(dialog).toBeVisible();
+    await expect(work).toHaveAttribute("aria-busy", "true");
+    await expect(work).toHaveAccessibleDescription("Checking availability…");
+    await expect(page.getByRole("group", { name: "Connection for this message", includeHidden: true })).toHaveCount(0);
+    await remediationEvidence(page, testInfo, "offline-held-option");
+    await context.setOffline(false);
+    await activation.started;
+    await expect.poll(fetchStatus).toBe("fetching");
+    activation.release({ credential_missing: false });
+    await expect.poll(fetchStatus).toBe("idle");
+    await expect(dialog).not.toBeVisible();
+    const chip = page.getByRole("group", { name: "Connection for this message" });
+    await expect(chip).toContainText("Work documents");
+
+    const send = await holdKeys(page);
+    await context.setOffline(true);
+    await openPicker(page);
+    await expect.poll(fetchStatus).toBe("paused");
+    await page.keyboard.press("Escape");
+    const input = page.locator("[data-composer-textbox]");
+    await input.fill("Keep while offline");
+    await expect(chip).toContainText("Checking availability…");
+    await expect(chip).not.toContainText("Unavailable");
+    await expect(chip.getByRole("status")).not.toContainText("Checking");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await input.press("Enter");
+    await expect(input).toHaveText("Keep while offline");
+    await expect(chip.getByRole("status")).toContainText("Checking availability…");
+    await expect(chip.getByRole("status")).toHaveClass(/text-muted-foreground/);
+    await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
+    await remediationEvidence(page, testInfo, "offline-checking-chip");
+    await context.setOffline(false);
+    await send.started;
+    await expect.poll(fetchStatus).toBe("fetching");
+    send.release({ credential_missing: false });
+    await expect.poll(fetchStatus).toBe("idle");
+    await expect(chip.getByRole("status")).toContainText("This message");
+    await input.press("Enter");
+    await expect(page.getByLabel("Submitted messages")).toHaveText("/service work\nKeep while offline");
+    await expect(page.getByText("Local send log · 1 messages")).toBeVisible();
+  } finally {
+    await context.setOffline(false);
+  }
+});
