@@ -465,6 +465,14 @@ async fn machine_proposal_unmarked_negotiation_adds_zero_database_commands() {
     let mut samples = Vec::new();
     for mode in [None, Some("connected"), None, Some("connected")] {
         let request = s.request(mode, 100, "/s/b2-test/upload").await;
+        let audits = [
+            "proxy_routed_via_personal",
+            "proxy_request",
+            "service_request",
+        ]
+        .map(|event| {
+            crate::services::audit_service::notify_on_audit_write_for_user(event, &s.f.owner)
+        });
         commands.lock().unwrap().clear();
         capturing.store(true, Ordering::Relaxed);
         let (call, _) = s.start(request).await;
@@ -473,6 +481,15 @@ async fn machine_proposal_unmarked_negotiation_adds_zero_database_commands() {
         axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
+        // The response completes before its three ordinary audit appends.
+        // Include every command through their durable completion in each sample.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for audit in audits {
+                audit.await.expect("proxy audit completed");
+            }
+        })
+        .await
+        .expect("proxy audit completion watchdog");
         capturing.store(false, Ordering::Relaxed);
         let mut sample = commands.lock().unwrap().clone();
         sample.sort();

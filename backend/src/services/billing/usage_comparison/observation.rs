@@ -39,13 +39,20 @@ pub(super) fn complete(
     usage: &CurrentUsage,
     now: chrono::DateTime<Utc>,
     pass: &str,
-) -> Result<UsageObservation, &'static str> {
+) -> Result<UsageObservation, String> {
+    if let Some(name) = projection
+        .totals
+        .keys()
+        .find_map(|code| usage.non_sum_metrics.get(code))
+    {
+        return Err(format!("non_sum_aggregation:{name}"));
+    }
     if projection
         .totals
         .keys()
         .any(|code| !usage.quantities_micros.contains_key(code))
     {
-        return Err("delivered_metric_missing");
+        return Err("delivered_metric_missing".into());
     }
     let mut observation = waiting(target, coverage, now, pass, "equal", "");
     observation.start_second = usage.start_second;

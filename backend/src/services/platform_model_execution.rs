@@ -986,6 +986,8 @@ pub(crate) async fn diagnostics(
         return Ok(vec![]);
     }
     Ok(vec![billing::BillingStartupDiagnostic {
+        severity: billing::DiagnosticSeverity::Action,
+        technical_details: None,
         code: "platform_model_usage_pending".into(),
         summary: "Platform model consumption needs review".into(),
         detail: format!(

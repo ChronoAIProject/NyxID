@@ -82,7 +82,7 @@ impl Payload {
         let text = text.map(|text| text.chars().take(MAX_TEXT_CHARS).collect::<String>());
         self.finish_text(text.as_deref(), failed);
     }
-    fn finish_text(&mut self, text: Option<&str>, failed: bool) {
+    pub(crate) fn finish_text(&mut self, text: Option<&str>, failed: bool) {
         self.progress();
         if let Some(text) = text.filter(|s| !s.trim().is_empty()) {
             let item = json!({"id":format!("msg_{}",self.snapshot["id"].as_str().unwrap_or_default()),
@@ -109,13 +109,18 @@ impl Payload {
     }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
-    let bytes = zeroize::Zeroizing::new(keys.decrypt(&row.payload_ciphertext).await?);
+    open_payload(keys, &row.payload_ciphertext).await
+}
+
+pub async fn open_payload(keys: &EncryptionKeys, ciphertext: &[u8]) -> AppResult<Payload> {
+    let bytes = zeroize::Zeroizing::new(keys.decrypt(ciphertext).await?);
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }
     serde_json::from_slice(&bytes).map_err(|_| unavailable())
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    super::nyxbot_response_read::ensure_indexes(db).await?;
     for (keys, opts) in [
         (
             doc! {"response_id":1},
@@ -317,6 +322,33 @@ where
         }
     }
     Ok(())
+}
+
+pub fn suppress_output(body: &mut Payload) {
+    body.snapshot["output"] = json!([]);
+    body.snapshot["status"] = json!("completed");
+    body.snapshot
+        .as_object_mut()
+        .expect("snapshot")
+        .remove("error");
+    body.frames.retain(|frame| {
+        matches!(
+            frame["type"].as_str(),
+            Some(
+                "response.created"
+                    | "response.in_progress"
+                    | "response.completed"
+                    | "response.failed"
+            )
+        )
+    });
+    for (sequence, frame) in body.frames.iter_mut().enumerate() {
+        frame["sequence_number"] = json!(sequence);
+    }
+    if let Some(last) = body.frames.last_mut() {
+        last["type"] = json!("response.completed");
+        last["response"] = body.snapshot.clone();
+    }
 }
 
 #[cfg(test)]

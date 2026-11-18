@@ -61,6 +61,7 @@ fn known_usage(period: &UsagePeriod) -> CurrentUsage {
         start_second: period.start_second,
         end_second_exclusive: period.end_second,
         quantities_micros: period.layout.iter().map(|s| (s.clone(), 0)).collect(),
+        non_sum_metrics: BTreeMap::new(),
     }
 }
 struct Candidate {
@@ -235,7 +236,7 @@ async fn preflight(
     let (folded, complete) = projection::fold(db, target, &usage, coverage).await?;
     if folded.unverified_origin || !complete {
         return Ok(Err(Evidence::Parsed {
-            usage,
+            usage: Box::new(usage),
             projection: Some(folded),
             complete,
             blocked: None,
@@ -314,7 +315,7 @@ async fn read_evidence(
     if response.customer_id != target.customer_id
         || response.subscription_id != target.subscription_id
     {
-        return Ok(Evidence::Finding("provider_target_mismatch"));
+        return Ok(Evidence::Finding("provider_target_mismatch".into()));
     }
     let usage = match super::lago_client::current_usage::parse(&response.raw) {
         Ok(usage) => usage,
@@ -326,7 +327,7 @@ async fn read_evidence(
             .is_some_and(|at| coverage.observed_at - at < chrono::Duration::minutes(10))
     {
         return Ok(Evidence::Parsed {
-            usage,
+            usage: Box::new(usage),
             projection: None,
             complete: false,
             blocked: None,
@@ -335,7 +336,7 @@ async fn read_evidence(
     // A preparation racing the provider read may already have been accepted remotely.
     if projection::has_unresolved(db, target, &usage).await? {
         return Ok(Evidence::Parsed {
-            usage,
+            usage: Box::new(usage),
             projection: None,
             complete: false,
             blocked: Some("unresolved_deliveries_in_period"),
@@ -355,22 +356,26 @@ async fn read_evidence(
         projection::fold(db, target, &usage, coverage).await?
     };
     Ok(Evidence::Parsed {
-        usage,
+        usage: Box::new(usage),
         projection: Some(folded),
         complete,
         blocked: None,
     })
 }
 
-fn finding_reason(finding: Finding) -> &'static str {
+fn finding_reason(finding: Finding) -> String {
     match finding {
-        Finding::UnsupportedShape => "unsupported_usage_shape",
-        Finding::ResponseTooLarge => "response_too_large",
-        Finding::InvalidPeriod => "invalid_provider_period",
-        Finding::InvalidUnits => "unsupported_provider_units",
-        Finding::DuplicateMetric => "duplicate_metric",
-        Finding::MissingMetric => "missing_metric_code",
-        Finding::SubscriptionUnavailable => "subscription_unavailable",
-        Finding::RequestRejected => "provider_request_rejected",
+        Finding::MissingCustomerUsage => "missing_customer_usage".into(),
+        Finding::MissingChargesUsage => "missing_charges_usage".into(),
+        Finding::ChargeNotObject => "charge_not_object".into(),
+        Finding::TooManyCharges => "too_many_charges".into(),
+        Finding::BreakdownMismatch => "breakdown_mismatch".into(),
+        Finding::ResponseTooLarge => "response_too_large".into(),
+        Finding::InvalidPeriod => "invalid_provider_period".into(),
+        Finding::InvalidUnits => "unsupported_provider_units".into(),
+        Finding::DuplicateMetric => "duplicate_metric".into(),
+        Finding::MissingMetric => "missing_metric_code".into(),
+        Finding::SubscriptionUnavailable => "subscription_unavailable".into(),
+        Finding::RequestRejected => "provider_request_rejected".into(),
     }
 }

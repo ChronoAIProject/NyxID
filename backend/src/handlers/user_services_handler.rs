@@ -17,7 +17,7 @@ use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
 use crate::services::{
-    node_service, oauth_resource_service, org_service, unified_key_service, user_service_service,
+    oauth_resource_service, org_service, unified_key_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -383,7 +383,6 @@ pub async fn update_user_service(
     // `user_service_service::update_user_service` doc for the rationale.
     let actor_for_node_check = actor.clone();
 
-    // Load current state before update (needed for node binding sync).
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
     // Capture the pre-update User-Agent override so we can emit
@@ -463,21 +462,6 @@ pub async fn update_user_service(
             &state.encryption_keys,
             &user_id_str,
             &service_id,
-        )
-        .await?;
-    }
-
-    // Auto-sync NodeServiceBinding when node_id changes. The actor (a
-    // human or API key) is what owns the node; for org-shared services
-    // the binding is owned by the org but the node is the actor's.
-    if body.node_id.is_some() {
-        node_service::sync_node_binding_for_user_service(
-            &state.db,
-            &user_id_str,
-            &actor,
-            current.catalog_service_id.as_deref(),
-            body.node_id.as_deref(),
-            current.node_id.as_deref(),
         )
         .await?;
     }
@@ -586,7 +570,6 @@ pub async fn delete_user_service(
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_service_write_owner(&state, &actor, &service_id).await?;
 
-    // Load current state to clean up node binding.
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
 
@@ -594,17 +577,6 @@ pub async fn delete_user_service(
 
     user_service_service::deactivate_user_service(&state.db, &user_id_str, &actor, &service_id)
         .await?;
-
-    // Deactivate the node binding if this service was node-routed.
-    node_service::sync_node_binding_for_user_service(
-        &state.db,
-        &user_id_str,
-        &actor,
-        current.catalog_service_id.as_deref(),
-        None, // new node_id = none (cleared)
-        current.node_id.as_deref(),
-    )
-    .await?;
 
     // Telemetry: service.disconnected. `provider_slug` is the UserService
     // slug, captured pre-deactivation above.

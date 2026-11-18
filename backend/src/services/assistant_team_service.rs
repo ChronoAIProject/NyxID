@@ -198,8 +198,32 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
             "Organizations cannot own NyxBot".into(),
         ));
     }
+    let agent = nyxbot_profile(
+        owner,
+        routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
+    );
+    let context = (db.clone(), owner.to_owned(), agent);
+    super::transaction_service::run_db_only(db, &context, |session, (db, owner, agent)| {
+        Box::pin(async move {
+            super::erasure_admission::fence_in_session(db, owner, session).await?;
+            let collection = db.collection::<AssistantAgent>(AGENTS);
+            if let Some(winner) = collection
+                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
+                .session(&mut *session)
+                .await?
+            {
+                return Ok(winner);
+            }
+            collection.insert_one(agent).session(session).await?;
+            Ok(agent.clone())
+        })
+    })
+    .await
+}
+
+fn nyxbot_profile(owner: &str, model: String) -> AssistantAgent {
     let now = Utc::now();
-    let agent = AssistantAgent {
+    AssistantAgent {
         channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
@@ -220,7 +244,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: "user".into(),
-        model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
+        model,
         owner_model_route: None,
         guest_model_notices: Default::default(),
         access_mode_override: None,
@@ -232,24 +256,42 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         destroyed_at: None,
         created_at: now,
         updated_at: now,
-    };
-    let context = (db.clone(), owner.to_owned(), agent);
-    super::transaction_service::run_db_only(db, &context, |session, (db, owner, agent)| {
-        Box::pin(async move {
-            super::erasure_admission::fence_in_session(db, owner, session).await?;
-            let collection = db.collection::<AssistantAgent>(AGENTS);
-            if let Some(winner) = collection
-                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
-                .session(&mut *session)
-                .await?
-            {
-                return Ok(winner);
-            }
-            collection.insert_one(agent).session(session).await?;
-            Ok(agent.clone())
-        })
-    })
-    .await
+    }
+}
+
+/// Group admission already holds this owner's fence. Creating a missing
+/// NyxBot must share that transaction instead of waiting on a nested writer.
+pub(crate) async fn ensure_nyxbot_in_session(
+    db: &Database,
+    owner: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<AssistantAgent> {
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    if let Some(agent) = collection
+        .find_one(doc! {"user_id": owner, "kind": "nyxbot"})
+        .session(&mut *session)
+        .await?
+    {
+        return Ok(agent);
+    }
+    if db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": owner, "user_type": "org"})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Organizations cannot own NyxBot".into(),
+        ));
+    }
+    super::erasure_admission::fence_in_session(db, owner, session).await?;
+    let model =
+        routing::model_for_in_session(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL, session)
+            .await;
+    let agent = nyxbot_profile(owner, model);
+    collection.insert_one(&agent).session(session).await?;
+    Ok(agent)
 }
 
 /// An agent of the owner by ID.

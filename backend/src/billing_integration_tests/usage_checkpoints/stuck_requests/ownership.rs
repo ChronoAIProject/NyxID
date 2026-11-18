@@ -97,14 +97,20 @@ async fn stuck_request_classification_reports_legacy_eligibility_without_mutatio
         .expect("classification must be visible before any write-off is enabled");
     assert!(
         diagnostic
-            .detail
+            .technical_details
+            .as_ref()
+            .unwrap()
             .contains("class=eligible_now eligible=true age=1h_to_24h rows=1 requests=1"),
         "{}",
-        diagnostic.detail
+        diagnostic.technical_details.as_ref().unwrap()
     );
     assert!(
-        diagnostic.detail.contains("kind=wallet unit=credits"),
+        diagnostic
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("kind=wallet unit=credits"),
         "{}",
-        diagnostic.detail
+        diagnostic.technical_details.as_ref().unwrap()
     );
 }

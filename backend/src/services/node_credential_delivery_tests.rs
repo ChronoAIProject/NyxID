@@ -64,6 +64,45 @@ fn runner() -> ClusterLeaseRuntime {
 }
 
 #[tokio::test]
+async fn binding_only_route_does_not_queue_server_credential_rotation() {
+    let (state, key, service) = fixture().await;
+    let db = &state.db;
+    let node = service.node_id.as_deref().unwrap();
+    let catalog = uuid::Uuid::new_v4().to_string();
+    let services = db.collection::<Document>("user_services");
+    services
+        .update_one(
+            doc! {"_id": &service.id},
+            doc! {"$unset": {"node_id": ""}, "$set": {"catalog_service_id": &catalog}},
+        )
+        .await
+        .unwrap();
+    crate::services::node_service::create_binding(db, &service.user_id, node, &catalog)
+        .await
+        .unwrap();
+    let slots = db.collection::<Document>(delivery::COLLECTION);
+    let target = doc! {"node_id": node, "service_slug": &service.slug};
+    let material = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+    rotate(&state, &key, &material).await;
+    assert!(slots.find_one(target.clone()).await.unwrap().is_none());
+
+    services
+        .update_one(doc! {"_id": &service.id}, doc! {"$set": {"node_id": node}})
+        .await
+        .unwrap();
+    let successor = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+    rotate(&state, &key, &successor).await;
+    let queued = slots
+        .find_one(target)
+        .await
+        .unwrap()
+        .expect("explicit node receives a delivery intent");
+    assert_eq!(queued.get_str("service_id").unwrap(), service.id);
+    assert!(queued.get_bool("pending").unwrap());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn node_credential_order_2472_refresh_advances_delivery_without_changing_approval_epoch() {
     let (state, key, svc) = fixture().await;
     let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());

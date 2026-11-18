@@ -1220,17 +1220,31 @@ pub async fn list_grants(
     api_key_id: &str,
     include_revoked: bool,
 ) -> AppResult<Vec<DurableOperationGrant>> {
+    list_grants_source(db, owner_user_id, api_key_id, include_revoked, None).await
+}
+
+async fn list_grants_source(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    api_key_id: &str,
+    include_revoked: bool,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<DurableOperationGrant>> {
     let mut filter = doc! { "user_id": owner_user_id, "api_key_id": api_key_id };
     if !include_revoked {
         filter.insert("revoked_at", bson::Bson::Null);
     }
-    Ok(db
-        .collection::<DurableOperationGrant>(GRANTS)
-        .find(filter)
-        .sort(doc! { "created_at": -1 })
-        .await?
-        .try_collect()
-        .await?)
+    let collection = db.collection::<DurableOperationGrant>(GRANTS);
+    let find = collection.find(filter).sort(doc! { "created_at": -1 });
+    Ok(if let Some(session) = session {
+        find.session(&mut *session)
+            .await?
+            .stream(session)
+            .try_collect()
+            .await?
+    } else {
+        find.await?.try_collect().await?
+    })
 }
 
 pub async fn revoke_grant(
@@ -1560,7 +1574,7 @@ pub async fn provision_scheduled_key(
 pub async fn reauthorize_scheduled_key(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
-    actor_user_id: &str,
+    actor: &super::audit_service::AuditActor,
     owner_user_id: &str,
     api_key_id: &str,
     selections: &[DurableOperationSelection],
@@ -1584,7 +1598,7 @@ pub async fn reauthorize_scheduled_key(
     let plan = api_key_scope_service::verify_durable_scope_plan_precondition(
         db,
         node_ws_manager,
-        actor_user_id,
+        &actor.user_id,
         owner_user_id,
         &key.allowed_service_ids,
         &key.allowed_node_ids,
@@ -1593,7 +1607,65 @@ pub async fn reauthorize_scheduled_key(
         expected_digest,
     )
     .await?;
-    let existing = list_grants(db, owner_user_id, api_key_id, false).await?;
+    let mut session = db.client().start_session().await?;
+    let grants = {
+        let db = db.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let api_key_id = api_key_id.to_owned();
+        let actor = actor.clone();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                key_mutations::transaction_result(
+                    revoke_for_reauthorization(
+                        &db,
+                        &owner_user_id,
+                        &api_key_id,
+                        &actor,
+                        &plan.durable_operations,
+                        session,
+                    )
+                    .await,
+                )
+            })
+            .await
+            .map_err(key_mutations::map_transaction_error)?
+    };
+
+    // Keep the fail-closed gap: failure of replacement publication never restores
+    // old authority. Each committed unit has its own durable audit evidence.
+    let intent = super::api_key_audit_service::grants_reauthorized(
+        actor,
+        api_key_id,
+        &grants
+            .iter()
+            .map(|grant| grant.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let db = db.clone();
+    let source_grants = grants.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            key_mutations::transaction_result(
+                publish_reauthorized(&db, &source_grants, &intent, session).await,
+            )
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)?;
+    Ok(grants)
+}
+
+async fn revoke_for_reauthorization(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    api_key_id: &str,
+    actor: &super::audit_service::AuditActor,
+    operations: &[DurableOperationPlan],
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Vec<DurableOperationGrant>> {
+    let existing =
+        list_grants_source(db, owner_user_id, api_key_id, false, Some(&mut *session)).await?;
     let previous_by_operation: BTreeMap<(&str, &str), &str> = existing
         .iter()
         .map(|grant| {
@@ -1603,14 +1675,13 @@ pub async fn reauthorize_scheduled_key(
             )
         })
         .collect();
-    let grants: Vec<DurableOperationGrant> = plan
-        .durable_operations
+    let grants: Vec<DurableOperationGrant> = operations
         .iter()
         .map(|operation| {
             grant_from_plan(
                 owner_user_id,
                 api_key_id,
-                actor_user_id,
+                &actor.user_id,
                 operation,
                 previous_by_operation
                     .get(&(
@@ -1627,7 +1698,8 @@ pub async fn reauthorize_scheduled_key(
         ));
     }
     let now = Utc::now();
-    db.collection::<DurableOperationGrant>(GRANTS)
+    let changed = db
+        .collection::<DurableOperationGrant>(GRANTS)
         .update_many(
             doc! {
                 "user_id": owner_user_id,
@@ -1637,19 +1709,47 @@ pub async fn reauthorize_scheduled_key(
             },
             doc! { "$set": {
                 "revoked_at": bson::DateTime::from_chrono(now),
-                "revoked_by": actor_user_id,
+                "revoked_by": &actor.user_id,
                 "updated_at": bson::DateTime::from_chrono(now),
             }, "$inc": { "state_version": 1_i64 } },
         )
+        .session(&mut *session)
         .await?;
-    // Reauthorization is an intentionally fail-closed saga: old authority is
-    // revoked before replacements are inserted. A database failure can cause
-    // temporary loss of authority, but can never leave old and new grants
-    // active together.
-    db.collection::<DurableOperationGrant>(GRANTS)
-        .insert_many(&grants)
-        .await?;
+    if changed.matched_count != existing.len() as u64
+        || changed.modified_count != existing.len() as u64
+    {
+        return Err(AppError::DurableGrantMissing(
+            "active grant not found".into(),
+        ));
+    }
+    let intents = existing
+        .iter()
+        .map(|grant| {
+            super::api_key_audit_service::grant_revoked_for_reauthorization(
+                actor,
+                api_key_id,
+                &grant.id,
+                &grant.endpoint_id,
+                &grant.contract_digest,
+            )
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    super::security_effect_service::enqueue_in_session(db, session, &intents).await?;
     Ok(grants)
+}
+
+async fn publish_reauthorized(
+    db: &mongodb::Database,
+    grants: &[DurableOperationGrant],
+    intent: &crate::models::security_effect_intent::SecurityEffectIntent,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<DurableOperationGrant>(GRANTS)
+        .insert_many(grants)
+        .session(&mut *session)
+        .await?;
+    super::security_effect_service::enqueue_in_session(db, session, std::slice::from_ref(intent))
+        .await
 }
 
 #[cfg(test)]
