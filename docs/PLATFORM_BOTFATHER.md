@@ -377,9 +377,9 @@ fences binding and draft revisions and makes same-owner/binding/generation
 replays idempotent; unmounted callbacks cannot clear a new review.
 
 Adoption success or definitive refusal (403/404/409) clears only the submitted
-id/revision's consent; a newer review survives. Refusals refresh the exact chat's
-drafts for fresh acknowledgement; transient failures permit explicit retry of
-the same snapshot. A draft-read denial (403/404) replaces cached private facts
+id/revision's consent; a newer review survives. Refusals evict that rejected
+snapshot before refreshing the exact chat's drafts, so a failed refresh cannot
+offer it again. Transient failures permit explicit retry of the same snapshot. A draft-read denial (403/404) replaces cached private facts
 with a denial marker and clears consent. Retry restores authorized facts with
 consent unchecked; transient errors cannot revive discarded facts.
 
