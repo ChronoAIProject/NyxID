@@ -9,7 +9,6 @@ import {
 } from "../../components/settings/SettingsList";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useTheme } from "../../theme/ThemeContext";
-import { isApiError } from "../../lib/api/ApiError";
 import type { QuickAccessItem } from "../../lib/api/quickAccessSchema";
 import { chatAgentLabel } from "../assistant/assistantAgentContext";
 import {
@@ -45,9 +44,7 @@ export function QuickAccessSettingsScreen(
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
   const partial = quickAccess.state.hasUnsupportedEntries === true;
-  const conflict = isApiError(quickAccess.saveError) && quickAccess.saveError.statusCode === 409
-    && (quickAccess.saveError.errorCode === 1004 || quickAccess.saveError.errorKey === "conflict");
-  const editable = quickAccess.loaded && !partial;
+  const editable = quickAccess.loaded && !partial && !quickAccess.recoveryRequired;
   const saving = pending || quickAccess.saving;
   const begin = (operation: (complete: () => void) => void, reset = false) => {
     if (!quickAccess.loaded || (!reset && !editable) || saving || busy.current) return;
@@ -95,7 +92,11 @@ export function QuickAccessSettingsScreen(
         footer={
           partial
             ? t("Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.")
-            : conflict
+            : quickAccess.recoveryRequired
+            ? quickAccess.recoveryPending
+              ? t("Reloading shortcuts changed on another device. Editing will resume when the latest list loads.")
+              : t("Couldn't reload your shortcuts. Reload the latest list before editing.")
+            : quickAccess.conflictRecovered
             ? t("Your shortcuts changed on another device. The latest list is shown. Try again.")
             : quickAccess.saveError
             ? t("Couldn't save quick access. Your previous list is back.")
@@ -162,6 +163,11 @@ export function QuickAccessSettingsScreen(
           })
         )}
       </SettingsGroup>
+      {quickAccess.recoveryRequired && !quickAccess.recoveryPending ? (
+        <SettingsGroup>
+          <SettingsRow label={t("Reload shortcuts")} tone="action" onPress={quickAccess.retry} />
+        </SettingsGroup>
+      ) : null}
       <SettingsGroup
         title={t("Add from the menu")}
         footer={

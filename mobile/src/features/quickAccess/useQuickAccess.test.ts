@@ -491,3 +491,37 @@ test('M2622-05 a remounted editor observes the outstanding account save until se
     assert.equal(module.useQuickAccess().saving, false, 'editing resumes when the account save settles');
   } finally {gate.resolve(saved);client.clear();}
 });
+
+
+test('R2 reconnect and manual retry during a pending save keep the accepted edit', async () => {
+  const client = new QueryClient();
+  const write = deferred<QuickAccessState>();
+  const module = load();
+  const key = module.quickAccessKey(7);
+  const edited: QuickAccessState = {customized: true, items: [{kind: 'destination', id: 'settings'}]};
+  client.setQueryData(key, saved);
+  const observer = new QueryObserver(client, {...module.quickAccessQueryOptions(7, client), staleTime: 0});
+  const unsubscribe = observer.subscribe(() => {});
+  await observer.refetch();
+  const mutation = new MutationObserver(client, {
+    mutationKey: module.QUICK_ACCESS_MUTATION_KEY,
+    mutationFn: () => write.promise,
+    ...module.quickAccessMutationHandlers(client, key),
+  });
+  const pending = mutation.mutate({items: edited.items});
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    same(client.getQueryData(key), edited);
+    const reads = module.env.reads;
+    assert.equal(module.refreshQuickAccessOnForeground(client, 7, Date.now() + 120000), false);
+    // TanStack reconnect and an explicit retry both call this query function.
+    await observer.refetch();
+    same(client.getQueryData(key), edited, 'a read cannot replace the accepted optimistic edit');
+    assert.equal(module.env.reads, reads, 'no competing read while the save owns the list');
+    write.resolve(edited); await pending;
+    module.env.get = async () => edited;
+    await observer.refetch();
+    assert.equal(module.env.reads, reads + 1, 'reads resume after settlement');
+    same(client.getQueryData(key), edited);
+  } finally {write.resolve(edited); await pending; unsubscribe(); client.clear();}
+});

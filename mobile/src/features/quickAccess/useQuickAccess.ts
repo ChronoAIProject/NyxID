@@ -7,6 +7,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { isApiError } from "../../lib/api/ApiError";
 import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { authSessionGeneration } from "../../lib/auth/sessionStore";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -28,6 +29,12 @@ export const quickAccessKey = (epoch: number) =>
 /** Every change to the list (save or reset), across screens. */
 export const QUICK_ACCESS_MUTATION_KEY = ["account", "quick-access", "change"] as const;
 export const QUICK_ACCESS_STALE_MS = 60_000;
+const conflictKey = (epoch: number) => ['account', 'quick-access-conflict', epoch] as const;
+type ConflictRecovery = {phase: 'required' | 'ready'};
+const needsRecovery = (client: QueryClient, epoch: number) =>
+  client.getQueryData<ConflictRecovery>(conflictKey(epoch))?.phase === 'required';
+const conflictError = (error: unknown) => isApiError(error) && error.statusCode === 409
+  && (error.errorCode === 1004 || error.errorKey === 'conflict');
 
 /**
  * The read for one account. It recovers on its own: transient failures (the
@@ -37,13 +44,30 @@ export const QUICK_ACCESS_STALE_MS = 60_000;
  * sign-out or account switch the key changes; this account's read never runs
  * or retries under the next session.
  */
-export function quickAccessQueryOptions(epoch: number) {
+export function quickAccessQueryOptions(epoch: number, client?: QueryClient) {
   return {
     queryKey: quickAccessKey(epoch),
-    queryFn: ({ signal }: { signal: AbortSignal }) =>
-      epoch === getAuthEpoch()
-        ? quickAccessApi.get(signal)
-        : Promise.reject(new Error("auth_session_changed")),
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+      if (epoch !== getAuthEpoch()) throw new Error("auth_session_changed");
+      const recovery = client?.getQueryData<ConflictRecovery>(conflictKey(epoch));
+      // Reconnect/manual reads cannot replace an accepted optimistic edit.
+      // Conflict recovery runs after the refused write, even while its
+      // onSettled callback is still pending.
+      if (client && client.isMutating({mutationKey: QUICK_ACCESS_MUTATION_KEY}) > 0
+        && recovery?.phase !== 'required') {
+        const cached = client.getQueryData<QuickAccessState>(quickAccessKey(epoch));
+        if (cached) return cached;
+      }
+      const fresh = await quickAccessApi.get(signal);
+      if (client && !signal.aborted && epoch === getAuthEpoch()
+        && recovery?.phase === 'required'
+        && client.getQueryData(conflictKey(epoch)) === recovery) {
+        // Publish the authoritative list before opening the editor fence.
+        client.setQueryData(quickAccessKey(epoch), fresh);
+        client.setQueryData<ConflictRecovery>(conflictKey(epoch), {phase: 'ready'});
+      }
+      return fresh;
+    },
     staleTime: QUICK_ACCESS_STALE_MS,
     retry: (failureCount: number, error: unknown) =>
       epoch === getAuthEpoch() && retryQuickAccessRead(failureCount, error),
@@ -105,6 +129,8 @@ export function quickAccessMutationHandlers(
   return {
     onMutate: async (change: QuickAccessChange & { authority?: ActionAuthority }) => {
       if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
+      if (!('reset' in change) && needsRecovery(client, key[2]))
+        throw Object.assign(new Error('quick_access_recovery_required'), {name: 'AbortError'});
       await client.cancelQueries({ queryKey: key });
       if (!current(change)) throw Object.assign(new Error("auth_session_changed"), { name: "AbortError" });
       const previous = client.getQueryData<QuickAccessState>(key);
@@ -117,12 +143,16 @@ export function quickAccessMutationHandlers(
       context: { previous?: QuickAccessState } | undefined,
     ) => {
       if (!current(change)) return;
+      if (conflictError(_error)) client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'required'});
+      if (_error instanceof Error && _error.name === 'AbortError') return;
       if (context?.previous) client.setQueryData(key, context.previous);
       else client.removeQueries({ queryKey: key, exact: true });
     },
     onSuccess: (saved: QuickAccessState, change?: QuickAccessChange & { authority?: ActionAuthority }) => {
       if (!current(change)) return;
       client.setQueryData(key, saved);
+      if (change && 'reset' in change && needsRecovery(client, key[2]))
+        client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'ready'});
     },
     onSettled: (
       _saved: QuickAccessState | undefined,
@@ -144,7 +174,12 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
   const client = useQueryClient();
   const epoch = getAuthEpoch();
   const key = quickAccessKey(epoch);
-  const query = useQuery({ ...quickAccessQueryOptions(epoch), enabled });
+  // Cache-only account state survives editor/rail unmounts until sign-out
+  // clears the QueryClient; an ordinary failed GET never removes the fence.
+  const recovery = useQuery<ConflictRecovery | null>({
+    queryKey: conflictKey(epoch), queryFn: () => null, enabled: false, gcTime: Infinity,
+  });
+  const query = useQuery({ ...quickAccessQueryOptions(epoch, client), enabled });
   useEffect(() => {
     if (!enabled) return;
     const subscription = AppState.addEventListener("change", (state) => {
@@ -157,6 +192,8 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     mutationFn: (change: BoundChange) => {
       const guard = () => assertAction(change.authority);
       guard();
+      if (!('reset' in change) && needsRecovery(client, epoch))
+        throw Object.assign(new Error('quick_access_recovery_required'), {name: 'AbortError'});
       return "reset" in change ? quickAccessApi.reset(guard) : quickAccessApi.save(change.items, guard);
     },
     // One account list: changes run in order, never racing each other.
@@ -167,6 +204,10 @@ export function useQuickAccess({ enabled = true }: { enabled?: boolean } = {}) {
     state: query.data ?? QUICK_ACCESS_DEFAULT_STATE,
     loaded: query.data !== undefined,
     loadError: query.error,
+    recoveryRequired: recovery.data?.phase === 'required',
+    recoveryPending: recovery.data?.phase === 'required' && (query.isFetching || !query.error),
+    recoveryError: recovery.data?.phase === 'required' ? query.error : null,
+    conflictRecovered: recovery.data?.phase === 'ready',
     // Account-wide pending state survives closing/reopening the editor. Its
     // replacement observer must not edit over an older optimistic response.
     saving: useIsMutating({ mutationKey: QUICK_ACCESS_MUTATION_KEY, exact: true }) > 0,
