@@ -121,8 +121,9 @@ function sourceFiles(dir) {
 // parsed when their text names a legacy catalog file.
 const allSourceFiles = sourceFiles("src").filter((file) => /\.tsx?$/.test(file));
 const guardedFiles = allSourceFiles.filter((file) => !isTestSource(file));
+// The bilingual public website owns route-localized copy, like the existing landing page.
 const isAuditFile = (file) => !FIXTURE_SOURCE.test(file) &&
-  !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding)\//.test(file);
+  !/\.test\.|\/dev\/|\/locales\/|features\/(?:landing|nyxbot-onboarding|website-a)\//.test(file);
 const files = guardedFiles.filter(isAuditFile);
 let checkedKeys = 0;
 const errorHelperFiles = new Set([

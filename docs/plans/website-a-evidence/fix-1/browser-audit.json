@@ -1,0 +1,706 @@
+{
+  "mobile": [
+    {
+      "language": "en",
+      "menu": {
+        "display": "flex",
+        "height": 36,
+        "href": "/login?lang=en&code=QA-INVITE&return_to=%2Fkeys%3Ftab%3Dactive&utm_source=qa",
+        "tabIndex": 0,
+        "text": "Log in",
+        "viewport": 390,
+        "width": 358
+      },
+      "loginUrl": "http://127.0.0.1:4180/login?lang=en&code=QA-INVITE&return_to=%2Fkeys%3Ftab%3Dactive&utm_source=qa"
+    },
+    {
+      "language": "zh",
+      "menu": {
+        "display": "flex",
+        "height": 36,
+        "href": "/login?lang=zh&code=QA-INVITE&return_to=%2Fkeys%3Ftab%3Dactive&utm_source=qa",
+        "tabIndex": 0,
+        "text": "登录",
+        "viewport": 390,
+        "width": 358
+      },
+      "loginUrl": "http://127.0.0.1:4180/login?lang=zh&code=QA-INVITE&return_to=%2Fkeys%3Ftab%3Dactive&utm_source=qa"
+    }
+  ],
+  "solutions": [
+    {
+      "language": "en",
+      "align": "center",
+      "border": "dashed",
+      "href": "/nyxbot?lang=en&code=QA-INVITE",
+      "justify": "center",
+      "text": "Describe your own“When someone asks for a quote, collect their address and email it to me.”Ask NyxBot",
+      "textAlign": "center",
+      "viewport": 1280,
+      "destination": "http://127.0.0.1:4180/nyxbot?lang=en&code=QA-INVITE"
+    },
+    {
+      "language": "zh",
+      "align": "center",
+      "border": "dashed",
+      "href": "/nyxbot?lang=zh&code=QA-INVITE",
+      "justify": "center",
+      "text": "描述你自己的需求“有人询价时，收集他们的地址并发邮件给我。”交给 NyxBot",
+      "textAlign": "center",
+      "viewport": 1280,
+      "destination": "http://127.0.0.1:4180/nyxbot?lang=zh&code=QA-INVITE"
+    }
+  ],
+  "sidebar": [
+    {
+      "language": "zh",
+      "demo": "在 Telegram 上接订位",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "餐厅经理新",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "新闻聚合",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "后台文员",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "回访队列",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "zh",
+      "demo": "每天给我发早报",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "餐厅经理",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "新闻聚合新",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "后台文员",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "回访队列",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "zh",
+      "demo": "去供应商那里补货",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "餐厅经理",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "新闻聚合",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "后台文员新",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "回访队列",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "zh",
+      "demo": "回电今天的线索",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "餐厅经理",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "新闻聚合",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "后台文员",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "回访队列新",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "en",
+      "demo": "Take bookings on Telegram",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Restaurant managernew",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "News aggregator",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Back-office clerk",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Callback queue",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "en",
+      "demo": "Send me a morning brief",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Restaurant manager",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "News aggregatornew",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Back-office clerk",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Callback queue",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "en",
+      "demo": "Reorder from my supplier",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Restaurant manager",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "News aggregator",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Back-office clerknew",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Callback queue",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    },
+    {
+      "language": "en",
+      "demo": "Call back today’s leads",
+      "rows": [
+        {
+          "badge": null,
+          "icon": null,
+          "name": "NyxBot",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Restaurant manager",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "News aggregator",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": null,
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Back-office clerk",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        },
+        {
+          "badge": {
+            "fontSize": "10px",
+            "inside": true,
+            "padding": "1px 6px",
+            "right": 793.078125
+          },
+          "icon": {
+            "height": 24,
+            "width": 24
+          },
+          "name": "Callback queuenew",
+          "row": {
+            "left": 633.078125,
+            "right": 802.078125,
+            "width": 169
+          }
+        }
+      ],
+      "viewport": {
+        "height": 900,
+        "width": 1280
+      }
+    }
+  ],
+  "desktop": [
+    {
+      "language": "en",
+      "burger": "none",
+      "loginLinks": [
+        {
+          "display": "none",
+          "text": "Log in"
+        },
+        {
+          "display": "flex",
+          "text": "Log in"
+        }
+      ],
+      "overflow": false,
+      "viewport": 1280
+    },
+    {
+      "language": "zh",
+      "burger": "none",
+      "loginLinks": [
+        {
+          "display": "none",
+          "text": "登录"
+        },
+        {
+          "display": "flex",
+          "text": "登录"
+        }
+      ],
+      "overflow": false,
+      "viewport": 1280
+    }
+  ]
+}

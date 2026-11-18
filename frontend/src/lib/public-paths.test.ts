@@ -22,3 +22,32 @@ describe("public route policy", () => {
     expect(isPublicPath("/oauth/token")).toBe(false);
   });
 });
+
+it("opens only the website routes and one solution segment, including a trailing slash", () => {
+  for (const path of [
+    "/nyxbot",
+    "/solutions",
+    "/how-it-works",
+    "/security",
+    "/agents",
+    "/integrations",
+    "/pricing",
+    "/contact",
+    "/solutions/restaurant-manager",
+  ]) {
+    expect(isPublicPath(path)).toBe(true);
+    expect(isPublicPath(`${path}/`)).toBe(true);
+  }
+  for (const path of [
+    "/nyxbot/admin",
+    "/security/admin",
+    "/solutions/one/admin",
+    "/agents/keys",
+    "/integrations/admin",
+    "/api/v1/services",
+    "/dashboard",
+    "/assistant",
+  ]) {
+    expect(isPublicPath(path)).toBe(false);
+  }
+});

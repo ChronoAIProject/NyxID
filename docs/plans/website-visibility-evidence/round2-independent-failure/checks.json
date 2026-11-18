@@ -1,0 +1,529 @@
+{
+  "acceptance": "v4.2 recoverable visibility increment",
+  "round": 2,
+  "max_rounds": 2,
+  "verdict": "FAIL",
+  "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+  "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+  "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+  "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+  "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+  "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+  "summary": {
+    "pass": 18,
+    "fail": 2,
+    "not-run": 4,
+    "blocked": 3
+  },
+  "checks": [
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C01",
+      "title": "版本、提交和产物绑定",
+      "status": "pass",
+      "expected": "HEAD、工程 SHA、revision 与远端产物一致",
+      "actual": "五个修复 commits；工程 SHA→HEAD 仅九份文档/证据；真实 ZIP SHA256 匹配，manifest sourceCommit 为 44bde4d23；首轮 FAIL 五份归档与独立原件逐字相同。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/git-evidence.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/download-verification.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/github-artifacts.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C02",
+      "title": "远端 CI 真实性",
+      "status": "pass",
+      "expected": "对应工程 SHA 的测试/构建/HTTP/浏览器成功",
+      "actual": "31 files / 241 tests；tsc 与完整生产 build；90 pages；219 HTTP checks；privacy gate；10 browser passed，0 skipped/flaky/unexpected。",
+      "environment": "GitHub Actions run 39582397033 / job 119162973220；Ubuntu runner、Node 20 配置、Chromium；单 worker、无重试；Nginx + backend fixture :4188；默认 off",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/github-jobs.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-verified-excerpts.txt",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/public-browser-results.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C03",
+      "title": "默认全部关闭",
+      "status": "pass",
+      "expected": "三功能及 Blog 菜单默认 false，solutions 空；无控件、占位或请求",
+      "actual": "38 个营销 SSR 页面无三功能；18 个方案详情原生 disabled；CI 浏览时无同源 POST。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/e2e-public/public-site.spec.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C04",
+      "title": "保留源码与开关独立性",
+      "status": "pass",
+      "expected": "组件/adapter 可维护且逐项配置；缺依赖拒绝开启",
+      "actual": "三组件及 adapter 保留；8 组合 resolver/组件 fixtures 已通过；renderer 覆盖全 off 与三个单项 on；非法/缺验收引用抛错。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/release-config.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/optional-features.test.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/test/public-visibility.test.ts",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C05",
+      "title": "Newsletter adapter 行为",
+      "status": "pass",
+      "expected": "无假成功、输入校验、隐私/退订配置、失败取消及无 JS 防护",
+      "actual": "仅接受 pending_confirmation；显示未确认；POST 无凭证，10 秒超时/16 KiB 上限；SSR disabled，失败保留输入；fixture 证据不代表真实订阅。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/newsletter-signup.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/public-feature-adapters.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/public-feature-adapters.test.ts",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C06",
+      "title": "公共 NyxBot adapter 行为",
+      "status": "pass",
+      "expected": "只显示真实服务返回的合法文本，不复用私人会话/脚本回复",
+      "actual": "空白回复被拒绝、回复按文本渲染、错误保留问题、取消清理；无 cookie/auth/Agent Key；无 mount 请求。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/contact-chat.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/use-public-feature-request.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/optional-features.test.tsx",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C07",
+      "title": "Status 恢复地址校验",
+      "status": "pass",
+      "expected": "官网首页不能冒充公共状态页",
+      "actual": "V-F01 关闭：实际 resolver 探针17个合法/非法地址全部符合预期，包含 /zh、/zh/、编码/重复斜杠/点段、非法编码、API/health；独立 Status 域名根及合法子路径保留。",
+      "environment": "实际 resolver 函数的离线输入探针；未执行浏览器或真实 Status 服务",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/release-config.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/release-config.test.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C08",
+      "title": "Blog 菜单、Footer 和直达页面",
+      "status": "pass",
+      "expected": "只关闭主导航/移动菜单，不更改 Footer、直达、已审核正文或索引",
+      "actual": "EN/ZH、700/1280 宽度远端默认 off 浏览器通过；38 页 Footer Blog 保留；90 页发布路径/indexable/Markdown 路径一致；llms/sitemap/routing 与首轮逐字相同。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/unchanged-public-surfaces.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/public-browser-results.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/blog-menu.test.tsx"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C09",
+      "title": "草稿边界与已批准发布集",
+      "status": "pass",
+      "expected": "不因恢复入口自动批准草稿",
+      "actual": "publication 输入无 diff；CI publication-footprint 通过；公开路由集合与旧基线相同；新增组件不加载草稿源。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/git-evidence.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/public-validation.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C10",
+      "title": "九个方案默认禁用",
+      "status": "pass",
+      "expected": "详情可浏览；每个 CTA 原生 disabled，无 href/启动 handler",
+      "actual": "EN/ZH 共 18 页独立 DOM 检查通过；辅助提示保留，通用登录和联系入口仍可用。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-activation.tsx"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C11",
+      "title": "逐方案配置和 legacy gate",
+      "status": "pass",
+      "expected": "只开启配置 slug，其余保持禁用，旧 start 遵循相同配置",
+      "actual": "九个逐项组件/legacy resolver fixtures 通过；已修复 CTA 与 fragment start 的认证入口；真实路径 /start 的已接受分支仍漏修，单列 V-C12。单项配置独立性未回退。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/optional-features.test.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-availability.ts",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C12",
+      "title": "恢复方案入口的认证上下文",
+      "status": "fail",
+      "expected": "保留所选目标和可供认证使用的顶层邀请码",
+      "actual": "V-F02 部分修复、仍 fail：真实 CTA 与 #/start 已保留顶层 code 和配置 return_to；但 router.tsx:344 的 /start 仍直接 siteHref(target)，实际 handler 探针后进入登录时顶层 code=null。",
+      "environment": "新源码实际函数与 TypeScript AST 提取的真实 /start beforeLoad 离线执行 + 精确认证表达式；CI 组件集成测试已核对。未运行完整浏览器认证。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/router.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/app-entry.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/pages/login.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-auth-handoff.test.tsx"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C13",
+      "title": "完整配置与 revision 一致",
+      "status": "pass",
+      "expected": "配置包含 endpoint/URL/target，同布尔不同配置拒绝 hydration",
+      "actual": "独立重算新包 config/content hash，所有 SSR 配置属性对齐新 manifest；源实现未回退；在新源码上再次调用实际 boundary 函数，拒绝同布尔不同 solution target。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/public-site/configuration-boundary.test.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C14",
+      "title": "已批准 tab 全文与 Markdown",
+      "status": "pass",
+      "expected": "普通隐藏 tab 正文/代码仍公开，链接仍为 CommonMark link",
+      "actual": "新包90份 Markdown 与首轮逐字一致；EN/ZH 首页各2 code blocks、Agents各4 code blocks；独立 AST markers 和链接通过。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.mjs"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C15",
+      "title": "当前默认包的可操作组件排除",
+      "status": "pass",
+      "expected": "关闭功能的控件和请求实现不进入公开可用路径",
+      "actual": "新包450个 JS 文件按三种引号扫描无关闭组件 marker；实际 optional chunk 控件导出为 null，无相关请求实现；纯 Zod schema 残留已在源码与交接准确披露，V-O01关闭。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/assets/optional-features-DSdgCaRN.js"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C16",
+      "title": "bundle 防残留门禁",
+      "status": "pass",
+      "expected": "关闭组件残留时应阻断，不受压缩字符串语法影响",
+      "actual": "V-F03关闭：实际gate的24个key/value引号与单项on组合通过；4个前缀/插值/不配对定界符反例不误报。单引号key及不配对引号由本轮独立探针补验。仍仅为完整静态marker检测，不声称任意JS语义分析。",
+      "environment": "实际导入 gate 函数的离线反例；当前产物未发现可操作组件泄漏",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/public-visibility-contract.mjs",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/test/public-visibility-contract.test.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C17",
+      "title": "文档与恢复/回滚步骤",
+      "status": "pass",
+      "expected": "v4.2 原计划/review 同步；完整重建；外部依赖明确",
+      "actual": "既有 v4.2 计划/review 和完整恢复/回滚流程保留；修复交接明确旧FAIL与新CI边界，V-O01声明收窄；本轮发现的真实/start漏项及on浏览器断言另列失败，不以文档声称修复覆盖。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/2026-10-16-website-scope-cut-v4.2.md",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/website-scope-v4.2/review.html",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/website-v4.2-visibility-delivery.md",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/website-visibility-round1-fixes.md"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C18",
+      "title": "既有默认路径回归",
+      "status": "pass",
+      "expected": "mailto/topic=bundle/Discord、dashboard、可信 return_to、导航 query/retry/menu 修复保留",
+      "actual": "新CI中既有 mailto/topic=bundle/Discord、默认dashboard/可信return_to、query/retry/menu回归通过；认证业务核心无diff。独立 Contact 字段/SSR检查通过；真实/start的遗漏单列V-C12。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/public-browser-results.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/git-evidence.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-artifact-check.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C19",
+      "title": "提交范围与构建独立性",
+      "status": "pass",
+      "expected": "分批提交、不改 v4.1，正式构建不依赖未跟踪视觉原型",
+      "actual": "五个新增commits；tracked tree clean；v4.1/publication/正式build依赖链无新增diff；正式构建仍不依赖未跟踪视觉原型。首轮原始FAIL归档保真。",
+      "environment": "本地只读源码审查 + 独立下载 CI 产物离线核验",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/git-evidence.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/package.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/website-scope-v4.2/README.md"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C20",
+      "title": "on 配置完整生产 build/browser",
+      "status": "not-run",
+      "expected": "正式开放前针对实际配置验证整包",
+      "actual": "完整生产构建和browser仍只覆盖默认off；on fixtures不等于on完整包。本轮另静态证实 enabled help-desk 浏览器分支的期望已过期，见V-C27；没有执行on浏览器运行。",
+      "environment": "未执行；用户限制不追加本地全量构建/浏览器矩阵；本轮 fixture 接线范围内不作为外部上线证明",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/ci-job.log",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/test/public-visibility.test.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C21",
+      "title": "整包 HTML/JS 混装浏览器场景",
+      "status": "not-run",
+      "expected": "正式发布时完整包一致，浏览器 fail-closed",
+      "actual": "新源码实际boundary函数仍拒绝不同target，CI覆盖不同endpoint；未执行整包替换JS的browser测试，不以纯函数证据代替E2E。",
+      "environment": "未执行；独立静态/函数证据另列 V-C13",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/public-site/configuration-boundary.test.ts"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C22",
+      "title": "真实 Newsletter / 公共 Chat / Status",
+      "status": "blocked",
+      "expected": "服务与运营依赖完成独立验收后开放",
+      "actual": "未提供真实端点/状态地址及完整验收记录；仅 fixtures；保持关闭。非本轮代码失败原因。",
+      "environment": "外部服务/负责人验收依赖；无外部调用",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/website-v4.2-visibility-delivery.md"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C23",
+      "title": "方案完整真实任务",
+      "status": "blocked",
+      "expected": "配置/授权/任务成功后才可将该 slug 开放",
+      "actual": "无九方案任一真实端到端任务验收证据；TG 已连接/登录成功不算方案完成。邀请码缺陷本身仍需修复，见 V-F02。",
+      "environment": "外部业务验收依赖；无真实任务执行",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/2026-10-16-website-scope-cut-v4.2.md"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C24",
+      "title": "部署与真实账号/OAuth/MFA",
+      "status": "not-run",
+      "expected": "独立发布授权及目标环境验收",
+      "actual": "未部署、未连接真实账号/OAuth/MFA会话，未启停服务、未访问4180或IAB；本地验收地址交由主对话按约定另行处理。",
+      "environment": "明确不在本轮范围",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/git-evidence.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C25",
+      "title": "真实性能及 field CWV",
+      "status": "not-run",
+      "expected": "可比较测量与真实访问数据",
+      "actual": "仅 /security 单次 reduced-motion CI lab：CLS 1.5217294424109988，LCP 116ms，73 resources；不判性能通过，也不判本增量回归，field CWV未测。",
+      "environment": "单次 CI lab 已记录；field CWV/受控性能对照未执行",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/release/dist/public-lab.json"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "check_id": "V-C26",
+      "title": "候选文章发布批准",
+      "status": "blocked",
+      "expected": "内容负责人确认后才更新 publication",
+      "actual": "本轮未批准任何候选文章；既有批准集及索引策略保留。",
+      "environment": "外部内容审批依赖；不阻塞本轮保留旧策略",
+      "evidence": [
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/content/publication.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/2026-10-16-website-scope-cut-v4.2.md"
+      ],
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95"
+    },
+    {
+      "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+      "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+      "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+      "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+      "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+      "check_id": "V-C27",
+      "title": "开启方案后的浏览器断言契约",
+      "status": "fail",
+      "expected": "on 分支断言与修复后的 /login?return_to=<target> 链接契约一致",
+      "actual": "V-F04：public-site.spec.ts:94 仍要求原始 /assistant 或 /dashboard target；实际CTA pathname固定/login，合法配置下二者不能相等。默认off CI走else，未覆盖此分支。",
+      "environment": "静态源核对 + 从测试提取的实际expected表达式与真实URL builder值比较；未运行on浏览器",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/e2e-public/public-site.spec.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-activation.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/verify-public-build.mjs"
+      ]
+    }
+  ]
+}

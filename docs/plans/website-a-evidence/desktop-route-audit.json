@@ -1,0 +1,452 @@
+[
+  {
+    "path": "/",
+    "language": "en",
+    "heading": "AI that does more\nthan chat.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/nyxbot",
+    "language": "en",
+    "heading": "Just ask.\nNyxBot handles it.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions",
+    "language": "en",
+    "heading": "What should your assistant do?",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/how-it-works",
+    "language": "en",
+    "heading": "How NyxID connects AI\nto your world, safely.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/security",
+    "language": "en",
+    "heading": "Your passwords never\nreach the AI.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/agents",
+    "language": "en",
+    "heading": "Already use an AI agent?\nPlug it into NyxID.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/pricing",
+    "language": "en",
+    "heading": "Platform prices.\nNo markup.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/integrations",
+    "language": "en",
+    "heading": "Connect the tools\nyou already use.",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog",
+    "language": "en",
+    "heading": "Guides, stories & updates",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/contact",
+    "language": "en",
+    "heading": "Talk to us",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/restaurant-manager",
+    "language": "en",
+    "heading": "Restaurant manager",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/help-desk",
+    "language": "en",
+    "heading": "24-hour help desk",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/appointment-booker",
+    "language": "en",
+    "heading": "Appointment booker",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/callback-queue",
+    "language": "en",
+    "heading": "Callback queue",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/stock-analyst",
+    "language": "en",
+    "heading": "Stock analyst",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/news-aggregator",
+    "language": "en",
+    "heading": "News aggregator",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/desk-researcher",
+    "language": "en",
+    "heading": "Desk researcher",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/x-lead-catcher",
+    "language": "en",
+    "heading": "X lead catcher",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/back-office-clerk",
+    "language": "en",
+    "heading": "Back-office clerk",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/what-is-nyxid",
+    "language": "en",
+    "heading": "What is an “agent gateway”? A plain-English guide for business owners",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/luna-bistro",
+    "language": "en",
+    "heading": "How a 40-seat bistro stopped missing late-night bookings",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/never-share-passwords",
+    "language": "en",
+    "heading": "Why your AI should never see your passwords",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/five-jobs",
+    "language": "en",
+    "heading": "Five repetitive jobs to hand off to an AI this month",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/scoped-keys",
+    "language": "en",
+    "heading": "Scoped keys: give agents only what they need",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/x-dms-live",
+    "language": "en",
+    "heading": "Product update: X (Twitter) DMs are live",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/",
+    "language": "zh",
+    "heading": "不止会聊天的\nAI。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/nyxbot",
+    "language": "zh",
+    "heading": "直接开口，\nNyxBot 来办。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions",
+    "language": "zh",
+    "heading": "你的助手要做什么？",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/how-it-works",
+    "language": "zh",
+    "heading": "NyxID 如何把 AI\n安全地连接到你的世界",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/security",
+    "language": "zh",
+    "heading": "你的密码，\n永远不会交给 AI。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/agents",
+    "language": "zh",
+    "heading": "已经在用 AI 智能体？\n把它接入 NyxID。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/pricing",
+    "language": "zh",
+    "heading": "平台原价，\n零加价。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/integrations",
+    "language": "zh",
+    "heading": "连接你\n已经在用的工具。",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog",
+    "language": "zh",
+    "heading": "指南、故事与更新",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/contact",
+    "language": "zh",
+    "heading": "联系我们",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/restaurant-manager",
+    "language": "zh",
+    "heading": "餐厅经理",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/help-desk",
+    "language": "zh",
+    "heading": "24 小时客服",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/appointment-booker",
+    "language": "zh",
+    "heading": "预约助手",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/callback-queue",
+    "language": "zh",
+    "heading": "回访队列",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/stock-analyst",
+    "language": "zh",
+    "heading": "股票分析师",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/news-aggregator",
+    "language": "zh",
+    "heading": "新闻聚合",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/desk-researcher",
+    "language": "zh",
+    "heading": "案头研究员",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/x-lead-catcher",
+    "language": "zh",
+    "heading": "X 线索捕手",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/solutions/back-office-clerk",
+    "language": "zh",
+    "heading": "后台文员",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/what-is-nyxid",
+    "language": "zh",
+    "heading": "什么是“智能体网关”？写给企业主的通俗指南",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/luna-bistro",
+    "language": "zh",
+    "heading": "一家 40 座小酒馆如何不再错过深夜订位",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/never-share-passwords",
+    "language": "zh",
+    "heading": "为什么你的 AI 永远不该看到你的密码",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/five-jobs",
+    "language": "zh",
+    "heading": "本月就可以交给 AI 的五项重复工作",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/scoped-keys",
+    "language": "zh",
+    "heading": "限权密钥：只给智能体它需要的权限",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  },
+  {
+    "path": "/blog/x-dms-live",
+    "language": "zh",
+    "heading": "产品更新：X（推特）私信已上线",
+    "iframes": 0,
+    "main": true,
+    "scrollWidth": 1272,
+    "width": 1280
+  }
+]

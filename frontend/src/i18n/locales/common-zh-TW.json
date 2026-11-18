@@ -1,6 +1,11 @@
 {
   "Couldn't reach NyxID. Check your connection and try again.": "無法連線至 NyxID。請檢查網路連線後再試。",
   "Generate new code": "產生新驗證碼",
+  "Loading NyxID…": "正在載入 NyxID…",
+  "NyxID home": "NyxID 首頁",
+  "Page unavailable": "頁面暫不可用",
+  "Please retry loading this page.": "請重試載入此頁面。",
+  "Retry": "重試",
   "in a moment": "即將",
   "in {{count}}d": "{{count}} 天後",
   "in {{count}}h": "{{count}} 小時後",

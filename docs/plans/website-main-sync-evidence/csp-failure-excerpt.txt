@@ -1,0 +1,38 @@
+Source: a8ad970f6046fd480a2502eb11106ea62cafc40c
+Run: https://github.com/aelf-hzz780/NyxID/actions/runs/39714990135
+Job: 119615139347
+Browser result: 9 passed / 1 failed before the strict-CSP SSG fix.
+
+1) e2e-public/public-site.spec.ts:24:1 › hydrates, keeps shell during a delayed route chunk and supports history and locale URLs
+2026-10-22T03:15:03.1254000Z
+2026-10-22T03:15:03.1254285Z     Error: expect(received).toEqual(expected) // deep equality
+2026-10-22T03:15:03.1254617Z
+2026-10-22T03:15:03.1254762Z     - Expected  -  1
+2026-10-22T03:15:03.1255046Z     + Received  + 14
+2026-10-22T03:15:03.1255205Z
+2026-10-22T03:15:03.1255313Z     - Array []
+2026-10-22T03:15:03.1255553Z     + Array [
+2026-10-22T03:15:03.1257902Z     +   "Executing inline script violates the following Content Security Policy directive 'script-src 'self' https://connect.facebook.net https://telegram.org/js/telegram-widget.js https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v2.1.4/dist/'. Either the 'unsafe-inline' keyword, a hash ('sha256-QYrBV4X03qjdBYnBfkhJZFYS3InhclmIm1hmdwILCaw='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.",
+2026-10-22T03:15:03.1260963Z     +   "[public-hydration] Error: Minified React error #418; visit https://react.dev/errors/418?args[]=HTML&args[]= for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+2026-10-22T03:15:03.1262391Z     +     at Ji (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:31211)
+2026-10-22T03:15:03.1263026Z     +     at Zi (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:32545)
+2026-10-22T03:15:03.1263632Z     +     at Uc (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:87850)
+2026-10-22T03:15:03.1264256Z     +     at Iu (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:116295)
+2026-10-22T03:15:03.1264887Z     +     at Nu (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:115568)
+2026-10-22T03:15:03.1265487Z     +     at Au (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:114590)
+2026-10-22T03:15:03.1266085Z     +     at ku (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:114429)
+2026-10-22T03:15:03.1267096Z     +     at _u (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:110950)
+2026-10-22T03:15:03.1267654Z     +     at ud (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:122915)
+2026-10-22T03:15:03.1268240Z     +     at ad (http://127.0.0.1:4188/assets/vendor-react-DxtVVckt.js:8:121479)",
+2026-10-22T03:15:03.1268625Z     + ]
+2026-10-22T03:15:03.1268749Z
+2026-10-22T03:15:03.1268908Z       73 |   await page.goForward();
+2026-10-22T03:15:03.1269340Z       74 |   await expect(page).toHaveURL(/\/zh\/security\?/);
+2026-10-22T03:15:03.1269971Z     > 75 |   expect(errors.filter((e) => !/401|Failed to load resource/.test(e))).toEqual(
+2026-10-22T03:15:03.1270579Z          |                                                                        ^
+2026-10-22T03:15:03.1270995Z       76 |     [],
+2026-10-22T03:15:03.1271220Z       77 |   );
+2026-10-22T03:15:03.1271432Z       78 | });
+2026-10-22T03:15:03.1272044Z         at /home/runner/work/NyxID/NyxID/frontend/e2e-public/public-site.spec.ts:75:72
+2026-10-22T03:15:03.1272422Z
+2026-10-22T03:15:03.1272918Z

@@ -1,0 +1,10 @@
+✔ generator fixes every primary gradient including mock hover and preserves secondary borders (2.404584ms)
+✔ committed public CSS has no later primary-gradient shorthand resetting paint bounds (6.86825ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 80.217042

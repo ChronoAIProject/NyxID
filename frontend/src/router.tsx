@@ -1,3 +1,4 @@
+import { solutionStartHref } from "./features/website-a/auth-links";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -153,9 +154,7 @@ import {
   OrgServiceAccountDetailPage,
   OrgDeveloperAppDetailPage,
   OrgJoinPage,
-  BlogIndexPage,
   BlogDetailPage,
-  BlogPreviewPage,
   DesignSystemPage,
   DocsIndexPage,
   DocsPage,
@@ -300,6 +299,69 @@ const termsRoute = createRoute({
   component: TermsPage,
 });
 
+const website0Route = createRoute({
+  path: "/nyxbot",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website1Route = createRoute({
+  path: "/solutions",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website2Route = createRoute({
+  path: "/solutions/$slug",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website3Route = createRoute({
+  path: "/how-it-works",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website4Route = createRoute({
+  path: "/security",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website5Route = createRoute({
+  path: "/agents",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website6Route = createRoute({
+  path: "/integrations",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website7Route = createRoute({
+  path: "/pricing",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website8Route = createRoute({
+  path: "/contact",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const legacyStartRoute = createRoute({
+  path: "/start",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    window.location.replace(solutionStartHref(window.location.search));
+  },
+  component: () => null,
+});
+
 const dataDeletionRoute = createRoute({
   path: "/data-deletion",
   getParentRoute: () => rootRoute,
@@ -309,7 +371,7 @@ const dataDeletionRoute = createRoute({
 const blogIndexRoute = createRoute({
   path: "/blog",
   getParentRoute: () => rootRoute,
-  component: BlogIndexPage,
+  component: LandingPage,
 });
 
 const blogDetailRoute = createRoute({
@@ -321,7 +383,7 @@ const blogDetailRoute = createRoute({
 const blogPreviewRoute = createRoute({
   path: "/preview/$id",
   getParentRoute: () => rootRoute,
-  component: BlogPreviewPage,
+  component: AppNotFound,
 });
 
 const docsIndexRoute = createRoute({
@@ -515,7 +577,7 @@ const landingRoute = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      throw redirect({ to: "/assistant" });
+      throw redirect({ to: "/dashboard" });
     }
   },
   component: LandingPage,
@@ -1285,6 +1347,16 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  legacyStartRoute,
+  website0Route,
+  website1Route,
+  website2Route,
+  website3Route,
+  website4Route,
+  website5Route,
+  website6Route,
+  website7Route,
+  website8Route,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

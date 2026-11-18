@@ -1,0 +1,15 @@
+{
+  "upstream_commit": "496968c4117e21278f13917201b7d615bc5e7450",
+  "approved_input_hash_matches": {
+    "GradientText.tsx": true,
+    "LICENSE.md": true,
+    "SpecularButton.tsx": true,
+    "GradientText.css": true,
+    "FadeContent.tsx": true,
+    "SpecularButton.css": true,
+    "SpotlightCard.css": true,
+    "SpotlightCard.tsx": true
+  },
+  "baseline": "5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33",
+  "candidate": "a620057104bf31b4e55be85244ea6ba29146e7ca7ecaa549c988e499aafc4d47"
+}

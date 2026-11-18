@@ -1,0 +1,9 @@
+2026-10-20T11:42:53.3031270Z  Test Files  23 passed (23)
+2026-10-20T11:42:53.3032424Z       Tests  176 passed (176)
+2026-10-20T11:44:06.4745169Z Public artifact gate passed: 90 pages.
+2026-10-20T11:44:11.6789503Z Public HTTP gate passed: 219 serial checks.
+2026-10-20T11:44:11.7265229Z Public log privacy gate passed: request and referrer queries omitted.
+2026-10-20T11:44:34.5352371Z Running 8 tests using 1 worker
+2026-10-20T11:44:50.0552812Z   8 passed (15.7s)
+2026-10-20T11:44:52.2507740Z SHA256 digest of uploaded artifact zip is 972d31a4978ea5ea2b9e1ac9a011b066bf2a606bf7a65aa7c8a922661f2ea10d
+2026-10-20T11:44:52.4994225Z Artifact download URL: https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393/artifacts/12261168854

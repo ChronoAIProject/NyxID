@@ -1,0 +1,9 @@
+2026-10-21T10:10:10.3692405Z  Test Files  31 passed (31)
+2026-10-21T10:10:10.3694706Z       Tests  241 passed (241)
+2026-10-21T10:11:22.4316906Z Public render: 90 canonical HTML pages; matching Markdown, llms and sitemap written.
+2026-10-21T10:11:32.2292992Z Public artifact gate passed: 90 pages.
+2026-10-21T10:11:36.8002642Z Public HTTP gate passed: 219 serial checks.
+2026-10-21T10:11:36.8579672Z Public log privacy gate passed: request and referrer queries omitted.
+2026-10-21T10:12:03.9596218Z Running 10 tests using 1 worker
+2026-10-21T10:12:22.3922626Z   10 passed (18.6s)
+2026-10-21T10:12:24.0550482Z SHA256 digest of uploaded artifact zip is 1e86ffc0fdc0f38699622de5734d1ca5e49a5bccf8bc9c7c424f5efbdbf9354c

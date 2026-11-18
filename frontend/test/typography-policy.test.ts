@@ -29,6 +29,13 @@ describe("typography policy", () => {
   it("keeps source tokens canonical and role consumers scalable", () => {
     expect(sourceViolations).toEqual([]);
   });
+  it("keeps public website typography independent while auditing docs", () => {
+    const source = '<h1 className="text-3xl font-bold" style={{fontSize:36}}>Public title</h1>';
+    expect(typographyViolations("features/website-a/generated/en/HomePage.tsx", source)).toEqual([]);
+    expect(typographyViolations("features/website-a/website-a.css", '.hero {font-size:36px;line-height:1.2;font-weight:700}')).toEqual([]);
+    expect(typographyViolations("features/public-site/public-document.tsx", source)).not.toEqual([]);
+    expect(typographyViolations("features/docs/docs-layout-view.tsx", source)).not.toEqual([]);
+  });
   it("every role owns size, weight and its line box in one shared utility", () => {
     const roles = postcss.parse(readFileSync("src/typography.css", "utf8"));
     const found = new Map<string, Record<string, string>>();

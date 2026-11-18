@@ -1,0 +1,9 @@
+Source: https://github.com/aelf-hzz780/NyxID/actions/runs/39409952720
+2026-10-20T10:44:18.2914380Z  Test Files  15 passed (15)
+2026-10-20T10:44:18.2919012Z       Tests  125 passed (125)
+2026-10-20T10:45:18.7666777Z Public artifact gate passed: 90 pages.
+2026-10-20T10:45:18.7668079Z Public release proof: {"sourceCommit":"5fc812e9df18da1d1c2b9538535c6c4f57840813","contentRevision":"d8f61ba7e05cb45364432358dbd46255749a78d2c96368c5191994cb6021f825","pages":90,"status":"pass"}
+2026-10-20T10:45:25.1112586Z Public HTTP gate passed: 219 serial checks.
+2026-10-20T10:45:25.1566182Z Public log privacy gate passed: request and referrer queries omitted.
+2026-10-20T10:46:31.0058165Z   5 passed (40.0s)
+2026-10-20T10:46:32.6300240Z Artifact download URL: https://github.com/aelf-hzz780/NyxID/actions/runs/39409952720/artifacts/12259545591

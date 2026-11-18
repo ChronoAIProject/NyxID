@@ -1,0 +1,186 @@
+{
+  "desktop": {
+    "animation": "none",
+    "cards": [
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Notion",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Slack",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "GitHub",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Linear",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Google Sheets",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Gmail",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Google Calendar",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Google Drive",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Asana",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Box",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Jira",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Zoom",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Dropbox",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "HubSpot",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "ClickUp",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Google Docs",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Airtable",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Microsoft Outlook (Mail & Calendar)",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Stripe",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Microsoft OneDrive",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Calendly",
+        "width": 175.671875
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Figma",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Microsoft Teams",
+        "width": 175.6640625
+      },
+      {
+        "height": 58,
+        "padding": "12px 14px",
+        "radius": "12px",
+        "text": "Intercom",
+        "width": 175.671875
+      }
+    ],
+    "columns": "175.664px 175.664px 175.672px 175.664px 175.664px 175.672px",
+    "gap": "10px",
+    "transform": "none"
+  },
+  "mobile_attempt": {
+    "status": "blocked",
+    "requested_width": 390,
+    "requested_height": 844,
+    "actual_width": 1280,
+    "actual_height": 720,
+    "reason": "Documented browser viewport.set returned success without changing the actual page viewport, across existing and new tabs. No alternate browser surface available."
+  }
+}

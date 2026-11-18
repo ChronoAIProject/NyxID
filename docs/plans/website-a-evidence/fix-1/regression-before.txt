@@ -1,0 +1,12 @@
+Before fixing A-01 and A-02, with the new generated contract tests:
+ FAIL  src/features/website-a/generated-contract.test.tsx > generated en website > offers a real login link inside the expanded menu with the full auth query
+TestingLibraryElementError: Unable to find an accessible element with the role "link" and name "Log in"
+ FAIL  src/features/website-a/generated-contract.test.tsx > generated en website > retains the custom solution CTA and its NyxBot destination
+TestingLibraryElementError: Unable to find an accessible element with the role "link" and name `/Ask NyxBot/`
+ FAIL  src/features/website-a/generated-contract.test.tsx > generated zh website > offers a real login link inside the expanded menu with the full auth query
+TestingLibraryElementError: Unable to find an accessible element with the role "link" and name "登录"
+ FAIL  src/features/website-a/generated-contract.test.tsx > generated zh website > retains the custom solution CTA and its NyxBot destination
+TestingLibraryElementError: Unable to find an accessible element with the role "link" and name `/交给 NyxBot/`
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+   Start at  18:27:56

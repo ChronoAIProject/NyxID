@@ -1,0 +1,106 @@
+{
+  "demos": [
+    {
+      "label": "Take bookings on Telegram",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Take table bookings for my bistro on Telegram. Never cancel without asking me."
+        },
+        {
+          "kind": "out",
+          "text": "On it. I’ve created a Restaurant manager with Telegram, Google Calendar and your guest sheet. Cancellations come to you first."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ specialist created · Restaurant manager"
+        },
+        {
+          "kind": "tool",
+          "text": "🔗 Secure sign-in link · Google Calendar"
+        },
+        {
+          "kind": "out",
+          "text": "Connect your calendar and it’s live. Want a booking summary every morning at 8?"
+        }
+      ],
+      "active": 0
+    },
+    {
+      "label": "Send me a morning brief",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Every weekday at 8, send me AI and fintech news. No duplicates."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ schedule created · weekdays 8:00"
+        },
+        {
+          "kind": "out",
+          "text": "Done. A News aggregator now reads Firecrawl, X and Tavily, read-only. First brief tomorrow at 8."
+        }
+      ],
+      "active": 1
+    },
+    {
+      "label": "Reorder from my supplier",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Reorder tomatoes from Fresh Farms when we drop below 3 cases."
+        },
+        {
+          "kind": "out",
+          "text": "Fresh Farms has no API, so I’ll use the browser on your Mac mini with your saved login. I’ll ask before placing any order."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ machine · Mac mini · browser on"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ rule · stock below 3 cases"
+        }
+      ],
+      "active": 2
+    },
+    {
+      "label": "Call back today’s leads",
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Call everyone in the “Leads” sheet today and log what they said."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ Callback queue · 9 people"
+        },
+        {
+          "kind": "out",
+          "text": "Starting at 10 AM through Twilio. Discounts need your OK; I’ll message you here."
+        }
+      ],
+      "active": 3
+    }
+  ],
+  "agents": [
+    {
+      "name": "Restaurant manager",
+      "icon": "rest"
+    },
+    {
+      "name": "News aggregator",
+      "icon": "news"
+    },
+    {
+      "name": "Back-office clerk",
+      "icon": "monitor"
+    },
+    {
+      "name": "Callback queue",
+      "icon": "phone"
+    }
+  ]
+}

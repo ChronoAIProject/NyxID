@@ -1,0 +1,727 @@
+[
+  {
+    "name": "notion",
+    "cat": "0",
+    "available": "1"
+  },
+  {
+    "name": "slack",
+    "cat": "1",
+    "available": "1"
+  },
+  {
+    "name": "github",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "linear",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "google sheets",
+    "cat": "3",
+    "available": "1"
+  },
+  {
+    "name": "gmail",
+    "cat": "4",
+    "available": "1"
+  },
+  {
+    "name": "google calendar",
+    "cat": "5",
+    "available": "1"
+  },
+  {
+    "name": "google drive",
+    "cat": "6",
+    "available": "1"
+  },
+  {
+    "name": "asana",
+    "cat": "7",
+    "available": "1"
+  },
+  {
+    "name": "box",
+    "cat": "6",
+    "available": "1"
+  },
+  {
+    "name": "salesforce",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "jira",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "zoom",
+    "cat": "9",
+    "available": "1"
+  },
+  {
+    "name": "dropbox",
+    "cat": "6",
+    "available": "1"
+  },
+  {
+    "name": "hubspot",
+    "cat": "8",
+    "available": "1"
+  },
+  {
+    "name": "clickup",
+    "cat": "7",
+    "available": "1"
+  },
+  {
+    "name": "zendesk",
+    "cat": "10",
+    "available": "0"
+  },
+  {
+    "name": "google docs",
+    "cat": "0",
+    "available": "1"
+  },
+  {
+    "name": "trello",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "confluence",
+    "cat": "0",
+    "available": "0"
+  },
+  {
+    "name": "airtable",
+    "cat": "3",
+    "available": "1"
+  },
+  {
+    "name": "microsoft outlook (mail & calendar)",
+    "cat": "4",
+    "available": "1"
+  },
+  {
+    "name": "stripe",
+    "cat": "11",
+    "available": "1"
+  },
+  {
+    "name": "microsoft onedrive",
+    "cat": "6",
+    "available": "1"
+  },
+  {
+    "name": "calendly",
+    "cat": "5",
+    "available": "1"
+  },
+  {
+    "name": "figma",
+    "cat": "12",
+    "available": "1"
+  },
+  {
+    "name": "microsoft teams",
+    "cat": "1",
+    "available": "1"
+  },
+  {
+    "name": "monday.com",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "intercom",
+    "cat": "10",
+    "available": "1"
+  },
+  {
+    "name": "shopify",
+    "cat": "13",
+    "available": "0"
+  },
+  {
+    "name": "google slides",
+    "cat": "0",
+    "available": "1"
+  },
+  {
+    "name": "quickbooks online",
+    "cat": "14",
+    "available": "0"
+  },
+  {
+    "name": "supabase",
+    "cat": "3",
+    "available": "1"
+  },
+  {
+    "name": "todoist",
+    "cat": "7",
+    "available": "1"
+  },
+  {
+    "name": "gitlab",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "microsoft sharepoint",
+    "cat": "6",
+    "available": "1"
+  },
+  {
+    "name": "youtube",
+    "cat": "15",
+    "available": "1"
+  },
+  {
+    "name": "microsoft excel",
+    "cat": "3",
+    "available": "1"
+  },
+  {
+    "name": "mailchimp",
+    "cat": "16",
+    "available": "0"
+  },
+  {
+    "name": "canva",
+    "cat": "12",
+    "available": "0"
+  },
+  {
+    "name": "reddit",
+    "cat": "17",
+    "available": "1"
+  },
+  {
+    "name": "bitbucket",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "typeform",
+    "cat": "18",
+    "available": "0"
+  },
+  {
+    "name": "google tasks",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "harvest",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "linkedin",
+    "cat": "17",
+    "available": "1"
+  },
+  {
+    "name": "vercel",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "wrike",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "sentry",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "pipedrive",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "pagerduty",
+    "cat": "19",
+    "available": "1"
+  },
+  {
+    "name": "snowflake",
+    "cat": "3",
+    "available": "0"
+  },
+  {
+    "name": "facebook pages",
+    "cat": "17",
+    "available": "1"
+  },
+  {
+    "name": "azure devops",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "basecamp",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "pinterest",
+    "cat": "17",
+    "available": "0"
+  },
+  {
+    "name": "posthog",
+    "cat": "20",
+    "available": "1"
+  },
+  {
+    "name": "netlify",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "zoho mail",
+    "cat": "4",
+    "available": "0"
+  },
+  {
+    "name": "google meet",
+    "cat": "9",
+    "available": "0"
+  },
+  {
+    "name": "square",
+    "cat": "11",
+    "available": "1"
+  },
+  {
+    "name": "webex",
+    "cat": "9",
+    "available": "0"
+  },
+  {
+    "name": "dialpad",
+    "cat": "1",
+    "available": "1"
+  },
+  {
+    "name": "x (twitter)",
+    "cat": "17",
+    "available": "1"
+  },
+  {
+    "name": "attio",
+    "cat": "8",
+    "available": "1"
+  },
+  {
+    "name": "productboard",
+    "cat": "7",
+    "available": "1"
+  },
+  {
+    "name": "fathom",
+    "cat": "9",
+    "available": "0"
+  },
+  {
+    "name": "servicenow",
+    "cat": "21",
+    "available": "0"
+  },
+  {
+    "name": "google analytics",
+    "cat": "20",
+    "available": "0"
+  },
+  {
+    "name": "webflow",
+    "cat": "22",
+    "available": "0"
+  },
+  {
+    "name": "ticktick",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "cal.com",
+    "cat": "5",
+    "available": "0"
+  },
+  {
+    "name": "front",
+    "cat": "10",
+    "available": "0"
+  },
+  {
+    "name": "whatsapp business",
+    "cat": "1",
+    "available": "0"
+  },
+  {
+    "name": "gong",
+    "cat": "9",
+    "available": "0"
+  },
+  {
+    "name": "google contacts",
+    "cat": "4",
+    "available": "0"
+  },
+  {
+    "name": "klaviyo",
+    "cat": "16",
+    "available": "0"
+  },
+  {
+    "name": "railway",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "microsoft dynamics 365",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "egnyte",
+    "cat": "6",
+    "available": "0"
+  },
+  {
+    "name": "gorgias",
+    "cat": "10",
+    "available": "0"
+  },
+  {
+    "name": "close",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "smartsheet",
+    "cat": "3",
+    "available": "0"
+  },
+  {
+    "name": "zoho books",
+    "cat": "14",
+    "available": "0"
+  },
+  {
+    "name": "help scout",
+    "cat": "10",
+    "available": "0"
+  },
+  {
+    "name": "zoho desk",
+    "cat": "10",
+    "available": "0"
+  },
+  {
+    "name": "cloudflare",
+    "cat": "21",
+    "available": "1"
+  },
+  {
+    "name": "xero",
+    "cat": "14",
+    "available": "0"
+  },
+  {
+    "name": "google search console",
+    "cat": "20",
+    "available": "0"
+  },
+  {
+    "name": "apollo",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "launchdarkly",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "microsoft onenote",
+    "cat": "0",
+    "available": "1"
+  },
+  {
+    "name": "mural",
+    "cat": "12",
+    "available": "0"
+  },
+  {
+    "name": "discord",
+    "cat": "1",
+    "available": "1"
+  },
+  {
+    "name": "paypal",
+    "cat": "11",
+    "available": "0"
+  },
+  {
+    "name": "greenhouse",
+    "cat": "23",
+    "available": "0"
+  },
+  {
+    "name": "google bigquery",
+    "cat": "3",
+    "available": "1"
+  },
+  {
+    "name": "digitalocean",
+    "cat": "21",
+    "available": "0"
+  },
+  {
+    "name": "hugging face",
+    "cat": "24",
+    "available": "0"
+  },
+  {
+    "name": "docusign",
+    "cat": "25",
+    "available": "0"
+  },
+  {
+    "name": "contentful",
+    "cat": "22",
+    "available": "0"
+  },
+  {
+    "name": "freshbooks",
+    "cat": "14",
+    "available": "0"
+  },
+  {
+    "name": "wordpress.com",
+    "cat": "22",
+    "available": "0"
+  },
+  {
+    "name": "microsoft to do",
+    "cat": "7",
+    "available": "1"
+  },
+  {
+    "name": "google chat",
+    "cat": "1",
+    "available": "0"
+  },
+  {
+    "name": "workday",
+    "cat": "23",
+    "available": "0"
+  },
+  {
+    "name": "stack exchange",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "google photos",
+    "cat": "6",
+    "available": "0"
+  },
+  {
+    "name": "google cloud pub/sub",
+    "cat": "21",
+    "available": "1"
+  },
+  {
+    "name": "tiktok ads",
+    "cat": "26",
+    "available": "0"
+  },
+  {
+    "name": "constant contact",
+    "cat": "16",
+    "available": "0"
+  },
+  {
+    "name": "miro",
+    "cat": "12",
+    "available": "1"
+  },
+  {
+    "name": "datadog",
+    "cat": "19",
+    "available": "0"
+  },
+  {
+    "name": "google ads",
+    "cat": "26",
+    "available": "0"
+  },
+  {
+    "name": "zoho crm",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "databricks",
+    "cat": "3",
+    "available": "0"
+  },
+  {
+    "name": "instagram",
+    "cat": "17",
+    "available": "1"
+  },
+  {
+    "name": "outline",
+    "cat": "0",
+    "available": "0"
+  },
+  {
+    "name": "vimeo",
+    "cat": "15",
+    "available": "0"
+  },
+  {
+    "name": "teamwork",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "eventbrite",
+    "cat": "27",
+    "available": "1"
+  },
+  {
+    "name": "microsoft intune",
+    "cat": "28",
+    "available": "0"
+  },
+  {
+    "name": "google forms",
+    "cat": "18",
+    "available": "0"
+  },
+  {
+    "name": "microsoft power bi",
+    "cat": "20",
+    "available": "0"
+  },
+  {
+    "name": "ringcentral",
+    "cat": "1",
+    "available": "0"
+  },
+  {
+    "name": "copper",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "timely",
+    "cat": "7",
+    "available": "0"
+  },
+  {
+    "name": "capsule crm",
+    "cat": "8",
+    "available": "1"
+  },
+  {
+    "name": "amplitude",
+    "cat": "20",
+    "available": "0"
+  },
+  {
+    "name": "dropbox sign",
+    "cat": "25",
+    "available": "0"
+  },
+  {
+    "name": "fireflies",
+    "cat": "9",
+    "available": "0"
+  },
+  {
+    "name": "zoom phone",
+    "cat": "1",
+    "available": "0"
+  },
+  {
+    "name": "snapchat",
+    "cat": "26",
+    "available": "0"
+  },
+  {
+    "name": "ramp",
+    "cat": "11",
+    "available": "0"
+  },
+  {
+    "name": "freeagent",
+    "cat": "14",
+    "available": "0"
+  },
+  {
+    "name": "crowdin",
+    "cat": "2",
+    "available": "1"
+  },
+  {
+    "name": "google cloud billing budgets",
+    "cat": "29",
+    "available": "1"
+  },
+  {
+    "name": "pandadoc",
+    "cat": "25",
+    "available": "0"
+  },
+  {
+    "name": "heroku",
+    "cat": "2",
+    "available": "0"
+  },
+  {
+    "name": "zeplin",
+    "cat": "12",
+    "available": "0"
+  },
+  {
+    "name": "brex",
+    "cat": "11",
+    "available": "0"
+  },
+  {
+    "name": "azure cost management",
+    "cat": "29",
+    "available": "0"
+  },
+  {
+    "name": "zoho bigin",
+    "cat": "8",
+    "available": "0"
+  },
+  {
+    "name": "roam hq (ro.am)",
+    "cat": "1",
+    "available": "0"
+  },
+  {
+    "name": "segment",
+    "cat": "20",
+    "available": "0"
+  }
+]

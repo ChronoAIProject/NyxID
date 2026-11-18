@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import ts from 'typescript';
 import postcss from 'postcss';
 
-// These routes do not mount useApplyTheme. Legal/docs/auth-layout/wizard ARE themed.
+// These routes do not mount useApplyTheme. Public website-a replaces landing and owns its typography. Legal/docs/auth-layout/wizard ARE themed.
 export const unthemed = new Set([
   'pages/cli-auth.tsx', 'pages/login-agent-key.tsx', 'pages/login-device.tsx',
   'pages/oauth-complete.tsx', 'pages/oauth-launching.tsx',
@@ -15,7 +15,7 @@ export const unthemed = new Set([
     'login-key-draft', 'login-permission-picker', 'login-request-preview',
   ].map(name => `components/auth/${name}.tsx`),
 ]);
-const excluded = file => /\.test\.|\.spec\.|\.d\.ts$/.test(file) || unthemed.has(file) || /^features\/(landing|blog)\//.test(file);
+const excluded = file => /\.test\.|\.spec\.|\.d\.ts$/.test(file) || unthemed.has(file) || /^features\/(landing|blog|website-a)\//.test(file);
 
 export function typographyViolations(file, source) {
   const errors = [];

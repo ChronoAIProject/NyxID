@@ -1,0 +1,57 @@
+.website-a .gradient-text {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  isolation: isolate;
+}
+
+.website-a .gradient-text--border {
+  padding: 0.35em 0.75em;
+  border-radius: 999px;
+}
+
+.website-a .gradient-text--border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: var(--gt-border);
+  border-radius: inherit;
+  background-image: var(--gt-gradient);
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+.website-a .gradient-text__inner {
+  position: relative;
+  display: inline-block;
+}
+
+.website-a .gradient-text__content {
+  display: inline-block;
+  background-image: var(--gt-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.website-a .gradient-text__glow {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--gt-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: blur(0.3em) saturate(1.4);
+  opacity: var(--gt-glow);
+  pointer-events: none;
+  user-select: none;
+}

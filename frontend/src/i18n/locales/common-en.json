@@ -1,6 +1,11 @@
 {
   "Couldn't reach NyxID. Check your connection and try again.": "Couldn't reach NyxID. Check your connection and try again.",
   "Generate new code": "Generate new code",
+  "Loading NyxID…": "Loading NyxID…",
+  "NyxID home": "NyxID home",
+  "Page unavailable": "Page unavailable",
+  "Please retry loading this page.": "Please retry loading this page.",
+  "Retry": "Retry",
   "in a moment": "in a moment",
   "in {{count}}d": "in {{count}}d",
   "in {{count}}h": "in {{count}}h",

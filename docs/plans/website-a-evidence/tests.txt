@@ -1,0 +1,12 @@
+
+> frontend@0.71.0 test
+> NODE_ENV=test vitest run src/features/website-a src/lib/public-paths.test.ts src/router.test.ts src/pages/login.test.tsx src/pages/register.test.tsx src/lib/return-url.test.ts src/features/docs
+
+
+ RUN  v4.1.4 /Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend
+
+
+ Test Files  10 passed (10)
+      Tests  85 passed (85)
+   Start at  17:55:07
+   Duration  3.61s (transform 3.86s, setup 5.00s, import 5.84s, tests 935ms, environment 5.96s)

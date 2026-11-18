@@ -1,0 +1,8 @@
+
+ RUN  v4.1.4 /Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend
+
+
+ Test Files  15 passed (15)
+      Tests  199 passed (199)
+   Start at  11:32:32
+   Duration  26.58s (transform 1.87s, setup 1.58s, import 1.92s, tests 20.04s, environment 1.81s)

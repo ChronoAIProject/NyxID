@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-10-21T09:41:16.337396+00:00",
+  "baseline": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+  "sourceCommit": "fd00726ec086ed5cf3d8ad19a20e88a00555a2b0",
+  "repository": "aelf-hzz780/NyxID",
+  "branch": "codex/website-a-delivery",
+  "workflowRun": "https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573",
+  "jobId": 119148848271,
+  "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39578181573/artifacts/12335496628",
+  "artifactDigest": "sha256:d0f0bc5adb532428f9022061a9a8b896540a3527d1fcd69d057d1917c57fad32",
+  "downloadedDigestVerified": true,
+  "contentRevision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+  "configRevision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+  "configuration": {
+    "blogMenu": false,
+    "newsletter": null,
+    "contactChat": null,
+    "footerStatus": null,
+    "solutions": {}
+  },
+  "visibility": {
+    "blogMenu": false,
+    "newsletter": false,
+    "contactChat": false,
+    "footerStatus": false,
+    "solutions": []
+  },
+  "checks": [
+    {
+      "id": "serial-tests",
+      "status": "pass",
+      "tests": 232,
+      "files": 30
+    },
+    {
+      "id": "complete-production-build",
+      "status": "pass",
+      "includes": "TypeScript, client, legal, public renderer, credential-accept"
+    },
+    {
+      "id": "public-artifact-gate",
+      "status": "pass",
+      "pages": 90,
+      "includes": [
+        "individual disabled feature code",
+        "effective configuration/content revisions",
+        "SSR configuration snapshot",
+        "optional markers and exact targets",
+        "unchanged article publication boundary"
+      ]
+    },
+    {
+      "id": "packaged-nginx-http",
+      "status": "pass",
+      "checks": 219
+    },
+    {
+      "id": "request/referrer-query-privacy",
+      "status": "pass"
+    },
+    {
+      "id": "single-worker-browser",
+      "status": "pass",
+      "startTime": "2026-10-21T09:37:48.883Z",
+      "duration": 13038.018,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  ],
+  "fixtures": "Enabled optional UI uses isolated unit/SSR HTTP response fixtures. No live newsletter/chat/status integration or solution task was performed.",
+  "localVerification": [
+    "serial unit/SSR/adapter regressions",
+    "TypeScript noEmit",
+    "deterministic source generation",
+    "deterministic original review generation; no screenshot recapture"
+  ],
+  "ciAttempts": [
+    {
+      "run": 39576950237,
+      "source": "46b3a5a78",
+      "status": "failure",
+      "reason": "Six earlier navigation assertions required Blog to remain visible; updated for latest menu-only scope and restored active/query context in 72500d639"
+    },
+    {
+      "run": 39577695134,
+      "source": "72500d639",
+      "status": "success"
+    },
+    {
+      "run": 39578181573,
+      "source": "fd00726ec086ed5cf3d8ad19a20e88a00555a2b0",
+      "status": "success"
+    }
+  ],
+  "lab": {
+    "kind": "lab",
+    "path": "/security",
+    "reducedMotion": true,
+    "fieldCwvStatus": "not-measured",
+    "resources": 73,
+    "transferBytes": 559843,
+    "decodedBytes": 1880574,
+    "lcp": 56,
+    "cls": 1.9513959385818906,
+    "limitations": "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion."
+  },
+  "labInterpretation": "Informational single CI sample only. High CLS remains a separate concern; no performance/field-CWV pass or regression conclusion.",
+  "notRun": [
+    "independent acceptance of this increment",
+    "live subscription confirmation/delivery/unsubscribe/abuse controls",
+    "live anonymous NyxBot quota/rate limiting",
+    "real public Status verification",
+    "real accepted solution task/configuration flow",
+    "new article/CMS publication",
+    "live OAuth provider integration",
+    "production deployment",
+    "field CWV"
+  ],
+  "preserved": [
+    "original fifteen commits",
+    "React/Vite/TanStack",
+    "dashboard/auth/trusted return_to",
+    "mailto no-JS protection, topic=bundle and Discord",
+    "Footer Blog and direct Blog/SEO policies",
+    "candidate article source and publication isolation",
+    "v4.1 inputs",
+    "existing services; no access to 4180"
+  ],
+  "excludedFromStaging": [
+    "docs/plans/website-scope-v4.2/visibility-review.html",
+    "docs/plans/website-scope-v4.2/source/build-visibility-review.py",
+    "docs/plans/website-scope-v4.2/visibility-evidence.json",
+    "other pre-existing untracked design/screenshot assets"
+  ]
+}

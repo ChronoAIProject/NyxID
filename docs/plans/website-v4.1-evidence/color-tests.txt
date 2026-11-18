@@ -1,0 +1,12 @@
+
+> frontend@0.71.0 test
+> NODE_ENV=test vitest run src/features/website-a/website-theme.test.tsx src/features/website-a/visuals/lifecycle.test.tsx
+
+
+ RUN  v4.1.4 /Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend
+
+
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+   Start at  10:42:34
+   Duration  1.23s (transform 389ms, setup 505ms, import 580ms, tests 499ms, environment 357ms)

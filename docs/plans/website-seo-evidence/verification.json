@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-10-20T10:46:32Z",
+  "checker": "implementation agent + isolated GitHub Actions",
+  "sourceCommit": "5fc812e9df18da1d1c2b9538535c6c4f57840813",
+  "contentRevision": "d8f61ba7e05cb45364432358dbd46255749a78d2c96368c5191994cb6021f825",
+  "repository": "aelf-hzz780/NyxID",
+  "branch": "codex/website-a-delivery",
+  "workflowRun": "https://github.com/aelf-hzz780/NyxID/actions/runs/39409952720",
+  "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39409952720/artifacts/12259545591",
+  "artifactDigest": "sha256:90b28b34272d467a24756c02f91f9741f2371f44bd83f1c89cf3a20300df7449",
+  "checks": [
+    {
+      "id": "unit-contracts",
+      "status": "pass",
+      "files": 15,
+      "tests": 125
+    },
+    {
+      "id": "production-build",
+      "status": "pass",
+      "includes": "TypeScript, client, legal, public renderer, credential-accept"
+    },
+    {
+      "id": "public-artifacts",
+      "status": "pass",
+      "canonicalPages": 90,
+      "evidence": "dist/public-validation.json"
+    },
+    {
+      "id": "packaged-nginx-http",
+      "status": "pass",
+      "checks": 219,
+      "evidence": "dist/public-http-validation.json"
+    },
+    {
+      "id": "access-log-query-privacy",
+      "status": "pass",
+      "evidence": "Nginx log probe for request and referrer queries"
+    },
+    {
+      "id": "browser",
+      "status": "pass",
+      "workers": 1,
+      "tests": 5,
+      "evidence": "dist/public-browser-results.json"
+    },
+    {
+      "id": "lab-resources",
+      "status": "pass",
+      "scope": "bounded CI snapshot only; not field CWV",
+      "evidence": "dist/public-lab.json"
+    },
+    {
+      "id": "independent-acceptance",
+      "status": "not-run"
+    },
+    {
+      "id": "live-oauth-provider",
+      "status": "not-run",
+      "note": "Authentication regression uses the CI backend fixture."
+    },
+    {
+      "id": "gsc-bing-ai-field-outcomes",
+      "status": "not-run"
+    }
+  ],
+  "constraints": {
+    "localFullBuild": false,
+    "localBrowser": false,
+    "existing4180Touched": false,
+    "merged": false,
+    "deployed": false,
+    "organizationPrCreated": false
+  },
+  "priorRuns": [
+    {
+      "run": 39407889647,
+      "source": "b70de2d0c",
+      "result": "failed correctly on legacy prototype article chunks"
+    },
+    {
+      "run": 39408320144,
+      "source": "697691449",
+      "result": "artifact gates passed; test Docker context excluded dist"
+    },
+    {
+      "run": 39408831115,
+      "source": "53f958465",
+      "result": "artifact and HTTP gates passed; browser exposed missing router SSR marker"
+    },
+    {
+      "run": 39409607036,
+      "source": "7aa338ad8",
+      "result": "all gates passed before the final access-log privacy change"
+    }
+  ]
+}

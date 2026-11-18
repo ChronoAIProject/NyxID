@@ -1,0 +1,89 @@
+{
+  "round": 2,
+  "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+  "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+  "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+  "source_commit": "f70b7c4c75baa0b77646a9fe986866ff67327128",
+  "engineering_commit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+  "previous_delivery_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+  "verdict": "FAIL",
+  "prior_findings": [
+    {
+      "id": "V-F01",
+      "status": "closed",
+      "evidence": "独立实际resolver17个合法/非法地址通过，原/zh与/zh/反例拒绝。"
+    },
+    {
+      "id": "V-F02",
+      "status": "still-failing",
+      "evidence": "原CTA及fragment入口修复，但真实/start反例仍失败。"
+    },
+    {
+      "id": "V-F03",
+      "status": "closed",
+      "evidence": "独立24种marker组合及4种负例通过；原反引号反例被识别。"
+    },
+    {
+      "id": "V-O01",
+      "status": "closed-by-claim-narrowing",
+      "evidence": "当前schema残留与源码/交接收窄声明一致。"
+    }
+  ],
+  "findings": [
+    {
+      "id": "V-F02",
+      "priority": "P2",
+      "state": "partially-fixed-still-failing",
+      "title": "真实 /start 入口仍将邀请码嵌入 return_to",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/router.tsx",
+      "line": 344,
+      "expected": "已接受方案的真实 /start、fragment start 与 CTA 使用一致认证入口：code 顶层保留，return_to 绑定配置完整目标。",
+      "actual": "CTA 与 #/start 已修复；真实 /start 的 beforeLoad 未改，仍直接 siteHref(target) 跳工作区。登录保护只生成顶层return_to，LoginPage读code=null。",
+      "configuration": {
+        "VITE_WEBSITE_SOLUTION_ACTIVATIONS": "{\"help-desk\":{\"target\":\"/assistant?setup=help-desk&draft=hello%20world\",\"acceptance\":\"review/help-desk\"}}"
+      },
+      "steps": [
+        "未登录访问 /start?t=help-desk&code=NYX-ABCDEF12。",
+        "真实 legacyStartRoute.beforeLoad 得到 /assistant?t=help-desk&code=NYX-ABCDEF12&setup=help-desk&draft=hello+world。",
+        "受保护入口生成 /login?return_to=<编码后的完整工作区URL>，没有顶层code。",
+        "Login/Register只读顶层code；AuthFlow邀请预填为空。"
+      ],
+      "impact": "有效邀请码在嵌套URL中仍存在，但认证无法使用，邀请码必需场景须重新输入。默认off不触发；未修路径属于已确认保留的真实分享入口。",
+      "evidence_scope": "TypeScript AST提取新源码真实beforeLoad并调用，函数模块使用显式on配置；随后执行精确app-entry/login表达式。未运行真实账号或浏览器。",
+      "recommendation": "让真实/start复用与CTA/fragment相同的方案认证交接，并覆盖其实际route handler；保持未开放方案返回详情和无t通用注册行为。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.cjs",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/main.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/lib/public-paths.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/public-routing.mjs",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/2026-10-16-website-scope-cut-v4.2.md"
+      ]
+    },
+    {
+      "id": "V-F04",
+      "priority": "P2",
+      "state": "new-regression-in-repair",
+      "title": "on 浏览器分支仍期待修复前的方案 href",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/e2e-public/public-site.spec.ts",
+      "line": 94,
+      "expected": "enabled help-desk断言应检查/login以及解码后的return_to等于配置target。",
+      "actual": "测试仍把href与publication.configuration.solutions[\"help-desk\"]直接比较；组件/构建gate已改为/login?return_to=…，所以该分支的正确UI也无法通过。",
+      "steps": [
+        "使用合法help-desk target，例如 /assistant?setup=help-desk。",
+        "浏览器测试第90行导航到无query的/solutions/help-desk。",
+        "实际CTA为/login?return_to=%2Fassistant%3Fsetup%3Dhelp-desk。",
+        "第94行期望/assistant?setup=help-desk，必然不相等。"
+      ],
+      "impact": "正式开启该项时会被已过期的browser断言阻断。当前默认off的10项通过结果不覆盖该分支。",
+      "evidence_scope": "提取原expected表达式，与实际solutionAuthPath/siteHref输出比较；没有把静态确定性失败写成已运行的浏览器失败。",
+      "recommendation": "同步enabled分支的新认证链接契约，解析pathname与return_to逐项断言；保留disabled分支与其余默认回归。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-f70b7c4-round2/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-activation.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/verify-public-build.mjs"
+      ]
+    }
+  ],
+  "next_action": "Formal two-round limit reached; no automatic further repair dispatch or acceptance round. Coordinator decides next steps."
+}

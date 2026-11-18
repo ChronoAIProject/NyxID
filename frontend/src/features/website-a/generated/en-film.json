@@ -1,0 +1,236 @@
+[
+  {
+    "id": "rest",
+    "label": "Restaurant manager",
+    "bot": "Luna Bistro",
+    "sub": "reservations",
+    "key": "Reservation assistant",
+    "sys": "Sat 11:42 PM · restaurant closed",
+    "user": "Hi, Sarah here! Table for 4 tomorrow at 7:30? One of us is vegan.",
+    "tools": [
+      "✓ checked calendar · 7:30 free",
+      "✓ booking created"
+    ],
+    "reply": "Booked! Table for 4, Sun 7:30 PM under Sarah. I've noted vegan, so the kitchen knows.",
+    "rows": [
+      [
+        "tg",
+        "Telegram",
+        "reply to guests",
+        "ok",
+        1
+      ],
+      [
+        "cal",
+        "Google Calendar",
+        "find & book tables",
+        "ok",
+        1
+      ],
+      [
+        "sh",
+        "Google Sheets",
+        "guest notes",
+        "ok",
+        1
+      ],
+      [
+        "cal",
+        "Google Calendar",
+        "cancel bookings",
+        "ask",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/google-calendar\n     /calendars/primary/events\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"summary\": \"Sarah · table for 4\",\n  \"start\": \"2026-10-18T19:30\",\n  \"notes\": \"1 vegan guest\" }",
+    "res": "→ 200 OK\n{ \"status\": \"confirmed\",\n  \"id\": \"evt_9f2c41\" }",
+    "cap": "Takes reservations around the clock, even after closing."
+  },
+  {
+    "id": "help",
+    "label": "24-hour help desk",
+    "bot": "Kite Supply",
+    "sub": "customer help",
+    "key": "Help desk assistant",
+    "sys": "Tue 3:12 AM",
+    "user": "My order #4821 still hasn't arrived. Where is it?",
+    "tools": [
+      "✓ looked up order #4821"
+    ],
+    "reply": "Sorry for the wait! #4821 shipped yesterday and arrives tomorrow by 6 PM. Tracking: KT-55210.",
+    "rows": [
+      [
+        "tg",
+        "Telegram",
+        "answer customers",
+        "ok",
+        1
+      ],
+      [
+        "sh",
+        "Google Sheets",
+        "order lookup",
+        "ro",
+        1
+      ],
+      [
+        "gm",
+        "Gmail",
+        "alert the team",
+        "ok",
+        1
+      ],
+      [
+        "pay",
+        "Payments",
+        "issue refunds",
+        "no",
+        0
+      ]
+    ],
+    "req": "GET /api/v1/proxy/s/google-sheets\n    /v4/spreadsheets/1Bx…/values\n    /Orders!A:F\nAuthorization: Bearer nyxid_ag_••••",
+    "res": "→ 200 OK\n{ \"values\": [\n  [\"4821\", \"shipped\",\n   \"KT-55210\", \"arrives Wed\"] ] }",
+    "cap": "Answers customers at 3 AM so your team doesn’t have to."
+  },
+  {
+    "id": "stock",
+    "label": "Stock analyst",
+    "bot": "Market Desk",
+    "sub": "my watchlist",
+    "key": "Analyst assistant",
+    "sys": "Mon 4:05 PM · market closed",
+    "user": "How did my watchlist close today? Anything I should know?",
+    "tools": [
+      "✓ pulled closing prices",
+      "✓ scanned posts on X"
+    ],
+    "reply": "NVDA +2.1%, AAPL −0.4%, TSLA −1.8%. TSLA chatter is mostly about delivery numbers. Notes are in your sheet.",
+    "rows": [
+      [
+        "mk",
+        "Market data",
+        "your own API",
+        "ro",
+        1
+      ],
+      [
+        "x",
+        "X (Twitter)",
+        "search posts",
+        "ro",
+        1
+      ],
+      [
+        "cl",
+        "Claude / GPT",
+        "summarise",
+        "ok",
+        1
+      ],
+      [
+        "tr",
+        "Brokerage",
+        "place trades",
+        "no",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/llm/gateway/v1\n     /chat/completions\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"model\": \"claude-sonnet-5-5\",\n  \"messages\": [{ \"role\": \"user\",\n    \"content\": \"Summarise my\n     watchlist moves\" }] }",
+    "res": "→ 200 OK\n{ \"choices\": [{ \"message\":\n  { \"content\": \"NVDA +2.1% led…\" }}] }",
+    "cap": "Watches the market and briefs you in plain English. It can read, never trade."
+  },
+  {
+    "id": "news",
+    "label": "News aggregator",
+    "bot": "Morning Brief",
+    "sub": "daily at 8:00 AM",
+    "key": "News assistant",
+    "sys": "8:00 AM · scheduled run",
+    "user": null,
+    "tools": [
+      "✓ read 42 sources",
+      "✓ removed duplicates"
+    ],
+    "reply": "Good morning! Today: 1) New EU guidance on AI rules 2) A payments firm launches stablecoin payouts 3) Chip stocks rally on earnings.",
+    "rows": [
+      [
+        "fc",
+        "Firecrawl",
+        "read news sites",
+        "ro",
+        1
+      ],
+      [
+        "x",
+        "X (Twitter)",
+        "search posts",
+        "ro",
+        1
+      ],
+      [
+        "tv",
+        "Tavily",
+        "web search",
+        "ro",
+        1
+      ],
+      [
+        "tg",
+        "Telegram",
+        "send your brief",
+        "ok",
+        1
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/firecrawl\n     /v1/search\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"query\": \"AI regulation fintech\",\n  \"limit\": 20 }",
+    "res": "→ 200 OK\n{ \"data\": [\n  { \"title\": \"EU publishes…\",\n    \"url\": \"https://…\" }, … ] }",
+    "cap": "Reads the news for you and sends one tidy brief every morning."
+  },
+  {
+    "id": "research",
+    "label": "Desk researcher",
+    "bot": "Research Desk",
+    "sub": "research",
+    "key": "Research assistant",
+    "sys": "Wed 10:20 AM",
+    "user": "Find 5 competitors to our booking app and compare their pricing.",
+    "tools": [
+      "✓ searched 18 pages",
+      "✓ wrote report"
+    ],
+    "reply": "Done! 5 competitors compared: plans range from free to $79/mo. The report is in your Google Doc “Competitor scan”.",
+    "rows": [
+      [
+        "tv",
+        "Tavily",
+        "web search",
+        "ro",
+        1
+      ],
+      [
+        "fc",
+        "Firecrawl",
+        "read pages",
+        "ro",
+        1
+      ],
+      [
+        "dc",
+        "Google Docs",
+        "write the report",
+        "ok",
+        1
+      ],
+      [
+        "dr",
+        "Google Drive",
+        "delete files",
+        "no",
+        0
+      ]
+    ],
+    "req": "POST /api/v1/proxy/s/google-docs\n     /v1/documents\nAuthorization: Bearer nyxid_ag_••••\n\n{ \"title\": \"Competitor scan\" }",
+    "res": "→ 200 OK\n{ \"documentId\": \"1aF7…\",\n  \"title\": \"Competitor scan\" }",
+    "cap": "Does the desk research and hands you a finished report."
+  }
+]

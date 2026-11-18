@@ -1,0 +1,77 @@
+{
+  "round": 1,
+  "source_commit": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+  "engineering_commit": "fd00726ec086ed5cf3d8ad19a20e88a00555a2b0",
+  "baseline_commit": "c17f8c8fe0aa23eb2892377af3be1f6c0bf51a52",
+  "content_revision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+  "config_revision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+  "findings": [
+    {
+      "id": "V-F01",
+      "priority": "P2",
+      "title": "Status 恢复校验接受中文官网首页",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/release-config.ts",
+      "line": 98,
+      "expected": "官网首页及其 locale/trailing-slash 别名不能作为状态页。",
+      "actual": "URL https://nyx.chrono-ai.fun/zh 与 /zh/ 配合开关 true、非空 acceptance 可通过；根 / 被拒绝。",
+      "reproduction": "调用 resolveWebsiteRelease({VITE_WEBSITE_STATUS_ENABLED:\"true\",VITE_WEBSITE_STATUS_URL:\"https://nyx.chrono-ai.fun/zh\",VITE_WEBSITE_STATUS_ACCEPTANCE:\"review/status\"})，返回 footerStatus 为该首页。",
+      "impact": "恢复后 Footer 将中文官网首页标为服务状态；默认 off 不触发。",
+      "recommendation": "根据官网实际路由归一化首页别名并拒绝，补 /zh、/zh/ 回归；保留真实独立状态域名首页支持。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-ed91d30-round1/independent-probe.json",
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-ed91d30-round1/release/dist/public-release.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/docs/plans/2026-10-16-website-scope-cut-v4.2.md"
+      ]
+    },
+    {
+      "id": "V-F02",
+      "priority": "P2",
+      "title": "恢复方案 CTA 后邀请码嵌入 return_to，认证表单无法使用",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/solution-activation.tsx",
+      "line": 18,
+      "expected": "选中方案目标与顶层邀请码同时通过认证，沿用可信 return_to 校验。",
+      "actual": "/solutions/help-desk?code=NYX-ABCDEF12 → /assistant?code=NYX-ABCDEF12&setup=help-desk → /login?return_to=<encoded assistant URL>；LoginPage params.get(\"code\") 为 null。",
+      "reproduction": "设置 help-desk target 为 /assistant?setup=help-desk；用上述匿名邀请地址生成 CTA。app-entry 与 assistant 的 standaloneAuthBeforeLoad 均只产生顶层 return_to；Login/Register 仅读顶层 code。",
+      "impact": "邀请码并未从所有 URL 消失，但被嵌套后无法预填/传给注册；需要邀请码时访客须重新输入。默认关闭不触发。",
+      "recommendation": "在官网方案入口或共享认证交接处保留有效顶层 code，并保留完整方案目标；覆盖真实 siteHref 与 router/auth handoff 的匿名→登录→注册路径，不把 siteHref mock 成 identity。不要改变普通登录默认落点。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-ed91d30-round1/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/router.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/app-entry.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/pages/login.tsx",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/components/auth/auth-flow.tsx"
+      ]
+    },
+    {
+      "id": "V-F03",
+      "priority": "P2",
+      "title": "关闭组件 bundle 门禁漏检反引号字符串",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/public-visibility-contract.mjs",
+      "line": 31,
+      "expected": "符合实际 minifier 语法的关闭组件残留应被识别并阻断。",
+      "actual": "{\"data-website-feature\":\"newsletter\"} 返回 [\"newsletter\"]；{\"data-website-feature\":`newsletter`} 返回 []，两者均为合法等价 JS。",
+      "reproduction": "实际调用 retainedDisabledFeatureCode，visibility 三项 false，传入上面两个对象片段。独立探针结果已保存。",
+      "impact": "默认关闭或只开放另一功能时，此种残留会绕过新门禁。当前下载包独立扫描未检出可操作组件泄漏，不能将门禁缺陷描述为已发生的 UI 泄漏。",
+      "recommendation": "补充实际压缩产物使用的字符串语法反例并修复检测；可用 AST 或覆盖无插值 template literal 的可靠解析。覆盖三组件及某一其他功能开启的场景。",
+      "evidence": [
+        "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-ed91d30-round1/independent-probe.json",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/test/public-visibility-contract.test.ts",
+        "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/scripts/verify-public-build.mjs"
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "id": "V-O01",
+      "priority": "P3",
+      "blocking": false,
+      "title": "默认 chunk 残留三个无网络行为的 adapter schema 初始化",
+      "file": "/Users/huangzongzhe/workspace/vibeCoding/nyxid/frontend/src/features/website-a/public-feature-adapters.ts",
+      "line": 4,
+      "actual": "optional-features-CE3HMhbm.js 中仍执行 email、pending_confirmation、reply 三个 Zod schema 初始化；组件表单和请求函数已剔除。",
+      "scope": "不构成控件、监听器或请求泄漏，不单独阻塞本轮；不能据此声称所有 adapter 相关字节为零。",
+      "recommendation": "如保留“排除 dormant adapters”声明，收紧 tree-shaking；否则将声明限定为无可操作组件/请求实现。",
+      "evidence": "/Users/huangzongzhe/.codex/visualizations/2026/10/15/01a13edf-2b31-75c1-b1ca-824d707f02ff/website-visibility-acceptance-ed91d30-round1/release/dist/assets/optional-features-CE3HMhbm.js"
+    }
+  ]
+}

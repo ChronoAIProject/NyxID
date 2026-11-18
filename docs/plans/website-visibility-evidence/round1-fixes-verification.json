@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-10-21T10:14:09.669587+00:00",
+  "repository": "aelf-hzz780/NyxID",
+  "branch": "codex/website-a-delivery",
+  "previousDeliveryHead": "ed91d302ff560388315b6cc1149491bb9d5beb95",
+  "firstIndependentAcceptance": "FAIL",
+  "secondIndependentAcceptance": "pending",
+  "sourceCommit": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+  "workflowRun": "https://github.com/aelf-hzz780/NyxID/actions/runs/39582397033",
+  "workflowConclusion": "success",
+  "jobId": 119162973220,
+  "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39582397033/artifacts/12337521717",
+  "artifactDigest": "sha256:1e86ffc0fdc0f38699622de5734d1ca5e49a5bccf8bc9c7c424f5efbdbf9354c",
+  "downloadedDigestVerified": true,
+  "configurationContentHashesRecomputed": true,
+  "contentRevision": "49e686770de9ed0f5a924923048c88611956e8d8ae7af93bb73744fa9ba236b1",
+  "configRevision": "a27cd071131edbef9665b638f622bf1a541f90673ee733d077c77f71e2faef27",
+  "configuration": {
+    "blogMenu": false,
+    "newsletter": null,
+    "contactChat": null,
+    "footerStatus": null,
+    "solutions": {}
+  },
+  "visibility": {
+    "blogMenu": false,
+    "newsletter": false,
+    "contactChat": false,
+    "footerStatus": false,
+    "solutions": []
+  },
+  "checks": [
+    {
+      "id": "serial-unit-and-integration",
+      "status": "pass",
+      "tests": 241,
+      "files": 31
+    },
+    {
+      "id": "complete-production-build",
+      "status": "pass",
+      "includes": "TypeScript, client, legal, public renderer, credential-accept"
+    },
+    {
+      "id": "public-artifact-gate",
+      "status": "pass",
+      "pages": 90
+    },
+    {
+      "id": "packaged-nginx-http",
+      "status": "pass",
+      "checks": 219
+    },
+    {
+      "id": "request-referrer-query-privacy",
+      "status": "pass"
+    },
+    {
+      "id": "single-worker-browser",
+      "status": "pass",
+      "startTime": "2026-10-21T10:12:03.762Z",
+      "duration": 18628.622,
+      "expected": 10,
+      "skipped": 0,
+      "unexpected": 0,
+      "flaky": 0
+    }
+  ],
+  "repairs": [
+    {
+      "id": "V-F01",
+      "commits": [
+        "3ceb5cf2e",
+        "44bde4d23"
+      ],
+      "status": "engineering-fixed",
+      "evidence": "release-config.test.ts: rejects /zh, /zh/, encoded/repeated-slash aliases; accepts independent status root"
+    },
+    {
+      "id": "V-F02",
+      "commits": [
+        "4dcb10f45"
+      ],
+      "status": "engineering-fixed",
+      "evidence": "solution-auth-handoff.test.tsx: real siteHref/SiteLink, appRouter validator/auth gate, Login/Register/AuthFlow, EN/ZH; registration submits invite; trusted final login target; normal default auth tests retained"
+    },
+    {
+      "id": "V-F03",
+      "commits": [
+        "714eaabd2"
+      ],
+      "status": "engineering-fixed",
+      "evidence": "public-visibility-contract.test.ts: three quote forms, three controls, each single enabled feature; complete static markers only"
+    },
+    {
+      "id": "V-O01",
+      "commits": [
+        "714eaabd2"
+      ],
+      "status": "claim-narrowed",
+      "evidence": "Pure Zod schema initialization may remain. Exclusion claim covers disabled controls/request implementations, not all adapter-related bytes."
+    }
+  ],
+  "review": {
+    "readOnlyAgents": 2,
+    "reviewerFound": "additional encoded and repeated-slash home aliases",
+    "resolution": "44bde4d23 plus regression cases; final CI passed",
+    "verifier": "Original three counterexamples and test contracts matched before normalization follow-up; no live-service acceptance claimed"
+  },
+  "ciAttempts": [
+    {
+      "run": 39582245022,
+      "source": "714eaabd2",
+      "conclusion": "cancelled",
+      "reason": "Superseded by encoded/repeated-slash Status normalization"
+    },
+    {
+      "run": 39582397033,
+      "source": "44bde4d23ded1cba2d7747e00bc146d5feaf0c96",
+      "conclusion": "success"
+    }
+  ],
+  "originalFailureArchive": {
+    "checks.json": "83df502a8c8424072add6d36256805a501fac8433373e0b5f5e0c36e2a02c94e",
+    "findings.json": "7b021f1e96e86945c88c46496abec9d0008b2d69c04fdec3a72aa327da9677b0",
+    "independent-probe.cjs": "591b63b8255aaeba46e1d84818048e3d21e377512a51f2315a03726d84e5ea45",
+    "independent-probe.json": "fb6bdba700cbf490ec8f1cef4d75ade47287d5f9d803dc6e7766bfff99de163f",
+    "report.md": "63c93fc1ba27625c435af295123074b5581b2916f053cf3a3ae605d9173707b8"
+  },
+  "lab": {
+    "kind": "lab",
+    "path": "/security",
+    "reducedMotion": true,
+    "fieldCwvStatus": "not-measured",
+    "resources": 73,
+    "transferBytes": 559985,
+    "decodedBytes": 1880955,
+    "lcp": 116,
+    "cls": 1.5217294424109988,
+    "limitations": "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion."
+  },
+  "labInterpretation": "Informational single CI sample only; high CLS remains a separate concern. No performance, field-CWV or regression conclusion.",
+  "notRun": [
+    "formal second-round independent acceptance",
+    "enabled production configuration build/browser",
+    "whole-artifact mixed HTML/JS browser test",
+    "live Newsletter confirmation/delivery/unsubscribe/abuse controls",
+    "live public chat quota/rate limiting",
+    "live public Status availability",
+    "real solution task execution",
+    "live account/OAuth/MFA end-to-end",
+    "new article approval",
+    "deployment/merge/organization PR",
+    "field CWV"
+  ],
+  "preserved": [
+    "four switches false; solutions empty",
+    "Blog menu-only hiding; Footer/direct/SEO retained",
+    "router/app-entry/Login/Register/AuthFlow business implementations unchanged",
+    "previous commits; previous CI and independent FAIL evidence",
+    "main chat visual files untouched and unstaged"
+  ]
+}

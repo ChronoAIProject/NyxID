@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "checkedAtUtc": "2026-10-20T11:45:02Z",
+  "checker": "implementation agent + isolated GitHub Actions; independent re-acceptance pending",
+  "repository": "aelf-hzz780/NyxID",
+  "branch": "codex/website-a-delivery",
+  "sourceCommit": "01ae02df63ec740f61c6bf2a7c8f4bad038c7300",
+  "contentRevision": "013bb5daf762126c4439ec7109629405a23e56aa7cabeee29e2bc21ce4c70fad",
+  "workflowRun": "https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393",
+  "jobId": 118607657514,
+  "artifact": "https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393/artifacts/12261168854",
+  "artifactDigest": "sha256:972d31a4978ea5ea2b9e1ac9a011b066bf2a606bf7a65aa7c8a922661f2ea10d",
+  "downloadedDigestVerified": true,
+  "checks": [
+    {
+      "id": "serial-public-and-auth-regressions",
+      "status": "pass",
+      "files": 23,
+      "tests": 176
+    },
+    {
+      "id": "production-build",
+      "status": "pass",
+      "includes": "TypeScript, client, legal, public renderer, credential-accept"
+    },
+    {
+      "id": "public-artifacts",
+      "status": "pass",
+      "canonicalPages": 90,
+      "includes": "Independent CommonMark AST obligations"
+    },
+    {
+      "id": "packaged-nginx-http",
+      "status": "pass",
+      "checks": 219
+    },
+    {
+      "id": "request-and-referrer-query-privacy",
+      "status": "pass"
+    },
+    {
+      "id": "single-worker-browser",
+      "status": "pass",
+      "tests": 8,
+      "skipped": 0,
+      "flaky": 0,
+      "includes": [
+        "SSR/no-JS contact controls",
+        "entry failure/delay",
+        "native Enter email handoff",
+        "ordered duplicate/string queries",
+        "continuous document identity",
+        "mobile menu/history/modified clicks",
+        "Docs 503 retry",
+        "fresh hydrated document after rejected import"
+      ]
+    },
+    {
+      "id": "measurement-templates",
+      "status": "pass",
+      "questions": 20,
+      "localizedPrompts": 40,
+      "brandQuestions": 10,
+      "nonBrandQuestions": 10,
+      "plannedDiscoveryTrials": 240,
+      "samplingStatus": "not-run"
+    }
+  ],
+  "ciAttempts": [
+    {
+      "run": 39415013248,
+      "source": "e6bb020c8",
+      "status": "failure",
+      "reason": "Initial resolution closed a newly opened mobile menu; fixed in bd6580039"
+    },
+    {
+      "run": 39415321909,
+      "source": "bd6580039",
+      "status": "failure",
+      "reason": "Browser fixtures: unsupported fieldset matcher, missing Docs link, inactive reduced-motion setting; fixed in 644d380f3"
+    },
+    {
+      "run": 39416304639,
+      "source": "644d380f3",
+      "status": "failure",
+      "reason": "Asset-retry check ran before fresh document hydration; strengthened in 01ae02df6"
+    },
+    {
+      "run": 39416790393,
+      "source": "01ae02df63ec740f61c6bf2a7c8f4bad038c7300",
+      "status": "success"
+    }
+  ],
+  "lab": {
+    "kind": "lab",
+    "path": "/security",
+    "reducedMotion": true,
+    "fieldCwvStatus": "not-measured",
+    "resources": 69,
+    "transferBytes": 542354,
+    "decodedBytes": 1836665,
+    "lcp": 84,
+    "cls": 1.9519614823659261,
+    "limitations": "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion."
+  },
+  "labInterpretation": "Single reduced-motion sample; CLS is high, requires separate investigation. Prior sample did not verify reduced-motion. No comparable regression or field-CWV conclusion.",
+  "notRun": [
+    "independent re-acceptance",
+    "live OAuth providers",
+    "all 90 pages hydration/visual regression",
+    "complete dynamic head/schema assertions",
+    "consent/telemetry runtime payloads",
+    "production deployment/routing",
+    "rollback exercise",
+    "normal-motion performance distribution",
+    "GSC/Bing/AI samples/verified inquiries"
+  ],
+  "pendingOwnerDecisions": [
+    "five historical mock-article URL dispositions",
+    "original Docs Markdown noindex history impact",
+    "individual approvals for 19 bilingual pages beyond broad v4.1/v4.2 authorization",
+    "availability copy such as minutes",
+    "measurement access owners and authorized exports"
+  ]
+}

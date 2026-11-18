@@ -1,0 +1,167 @@
+name: Website public artifact
+on:
+  push:
+    branches: ['codex/website-a-delivery']
+    paths: ['frontend/**', 'docs/site/**', 'cli/src/wizard/**', '.github/workflows/website-public.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: website-public-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  public-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Nginx deployment-input policy checks
+        run: python3 scripts/test-nginx-policy.py
+      - name: Serial public contracts
+        run: npm test -- src/features/public-site src/features/website-a test/public-routing.test.ts test/public-content.test.ts test/public-markdown-acceptance.test.ts test/public-visibility.test.ts test/public-visibility-contract.test.ts src/pages/login.test.tsx src/pages/register.test.tsx src/components/auth/auth-flow.test.tsx src/components/auth/mfa-verify-form.test.tsx src/components/auth/mfa-setup-dialog.test.tsx src/lib/return-url.test.ts src/router.test.ts src/lib/public-paths.test.ts src/lib/platform-personal-handoff.test.ts src/lib/platform-onboarding-handoff.test.ts src/pages/platform-personal-link.test.tsx src/lib/telemetry.test.ts src/stores/consent-store.test.ts --maxWorkers=1 --no-file-parallelism
+      - name: Build and artifact gates
+        run: npm run build
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+      - name: Nginx and backend fixture
+        run: |
+          node scripts/public-fixture-server.mjs > /tmp/public-fixture.log 2>&1 &
+          docker build -f Dockerfile.public-test -t nyxid-public-test .
+          docker run -d --name nyxid-public-test --add-host host.docker.internal:host-gateway -p 127.0.0.1:4188:8080 nyxid-public-test
+          for i in $(seq 1 30); do curl --fail --silent http://127.0.0.1:4188/security >/dev/null && break; sleep 1; done
+          docker exec nyxid-public-test nginx -t
+          node scripts/verify-public-http.mjs
+          node scripts/verify-public-log-privacy.mjs
+      - run: npx playwright install --with-deps chromium
+      - name: Single browser acceptance
+        run: npx playwright test --config public-playwright.config.ts
+      - name: Package complete validated release
+        run: tar -czf website-public-release.tar.gz dist nginx.conf.template Dockerfile.public-test Dockerfile.public-test.dockerignore nginx-default.conf scripts/render-nginx.py scripts/nginx-policy-entrypoint.sh
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: website-public-${{ github.sha }}
+          path: frontend/website-public-release.tar.gz
+      - name: Runtime diagnostics
+        if: failure()
+        run: |
+          docker logs nyxid-public-test || true
+          test ! -f /tmp/public-fixture.log || cat /tmp/public-fixture.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: website-public-failure-${{ github.sha }}
+          path: |
+            frontend/dist/public-*validation.json
+            frontend/dist/public-browser-results.json
+            frontend/test-results/
+  solution-on-fixture:
+    name: Single solution on fixture (not delivery)
+    needs: public-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Build one accepted solution fixture
+        run: npm run build && node scripts/verify-solution-fixture.mjs
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          VITE_WEBSITE_BLOG_MENU_ENABLED: 'false'
+          VITE_WEBSITE_NEWSLETTER_ENABLED: 'false'
+          VITE_WEBSITE_CONTACT_CHAT_ENABLED: 'false'
+          VITE_WEBSITE_STATUS_ENABLED: 'false'
+          VITE_WEBSITE_SOLUTION_ACTIVATIONS: '{"help-desk":{"target":"/assistant?setup=help-desk&draft=hello%20world","acceptance":"ci/wiring-fixture-only"}}'
+      - name: Isolated fixture server
+        run: |
+          node scripts/public-fixture-server.mjs > /tmp/public-fixture.log 2>&1 &
+          docker build -f Dockerfile.public-test -t nyxid-solution-fixture .
+          docker run -d --name nyxid-solution-fixture --add-host host.docker.internal:host-gateway -p 127.0.0.1:4188:8080 nyxid-solution-fixture
+          for i in $(seq 1 30); do curl --fail --silent http://127.0.0.1:4188/solutions/help-desk >/dev/null && break; sleep 1; done
+          docker exec nyxid-solution-fixture nginx -t
+      - run: npx playwright install --with-deps chromium
+      - name: Targeted on branch and real entry browser checks
+        run: npx playwright test --config public-playwright.config.ts --grep 'contact preselection|single accepted help-desk fixture' && node scripts/verify-solution-fixture.mjs --browser
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+      - name: Package non-delivery fixture evidence
+        run: tar -czf website-solution-fixture.tar.gz dist nginx.conf.template Dockerfile.public-test Dockerfile.public-test.dockerignore nginx-default.conf scripts/render-nginx.py scripts/nginx-policy-entrypoint.sh
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: website-solution-fixture-${{ github.sha }}
+          path: frontend/website-solution-fixture.tar.gz
+      - name: Fixture diagnostics
+        if: failure()
+        run: |
+          docker logs nyxid-solution-fixture || true
+          test ! -f /tmp/public-fixture.log || cat /tmp/public-fixture.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: website-solution-fixture-failure-${{ github.sha }}
+          path: |
+            frontend/dist/public-*validation.json
+            frontend/dist/public-browser-results.json
+            frontend/dist/solution-fixture.json
+            frontend/test-results/
+  wizard-regeneration:
+    name: Rebuild committed CLI wizard
+    needs: solution-on-fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Generate the actual embedded wizard and source metadata
+        run: npm run build:wizard
+      - name: Package generated wizard for review and commit
+        run: tar -czf wizard-regenerated.tar.gz -C .. cli/src/wizard/assets cli/src/wizard/bundle-meta
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wizard-regenerated-${{ github.sha }}
+          path: frontend/wizard-regenerated.tar.gz
+      - name: Require the committed source-closure hash to match the real rebuild
+        run: |
+          git show HEAD:cli/src/wizard/bundle-meta/index.hash > /tmp/wizard-committed.hash
+          cmp /tmp/wizard-committed.hash ../cli/src/wizard/bundle-meta/index.hash
+  wizard-committed-freshness:
+    name: Verify committed CLI wizard freshness
+    needs: wizard-regeneration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust test dependencies
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wizard-freshness
+      - name: Run the authoritative committed-bundle Rust test
+        run: cargo test -p nyxid-cli --test wizard_bundle_freshness

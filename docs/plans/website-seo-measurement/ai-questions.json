@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "samplingStatus": "not-run",
+  "questions": [
+    {
+      "id": "Q01",
+      "category": "product",
+      "en": "What is NyxID and who is it for?",
+      "zh": "NyxID 是什么，适合谁？",
+      "intent": "product",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q02",
+      "category": "product",
+      "en": "How does NyxBot differ from an AI chat interface?",
+      "zh": "NyxBot 和普通 AI 聊天界面有什么区别？",
+      "intent": "product",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q03",
+      "category": "product",
+      "en": "Can NyxID work with an existing AI agent?",
+      "zh": "NyxID 能接入已有 AI Agent 吗？",
+      "intent": "product",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q04",
+      "category": "product",
+      "en": "Where should a developer start with NyxID?",
+      "zh": "开发者应该从哪里开始接入 NyxID？",
+      "intent": "product",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q05",
+      "category": "security",
+      "en": "Does an AI agent see raw credentials when using NyxID?",
+      "zh": "通过 NyxID 使用服务时，AI Agent 能看到原始凭证吗？",
+      "intent": "security",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q06",
+      "category": "security",
+      "en": "What are scoped agent keys in NyxID?",
+      "zh": "NyxID 的 scoped Agent Keys 是什么？",
+      "intent": "security",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q07",
+      "category": "security",
+      "en": "How do NyxID approvals limit agent actions?",
+      "zh": "NyxID 的审批如何限制 Agent 操作？",
+      "intent": "security",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q08",
+      "category": "security",
+      "en": "What is a NyxID credential node?",
+      "zh": "NyxID 的 credential node 是什么？",
+      "intent": "security",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q09",
+      "category": "availability",
+      "en": "Is the NyxID help desk solution currently available to activate?",
+      "zh": "NyxID 的客服方案目前能直接开通吗？",
+      "intent": "availability",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q10",
+      "category": "availability",
+      "en": "Can NyxID stock analyst place trades?",
+      "zh": "NyxID 的股票分析方案会下单交易吗？",
+      "intent": "availability",
+      "brand_group": "brand"
+    },
+    {
+      "id": "Q11",
+      "category": "availability",
+      "en": "How can I check whether a listed AI service integration is actually available?",
+      "zh": "如何确认 AI 服务集成列表中哪些已经上线？",
+      "intent": "availability",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q12",
+      "category": "availability",
+      "en": "How can a business ask about a custom AI automation bundle?",
+      "zh": "企业如何咨询自定义 AI 自动化套餐？",
+      "intent": "availability",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q13",
+      "category": "delivery",
+      "en": "What minimum permissions does an AI restaurant operations assistant need?",
+      "zh": "AI 餐厅运营助手最少需要哪些权限？",
+      "intent": "delivery",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q14",
+      "category": "delivery",
+      "en": "How should an AI appointment assistant handle rescheduling safely?",
+      "zh": "AI 预约助手如何安全处理改期？",
+      "intent": "delivery",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q15",
+      "category": "delivery",
+      "en": "How can an agent use a business portal that has no API?",
+      "zh": "Agent 如何操作没有 API 的业务后台？",
+      "intent": "delivery",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q16",
+      "category": "delivery",
+      "en": "What should an AI research service provide as a report deliverable?",
+      "zh": "AI 研究服务应提供怎样的报告交付物？",
+      "intent": "delivery",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q17",
+      "category": "reading",
+      "en": "Where can AI readers find canonical product documentation in Markdown?",
+      "zh": "AI 阅读器如何找到产品文档的规范 Markdown？",
+      "intent": "reading",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q18",
+      "category": "reading",
+      "en": "How should a product website separate its llms.txt from API documentation?",
+      "zh": "产品官网应如何区分网站和 API 文档的 llms.txt？",
+      "intent": "reading",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q19",
+      "category": "reading",
+      "en": "Does a website contact form that opens a mail app automatically send the message?",
+      "zh": "打开邮件客户端的网站联系表单会自动发送邮件吗？",
+      "intent": "reading",
+      "brand_group": "non_brand"
+    },
+    {
+      "id": "Q20",
+      "category": "reading",
+      "en": "How can readers distinguish verified customer stories from draft AI examples?",
+      "zh": "读者如何区分审核通过的客户案例和 AI 示例草稿？",
+      "intent": "reading",
+      "brand_group": "non_brand"
+    }
+  ],
+  "questionCount": 20,
+  "localeCount": 2,
+  "completeDiscoveryTrials": 240,
+  "samplingContract": "2 source-visible platform categories × 3 repeats × 20 questions × 2 locales; direct URL reading separate"
+}

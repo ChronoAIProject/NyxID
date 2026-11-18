@@ -1,0 +1,26 @@
+{
+  "nyxbot": {
+    "selected": "每天给我发早报",
+    "messages": "每个工作日早上 8 点给我发 AI 和金融科技新闻，不要重复。\n✓ 已创建计划 · 工作日 8:00\n好了。新闻聚合助手会以只读方式读取 Firecrawl、X 和 Tavily。明早 8 点发第一份简报。"
+  },
+  "code": {
+    "selected": "MCP",
+    "visibleSnippet": "// Claude, Cursor, Codex… connect any MCP client to NyxID\n{\n  \"mcpServers\": {\n    \"nyxid\": { \"url\": \"https://nyx-api.chrono-ai.fun/mcp\" }\n  }\n}\n// Your connected services appear as tools, scoped to this key."
+  },
+  "blog": {
+    "visible": [
+      "指南本月就可以交给 AI 的五项重复工作订位、常见问题、回电、早报和案头研究：从哪里开始，哪些留给自己。2026年9月18日·7 分钟阅读"
+    ],
+    "subscriptionDisabled": true
+  },
+  "film": {
+    "selected": "案头研究员",
+    "columns": 3,
+    "resumeLabel": "暂停",
+    "pauseLabel": "播放"
+  },
+  "homeKeyboard": {
+    "selected": "给 AI 爱好者"
+  },
+  "finalConsole": []
+}

@@ -1,0 +1,24 @@
+{
+  "base": "5de5ff19f8347b09604221ce260089e1b5a1c6e1",
+  "tests": {
+    "exit_code": 0,
+    "files": 16,
+    "passed": 125
+  },
+  "build": {
+    "exit_code": 0,
+    "warnings": [
+      "Tailwind text-destructive selector",
+      "chunk size >500kB"
+    ]
+  },
+  "eslint": {
+    "command": "npx eslint src/features/website-a",
+    "exit_code": 0
+  },
+  "diff_check": {
+    "exit_code": 0
+  },
+  "branding": "unresolved",
+  "independent_acceptance": "pending"
+}

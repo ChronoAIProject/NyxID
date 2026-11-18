@@ -43,7 +43,7 @@ def path_literal(value: Path) -> str:
 
 
 def render(env: dict[str, str], template: str, output: Path, root: Path,
-           legal_cache: Path, port: int = 8080) -> dict[str, str]:
+           legal_cache: Path, port: int = 8080, public_routing: str = "") -> dict[str, str]:
     backend = origin(env.get("BACKEND_URL", "http://backend:3001"), "BACKEND_URL")
     public = origin(env.get("NYXID_PUBLIC_ORIGIN", "http://localhost:8080"), "NYXID_PUBLIC_ORIGIN")
     extra = env.get("NYXID_BROWSER_CONNECT_ORIGINS", "").split()
@@ -98,13 +98,17 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
         "@@PROXY_HEADERS@@": path_literal(output / "proxy-headers.conf"),
         "@@ROOT@@": path_literal(root), "@@LEGAL_CACHE@@": path_literal(legal_cache),
         "@@PORT@@": str(port),
+        "@@PUBLIC_MAPS@@": path_literal(root / "public-routing-maps.conf"),
+        "@@PUBLIC_ROUTING@@": path_literal(output / "public-routing.conf"),
     }
     for marker, value in values.items():
         template = template.replace(marker, value)
-    if "@@" in template or not 1024 <= port <= 65535:
+        public_routing = public_routing.replace(marker, value)
+    if "@@" in template or "@@" in public_routing or not 1024 <= port <= 65535:
         raise ValueError("invalid template marker or listen port")
     return {"default.conf": template, "spa-headers.conf": "\n".join(static) + "\n",
-            "proxy-headers.conf": "\n".join(proxy) + "\n"}
+            "proxy-headers.conf": "\n".join(proxy) + "\n",
+            "public-routing.conf": public_routing}
 
 
 def main() -> None:
@@ -117,7 +121,8 @@ def main() -> None:
     args = parser.parse_args()
     # Validate everything before writing a single output file.
     files = render(dict(os.environ), args.template.read_text(), args.output_dir,
-                   args.root, args.legal_cache, args.port)
+                   args.root, args.legal_cache, args.port,
+                   public_routing=(args.root / "public-routing.conf").read_text())
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, value in files.items():
         target = args.output_dir / name

@@ -1,0 +1,129 @@
+/* Approved v4.1 presentation only; every rule stays inside the public website. */
+.website-a {
+  --nyx-edge: color-mix(in srgb, var(--ptext) 36%, var(--border));
+}
+.website-a .nyx-home-hero {
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--glow);
+}
+.website-a .nyx-home-hero > .wrap {
+  position: relative;
+  z-index: 1;
+}
+.website-a .nyx-hero-scene {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0.42;
+  pointer-events: none;
+  transition: opacity 1.4s ease;
+}
+.website-a .nyx-hero-scene:not([data-scene-state="ready"]) {
+  opacity: 0;
+}
+.website-a[data-theme="light"] .nyx-hero-scene {
+  opacity: 0.13;
+  mix-blend-mode: multiply;
+}
+.website-a .nyx-home-hero .icp-panel {
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  border-color: var(--nyx-edge);
+  box-shadow: 0 18px 64px #0000001c;
+}
+.website-a .nyx-title-gradient,
+.website-a .nyx-title-static {
+  display: inline-block;
+  line-height: inherit;
+  background: var(--vivid);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+.website-a .nyx-title-gradient .gradient-text__content {
+  font: inherit;
+}
+.website-a .nyx-primary {
+  position: relative;
+  isolation: isolate;
+  box-shadow:
+    0 0 0 1px #ffffff12 inset,
+    0 5px 18px #5a2af128;
+}
+.website-a .nyx-primary:focus-visible,
+.website-a .nyx-clickable:focus-visible {
+  outline: 2px solid var(--ptext);
+  outline-offset: 4px;
+}
+.website-a .nyx-primary:hover {
+  box-shadow:
+    0 0 0 1px #d7c7ff75 inset,
+    0 8px 24px #5a2af140;
+}
+.website-a .nyx-button-mount {
+  display: contents;
+  pointer-events: none;
+}
+.website-a .nyx-clickable {
+  position: relative;
+  isolation: isolate;
+  transition:
+    border-color 0.22s ease,
+    box-shadow 0.22s ease,
+    transform 0.22s ease;
+}
+.website-a .nyx-clickable:hover,
+.website-a .nyx-clickable:focus-visible {
+  border-color: var(--nyx-edge);
+  box-shadow: 0 12px 32px #00000015;
+}
+.website-a .nyx-card-light {
+  position: absolute !important;
+  inset: 0;
+  z-index: -1;
+  padding: 0 !important;
+  border-radius: inherit !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  pointer-events: none;
+}
+.website-a .nb-app,
+.website-a .workflow-film,
+.website-a .code {
+  border-color: var(--nyx-edge);
+  box-shadow: 0 16px 48px #00000017;
+}
+.website-a[data-visual-route="/pricing"] .mono {
+  font-variant-numeric: tabular-nums;
+}
+.website-a[data-visual-route="/pricing"] .split > .card {
+  border-color: var(--nyx-edge);
+  box-shadow: 0 16px 48px #00000017;
+}
+@media (max-width: 600px) {
+  .website-a .nyx-hero-scene {
+    opacity: 0.25;
+  }
+  .website-a .nyx-home-hero .h1 {
+    letter-spacing: -0.035em;
+  }
+}
+/* Preserve the existing audience panel's reduced-motion terminal state. */
+@media (prefers-reduced-motion: reduce) {
+  .website-a .nyx-primary,
+  .website-a .nyx-clickable,
+  .website-a .nyx-hero-scene {
+    transition: none !important;
+  }
+  .website-a .nyx-hero-scene {
+    display: none;
+  }
+}
+
+.website-a .specular-button__light[data-render-state="fallback"],
+.website-a .specular-button__light[data-render-state="lost"] {
+  display: none;
+}
+
+.website-a .solution-activation{display:inline-flex;flex-direction:column;gap:8px;align-items:flex-start}
+.website-a .solution-activation button:disabled{background:var(--muted);color:var(--fg3);border:1px solid var(--border);box-shadow:none;cursor:not-allowed;transform:none}

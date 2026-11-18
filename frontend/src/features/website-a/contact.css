@@ -1,0 +1,33 @@
+/* Contact retains the approved website-a.css layout and component tokens. */
+.website-a .contact > *,
+.website-a .contact-side > *,
+.website-a .contact .f2 > div,
+.website-a .contact .c-input {
+  min-width: 0;
+}
+
+.website-a .contact .bot-in .c-input {
+  flex: 1;
+}
+
+.website-a .contact .bot-msgs .m {
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
+}
+
+.website-a .contact .c-input[aria-invalid="true"] {
+  border-color: var(--err);
+}
+
+.website-a #contact-demo-note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.website-a #contact-demo-note a,
+.website-a #contact-delivery-note a {
+  color: var(--ptext);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
