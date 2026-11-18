@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { View } from "react-native";
 import { SvgXml } from "react-native-svg";
 import { useTheme } from "../../theme/ThemeContext";
@@ -5,13 +7,14 @@ import { nyxidLogoDarkXml, nyxidLogoXml } from "./brandVectors";
 
 /** The web sidebar's h-5 mark and wordmark, with the resolved theme variant. */
 export function NyxidLogo({ height = 20 }: { height?: number }) {
+  useAppLanguage();
   const { mode } = useTheme();
   const width = (height * 1062) / 301;
   return (
     <View
       accessible
       accessibilityRole="image"
-      accessibilityLabel="NyxID"
+      accessibilityLabel={"NyxID"}
       style={{ width, height }}
     >
       <SvgXml

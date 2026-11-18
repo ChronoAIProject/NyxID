@@ -10,6 +10,8 @@ export class ApiError extends Error {
   readonly errorCode: number;
   /** HTTP status code */
   readonly statusCode: number;
+  /** True only for a NyxID JSON error with a numeric code, not a proxy fallback. */
+  readonly hasErrorEnvelope: boolean;
   /** Optional structured validation diagnostics; rendered only by their owner. */
   readonly details?: unknown;
   readonly reason?: string;
@@ -21,6 +23,7 @@ export class ApiError extends Error {
     errorKey: string;
     errorCode: number;
     statusCode: number;
+    hasErrorEnvelope?: boolean;
     message: string;
     details?: unknown;
     reason?: string;
@@ -33,6 +36,7 @@ export class ApiError extends Error {
     this.errorKey = opts.errorKey;
     this.errorCode = opts.errorCode;
     this.statusCode = opts.statusCode;
+    this.hasErrorEnvelope = opts.hasErrorEnvelope ?? Number.isInteger(opts.errorCode);
     this.details = opts.details;
     this.reason = opts.reason;
     this.requestId = opts.requestId;

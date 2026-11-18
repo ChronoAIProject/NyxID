@@ -1009,8 +1009,23 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         return Ok(channel);
     }
 
+    let channel = default_channel(user_id);
+    match collection.insert_one(&channel).await {
+        Ok(_) => Ok(channel),
+        Err(e) if is_duplicate_key_error(&e) => {
+            // Another request created it first; fetch the existing channel
+            collection
+                .find_one(doc! { "user_id": user_id })
+                .await?
+                .ok_or_else(|| AppError::Internal("Channel creation conflict".to_string()))
+        }
+        Err(e) => Err(AppError::DatabaseError(e)),
+    }
+}
+
+pub(super) fn default_channel(user_id: &str) -> NotificationChannel {
     let now = Utc::now();
-    let channel = NotificationChannel {
+    NotificationChannel {
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         telegram_chat_id: None,
@@ -1026,18 +1041,6 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         push_devices: vec![],
         created_at: now,
         updated_at: now,
-    };
-
-    match collection.insert_one(&channel).await {
-        Ok(_) => Ok(channel),
-        Err(e) if is_duplicate_key_error(&e) => {
-            // Another request created it first; fetch the existing channel
-            collection
-                .find_one(doc! { "user_id": user_id })
-                .await?
-                .ok_or_else(|| AppError::Internal("Channel creation conflict".to_string()))
-        }
-        Err(e) => Err(AppError::DatabaseError(e)),
     }
 }
 

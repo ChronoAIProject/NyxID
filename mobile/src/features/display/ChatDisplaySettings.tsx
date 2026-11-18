@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { StyleSheet, View, useWindowDimensions } from "react-native";
 import { useNavigation } from "@react-navigation/native";
@@ -37,7 +38,7 @@ export function ChatDisplaySettings() {
         {offersChatWidth(width) ? (
           <SettingsRow
             label={t(chatLayoutTitle("columnWidth"))}
-            value={`${layout.columnWidth} pt`}
+            value={translateApp("{{points}} pt", { points: layout.columnWidth})}
             onPress={() =>
               navigation.navigate("ChatLayoutEdit", { key: "columnWidth" })
             }
@@ -45,7 +46,9 @@ export function ChatDisplaySettings() {
         ) : null}
         <SettingsRow
           label={t(chatLayoutTitle("composerMaxHeight"))}
-          value={`${layout.composerMaxHeight} pt`}
+          value={translateApp("{{points}} pt", {
+            points: layout.composerMaxHeight,
+          })}
           onPress={() =>
             navigation.navigate("ChatLayoutEdit", { key: "composerMaxHeight" })
           }

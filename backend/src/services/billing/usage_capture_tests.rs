@@ -221,7 +221,7 @@ async fn usage_capture_unready_fleet_never_calls_provider_or_compares() {
 fn usage_capture_parser_recognizes_nested_provider_metric() {
     let response = serde_json::json!({"customer_usage":{
         "from_datetime":"2026-10-01T00:00:00Z", "to_datetime":"2026-10-31T23:59:59Z",
-        "charges_usage":[{"billable_metric":{"code":"platform_requests"},"units":"2.5"}]
+        "charges_usage":[{"billable_metric":{"code":"platform_requests","aggregation_type":"sum_agg"},"units":"2.5"}]
     }});
     assert_eq!(
         super::super::lago_client::current_usage::parse(&response)
@@ -1228,8 +1228,8 @@ async fn usage_comparison_lost_response_retry_projects_equal_without_uncertainty
     f.compare_usage().await.unwrap();
     assert_eq!(
         f.commands.lock().unwrap().len(),
-        9,
-        "ready empty comparison plus test lease acquire/release"
+        10,
+        "ready empty comparison includes the legacy finding lookup and test lease acquire/release"
     );
     f.db.collection::<Document>(crate::models::security_capability_activation::COLLECTION_NAME)
         .delete_one(
@@ -1245,7 +1245,7 @@ async fn usage_comparison_lost_response_retry_projects_equal_without_uncertainty
         "unready empty comparison plus test lease acquire/release"
     );
     println!(
-        "USAGE_COMPARISON_EMPTY ready=7 unready=6 commands excluding test lease acquire/release"
+        "USAGE_COMPARISON_EMPTY ready=8 unready=6 commands excluding test lease acquire/release"
     );
     f.db.drop().await.unwrap();
 }

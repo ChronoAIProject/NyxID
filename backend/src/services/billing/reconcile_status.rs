@@ -323,6 +323,8 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
         },
     };
     items.push(BillingStartupDiagnostic {
+        severity: super::DiagnosticSeverity::Action,
+        technical_details: None,
         code: "billing_reconcile_steps".into(),
         summary: "Billing maintenance has failed steps".into(),
         detail,

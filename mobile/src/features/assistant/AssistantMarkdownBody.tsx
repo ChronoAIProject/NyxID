@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { memo, useCallback, useContext, useMemo, useRef } from "react";
 import {
   AccessibilityInfo,
@@ -74,6 +75,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
   text: string;
   onLinkPress?: (url: string) => boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const linkHost = useContext(AssistantLinkContext);
   const anchors = useRef(new Map<string, Text>());
@@ -260,7 +262,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
             {typeof node.attributes.alt === "string" &&
             node.attributes.alt.trim()
               ? node.attributes.alt
-              : "Image"}
+              : t("Image")}
           </Text>
         );
       },
@@ -276,7 +278,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
           >
             <View
               accessibilityRole="checkbox"
-              accessibilityLabel="Task"
+              accessibilityLabel={t("Task")}
               accessibilityState={{ checked, disabled: true }}
               style={{
                 width: 15,
@@ -317,7 +319,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
           <ScrollView
             key={node.key}
             horizontal
-            accessibilityLabel="Table"
+            accessibilityLabel={t("Table")}
             contentContainerStyle={{
               flexGrow: 1,
               paddingRight: TRANSCRIPT_SIDE_PADDING,
@@ -409,7 +411,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
               marginBottom: 4,
             }}
           >
-            Footnotes
+            {t("Footnotes")}
           </Text>
           {children}
         </View>
@@ -421,7 +423,9 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
               if (target) anchors.current.set(node.attributes.id, target);
               else anchors.current.delete(node.attributes.id);
             }}
-            accessibilityLabel={`Footnote ${node.attributes["data-number"]}`}
+            accessibilityLabel={t("Footnote {{details}}", {
+              details: node.attributes["data-number"],
+            })}
             style={{ color: colors.textSecondary, fontSize: 11 }}
           >
             {node.attributes["data-number"]}.
@@ -437,7 +441,9 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
             else anchors.current.delete(node.attributes.id);
           }}
           accessibilityRole="link"
-          accessibilityLabel={`Footnote ${node.attributes["data-number"]}`}
+          accessibilityLabel={t("Footnote {{details}}", {
+            details: node.attributes["data-number"],
+          })}
           onPress={() => openHref(node.attributes.href)}
           style={{ color: colors.primaryOnTint, fontSize: 10 }}
         >
@@ -448,7 +454,10 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         <Text
           key={node.key}
           accessibilityRole="link"
-          accessibilityLabel={`Back to footnote ${node.attributes["data-number"]} reference`}
+          accessibilityLabel={t(
+            "Back to footnote {{details}} reference",
+            { details: node.attributes["data-number"] },
+          )}
           onPress={() => openHref(node.attributes.href)}
           style={{ color: colors.primaryOnTint, fontSize: 12 }}
         >
@@ -457,7 +466,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         </Text>
       ),
     }),
-    [markdownStyle, colors, openHref],
+    [markdownStyle, colors, openHref, t],
   );
   return (
     <Markdown

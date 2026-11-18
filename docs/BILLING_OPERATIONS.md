@@ -107,6 +107,16 @@ or country policy in NyxID configuration.
    change the tax, wait for the profile refresh, and verify the bill before
    resuming. Do not edit tax assignments while running the demo.
 
+Reconciliation sweeps tax profiles before recovery and again after price
+synchronization. Each sweep selects up to 100 due wallets, oldest first.
+After selection, it starts refreshes for up to 20 seconds and lets the current
+refresh finish. Allow for selection, the 20-second budget, and one final
+refresh with up to five seconds of Lago time plus its MongoDB work. The sweep
+has no fixed wall-clock maximum. If wallets remain when the budget runs out,
+an info log records how many were attempted, completed, and left for the next
+sweep. The second sweep can pick them up in the same pass. A refresh error,
+including a Lago timeout, still counts as a failed unit in Integrity.
+
 NyxID reads the actual subscription's plan, including customized plan/charge tax
 assignments, and the customer's billing entity. Price synchronization round-trips
 charge IDs and omits response-only tax fields and `tax_codes` on existing
@@ -299,7 +309,7 @@ changed wallet bindings retire old targets; discovery reactivates a binding if
 it becomes current again. This also applies to captured runtime targets. Each
 visit folds at most 1,000 receipts; period/layout changes rebuild through the event
 index, then acknowledgements fold in sequence order. Incomplete projections stay
-visible. Responses are capped at 1 MiB and 256 metrics.
+visible. Responses are capped at 1 MiB and 256 charges.
 
 A nonzero difference becomes `billing_usage_drift` only after two complete
 observations in distinct passes at least ten database-time minutes apart, with
@@ -324,12 +334,152 @@ of additional differing metrics. Unsupported reasons have counts and up to five
 subscription ids. The retained prepared/rejected sample has at most five examples. A stale generation, changed
 sequence or elapsed period cannot display a live numeric finding.
 
-The response parser supports the nested plain per-metric shape used by the bill
-fixtures, exact decimal-string units, integer units, and inclusive final-second
-period bounds. Grouped/filtered usage, duplicate metrics, missing metrics,
-unsupported aggregation, invalid periods and unrepresentable quantities are
-explicit findings, never inferred totals. Published Lago v1.50 grouped/filtered
-schemas were unavailable offline; no partition semantics have been inferred.
+The provider contract is taken from lago-api tag `v1.50.0`,
+`app/serializers/v1/customers/charge_usage_serializer.rb` and
+`app/serializers/v1/customers/usage_serializer.rb`.
+`app/services/invoices/customer_usage_service.rb` formats the period bounds with
+`iso8601` without fractional seconds. The parser reads the inclusive whole-second
+`customer_usage.from_datetime` and `to_datetime` bounds and each
+`charges_usage` entry's `billable_metric.code`, `aggregation_type`, and `units`.
+The metric code must be bounded and non-blank. For sum metrics, units must be
+an exact, non-negative decimal string or integer representable in micro-units.
+
+For `sum_agg` metrics the charge-level `units` is the total over all fees in the
+charge. Non-empty `filters` and `grouped_usage` arrays each partition those same
+fees: their direct entries' units must add up to the charge total. Nested filters
+inside a group are not added again. Malformed breakdowns or entry units produce
+`breakdown_mismatch`; missing, null and empty breakdowns need no check.
+
+Other aggregations are omitted from the compared quantities and remembered only
+by metric code and a bounded aggregation name in the current read. Their units
+and breakdowns are skipped entirely, including absent or unrepresentable units. After local deliveries for the period have been
+folded, a delivered metric with a non-sum aggregation produces
+`non_sum_aggregation:<name>` instead of a numeric comparison. A non-sum metric
+without deliveries in that period does not block the sum metrics. Structural
+findings, including invalid sum-charge units and duplicate metric codes across
+any aggregations, still block the subscription. Duplicate codes are checked
+before aggregation or units, including duplicates across sum and non-sum charges.
+
+Every other key is ignored, whether absent, scalar, object, or array. v1.50.0
+already sends `presentation_breakdowns`, `pricing_unit_details`, and
+`total_aggregated_units`; none replaces or adds to the charge's `units`.
+`backend/src/services/billing/fixtures/lago_current_usage_v1_50_0.json` mirrors
+that tag's serializer keys with synthetic values: one charge has two filters,
+and one has grouped usage with nested filters. It includes the nested
+`presentation_breakdowns`, `invoice_display_name`, `values`, and `grouped_by`
+fields, and omits `amount_currency` inside breakdown entries as the serializer
+does. Smaller fixtures also cover absent metadata and exact `"12.0"`, `"0.0"`,
+`"0.000001"`, and integer units.
+
+Integrity records one bounded reason code per finding; only the code and a
+validated aggregation name can come from a response in a stored finding:
+
+| Reason code | Integrity sentence |
+| --- | --- |
+| `missing_customer_usage` | the provider omitted customer_usage |
+| `missing_charges_usage` | the provider omitted charges_usage or returned it in a non-array form |
+| `charge_not_object` | a charges_usage entry is not an object |
+| `too_many_charges` | the provider returned more than 256 charges |
+| `non_sum_aggregation:<name>` | a delivered metric has non-sum provider aggregation '{name}' |
+| `breakdown_mismatch` | a provider usage breakdown does not add up to its charge total |
+| `duplicate_metric` | the provider returned the same metric more than once |
+| `missing_metric_code` | the provider omitted a metric code |
+| `unsupported_provider_units` | the quantities cannot be represented exactly |
+| `invalid_provider_period` | the provider period is invalid |
+| `response_too_large` | the response exceeds the comparison size limit |
+| `subscription_unavailable` | the provider no longer exposes the subscription |
+| `provider_request_rejected` | the provider rejected the usage request |
+| `provider_target_mismatch` | the returned customer or subscription does not match |
+| `delivered_metric_missing` | a delivered metric is missing from provider usage |
+| `unsupported_usage_shape` (retired) | the previous release recorded an unsupported provider usage shape |
+
+For `non_sum_aggregation`, `<name>` is the provider enum only when it is at
+most 32 ASCII characters from `[a-z_]` and is nonempty; malformed or absent names
+are stored as `other`. Subscriptions carrying the retired
+`unsupported_usage_shape` finding can be re-read before their stored next visit.
+The original indexed due query runs first. If it returns fewer than 20 rows, a
+second query fills the remaining slots from non-retired, future-dated rows with
+that exact legacy reason, excluding rows already selected. The future-date bound
+avoids scanning legacy rows that were already due. It uses the named
+`usage_comparison_legacy_shape_due` index on `{next_visit_at, _id}`, partial on
+`{retired_at: null, comparison.reason: "unsupported_usage_shape"}`. Once those
+findings are replaced, the index is empty: the fallback examines no documents or
+keys, and the original due query still examines only due rows. Startup creates
+the additive index through the existing index setup; no migration or operator
+action is required. Old replicas' writes naturally repopulate it during rollout.
+If the legacy lookup's named index is missing, that lookup contributes no rows
+for the pass. A single warning records only the MongoDB error code; due rows
+still proceed. The old findings retain their schedule and become due within a
+day. Only IndexNotFound (27) or BadValue (2) with MongoDB's specific missing-hint
+message takes this fallback; other errors propagate. The due query is unchanged.
+
+The limits remain 20 subscriptions per pass, 20 reads per rolling five minutes,
+and 5,760 per UTC day. Ordinary due rows have priority. Successful publication
+replaces the old reason and resumes the ordinary schedule; existing coverage
+waits still apply. Both versions read the unchanged observation schema and string
+reasons.
+
+## Billing inventories on Integrity
+
+`billing_hold_backlog` and `billing_stuck_requests` are read-only inventories.
+They have severity `info` whenever their evidence is readable and complete,
+regardless of reservation age or recovery eligibility. An incomplete, truncated
+or unreadable scan, invalid rows, or unreadable process-registry evidence makes
+the affected inventory `action`; unreadable recovery totals also make the
+forwarded-request inventory incomplete. The bounded count of rows with no holds
+remains a valid lower bound when its index-key limit is reached, so that count
+alone does not require action. Failing recovery steps are reported separately
+by `billing_reconcile_steps`, and unexplained holds by the hold observations.
+
+The summaries use “holds” because the inventory includes allowance units as
+well as credits. Sentences describe counts, hold kinds and the oldest creation-age
+bucket in plain English. Counts of billing rows are not counts of individual
+funding reservations: one meter row may reserve from several grants or allowance
+periods. The sweep can release unused holds from eligible reservations after
+rechecking them; it does not promise completion on the next pass. A request may
+have both eligible reservations and reservations belonging to running work, so
+these sentences retain that distinction. Live work has no new lifetime limit.
+
+Rows with no holds are not necessarily dead requests or eligible for cleanup.
+Their remaining count is a lower bound in sent request rows, with no money tied
+up in them. Cleanup's closed-row and request counts are cumulative completions
+for that category, not a subset of the currently remaining rows. Request counts
+are distinct within each described category; categories and hold kinds overlap.
+
+Information entries say “No action is needed. This inventory is read-only.”
+Action entries name the relevant checks: the row limit and backlog, query
+performance, stored billing fields and schemas, database access and indexes,
+process registry records, recovery counters, or the count query for rows with no
+holds. They direct the operator to the stages in Details, database health and
+available server logs, then to reload the page for a fresh read. These readers do
+not guarantee a dedicated server log line for every failure. Multiple causes
+combine fixed checks without repeating them, in at most two sentences.
+
+The exact technical inventory is retained in the additive `technical_details`
+field, collapsed under **Details** on the page. The `detail` field contains the
+short English sentences. Each diagnostic explicitly supplies `severity` as
+`info` or `action`. Older frontends ignore the additive fields and retain their
+previous diagnostic coloring; new frontends retain the previous code allowlist
+when an older backend omits severity. No operator step is required.
+
+For the hold backlog, each kind is an independent consistent snapshot. Age uses
+meter creation and database time. Held amounts exclude recorded returns and
+matching applied locks. Resources count positive outstanding holds; billing
+rows include zero-hold handoffs. Wallets and owners are distinct row identities.
+Allowance units remain separated by metric in Details; groups can overlap in
+resources and owners. Incomplete totals are not population totals. Each kind
+reads at most 10,000 rows within its existing query and client deadlines.
+
+The forwarded-request inventory classifies potential wallet, grant and allowance
+holds in one pinned snapshot, reading at most 10,000 distinct candidates in
+128-row pages within four seconds. Incomplete groups mean at least the reported
+counts and amounts. Its separate count examines at most 100,001 index keys per
+source and may undercount overlapping funding or returned holds. Siblings are
+bounded at 129 per row; locks and receipts are deducted in the same snapshot.
+Live ownership includes the registry's 45-second window plus a two-minute
+margin. Legacy eligibility requires an extra hour before every live generation's
+registration. Missing or unreadable registry evidence authorizes no cleanup.
+Reading either inventory changes no counters, quantities or charging decisions.
 
 ## Reconcile ownership and verification status
 

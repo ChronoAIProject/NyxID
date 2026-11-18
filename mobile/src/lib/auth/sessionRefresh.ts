@@ -26,3 +26,9 @@ export function createSessionRefresh(deps: {
     return next.promise;
   };
 }
+/** `/auth/refresh` answers a missing, expired, revoked or reused refresh token
+ * with 401 (400/403 for malformed or forbidden requests). Only these end the
+ * local session; every other status is temporary and keeps credentials. */
+export function isRefreshRefusal(status: number): boolean {
+  return status === 400 || status === 401 || status === 403;
+}

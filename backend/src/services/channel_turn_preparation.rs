@@ -1,5 +1,6 @@
 //! A preparation lease proves only that the next text part has not been sent.
-//! Images retain their independent barriers. A sending part is never reclaimed.
+//! Images retain their independent barriers. Direct sending parts are never
+//! reclaimed; gateway reply-target recovery requires a frozen request.
 #[path = "channel_turn_gateway_receipt.rs"]
 pub mod gateway;
 

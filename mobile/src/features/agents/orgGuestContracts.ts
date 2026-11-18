@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 export const guestServiceSchema = z.object({
   id: z.string(),
@@ -36,8 +37,16 @@ export function orgGuestSwitchPayload(
   return { enabled, expected_revision };
 }
 export const GUEST_ACCESS_LABEL = {
-  none: "No guest access",
-  read: "Look things up only",
-  use: "Use, but not change or delete",
-  all: "Everything this agent can do",
+  get none() {
+    return translateApp("No guest access");
+  },
+  get read() {
+    return translateApp("Look things up only");
+  },
+  get use() {
+    return translateApp("Use, but not change or delete");
+  },
+  get all() {
+    return translateApp("Everything this agent can do");
+  },
 };

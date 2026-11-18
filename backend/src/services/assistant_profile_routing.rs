@@ -119,6 +119,26 @@ pub async fn model_for(db: &Database, role: RouteRole<'_>, inherited: &str) -> S
     }
 }
 
+pub(crate) async fn model_for_in_session(
+    db: &Database,
+    role: RouteRole<'_>,
+    inherited: &str,
+    session: &mut mongodb::ClientSession,
+) -> String {
+    if !ROUTING_ACTIVE {
+        return inherited.into();
+    }
+    match db
+        .collection::<AssistantProfileRoutes>(COLLECTION_NAME)
+        .find_one(doc! {"_id": DOCUMENT_ID})
+        .session(session)
+        .await
+    {
+        Ok(routes) => resolve(routes.as_ref(), role, inherited, true),
+        Err(_) => inherited.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

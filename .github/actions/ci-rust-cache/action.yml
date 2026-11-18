@@ -11,7 +11,7 @@ inputs:
     description: This job allocates the backend swap reserve; reclaim hosted SDK space and budget that allocation.
     default: 'false'
   save-if:
-    description: Only CI Cache Warm opts in. Push still writes main only.
+    description: Only CI Cache Warm opts in. Pushes write main and dev.
     default: 'false'
 outputs:
   save-enabled:
@@ -26,7 +26,7 @@ outputs:
 runs:
   using: composite
   steps:
-    # Push publishes main only. workflow_dispatch also publishes the selected
+    # Push publishes main and dev. workflow_dispatch also publishes the selected
     # ref; Actions scopes that entry to the branch and does not replace main.
     # Ordinary CI passes save-if false, so it never writes.
     - name: Decide whether this run may write ordinary caches
@@ -39,7 +39,7 @@ runs:
       run: |
         set -euo pipefail
         enabled=false
-        if [[ "$SAVE_IF" == "true" && ( "$EVENT" == "workflow_dispatch" || "$REF" == "refs/heads/main" ) ]]; then
+        if [[ "$SAVE_IF" == "true" && ( "$EVENT" == "workflow_dispatch" || "$REF" == "refs/heads/main" || "$REF" == "refs/heads/dev" ) ]]; then
           enabled=true
         fi
         echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"

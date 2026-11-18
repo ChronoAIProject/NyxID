@@ -166,6 +166,8 @@ server {
         try_files $uri =404;
     }
 
+    location ~* \.map$ { return 404; }
+
     # Cache hashed static assets for 1 year
     location ~* \.(?:js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
         expires 1y;

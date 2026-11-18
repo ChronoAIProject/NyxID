@@ -123,12 +123,32 @@ account state and unmounts editors. `navigationHierarchy.test.ts`,
 `workspaceChatNavigation.test.ts` and the surface/guard tests cover route,
 restoration, transition and dismissal behavior.
 
-At window widths of at least 768pt, Settings and quick-action sheets use a
-centered card up to 720×860pt with 24pt plus safe-area margins. Narrow windows
-retain the bottom sheet. The measured host shrinks above the keyboard, retaining
+At window widths of at least 768pt without a corner status column, Settings and
+quick-action sheets use a centered card up to 720×860pt with 24pt plus safe-area
+margins. Narrow windows and both Duo postures retain the bottom sheet. Duo
+sheets start at the leading edge, end 8pt before the quick rail's column, and
+reach the bottom with no gap or rounded bottom corners. Device classification
+uses the full window so the keyboard cannot switch the Duo to an iPad card.
+The measured host shrinks above the keyboard, retaining
 the same sheet navigator and guarded edits; rotation does not replay entrance
 animation. Settings content is centered up to 720pt and row wrapping follows
 measured row width and Dynamic Type.
+
+The Duo rail rests 8pt below the idle status cluster (160pt folded, 108pt
+unfolded). Native status-frame will-change and safe-area events drive its
+displacement; did-change/foreground events read the current frame. Actual
+camera-ready, recognizer audio-start/end and media capture/teardown events
+also move it while NyxID uses the camera/microphone. iOS has no public privacy-
+light event; capture lifecycle events cover that case without polling, UI
+timers or route-open guesses. After capture ends and the system column settles,
+the rail returns to idle. The extra offset is capped at 36pt. Folded, its active
+default stack starts at 196pt and ends at the collapsed composer's 640pt baseline, accounting
+for the same 4pt page padding above the bottom safe area; all five shortcuts
+fit without scrolling. Physical-device acceptance:
+open Settings folded, unfold with it open, and dismiss/reopen unfolded; the
+drawer stays attached to the bottom. Open QR scanning repeatedly and verify
+the expanded camera indicator, clock and Wi-Fi never cover the full-screen
+capsule. The shortcuts scroll within the space left above the chat controls.
 
 Accessibility exposure follows the shell's settled visual endpoint. While
 navigation is open the slab is hidden except for Close navigation; focus moves

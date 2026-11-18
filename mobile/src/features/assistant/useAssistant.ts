@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import {
   retryAgentRead,
   agentReadRetryDelay,
@@ -424,7 +425,9 @@ export function useAssistant(
     interruptedSettlement?.error_code === "turn_lost"
       ? storedError("turn_lost")
       : unresolvedInterruption
-        ? "Connection interrupted. The assistant may still be working. Refresh or open its history before sending again."
+        ? translateApp(
+            "Connection interrupted. The assistant may still be working. Refresh or open its history before sending again.",
+          )
         : undefined;
   const needsPolling =
     unresolvedInterruption ||
@@ -468,35 +471,49 @@ export function useAssistant(
       uploads?: AssistantUploadedMessage,
       acknowledgementId?: string,
     ) => {
-      if (sendLock.current) throw new Error("A message is already being sent.");
-      if (!activeRef.current) throw new Error("Reconnect to send a message.");
+      if (sendLock.current) throw new Error(translateApp("A message is already being sent."));
+      if (!activeRef.current) throw new Error(translateApp("Reconnect to send a message."));
       if (recoveryRequired)
-        throw new Error("Refresh or open the saved chat before sending again.");
+        throw new Error(
+          translateApp("Refresh or open the saved chat before sending again."),
+        );
       if (
         uploads &&
         selected.current &&
         uploads.conversationId !== selected.current
       )
         throw new Error(
-          "These files belong to a different chat. Choose them again here.",
+          translateApp(
+            "These files belong to a different chat. Choose them again here.",
+          ),
         );
       if (uploads && retryOf)
-        throw new Error("Retry uses the original message's attachments.");
+        throw new Error(
+          translateApp("Retry uses the original message's attachments."),
+        );
       if (selected.current && !latestHistory.current)
-        throw new Error("Wait for this chat's saved history to load.");
+        throw new Error(
+          translateApp("Wait for this chat's saved history to load."),
+        );
       if (latestHistory.current?.conversation.active_turn)
         throw new Error(
-          "The assistant is still working. Stop it or wait for completion.",
+          translateApp(
+            "The assistant is still working. Stop it or wait for completion.",
+          ),
         );
       if (latestHistory.current?.conversation.agent?.destroyed)
         throw new Error(
-          "This agent was destroyed. Its conversation is read-only.",
+          translateApp(
+            "This agent was destroyed. Its conversation is read-only.",
+          ),
         );
       if (
         !selected.current &&
         (!agent || agent.can_use !== true || agent.status === "destroyed")
       )
-        throw new Error("Select an available agent before starting a chat.");
+        throw new Error(
+          translateApp("Select an available agent before starting a chat."),
+        );
       // Local validation must refuse before detaching any optimistic message.
       assistantTurnBody({
         conversationId: selected.current ?? uploads?.conversationId,
@@ -548,7 +565,9 @@ export function useAssistant(
               setConversationId(id);
               adopt.current?.(id);
             } else if (!reply.conversationId) {
-              throw new Error("Assistant did not identify the conversation.");
+              throw new Error(
+                translateApp("Assistant did not identify the conversation."),
+              );
             }
             setLive(reply);
           },
@@ -637,7 +656,9 @@ export function useAssistant(
     const id = selected.current;
     if (!id || decisionLock.current) return;
     if (Date.now() - lastDecision.current < 750)
-      throw new Error("Please wait a moment before deciding again.");
+      throw new Error(
+        translateApp("Please wait a moment before deciding again."),
+      );
     lastDecision.current = Date.now();
     decisionLock.current = true;
     setDeciding(acknowledgementId);
@@ -677,7 +698,7 @@ export function useAssistant(
       !activeRef.current ||
       accountEpoch.current !== getAuthEpoch()
     )
-      throw new Error("Reconnect to decide this request.");
+      throw new Error(translateApp("Reconnect to decide this request."));
     if (
       !row ||
       !Number.isFinite(Date.parse(row.expires_at)) ||
@@ -685,10 +706,14 @@ export function useAssistant(
       latestHistory.current?.conversation.agent?.destroyed
     )
       throw new Error(
-        "This request is no longer available. Refresh its latest state.",
+        translateApp(
+          "This request is no longer available. Refresh its latest state.",
+        ),
       );
     if (Date.now() - lastDecision.current < 750)
-      throw new Error("Please wait a moment before deciding again.");
+      throw new Error(
+        translateApp("Please wait a moment before deciding again."),
+      );
     lastDecision.current = Date.now();
     decisionLock.current = true;
     setDeciding(approvalId);
@@ -726,7 +751,7 @@ export function useAssistant(
     const id = selected.current;
     const generation = epoch.current;
     if (!id || !activeRef.current)
-      throw new Error("Reconnect to check retry availability.");
+      throw new Error(translateApp("Reconnect to check retry availability."));
     let recovery: NonNullable<AssistantMessage["recovery"]>;
     try {
       recovery = await assistantApi.recovery(id, messageId);
@@ -853,7 +878,8 @@ export function useAssistant(
     error:
       error ??
       interruptionError ??
-      (history?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
+      (history?.unsupported_history_items ? translateApp(HISTORY_UNSUPPORTED)
+        : undefined),
     online,
     recoveryRequired,
     interrupted:
@@ -886,12 +912,16 @@ function errorMessage(cause: unknown): string {
     "name" in cause &&
     cause.name === "ZodError"
   )
-    return HISTORY_UNAVAILABLE;
+    return translateApp(HISTORY_UNAVAILABLE);
   if (cause instanceof ApiError && cause.errorKey === "turn_active")
-    return "The assistant is already working on this chat. Refresh its history.";
+    return translateApp(
+      "The assistant is already working on this chat. Refresh its history.",
+    );
   if (cause instanceof ApiError && cause.statusCode === 404)
-    return "This chat is unavailable, or Assistant is not enabled for your account.";
+    return translateApp(
+      "This chat is unavailable, or Assistant is not enabled for your account.",
+    );
   return cause instanceof Error
     ? historyErrorMessage(cause)!
-    : "Could not reach the assistant. Try again.";
+    : translateApp("Could not reach the assistant. Try again.");
 }

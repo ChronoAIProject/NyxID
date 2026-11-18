@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 // Ported from Web tool-activity-text.ts at upstream f69a8718 (PR #1870).
 // Keep its identifier-only phrases; native needs only the branding labels.
 const PROVIDER_LABELS: Readonly<Record<string, string>> = {
@@ -149,35 +150,44 @@ function serviceName(slug: string): string {
   );
 }
 
-/** "get_file_contents" -> reading/read/get "file contents". */
-function operationForms(operation: string): Forms {
-  const words = operation
-    .toLowerCase()
-    .split(/[_\-.\s]+/)
+type ActivityMessage = { phrases: Forms; values: Record<string, string> };
+
+/** Select complete English message keys first; translate exactly once at the edge. */
+function operationForms(operation: string): ActivityMessage {
+  const words = operation.toLowerCase().split(/[_\-.\s]+/)
     .filter((word) => word && !NOISE.has(word));
   const at = words.findIndex((word) => Object.hasOwn(VERBS, word));
   const verb = words[at];
-  const verbForms = verb === undefined ? undefined : VERBS[verb];
-  if (verb === undefined || !verbForms) {
-    const object = words.join(" ") || operation;
-    return [`Using ${object}`, `Used ${object}`, `use ${object}`];
-  }
-  const [ing, past] = verbForms;
-  const object = words.filter((_, index) => index !== at).join(" ");
-  const tail = object ? ` ${object}` : "";
-  return [`${ing}${tail}`, `${past}${tail}`, `${verb}${tail}`];
+  const pair = verb === undefined ? undefined : VERBS[verb];
+  const object = words.filter((_, index) => index !== at).join(" ") || (pair ? "" : operation);
+  const [running, done] = pair ?? ["Using", "Used"];
+  const tail = object ? " {{object}}" : "";
+  return {
+    phrases: [running + tail, done + tail, "Couldn't " + (pair ? verb : "use") + tail],
+    values: { object },
+  };
 }
 
-function forms(label: string): Forms | null {
+function forms(label: string): ActivityMessage | null {
   const meta = Object.hasOwn(META, label) ? META[label] : undefined;
-  if (meta) return meta;
+  if (meta) return { phrases: [meta[0], meta[1], "Couldn't " + meta[2]], values: {} };
   const split = label.indexOf("__");
   if (split <= 0 || split + 2 >= label.length) return null;
   const service = label.slice(0, split);
-  const [ing, past, base] = operationForms(label.slice(split + 2));
-  if (service === "nyx" || service === "nyxid") return [ing, past, base];
-  const where = ` on ${serviceName(service)}`;
-  return [`${ing}${where}`, `${past}${where}`, `${base}${where}`];
+  const message = operationForms(label.slice(split + 2));
+  if (service === "nyx" || service === "nyxid") return message;
+  return {
+    phrases: message.phrases.map((phrase) => phrase + " on {{service}}") as unknown as Forms,
+    values: { ...message.values, service: serviceName(service) },
+  };
+}
+
+/** Every state of the closed client vocabulary has a complete catalog template. */
+export function toolActivityTranslationKeys(): string[] {
+  const labels = Object.keys(VERBS).flatMap((verb) =>
+    [`nyx__${verb}`, `nyx__${verb}_object`, `external__${verb}`, `external__${verb}_object`]);
+  labels.push("nyx__unknown_object", "external__unknown_object", ...Object.keys(META));
+  return [...new Set(labels.flatMap((label) => forms(label)!.phrases))];
 }
 
 /**
@@ -189,9 +199,7 @@ export function describeToolActivity(
   label: string,
   status: ToolActivityStatus,
 ): string {
-  const phrase = forms(label);
-  if (!phrase || status === "unknown" || status === "skipped") return label;
-  if (status === "running") return phrase[0];
-  if (status === "error") return `Couldn't ${phrase[2]}`;
-  return phrase[1];
+  const message = forms(label);
+  if (!message || status === "unknown" || status === "skipped") return label;
+  return translateApp(message.phrases[status === "running" ? 0 : status === "error" ? 2 : 1], message.values);
 }

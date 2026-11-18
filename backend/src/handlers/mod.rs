@@ -75,6 +75,8 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+#[cfg(test)]
+mod key_authority_audit_tests;
 pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;
@@ -86,6 +88,7 @@ pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub mod mobile_app_links;
 pub(crate) mod mobile_redirect;
 pub mod node_admin;
 pub mod node_agent;
@@ -152,6 +155,7 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod admin_cma_sandbox_reservations;
 pub mod assistant_cma_agents;
 pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
@@ -246,3 +250,5 @@ pub(crate) mod invocation_diagnostics;
 
 mod platform_model_gateway;
 pub mod platform_models;
+
+pub mod crash_reports;

@@ -207,9 +207,13 @@ async fn stuck_request_inventory_is_indexed_bounded_and_read_only() {
         "aggregate" | "getMore" | "killCursors" | "abortTransaction" | "find"
     )));
     assert!(
-        result[0].detail.contains("distinct_requests=1"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("distinct_requests=1"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     assert_eq!(
         raw,
@@ -226,10 +230,12 @@ async fn stuck_request_inventory_is_indexed_bounded_and_read_only() {
     let result = diagnostics(&f.db).await.unwrap();
     assert!(
         result[0]
-            .detail
+            .technical_details
+            .as_ref()
+            .unwrap()
             .contains("class=registry_unavailable eligible=false"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     // One bad row remains visible as incompleteness, not a page error.
     f.db.collection::<Document>(METERS)
@@ -238,9 +244,13 @@ async fn stuck_request_inventory_is_indexed_bounded_and_read_only() {
         .unwrap();
     let result = diagnostics(&f.db).await.unwrap();
     assert!(
-        result[0].detail.contains("invalid_rows=1"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("invalid_rows=1"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     f.db.drop().await.unwrap();
 }
@@ -283,21 +293,28 @@ async fn stuck_request_inventory_deduplicates_requests_and_separates_benefit_uni
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail.contains("rows=2 distinct_requests=1"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("rows=2 distinct_requests=1"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("kind=grant unit=credits rows=2 requests=1 held=4 resources=1"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("kind=allowance unit=tokens rows=2 requests=1 held=14 resources=1"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     // A coordinator marker protects both rows, including the unmarked sibling.
     f.db.collection::<Document>(METERS)
@@ -309,12 +326,20 @@ async fn stuck_request_inventory_deduplicates_requests_and_separates_benefit_uni
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("class=excluded_realtime eligible=false age=over_7d rows=2 requests=1"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
-    assert!(!d[0].detail.contains("eligible=true"));
+    assert!(
+        !d[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("eligible=true")
+    );
     f.db.drop().await.unwrap();
 }
 
@@ -383,14 +408,22 @@ async fn stuck_request_inventory_pins_history_across_cursor_batches() {
     let result = result.unwrap();
     assert_eq!(result.len(), 1, "{result:?}");
     assert!(
-        result[0].detail.contains("rows=601 distinct_requests=601"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("rows=601 distinct_requests=601"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        result[0].detail.starts_with("complete=true"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .starts_with("complete=true"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     assert!(diagnostics(&f.db).await.unwrap().is_empty());
     f.db.drop().await.unwrap();
@@ -413,12 +446,14 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("reason=index_unavailable stage=holdless_count database_code=2 elapsed_ms="),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
-    assert!(!d[0].detail.contains(&f.owner));
+    assert!(!d[0].technical_details.as_ref().unwrap().contains(&f.owner));
     f.db.collection::<Document>(METERS)
         .create_index(selection::Source::Wallet.model())
         .await
@@ -429,12 +464,20 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("reason=registry_evidence_unavailable stage=registry"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
-    assert!(!d[0].detail.contains("eligible=true"));
+    assert!(
+        !d[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("eligible=true")
+    );
     roster(
         &f,
         "live",
@@ -448,9 +491,12 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail.contains("reason=row_decode_error stage=decode"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("reason=row_decode_error stage=decode"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     f.db.drop().await.unwrap();
 }
@@ -472,17 +518,29 @@ async fn stuck_request_inventory_timeout_is_explicit_and_bounded() {
     let result = READ_GATE.scope(gate, diagnostics(&f.db)).await.unwrap();
     assert!(start.elapsed() < std::time::Duration::from_secs(6));
     assert!(
-        result[0].detail.contains("rows=1 distinct_requests=1"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("rows=1 distinct_requests=1"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
-    assert!(result[0].detail.contains("truncated=true"));
     assert!(
         result[0]
-            .detail
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("truncated=true")
+    );
+    assert!(
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
             .contains("reason=deadline_exceeded stage=inventory elapsed_ms="),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     assert!(
         f.db.collection::<Document>(METERS)
@@ -543,7 +601,7 @@ async fn stuck_request_inventory_held_rows_are_not_hidden_by_holdless_prefix() {
         .await
         .unwrap();
     let result = diagnostics(&f.db).await.unwrap();
-    let detail = result[0].detail.clone();
+    let detail = result[0].technical_details.as_ref().unwrap().clone();
     f.db.drop().await.unwrap();
     assert!(detail.contains("rows=1 distinct_requests=1"), "{detail}");
     assert!(detail.starts_with("complete=true"), "{detail}");
@@ -597,21 +655,31 @@ async fn stuck_request_inventory_zero_allocations_legacy_amount_and_index_only_c
         .unwrap();
     let result = diagnostics(&f.db).await.unwrap();
     assert!(
-        result[0].detail.contains("rows=1 distinct_requests=1"),
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("rows=1 distinct_requests=1"),
         "{}",
-        result[0].detail
-    );
-    assert!(
-        result[0].detail.contains("holdless_rows_at_least=1"),
-        "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     assert!(
         result[0]
-            .detail
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("holdless_rows_at_least=1"),
+        "{}",
+        result[0].technical_details.as_ref().unwrap()
+    );
+    assert!(
+        result[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
             .contains("kind=grant unit=credits rows=1 requests=1 held=1 resources=1"),
         "{}",
-        result[0].detail
+        result[0].technical_details.as_ref().unwrap()
     );
     for name in std::iter::once(inventory::INDEX).chain(selection::Source::ALL.map(|s| s.index())) {
         let plan =
@@ -663,29 +731,63 @@ async fn stuck_request_inventory_limit_keeps_held_lower_bound() {
         .await
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
-    assert!(d[0].detail.starts_with("complete=false"), "{}", d[0].detail);
-    assert!(d[0].detail.contains("truncated=true"), "{}", d[0].detail);
     assert!(
-        d[0].detail.contains("counts_are_lower_bounds=true"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .starts_with("complete=false"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        d[0].detail.contains("kind=wallet unit=credits"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("truncated=true"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        d[0].detail.contains("reason=row_limit")
-            || d[0].detail.contains("reason=deadline_exceeded")
-            || d[0].detail.contains("reason=query_timeout"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("counts_are_lower_bounds=true"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     assert!(
-        d[0].detail.contains("holdless_rows_at_least=0"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("kind=wallet unit=credits"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
+    );
+    assert!(
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("reason=row_limit")
+            || d[0]
+                .technical_details
+                .as_ref()
+                .unwrap()
+                .contains("reason=deadline_exceeded")
+            || d[0]
+                .technical_details
+                .as_ref()
+                .unwrap()
+                .contains("reason=query_timeout"),
+        "{}",
+        d[0].technical_details.as_ref().unwrap()
+    );
+    assert!(
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("holdless_rows_at_least=0"),
+        "{}",
+        d[0].technical_details.as_ref().unwrap()
     );
     f.db.drop().await.unwrap();
 }

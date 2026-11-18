@@ -27,13 +27,7 @@ class AppDelegate: ExpoAppDelegate {
     reactNativeDelegate = delegate
     reactNativeFactory = factory
 
-#if os(iOS) || os(tvOS)
-    window = UIWindow(frame: UIScreen.main.bounds)
-    factory.startReactNative(
-      withModuleName: "main",
-      in: window,
-      launchOptions: launchOptions)
-#endif
+    // The window and React root are created per scene in SceneDelegate.
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -55,6 +49,73 @@ class AppDelegate: ExpoAppDelegate {
   ) -> Bool {
     let result = RCTLinkingManager.application(application, continue: userActivity, restorationHandler: restorationHandler)
     return super.application(application, continue: userActivity, restorationHandler: restorationHandler) || result
+  }
+}
+
+/// Owns the app window. UIKit hands URLs and user activities to the scene
+/// instead of the app delegate; forward them so Expo subscribers (including
+/// the dev launcher) and React Native Linking keep a single entry point.
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+  var window: UIWindow?
+
+  func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard
+      let windowScene = scene as? UIWindowScene,
+      let appDelegate = UIApplication.shared.delegate as? AppDelegate,
+      let factory = appDelegate.reactNativeFactory
+    else { return }
+
+    let window = UIWindow(windowScene: windowScene)
+    self.window = window
+    appDelegate.window = window
+    // A cold-start link arrives in the connection options rather than the
+    // app's launch options; Linking.getInitialURL and the dev launcher read it
+    // from the launch options given to React Native.
+    factory.startReactNative(
+      withModuleName: "main",
+      in: window,
+      launchOptions: Self.launchOptions(from: connectionOptions))
+  }
+
+  func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+    guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
+    for context in URLContexts {
+      var options: [UIApplication.OpenURLOptionsKey: Any] = [
+        .openInPlace: context.options.openInPlace
+      ]
+      if let source = context.options.sourceApplication { options[.sourceApplication] = source }
+      if let annotation = context.options.annotation { options[.annotation] = annotation }
+      _ = appDelegate.application(UIApplication.shared, open: context.url, options: options)
+    }
+  }
+
+  func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+    guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
+    _ = appDelegate.application(
+      UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+  }
+
+  static func launchOptions(
+    from connectionOptions: UIScene.ConnectionOptions
+  ) -> [UIApplication.LaunchOptionsKey: Any]? {
+    var launchOptions: [UIApplication.LaunchOptionsKey: Any] = [:]
+    if let context = connectionOptions.urlContexts.first {
+      launchOptions[.url] = context.url
+      if let source = context.options.sourceApplication { launchOptions[.sourceApplication] = source }
+    }
+    if let activity = connectionOptions.userActivities.first(where: {
+      $0.activityType == NSUserActivityTypeBrowsingWeb
+    }) {
+      launchOptions[.userActivityDictionary] = [
+        "UIApplicationLaunchOptionsUserActivityKey": activity,
+        UIApplication.LaunchOptionsKey.userActivityType.rawValue: activity.activityType,
+      ]
+    }
+    return launchOptions.isEmpty ? nil : launchOptions
   }
 }
 

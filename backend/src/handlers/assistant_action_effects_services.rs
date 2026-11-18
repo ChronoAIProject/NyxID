@@ -624,39 +624,17 @@ async fn commit_service_route(
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
-    if let Some(node_id) = request.via_node_id.as_deref() {
-        node_service::ensure_node_writable_by_actor(&state.db, actor, node_id).await?;
-    }
-    let mut extra = doc! {};
-    match request.via_node_id.as_deref() {
-        Some(node_id) => {
-            extra.insert("node_id", node_id);
-        }
-        None => {
-            extra.insert("node_id", mongodb::bson::Bson::Null);
-        }
-    }
-    let db = state.db.clone();
-    let owner_id = access.owner_id.clone();
-    let service_id = request.user_service_id.clone();
-    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
-        let db = db.clone();
-        let owner_id = owner_id.clone();
-        let service_id = service_id.clone();
-        let extra = extra.clone();
-        let operation = user_service_service::commit_user_service_mutation(
-            &db,
-            &mut *session,
-            &owner_id,
-            &service_id,
-            extra,
-        )
-        .await
-        .map(|_| ());
-        crate::services::api_key_mutation_service::transaction_result(operation)
-    })
-    .await
-    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    let target = match request.via_node_id.as_deref() {
+        Some(id) => Some(node_service::RouteNode::authorize(&state.db, actor, id).await?),
+        None => None,
+    };
+    user_service_service::set_service_route(
+        &state.db,
+        &access.owner_id,
+        &request.user_service_id,
+        target,
+    )
+    .await?;
     mark_completed(&state.db, &receipt).await?;
     Ok(false)
 }
@@ -1006,6 +984,7 @@ impl std::fmt::Debug for RotateAssistantServiceCredentialRequest {
 
 #[cfg(test)]
 mod tests {
+    mod route_sync;
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -1046,11 +1025,15 @@ mod tests {
     };
 
     fn access_token(state: &AppState, user_id: &str) -> String {
+        access_token_with_scope(state, user_id, "")
+    }
+
+    fn access_token_with_scope(state: &AppState, user_id: &str, scope: &str) -> String {
         crate::crypto::jwt::generate_access_token(
             &state.jwt_keys,
             &state.config,
             &Uuid::parse_str(user_id).expect("valid user id"),
-            "",
+            scope,
             None,
             None,
             None,

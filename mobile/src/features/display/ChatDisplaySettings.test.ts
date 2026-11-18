@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { translate, type TranslationValues } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import {
   defaultChatLayout,
@@ -36,6 +38,7 @@ function setup(
     width = 402,
     initial = defaultChatLayout,
     key = "composerMaxHeight" as keyof ChatLayout,
+    language = "en" as Language,
   } = {},
 ) {
   let layout = { ...initial };
@@ -47,6 +50,9 @@ function setup(
   ) => ({ type, props, key: elementKey });
   const dynamicText = {};
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({ language, t: (key: string, values?: TranslationValues) => translate(language, key, values) }),
+    },
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
       View: "View",
@@ -165,4 +171,20 @@ test("the edit page steps within bounds with 44pt targets and offers a reset", (
     false,
   );
   env.harness.unmount();
+});
+
+test("each chat-layout adjustment announces a complete setting-specific phrase in every app language", () => {
+  for (const [language, key, increase, decrease] of [
+    ["en", "composerMaxHeight", "Increase maximum composer height", "Decrease maximum composer height"],
+    ["en", "columnWidth", "Increase chat column width", "Decrease chat column width"],
+    ["zh-CN", "composerMaxHeight", "增大输入框最大高度", "减小输入框最大高度"],
+    ["zh-CN", "columnWidth", "增大聊天栏宽度", "减小聊天栏宽度"],
+    ["zh-TW", "composerMaxHeight", "增加輸入框最大高度", "減少輸入框最大高度"],
+    ["zh-TW", "columnWidth", "增加聊天欄寬度", "減少聊天欄寬度"],
+  ] as const) {
+    const env = setup("./ChatLayoutEditScreen.tsx", { key, language });
+    assert.ok(env.find(increase));
+    assert.ok(env.find(decrease));
+    env.harness.unmount();
+  }
 });

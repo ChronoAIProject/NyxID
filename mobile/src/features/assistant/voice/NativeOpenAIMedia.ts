@@ -1,3 +1,5 @@
+import { translateApp } from "../../../i18n/appTranslation";
+import { claimSystemStatusActivity } from "../../../lib/systemStatusActivity";
 import type {
   VoiceMediaAdapter,
   VoiceMediaEvent,
@@ -65,7 +67,7 @@ type Diagnostic = {
   counts?: Record<string, number>;
 };
 
-const closedError = () => new Error("Voice audio was closed.");
+const closedError = () => new Error(translateApp("Voice audio was closed."));
 const startupError = "Voice audio could not be started. Please try again.";
 const connectionError = "WebRTC negotiation failed.";
 let microphoneOwner: NativeOpenAIMedia | undefined;
@@ -79,6 +81,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   private generation = 0;
   private peer?: NativeAudioPeer;
   private stream?: NativeAudioStream;
+  private releaseStatus?: () => void;
   private channel?: NativeAudioChannel;
   private remoteTracks = new Set<NativeAudioTrack>();
   private disposers: (() => void)[] = [];
@@ -163,7 +166,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       const cancel = (error: Error) => finish(error);
       const timer = this.clock.setTimeout(() => {
         const error = new Error(
-          "Voice audio took too long to start. Please try again.",
+          translateApp("Voice audio took too long to start. Please try again."),
         );
         finish(error);
         if (this.alive(generation)) this.fail(error.message);
@@ -171,7 +174,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       this.waiters.add(cancel);
       operation.then(
         (value) => finish(undefined, value),
-        () => finish(new Error(startupError)),
+        () => finish(new Error(translateApp(startupError))),
       );
       if (!this.alive(generation)) finish(closedError());
     });
@@ -180,10 +183,12 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   async prepare(protocol: VoiceProtocol, signal: AbortSignal): Promise<string> {
     this.close();
     if (protocol !== "openai_live")
-      throw new Error("Voice audio is not supported by this app runtime.");
+      throw new Error(
+        translateApp("Voice audio is not supported by this app runtime."),
+      );
     if (signal.aborted) throw closedError();
     if (microphoneOwner && microphoneOwner !== this)
-      throw new Error("The microphone is already in use.");
+      throw new Error(translateApp("The microphone is already in use."));
     microphoneOwner = this;
     this.closed = false;
     const generation = ++this.generation;
@@ -204,6 +209,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
           throw closedError();
         }
         this.stream = stream;
+        this.releaseStatus = claimSystemStatusActivity();
         for (const track of stream.getTracks()) track.enabled = false;
         return stream;
       });
@@ -212,11 +218,13 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       const tracks = stream.getAudioTracks();
       const track = tracks[0];
       if (tracks.length !== 1 || !track || track.readyState !== "live")
-        throw new Error(startupError);
+        throw new Error(translateApp(startupError));
       this.listen(track, "ended", () => {
         if (this.alive(generation))
           this.fail(
-            "Microphone access ended. Start a new call when it is available.",
+            translateApp(
+              "Microphone access ended. Start a new call when it is available.",
+            ),
           );
       });
       this.diagnostic("microphone", "ready", { audio_tracks: tracks.length });
@@ -240,18 +248,18 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
           peer.iceConnectionState === "failed" ||
           peer.iceConnectionState === "closed"
         )
-          this.fail(connectionError);
+          this.fail(translateApp(connectionError));
       };
       this.listen(peer, "connectionstatechange", state);
       this.listen(peer, "iceconnectionstatechange", state);
       this.listen(peer, "track", ({ track }) => {
         if (!this.alive(generation) || !track || track.kind !== "audio") return;
-        if (track.readyState !== "live") return this.fail(connectionError);
+        if (track.readyState !== "live") return this.fail(translateApp(connectionError));
         if (this.remoteTracks.has(track)) return;
-        if (this.remoteTracks.size >= 4) return this.fail(connectionError);
+        if (this.remoteTracks.size >= 4) return this.fail(translateApp(connectionError));
         this.remoteTracks.add(track);
         this.listen(track, "ended", () => {
-          if (this.alive(generation)) this.fail(connectionError);
+          if (this.alive(generation)) this.fail(translateApp(connectionError));
         });
         this.applySpeaker();
       });
@@ -278,7 +286,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       });
       for (const event of ["error", "close"])
         this.listen(channel, event, () => {
-          if (this.alive(generation)) this.fail(connectionError);
+          if (this.alive(generation)) this.fail(translateApp(connectionError));
         });
       await this.wait(
         (async () => {
@@ -292,10 +300,10 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       this.assertAlive(generation);
       await this.waitForICE(peer, generation);
       this.assertAlive(generation);
-      if (track.readyState !== "live") throw new Error(startupError);
+      if (track.readyState !== "live") throw new Error(translateApp(startupError));
       const sdp = peer.localDescription?.sdp;
       if (typeof sdp !== "string" || !sdp.trim() || sdp.length > 131072)
-        throw new Error(startupError);
+        throw new Error(translateApp(startupError));
       this.timer = this.clock.setInterval(
         () => void this.sample(generation),
         200,
@@ -327,7 +335,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   async answer(sdp: string): Promise<void> {
     if (this.closed || !this.peer) throw closedError();
     if (!sdp.trim() || sdp.length > 131072)
-      throw new Error("Invalid voice answer.");
+      throw new Error(translateApp("Invalid voice answer."));
     const generation = this.generation;
     try {
       await this.wait(
@@ -346,11 +354,11 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     this.inputEnabled = enabled;
     try {
       for (const track of this.stream?.getAudioTracks() ?? []) {
-        if (track.readyState !== "live") return this.fail(startupError);
+        if (track.readyState !== "live") return this.fail(translateApp(startupError));
         track.enabled = enabled;
       }
     } catch {
-      this.fail(startupError);
+      this.fail(translateApp(startupError));
     }
   }
 
@@ -363,7 +371,9 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       if (this.speakerMuted) this.telemetry.playback_audible = false;
     } catch {
       this.fail(
-        "Voice playback could not be started. Try another voice source or continue with text.",
+        translateApp(
+          "Voice playback could not be started. Try another voice source or continue with text.",
+        ),
       );
     }
   }
@@ -386,7 +396,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
 
   /** PCM is handled by the Grok adapter; never accept it on a native RTP call. */
   enqueue(_bytes: ArrayBuffer, _endMs: number): void {
-    if (!this.closed) this.fail("Voice playback could not be verified.");
+    if (!this.closed) this.fail(translateApp("Voice playback could not be verified."));
   }
 
   flush(): void {
@@ -546,6 +556,8 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     }
     this.peer = undefined;
     if (this.stream) this.releaseStream(this.stream);
+    this.releaseStatus?.();
+    this.releaseStatus = undefined;
     this.stream = undefined;
     this.inputEnabled = this.speakerMuted = this.providerReady = false;
     this.telemetry = { playback_ms: 0, playback_audible: false };

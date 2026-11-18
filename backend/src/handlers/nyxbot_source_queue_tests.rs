@@ -412,6 +412,49 @@ async fn owner_gateway_home(f: &Fixture) -> AssistantConversation {
     row(f).await
 }
 
+async fn queued_provider_response(response: Response, replay: bool) {
+    use http_body_util::BodyExt;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    if !replay {
+        let body = body_text(response).await;
+        assert!(body.contains("response.completed"), "{body}");
+        assert!(!body.contains("response.output_text"), "{body}");
+        assert!(!body.contains("Got it"));
+        assert!(!body.contains("working on"));
+        return;
+    }
+
+    let mut body = response.into_body();
+    for (sequence, kind) in ["response.created", "response.in_progress"]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let frame = std::str::from_utf8(&bytes).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let frame: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(frame["type"], kind);
+        assert_eq!(frame["sequence_number"], sequence);
+        assert_eq!(frame["response"]["output"], json!([]));
+    }
+    // The queued source has no settled answer. Recovery cannot release its parent yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), body.frame())
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_output() {
     let f = fixture("source_gateway_queue_handler").await;
@@ -435,14 +478,9 @@ async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_ou
     .await
     .unwrap();
     let request = super::super::event("next queued question", "7", "queued-handler");
-    for _ in 0..2 {
+    for replay in [false, true] {
         let response = respond(&f.state, &f.key, &request, "queued-handler").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_text(response).await;
-        assert!(body.contains("response.completed"), "{body}");
-        assert!(!body.contains("response.output_text"), "{body}");
-        assert!(!body.contains("Got it"));
-        assert!(!body.contains("working on"));
+        queued_provider_response(response, replay).await;
     }
     let queued = row(&f).await;
     assert_eq!(queued.pending_events.len(), 1);
@@ -716,12 +754,9 @@ async fn post_admission_reply_preference_failure_preserves_queued_and_bound_sour
         };
         let mut incoming = super::super::event(question, "7", "preference-failed");
         incoming["event_context"]["event_ref"] = json!("cmaeg1.ev.original");
-        for _ in 0..2 {
+        for replay in [false, true] {
             let response = respond(&f.state, &f.key, &incoming, "preference-failed").await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = body_text(response).await;
-            assert!(body.contains("response.completed"), "{body}");
-            assert!(!body.contains("response.output_text"), "{body}");
+            queued_provider_response(response, replay).await;
         }
         let saved = f
             .state

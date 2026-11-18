@@ -68,6 +68,8 @@ pub struct BillingUsageRow {
     pub bytes: i64,
     pub events: i64,
     pub lago_acked: bool,
+    #[serde(default = "default_detail_retained")]
+    pub detail_retained: bool,
     #[serde(default = "default_billable")]
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
@@ -84,6 +86,10 @@ pub struct BillingUsageRow {
     pub allowance_credits: Option<String>,
     #[serde(default)]
     pub allowance_quantity: i64,
+}
+
+fn default_detail_retained() -> bool {
+    true
 }
 
 fn default_billable() -> bool {
@@ -461,11 +467,18 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
     ]);
     for row in &usage.rows {
         table.add_row([
-            row.service_slug
-                .as_deref()
-                .or(row.service_id.as_deref())
-                .unwrap_or("-")
-                .to_string(),
+            {
+                let service = row
+                    .service_slug
+                    .as_deref()
+                    .or(row.service_id.as_deref())
+                    .unwrap_or("-");
+                if row.detail_retained {
+                    service.to_string()
+                } else {
+                    format!("{service} (older than 30 days)")
+                }
+            },
             row.model.as_deref().unwrap_or("-").to_string(),
             row.api_key_name.as_deref().unwrap_or("-").to_string(),
             row.layer.clone(),
@@ -480,7 +493,9 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
             } else {
                 "free".to_string()
             },
-            if !row.billable {
+            if !row.detail_retained {
+                "older"
+            } else if !row.billable {
                 "free"
             } else if row.lago_acked {
                 "acked"
@@ -792,6 +807,7 @@ mod tests {
         let usage: BillingUsageResponse = serde_json::from_value(payload.clone()).unwrap();
         let row = &usage.rows[0];
         assert!(row.billable);
+        assert!(row.detail_retained);
         assert_eq!(row.model, None);
         assert_eq!(row.api_key_name, None);
         assert_eq!(row.wallet_credits_micros, None);
@@ -806,6 +822,27 @@ mod tests {
         assert!(output.contains("0.002440 credits"));
         assert!(output.contains("pending"));
         assert!(!output.contains("Funded by"));
+    }
+
+    #[test]
+    fn usage_keeps_recent_and_older_lines_with_no_invented_ack_or_allowance_units() {
+        let mut payload = usage_json();
+        let mut older = payload["rows"][0].clone();
+        older["detail_retained"] = serde_json::json!(false);
+        older["allowance_credits_micros"] = serde_json::json!(1000);
+        payload["rows"].as_array_mut().unwrap().push(older);
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        let lines: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("chrono-llm-public"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("pending"));
+        assert!(lines[1].contains("older than 30 days"));
+        assert!(!lines[1].contains("pending"));
+        assert!(!lines[1].contains("acked"));
+        assert!(!lines[1].contains("0 tokens"));
+        assert!(lines[1].contains("allowance 0.001000 credits"));
     }
 
     #[test]

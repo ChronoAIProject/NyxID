@@ -1071,6 +1071,8 @@ function SessionsTab() {
 
 function PrivacyTab() {
   useUiTranslation();
+  const [reviewDiagnostics, setReviewDiagnostics] = useState(false);
+  const devicePolicy = useConsentStore((s) => s.policy);
   const consentEnabled = useConsentStore((s) => s.enabled);
   const persistenceError = useConsentStore((s) => s.persistenceError);
   const setConsent = useConsentStore((s) => s.setConsent);
@@ -1083,15 +1085,19 @@ function PrivacyTab() {
     enabled: Boolean(accountId),
     staleTime: 0,
   });
-  async function handleToggle(next: boolean) {
+  const diagnosticsEnabled =
+    permission.data?.diagnostics_available &&
+    consentEnabled &&
+    devicePolicy === 2;
+  async function handleToggle(next: boolean, policy: 1|2 = 1) {
     if (!accountId) return;
     setSaving(true);
     try {
-      await saveAnalyticsConsent(accountId, next);
+      await saveAnalyticsConsent(accountId, next, policy);
       await permission.refetch();
     } catch {
       toast.error(
-        translateErrorMessage("Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
+        translateErrorMessage(next && policy === 2 && consentEnabled ? "Could not save updated analytics permission." : "Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
       );
     } finally {
       setSaving(false);
@@ -1186,7 +1192,7 @@ function PrivacyTab() {
       title={translateUi("Usage analytics")}
       footer={
         <>
-          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
+          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
             <div role="alert" className="space-y-2">
               <p>{translateUi("This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.")}</p>
@@ -1239,7 +1245,7 @@ function PrivacyTab() {
                 permission.isError ||
                 permission.isFetching
               }
-              onCheckedChange={(next) => void handleToggle(next)}
+              onCheckedChange={(next) => void handleToggle(next, permission.data?.diagnostics_offered && (permission.data?.policy_version === "2" || devicePolicy === 2) ? 2 : 1)}
               aria-label={translateUi("Allow account usage analytics")}
             />
           </>
@@ -1257,14 +1263,71 @@ function PrivacyTab() {
                 permission.isFetching)
             }
             onCheckedChange={(next) => {
-              setConsent(next);
+              setConsent(next, useConsentStore.getState().policy ?? 1);
               if (!next) disableTelemetry();
             }}
             aria-label={translateUi("Allow usage analytics on this browser")}
           />
         }
       />
+        {permission.data?.diagnostics_offered === true && (
+          <GroupedRow
+            title={translateUi("Crash diagnostics")}
+            description={translateUi(
+              diagnosticsEnabled
+                ? "Crash diagnostics enabled"
+                : "Crash diagnostics need updated permission",
+            )}
+            accessory={
+              diagnosticsEnabled ? undefined : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    saving || permission.data?.current_policy_version !== "2"
+                  }
+                  onClick={() => setReviewDiagnostics(true)}
+                >
+                  {translateUi("Review updated analytics")}
+                </Button>
+              )
+            }
+          />
+        )}
       </GroupedList>
+      {permission.data?.diagnostics_offered === true && (
+        <Dialog open={reviewDiagnostics} onOpenChange={setReviewDiagnostics}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {translateUi("Review updated analytics")}
+              </DialogTitle>
+              <DialogDescription>
+                {translateUi(
+                  "Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice.",
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setReviewDiagnostics(false)}
+              >
+                {translateUi("Not now")}
+              </Button>
+              <Button
+                disabled={saving}
+                onClick={() => {
+                  void handleToggle(true, 2);
+                  setReviewDiagnostics(false);
+                }}
+              >
+                {translateUi("Allow updated analytics")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

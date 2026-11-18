@@ -500,6 +500,119 @@ pub async fn save_service_views(
     ))
 }
 
+// --- Quick access (the Duo's rail, synced to the account) ---
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickAccessItemRequest {
+    /// `destination`, `agent` or `crew` (`group` is accepted for crews).
+    pub kind: String,
+    /// A destination's name, an agent's UUID or a crew's `nyxg-` id.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveQuickAccessRequest {
+    pub items: Vec<QuickAccessItemRequest>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct QuickAccessItemResponse {
+    pub kind: &'static str,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QuickAccessResponse {
+    pub items: Vec<QuickAccessItemResponse>,
+    /// False while the person still has the default list.
+    pub customized: bool,
+}
+
+impl From<crate::models::user::QuickAccessItem> for QuickAccessItemResponse {
+    fn from(item: crate::models::user::QuickAccessItem) -> Self {
+        use crate::models::user::QuickAccessItem;
+        match item {
+            QuickAccessItem::Destination { id } => Self {
+                kind: "destination",
+                id: id.as_str().to_string(),
+            },
+            QuickAccessItem::Agent { id } => Self { kind: "agent", id },
+            QuickAccessItem::Crew { id } => Self { kind: "crew", id },
+        }
+    }
+}
+
+fn quick_access_response(
+    saved: Option<crate::models::user::QuickAccessPreferences>,
+) -> QuickAccessResponse {
+    let customized = saved.is_some();
+    let items = saved.map_or_else(
+        crate::services::user_preferences_service::default_quick_access,
+        |preferences| preferences.items,
+    );
+    QuickAccessResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        customized,
+    }
+}
+
+/// GET /api/v1/users/me/quick-access
+pub async fn get_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let saved = crate::services::user_preferences_service::read_quick_access(
+        &state.db,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    Ok(Json(quick_access_response(saved)))
+}
+
+/// PUT /api/v1/users/me/quick-access
+pub async fn save_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<SaveQuickAccessRequest>,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let entries: Vec<_> = body
+        .items
+        .iter()
+        .map(
+            |item| crate::services::user_preferences_service::QuickAccessEntry {
+                kind: &item.kind,
+                id: &item.id,
+            },
+        )
+        .collect();
+    let items = crate::services::user_preferences_service::parse_quick_access(&entries)?;
+    let saved = crate::services::user_preferences_service::save_quick_access(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        items,
+    )
+    .await?;
+    Ok(Json(quick_access_response(Some(saved))))
+}
+
+/// DELETE /api/v1/users/me/quick-access: back to the default list.
+pub async fn reset_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    crate::services::user_preferences_service::reset_quick_access(
+        &state.db,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    Ok(Json(quick_access_response(None)))
+}
+
 #[derive(Debug, Serialize)]
 pub struct UserCapabilitiesResponse {
     pub billing_available: bool,
@@ -1857,12 +1970,18 @@ mod account_deletion_policy_tests;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsConsentRequest {
+    #[serde(default)]
+    pub policy_version: Option<String>,
     pub account_id: String,
     pub enabled: bool,
 }
 
 #[derive(serde::Serialize)]
 pub struct AnalyticsConsentResponse {
+    pub current_policy_version: String,
+    pub diagnostics_offered: bool,
+    pub diagnostics_available: bool,
+    pub diagnostics_status: crate::services::crash_report_service::DiagnosticsStatus,
     pub account_id: String,
     pub policy_version: Option<String>,
     pub revision: String,
@@ -1870,10 +1989,12 @@ pub struct AnalyticsConsentResponse {
     pub changed_at: Option<String>,
 }
 
-fn analytics_consent_response(
+async fn analytics_consent_response(
+    db: &mongodb::Database,
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
+    let status = crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -1882,6 +2003,11 @@ fn analytics_consent_response(
     (
         headers,
         Json(AnalyticsConsentResponse {
+            current_policy_version: if status.offered() { "2" } else { "1" }.into(),
+            diagnostics_offered: status.offered(),
+            diagnostics_available: status
+                == crate::services::crash_report_service::DiagnosticsStatus::Available,
+            diagnostics_status: status,
             account_id: account_id.to_owned(),
             policy_version: value.policy_version,
             revision: value.revision,
@@ -1898,9 +2024,11 @@ pub async fn get_analytics_consent(
     super::login_client_context::require_first_party_human(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     Ok(analytics_consent_response(
+        &state.db,
         &actor,
         crate::services::analytics_consent_service::read(&state.db, &actor).await?,
-    ))
+    )
+    .await)
 }
 
 pub async fn set_analytics_consent(
@@ -1915,10 +2043,186 @@ pub async fn set_analytics_consent(
             "Account changed; reload before changing analytics permission".into(),
         ));
     }
-    Ok(analytics_consent_response(
-        &actor,
-        crate::services::analytics_consent_service::set(&state.db, &actor, body.enabled).await?,
-    ))
+    use crate::services::analytics_consent_service::{self as consent, PolicyVersion};
+    let value = match PolicyVersion::parse(body.policy_version.as_deref())? {
+        PolicyVersion::V1 => consent::set(&state.db, &actor, body.enabled).await?,
+        policy => consent::set_acknowledging(&state.db, &actor, body.enabled, policy).await?,
+    };
+    Ok(analytics_consent_response(&state.db, &actor, value).await)
+}
+
+#[cfg(test)]
+mod quick_access_tests {
+    use super::*;
+    use crate::{models::user::UserType, test_utils::*};
+
+    fn item(kind: &str, id: &str) -> QuickAccessItemRequest {
+        QuickAccessItemRequest {
+            kind: kind.into(),
+            id: id.into(),
+        }
+    }
+
+    fn pairs(response: &QuickAccessResponse) -> Vec<(&'static str, String)> {
+        response
+            .items
+            .iter()
+            .map(|item| (item.kind, item.id.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn quick_access_defaults_saves_validates_resets_and_is_human_only() {
+        let db = connect_test_database("quick_access")
+            .await
+            .expect("MongoDB required");
+        let person = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        for id in [&person, &other] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, UserType::Person))
+                .await
+                .unwrap();
+        }
+        let state = test_app_state(db.clone());
+        let default = vec![
+            ("destination", "new_chat".to_string()),
+            ("destination", "notifications".to_string()),
+            ("destination", "scan_qr".to_string()),
+            ("destination", "recent_chats".to_string()),
+            ("destination", "settings".to_string()),
+        ];
+        // Never customised: the default list, marked as such.
+        let Json(fresh) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(!fresh.customized);
+        assert_eq!(pairs(&fresh), default);
+
+        // Saved in order; ids canonical; `group` reads back as `crew`.
+        let agent = uuid::Uuid::new_v4().to_string();
+        let crew = format!("nyxg-{}", uuid::Uuid::new_v4().simple());
+        let Json(saved) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&person),
+            Json(SaveQuickAccessRequest {
+                items: vec![
+                    item("agent", &agent.to_ascii_uppercase()),
+                    item("destination", "automations"),
+                    item("group", &crew),
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+        let expected = vec![
+            ("agent", agent.clone()),
+            ("destination", "automations".to_string()),
+            ("crew", crew.clone()),
+        ];
+        assert!(saved.customized);
+        assert_eq!(pairs(&saved), expected);
+        let Json(read) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(read.customized);
+        assert_eq!(pairs(&read), expected);
+        // Another account is untouched.
+        let Json(theirs) = get_quick_access(State(state.clone()), test_auth_user(&other))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&theirs), default);
+
+        // Unknown, duplicate, malformed and oversized lists are 400s that
+        // leave the saved list as it was.
+        let thirteen: Vec<_> = (0..13)
+            .map(|_| item("agent", &uuid::Uuid::new_v4().to_string()))
+            .collect();
+        for items in [
+            vec![item("destination", "billing")],
+            vec![item("pin", "notifications")],
+            vec![item("crew", "nope")],
+            vec![item("crew", &agent)],
+            vec![
+                item("destination", "plugins"),
+                item("destination", "plugins"),
+            ],
+            thirteen,
+        ] {
+            let error = save_quick_access(
+                State(state.clone()),
+                test_auth_user(&person),
+                Json(SaveQuickAccessRequest { items }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        let Json(unchanged) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&unchanged), expected);
+
+        // API keys and delegated callers can neither read nor change it.
+        let mut agent_key = test_auth_user(&person);
+        agent_key.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        agent_key.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(
+            get_quick_access(State(state.clone()), agent_key.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            save_quick_access(
+                State(state.clone()),
+                agent_key.clone(),
+                Json(SaveQuickAccessRequest { items: vec![] }),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            reset_quick_access(State(state.clone()), agent_key)
+                .await
+                .is_err()
+        );
+        let mut delegated = test_auth_user(&person);
+        delegated.auth_method = crate::mw::auth::AuthMethod::Delegated;
+        assert!(
+            get_quick_access(State(state.clone()), delegated)
+                .await
+                .is_err()
+        );
+        let Json(still) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&still), expected);
+
+        // An empty list is a deliberate choice, distinct from the default.
+        let Json(empty) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&person),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert!(empty.customized);
+        assert!(empty.items.is_empty());
+
+        // Reset returns to the default (and follows future default changes).
+        let Json(reset) = reset_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(!reset.customized);
+        assert_eq!(pairs(&reset), default);
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &person })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.profile_config.quick_access, None);
+    }
 }
 
 #[cfg(test)]
@@ -1948,6 +2252,7 @@ mod analytics_tests {
                 State(state.clone()),
                 test_auth_user(&second),
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1965,6 +2270,7 @@ mod analytics_tests {
                 State(state.clone()),
                 agent,
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1977,6 +2283,7 @@ mod analytics_tests {
             State(state),
             test_auth_user(&first),
             Json(AnalyticsConsentRequest {
+                policy_version: None,
                 account_id: first.clone(),
                 enabled: true,
             }),
