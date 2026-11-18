@@ -121,3 +121,21 @@ test('M2622-03 a failed held tombstone cannot restore a successor into a queued 
   await replacement;
   assert.equal((await e.coordinator.load())?.refreshToken, 'b');
 });
+
+test('R1-B Android memory-before-disk tombstone failure keeps an ordinary persisted pair authoritative', async () => {
+  const e = fixture();
+  await e.coordinator.persist(old);
+  const cache = new Map(e.values);
+  const durableWrite = e.storage.setItemAsync;
+  e.storage.getItemAsync = async key => cache.get(key) ?? null;
+  e.storage.setItemAsync = async (key, value) => { cache.set(key, value); throw Error('commit returned false'); };
+  await assert.rejects(e.coordinator.clear(), /commit returned false/);
+  assert.equal(e.coordinator.peek()?.refreshToken, 'old');
+  assert.equal((await e.coordinator.load())?.refreshToken, 'old');
+  assert.equal(JSON.parse(e.values.get(SESSION_RECORD_KEY)!).session.refreshToken, 'old');
+  e.storage.setItemAsync = async (key, value) => { cache.set(key, value); await durableWrite(key, value); };
+  assert.equal((await e.coordinator.load())?.refreshToken, 'old');
+  assert.equal((await createSessionCoordinator(e.storage, () => {}).load())?.refreshToken, 'old');
+  await e.coordinator.clear();
+  assert.equal(await createSessionCoordinator(e.storage, () => {}).load(), null);
+});

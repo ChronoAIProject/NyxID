@@ -127,12 +127,14 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
           // that exists only in memory. Rebase it into this intent's generation
           // without admitting any older refresh flight or a replacement login.
           if (generation === expected) {
-            if (previousKnown) remember(previousKnown.session ? { ...previousKnown.session, sessionGeneration: expected } : null, expected);
-            if (previousSuccessor) {
-              pendingSuccessor = { generation: expected, session: previousSuccessor.session };
-              remember({ ...previousSuccessor.session, sessionGeneration: expected }, expected);
-            }
             const retained = previousSuccessor?.session ?? previousKnown?.session;
+            if (retained) {
+              // Android commit() updates native memory before reporting disk
+              // failure. The recovery slot must outrank that cached tombstone,
+              // even when this pair was already durable before sign-out.
+              pendingSuccessor = { generation: expected, session: retained };
+              remember({ ...retained, sessionGeneration: expected }, expected);
+            } else if (previousKnown) remember(null, expected);
             bind(retained ? decodeJwtSub(retained.accessToken) ?? null : null);
           }
           throw error;
