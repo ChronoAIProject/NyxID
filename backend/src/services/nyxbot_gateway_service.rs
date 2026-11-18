@@ -205,19 +205,20 @@ pub(crate) async fn gateway_call_at_base(
     body: Option<&Value>,
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
-    let response = exchange_at_base(base, method, path, bearer, body, idempotency_key).await?;
+    let response =
+        exchange_at_base(base, method, path, bearer, body, idempotency_key, None).await?;
+    let status = response
+        .status
+        .ok_or_else(|| AppError::ValidationError("gateway_unavailable".into()))?;
     let body = match response.body {
-        Err(_) if !(200..300).contains(&response.status) => Value::Null,
+        Err(_) if !(200..300).contains(&status) => Value::Null,
         result => result?,
     };
-    Ok(GatewayResponse {
-        status: response.status,
-        body,
-    })
+    Ok(GatewayResponse { status, body })
 }
 
 struct Exchange {
-    status: u16,
+    status: Option<u16>,
     body: AppResult<Value>,
     retry_after: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -229,6 +230,7 @@ async fn exchange_at_base(
     bearer: &str,
     body: Option<&Value>,
     idempotency_key: Option<&str>,
+    reply: Option<(chrono::DateTime<chrono::Utc>, bool)>,
 ) -> AppResult<Exchange> {
     let mut operation = crate::turn_trace::Operation::start(
         crate::turn_trace::TurnContext::current(),
@@ -254,19 +256,41 @@ async fn exchange_at_base(
             request = request.header("Idempotency-Key", key);
         }
         super::channel_turn_preparation::effect().await?;
-        let response = request
-            .send()
-            .await
-            .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
+        if let Some((deadline, _)) = reply {
+            let remaining = (deadline - chrono::Utc::now())
+                .to_std()
+                .ok()
+                .filter(|duration| !duration.is_zero())
+                .ok_or_else(|| AppError::Forbidden("Channel reply deadline expired".into()))?;
+            request = request.timeout(remaining.min(Duration::from_secs(GATEWAY_TIMEOUT_SECS)));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) if error.is_builder() => {
+                return Err(AppError::ValidationError("gateway_unavailable".into()));
+            }
+            Err(_) => {
+                return Ok(Exchange {
+                    status: None,
+                    body: Err(AppError::ValidationError("gateway_unavailable".into())),
+                    retry_after: None,
+                });
+            }
+        };
         let status = response.status().as_u16();
         let retry_after = response
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(retry_after);
-        let body = gateway_body(response, requires_json).await;
+        let body = gateway_body(
+            response,
+            requires_json,
+            reply.is_some_and(|(_, target)| target),
+        )
+        .await;
         Ok(Exchange {
-            status,
+            status: Some(status),
             body,
             retry_after,
         })
@@ -274,12 +298,12 @@ async fn exchange_at_base(
     .await;
     match &result {
         Ok(response) => operation.finish(
-            if (200..300).contains(&response.status) && response.body.is_ok() {
+            if response.status.is_some_and(|s| (200..300).contains(&s)) && response.body.is_ok() {
                 crate::turn_trace::Outcome::Completed
             } else {
                 crate::turn_trace::Outcome::Failed
             },
-            Some(response.status),
+            response.status,
             None,
         ),
         Err(error) => operation.finish(
@@ -307,10 +331,19 @@ pub(crate) async fn reply_call(
     body: &Value,
     key: Option<&str>,
     target_operation: bool,
+    deadline: chrono::DateTime<chrono::Utc>,
 ) -> AppResult<crate::models::gateway_reply::Reply> {
     let base = gateway_base(state).await?;
-    let response =
-        exchange_at_base(&base, reqwest::Method::POST, path, bearer, Some(body), key).await?;
+    let response = exchange_at_base(
+        &base,
+        reqwest::Method::POST,
+        path,
+        bearer,
+        Some(body),
+        key,
+        Some((deadline, target_operation)),
+    )
+    .await?;
     Ok(classify_reply(response, target_operation))
 }
 
@@ -318,18 +351,25 @@ fn classify_reply(
     response: Exchange,
     target_operation: bool,
 ) -> crate::models::gateway_reply::Reply {
-    use crate::models::gateway_reply::{Code, Observation, Outcome, Reply};
+    use crate::models::gateway_reply::{Code, Failure, Observation, Outcome, Reply};
+    let failure = match (target_operation, response.status) {
+        (true, None) => Some(Failure::NoResponse),
+        (true, Some(500..=599)) => Some(Failure::ServerError),
+        (true, Some(200..=299)) if response.body.is_err() => Some(Failure::UnreadableResponse),
+        _ => None,
+    };
     let body = response.body.unwrap_or(Value::Null);
     let observation = Observation {
-        status: Some(response.status),
+        status: response.status,
+        failure,
         code: Code::parse(&body["detail"]),
         retry_after: response.retry_after,
     };
     let outcome = if target_operation && observation.retryable() {
         Outcome::Pending
-    } else if observation.admitted() || response.status >= 500 {
+    } else if observation.admitted() || response.status.is_none_or(|s| s >= 500) {
         Outcome::Unknown
-    } else if !(200..300).contains(&response.status) {
+    } else if !response.status.is_some_and(|s| (200..300).contains(&s)) {
         Outcome::Rejected
     } else {
         match body
@@ -348,7 +388,11 @@ fn classify_reply(
     }
 }
 
-async fn gateway_body(mut response: reqwest::Response, requires_json: bool) -> AppResult<Value> {
+async fn gateway_body(
+    mut response: reqwest::Response,
+    requires_json: bool,
+    strict_json: bool,
+) -> AppResult<Value> {
     if response
         .content_length()
         .is_some_and(|n| n > MAX_GATEWAY_RESPONSE_BYTES as u64)
@@ -374,7 +418,7 @@ async fn gateway_body(mut response: reqwest::Response, requires_json: bool) -> A
         Err(_)
             if !requires_json
                 || !status.is_success()
-                || status == reqwest::StatusCode::NO_CONTENT =>
+                || (!strict_json && status == reqwest::StatusCode::NO_CONTENT) =>
         {
             Ok(Value::Null)
         }
@@ -949,6 +993,7 @@ impl Observation {
     }
     pub fn retryable(&self) -> bool {
         self.admitted()
+            || self.failure.is_some()
             || (self.status == Some(503) && self.code == Some(Code::RoutedReplyUnavailable))
     }
 }
@@ -984,13 +1029,13 @@ mod reply_contract_tests {
                 500,
                 json!({"detail":"routed_reply_unavailable"}),
                 true,
-                Outcome::Unknown,
+                Outcome::Pending,
             ),
             (
                 503,
                 json!({"detail":"routed_reply_unavailable "}),
                 true,
-                Outcome::Unknown,
+                Outcome::Pending,
             ),
             (
                 409,
@@ -1025,7 +1070,7 @@ mod reply_contract_tests {
         ] {
             let reply = classify_reply(
                 Exchange {
-                    status,
+                    status: Some(status),
                     body: Ok(body),
                     retry_after: None,
                 },
@@ -1040,13 +1085,13 @@ mod reply_contract_tests {
         }
         let reply = classify_reply(
             Exchange {
-                status: 200,
+                status: Some(200),
                 body: Err(AppError::Internal("broken".into())),
                 retry_after: None,
             },
             true,
         );
-        assert!(reply.outcome == Outcome::Unknown);
+        assert!(reply.outcome == Outcome::Pending);
         assert_eq!(reply.observation.status_class(), Some("2xx"));
         assert!(reply.observation.code.is_none());
     }

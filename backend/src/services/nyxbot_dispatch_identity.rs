@@ -364,8 +364,9 @@ pub async fn lookup(
     let receipt = delivery
         .and_then(|d| d.get_document("preparation").ok())
         .and_then(|p| p.get_document("gateway_receipt").ok());
-    let pending =
-        receipt.is_some_and(|r| r.get_i32("version") == Ok(1) && r.get_bool("pending") == Ok(true));
+    let pending = receipt.is_some_and(|r| {
+        matches!(r.get_i32("version"), Ok(1 | 2)) && r.get_bool("pending") == Ok(true)
+    });
     let local = channel.gateway_source.is_none() && custom_binding.is_none();
     let provider_delivery = if !local {
         "none"

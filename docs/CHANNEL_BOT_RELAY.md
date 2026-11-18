@@ -2845,17 +2845,23 @@ each attachment upload, text part and subsequent provider effect reads it again.
 A confirmed prefix never authorizes its suffix.
 
 Gateway reply-target receipt polling is the bounded exception to an uncertain
-send: only exact `409 routed_reply_in_progress` or
-`503 routed_reply_unavailable` permits the identical same-key re-ask. Only the
-409 proves admission. The event retains the existing preparation claim; there
+send: exact `409 routed_reply_in_progress`, any 5xx (including
+`503 routed_reply_unavailable`), no HTTP response, or unreadable/unparseable
+2xx permits the identical same-key re-ask. Only the exact 409 proves admission. The event retains the existing preparation claim; there
 is no new delivery outbox. See the [gateway receipt and lookup contract](CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup).
 
 Bot Health uses the existing outbound diagnostics. `gateway_reply_unconfirmed`
 means the gateway accepted the reply but delivery is unconfirmed; its action is
 `none`, advising no action unless a later reply repeats the problem.
 `gateway_reply_unavailable` records a transient gateway failure without claiming
-acceptance. The admission/terminal event, diagnostic and chained audit commit
-together. Audit retains the HTTP status class and closed gateway code, never
+acceptance. The closed reasons `gateway_reply_no_response`,
+`gateway_reply_server_error`, `gateway_reply_unreadable_response` and
+`gateway_reply_interrupted` describe the new failures; `_pending` adds that
+NyxBot is still trying with the same reply. Terminal wording says confirmation
+could not be obtained before checking stopped. These have action `none` and
+the same later-reply guidance. Only the first proven admission and the terminal
+outcome produce audit rows; polls do not. The event, diagnostic and chained audit commit
+together. Audit retains the HTTP status class, closed gateway code and failure, never
 answer text, problem prose, keys or reply-target references. Terminal rows retain
 the five image counts from the frozen notice. First admission and terminal
 outcomes emit the Channel trace milestone; its enum has no pending value, so

@@ -185,8 +185,6 @@ async fn gateway_reply_refusals_and_other_uncertainty_never_retry() {
         (410, "event_ref_expired", "refused"),
         (409, "reply_idempotency_conflict", "refused"),
         (429, "reply_operation_limit", "refused"),
-        (503, "different", "unknown"),
-        (500, "routed_reply_unavailable", "unknown"),
     ] {
         let f = pending(
             &format!("gateway_reply_refusal_{status_code}_{expected}"),
@@ -413,7 +411,7 @@ async fn gateway_receipt_milestones_and_terminal_audit_keep_frozen_image_counts(
         let (status, body) = match disposition {
             "confirmed" => (200, json!({"delivery":{"outcome":"confirmed"}})),
             "rejected" => (403, json!({"detail":"routed_reply_revoked"})),
-            "unknown" => (500, json!({"detail":"unavailable"})),
+            "unknown" => (200, json!({"delivery":{"outcome":"unknown"}})),
             "unavailable_admitted" => (503, json!({"detail":"routed_reply_unavailable"})),
             _ => (409, json!({"detail":"routed_reply_in_progress"})),
         };
@@ -927,45 +925,6 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
 }
 
 #[tokio::test]
-async fn gateway_reply_timeout_and_broken_success_are_not_reasked() {
-    for (name, template) in [
-        (
-            "broken",
-            ResponseTemplate::new(200).set_body_string("not json"),
-        ),
-        (
-            "oversize",
-            ResponseTemplate::new(200).set_body_string("x".repeat(2 * 1024 * 1024 + 1)),
-        ),
-        (
-            "timeout",
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"delivery":{"outcome":"confirmed"}}))
-                .set_delay(Duration::from_secs(21)),
-        ),
-    ] {
-        let f = fixture(&format!("gateway_reply_{name}")).await;
-        settled(&f, false).await;
-        patch(&f, doc! {"delivery.state":"pending"}).await;
-        Mock::given(method("POST"))
-            .and(path("/reply-targets/cmaeg1.rt.original/messages"))
-            .respond_with(template)
-            .with_priority(1)
-            .mount(&f.gateway)
-            .await;
-        late_delivery::process(&f.state, &f.event.id).await;
-        assert_eq!(status(&f).await, "unknown");
-        late_delivery::sweep(&f.state).await.unwrap();
-        assert_eq!(sends(&f).await.len(), 1);
-        let audit = outcomes(&f).await;
-        assert_eq!(audit.len(), 1);
-        if name != "timeout" {
-            assert!(audit[0].to_string().contains("2xx"));
-        }
-    }
-}
-
-#[tokio::test]
 async fn gateway_reply_crash_after_pending_restarts_without_target_mint() {
     let f = fixture("gateway_reply_pending_crash").await;
     settled(&f, false).await;
@@ -1277,3 +1236,6 @@ async fn gateway_dispatch_shape_matrix_retention_and_foreign_scope() {
         json!({"state":"expired"})
     );
 }
+
+#[path = "nyxbot_gateway_reask_tests.rs"]
+mod reask_tests;

@@ -4,7 +4,7 @@ use crate::{
     errors::AppResult,
     models::{
         channel_turn_preparation::Preparation,
-        gateway_reply::{Observation, Outcome, ReceiptWait, Reply},
+        gateway_reply::{Failure, Observation, Outcome, ReceiptWait, Reply},
         nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotEvent},
     },
 };
@@ -16,12 +16,12 @@ pub const DUE_INDEX: &str = "nyxbot_receipt_due";
 pub fn due(now: DateTime<Utc>) -> Document {
     doc! {"delivery.receipt_due_at":{"$type":"date","$lte":bson::DateTime::from_chrono(now)},
     "delivery.version":1,"delivery.state":"unknown","delivery.preparation.version":1,
-    "delivery.preparation.gateway_receipt.version":1,
+    "delivery.preparation.gateway_receipt.version":{"$in":[1,2]},
     "delivery.preparation.gateway_receipt.pending":true}
 }
 fn pending(event: &str) -> Document {
     doc! {"_id":event,"delivery.version":1,"delivery.state":"unknown",
-    "delivery.preparation.version":1,"delivery.preparation.gateway_receipt.version":1,
+    "delivery.preparation.version":1,"delivery.preparation.gateway_receipt.version":{"$in":[1,2]},
     "delivery.preparation.gateway_receipt.pending":true}
 }
 pub async fn acquire(db: &Database, event: &str, claim: &str) -> AppResult<Option<Preparation>> {
@@ -33,6 +33,7 @@ pub async fn acquire(db: &Database, event: &str, claim: &str) -> AppResult<Optio
             filter,
             vec![doc! {"$set":{
                 "delivery.claim_id":{"$literal":claim},
+                "delivery.preparation.gateway_receipt.version":2,
                 "delivery.preparation.lease_until":{"$add":["$$NOW",SEND_SECS*1000]},
                 "delivery.receipt_due_at":{"$add":["$$NOW",{"$cond":[
                     {"$gte":["$delivery.preparation.gateway_receipt.attempts",4]},300_000,SEND_SECS*1000]}]},
@@ -53,6 +54,48 @@ pub async fn acquire(db: &Database, event: &str, claim: &str) -> AppResult<Optio
     })
     .transpose()
 }
+/// Recover only the frozen reply-target operation, using the original send
+/// barrier as the clock anchor. Older senders still settle terminal unknown.
+pub async fn recover(db: &Database, event: &str) -> AppResult<Option<NyxbotEvent>> {
+    let observation = bson::to_bson(&Observation {
+        failure: Some(Failure::Interrupted),
+        ..Default::default()
+    })
+    .map_err(|_| lost())?;
+    Ok(db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one_and_update(
+            doc! {
+                "_id":event,"delivery.version":1,"delivery.transport":"gateway",
+                "delivery.state":"sending","delivery.preparation.version":1,
+                "delivery.preparation.gateway_request_version":1,
+                "delivery.preparation.gateway_request_hash":{"$regex":"^[0-9a-f]{64}$"},
+                "delivery.preparation.gateway_receipt":bson::Bson::Null,
+                "delivery.target_ciphertext":{"$type":["binData","array"]},
+                "delivery.target_expires_at":{"$type":"date"},
+                "expires_at":{"$type":"date"},
+                "delivery.checked_at":{"$type":"date"},
+                "delivery.preparation.lease_until":{"$type":"date"},
+                "$expr":{"$and":[
+                    {"$lte":["$delivery.preparation.lease_until","$$NOW"]},
+                    {"$lte":["$delivery.checked_at","$$NOW"]}
+                ]},
+            },
+            vec![doc! {"$set":{
+                "delivery.state":"unknown","delivery.receipt_due_at":"$$NOW",
+                "delivery.preparation.gateway_receipt":{
+                    "version":2,"pending":true,"attempts":1,
+                    "started_at":"$delivery.checked_at","admitted_at":bson::Bson::Null,
+                    "deadline":{"$min":["$delivery.target_expires_at","$expires_at",
+                        {"$add":["$delivery.checked_at",86_400_000_i64]}]},
+                    "observation":{"$literal":observation},
+                },
+            }}],
+        )
+        .return_document(ReturnDocument::After)
+        .await?)
+}
+
 pub async fn before_effect(db: &Database, event: &str, claim: &str) -> AppResult<()> {
     let mut filter = pending(event);
     filter.insert("delivery.claim_id", claim);
@@ -65,7 +108,15 @@ pub async fn before_effect(db: &Database, event: &str, claim: &str) -> AppResult
     );
     if db
         .collection::<Document>(EVENTS)
-        .update_one(filter, doc! {"$set":{"delivery.gateway_attempted":true}})
+        .update_one(
+            filter,
+            vec![doc! {"$set":{
+                "delivery.gateway_attempted":true,
+                "delivery.preparation.lease_until":{"$add":["$$NOW",SEND_SECS*1000]},
+                "delivery.receipt_due_at":{"$max":["$delivery.receipt_due_at",
+                    {"$add":["$$NOW",SEND_SECS*1000]}]},
+            }}],
+        )
         .await?
         .matched_count
         == 1
@@ -124,13 +175,14 @@ pub async fn record(
     let reply = prior.as_ref().unwrap_or(reply);
     let local_refusal = reply.outcome == Outcome::Rejected && reply.observation.status.is_none();
     let now = Utc::now();
+    let deadline = previous.map_or(deadline, |p| deadline.min(p.deadline));
     let retry = reply.outcome == Outcome::Pending && deadline > now;
     let admitted = previous
         .and_then(|p| p.admitted_at)
         .or_else(|| reply.observation.admitted().then_some(now));
     let started = previous.map_or(now, |p| p.started_at);
     let wait = ReceiptWait {
-        version: 1,
+        version: 2,
         pending: retry,
         started_at: started,
         admitted_at: admitted,
@@ -200,11 +252,13 @@ pub async fn record(
         "gateway_reply_rejected"
     } else if admitted.is_some() {
         "gateway_reply_unconfirmed"
-    } else if reply.observation.code
-        == Some(crate::models::gateway_reply::Code::RoutedReplyUnavailable)
-        || previous.is_some()
+    } else if reply.observation.status == Some(503)
+        && reply.observation.code
+            == Some(crate::models::gateway_reply::Code::RoutedReplyUnavailable)
     {
         "gateway_reply_unavailable"
+    } else if let Some(failure) = reply.observation.failure {
+        failure.health_reason(retry)
     } else {
         "gateway_reply_unknown"
     };
@@ -253,7 +307,7 @@ pub async fn record(
                             "event_id":event.id,"conversation_id":event.conversation_id,"turn_id":event.turn_id,
                             "transport":"gateway","outcome":outcome,"reason":reason,
                             "http_status_class":observation.status_class(),"gateway_code":observation.code,
-                            "gateway_admitted":admitted.is_some()
+                            "gateway_admitted":admitted.is_some(),"gateway_failure":observation.failure
                         });
                         if outcome != "receipt_pending" {
                             audit["images_attempted"] = notice.as_ref().map_or(0, |n| n.attempted).into();
@@ -303,5 +357,20 @@ pub fn unknown(observation: Observation) -> Reply {
     Reply {
         outcome: Outcome::Unknown,
         observation,
+    }
+}
+
+impl Failure {
+    fn health_reason(self, pending: bool) -> &'static str {
+        match (self, pending) {
+            (Self::NoResponse, true) => "gateway_reply_no_response_pending",
+            (Self::NoResponse, false) => "gateway_reply_no_response",
+            (Self::ServerError, true) => "gateway_reply_server_error_pending",
+            (Self::ServerError, false) => "gateway_reply_server_error",
+            (Self::UnreadableResponse, true) => "gateway_reply_unreadable_response_pending",
+            (Self::UnreadableResponse, false) => "gateway_reply_unreadable_response",
+            (Self::Interrupted, true) => "gateway_reply_interrupted_pending",
+            (Self::Interrupted, false) => "gateway_reply_interrupted",
+        }
     }
 }
