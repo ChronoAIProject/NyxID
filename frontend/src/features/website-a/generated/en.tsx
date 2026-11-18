@@ -71,7 +71,7 @@ export const titles: Record<string, string> = {
   "/how-it-works": "How NyxID connects AI to your world, safely.",
   "/security": "Your passwords never reach the AI.",
   "/agents": "Already use an AI agent? Plug it into NyxID.",
-  "/pricing": "Platform prices. No markup.",
+  "/pricing": "Pay as you go. 15% markup.",
   "/integrations": "Connect the tools you already use.",
   "/blog": "Guides, stories & updates",
   "/contact": "Talk to us",
@@ -99,7 +99,7 @@ export const descriptions: Record<string, string> = {
   "/agents":
     "Claude, ChatGPT, Cursor, Codex or your own script: point it at NyxID and it gets scoped access to your services, AI models and machines, without ever holding a password. NyxID is open source: self-host it, or use ours.",
   "/pricing":
-    "Every model and API call is billed at the provider’s published rate. NyxID adds nothing on top.",
+    "Services we pay for on your behalf include a 15% markup. Bring your own provider account and pay no platform fee.",
   "/integrations":
     "145 apps and APIs across 30 categories. Connect each one with a secure sign-in link, then decide exactly what your AI may do with it.",
   "/blog": "Practical ideas for putting AI to work, safely.",
