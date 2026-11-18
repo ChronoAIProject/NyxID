@@ -114,9 +114,10 @@ export function createSessionCoordinator(storage: SessionStorage, bind: (actor: 
         await write(null);
         remember(null, expected);
         legacyCleanupComplete = false;
-        await removeLegacy().then(() => storage.deleteItemAsync(SESSION_RECORD_KEY)).catch(() => {
-          // The durable tombstone already establishes sign-out. Retry cleanup on load.
-        });
+        // Keep the authoritative nonsecret tombstone even if native deletion
+        // silently fails (iOS ignores SecItemDelete status). Legacy deletion is
+        // independent housekeeping; a later explicit login overwrites v2.
+        void removeLegacy().catch(() => { legacyCleanupComplete = false; });
       });
     },
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {

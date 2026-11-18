@@ -46,8 +46,20 @@ test('rotation leaves a usable old-access/new-refresh or complete successor afte
     assert.ok([a.refreshToken,rotated.refreshToken].includes(restored.refreshToken!));assert.equal(restored.userId,'a');
   }
 });
-test('legacy copies are removed only after the complete fresh v2 record exists; signout removes both formats',async()=>{
+test('legacy copies are removed only after the complete fresh v2 record exists; signout removes secrets and retains the authoritative nonsecret tombstone',async()=>{
   const values=legacy();const run=fixture(values);await run.coordinator.load();
   assert.ok([...values.keys()].some(k=>k.startsWith(prefix+'v2.')),'fresh key must apply current Keychain accessibility');
-  assert.ok(!values.has(prefix+'refresh_token'));await run.coordinator.clear();assert.equal(values.size,0);
+  assert.ok(!values.has(prefix+'refresh_token'));await run.coordinator.clear();assert.equal(values.size,1);assert.deepEqual(JSON.parse(values.get(prefix+'v2.session')!),{version:2,session:null});
+});
+
+test('M2622-02 fulfilled native deletions cannot resurrect legacy credentials after sign-out',async()=>{
+  const values=legacy();
+  const storage:SessionStorage={getItemAsync:async k=>values.get(k)??null,setItemAsync:async(k,v)=>{values.set(k,v);},deleteItemAsync:async k=>{if(k.includes('.v2.'))values.delete(k);}};
+  const run=createSessionCoordinator(storage,()=>{});
+  usable(await run.load());await run.clear();
+  assert.ok(values.has(prefix+'access_token'),'native legacy deletion silently failed');
+  assert.deepEqual(JSON.parse(values.get(prefix+'v2.session')!),{version:2,session:null});
+  for(let boot=0;boot<3;boot++)assert.equal(await createSessionCoordinator(storage,()=>{}).load(),null);
+  const login=createSessionCoordinator(storage,()=>{});await login.persist(b);
+  usable(await createSessionCoordinator(storage,()=>{}).load(),b);
 });
