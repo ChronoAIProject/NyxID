@@ -1140,9 +1140,16 @@ policy of `/users/me/analytics-consent`; it is not a delegated profile read.
     { "kind": "destination", "id": "recent_chats" },
     { "kind": "destination", "id": "settings" }
   ],
-  "customized": false
+  "customized": false,
+  "has_unsupported_entries": false
 }
 ```
+
+The additive `has_unsupported_entries` boolean reports whether this server
+omitted stored kinds/destinations it cannot parse. Clients must also detect any
+entries they omit locally. A partial list remains visible but read-only; only
+explicit Reset may replace it. Older clients may ignore this response field;
+server-side PUT protection still prevents them erasing unsupported entries.
 
 #### PUT /api/v1/users/me/quick-access
 
@@ -1160,7 +1167,12 @@ Unknown kinds/destinations, malformed IDs, duplicates and oversized lists return
 these inert preferences confer no access, and clients resolve them only against
 the authenticated person's authorized roster. Unavailable entries are not shown.
 The response has the GET shape with `customized: true`; an empty saved list is
-different from the default list.
+different from the default list. If the raw stored list contains entries this
+server cannot parse, PUT returns 409 `conflict` (existing code 1004) without
+changing storage. Replacement also compares the complete raw preference so a
+concurrent newer-version edit returns 409 rather than being overwritten. Reload
+before retrying a concurrent edit; unsupported lists require a newer compatible
+client/server or intentional Reset.
 
 #### DELETE /api/v1/users/me/quick-access
 

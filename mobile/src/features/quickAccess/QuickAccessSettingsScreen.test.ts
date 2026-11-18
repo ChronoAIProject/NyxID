@@ -39,6 +39,7 @@ function setup({
   items = DEFAULT,
   customized = false,
   loaded = true,
+  hasUnsupportedEntries = false,
   loadError = null as unknown,
   saveError = null as unknown,
   sources = {
@@ -51,7 +52,7 @@ function setup({
 } = {}) {
   const calls: unknown[][] = [];
   const quick = {
-    state: { items, customized },
+    state: { items, customized, hasUnsupportedEntries },
     loaded,
     loadError,
     saveError,
@@ -260,4 +261,18 @@ test('M2622-05 three accepted UI edits survive staggered server responses; pendi
     same(server.items.map((i:any)=>i.id),['plugins','machines','settings']);
     same((client.getQueryData(key) as any).items,server.items,'server readback retains all three accepted edits');
   } finally {h.unmount();client.clear();}
+});
+
+
+test('M2622-08 partial quick-access list stays visible and read-only with explicit Reset available',()=>{
+  const x=setup({items:[destination('plugins')],customized:true,hasUnsupportedEntries:true});
+  const rows=x.rows(x.group('Your shortcuts'));
+  assert.equal(rows[0]!.props.label,'Plugins');
+  assert.match(x.group('Your shortcuts').props.footer,/newer version.*Reset/);
+  for(const button of orderButtons(rows[0]!)){assert.equal(button.props.disabled,true);button.props.onPress();}
+  for(const group of ['Add from the menu','Add an agent','Add a crew']) for(const row of x.rows(x.group(group))){assert.equal(row.props.disabled,true);row.props.onPress();}
+  assert.equal(x.calls.length,0,'even forced edit callbacks cannot send partial replacement');
+  const reset=x.groups.flatMap(g=>x.rows(g)).find(row=>row.props.label==='Reset to default')!;
+  assert.equal(reset.props.disabled,false);reset.props.onPress();
+  same(x.calls,[['clear'],['reset']]);
 });

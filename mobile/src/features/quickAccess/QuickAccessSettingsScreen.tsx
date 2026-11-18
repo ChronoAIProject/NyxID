@@ -43,10 +43,11 @@ export function QuickAccessSettingsScreen(
   // default would overwrite it.
   const busy = useRef(false);
   const [pending, setPending] = useState(false);
-  const editable = quickAccess.loaded;
+  const partial = quickAccess.state.hasUnsupportedEntries === true;
+  const editable = quickAccess.loaded && !partial;
   const saving = pending || quickAccess.saving;
-  const begin = (operation: (complete: () => void) => void) => {
-    if (!editable || saving || busy.current) return;
+  const begin = (operation: (complete: () => void) => void, reset = false) => {
+    if (!quickAccess.loaded || (!reset && !editable) || saving || busy.current) return;
     busy.current = true;
     setPending(true);
     quickAccess.clearSaveError();
@@ -89,14 +90,16 @@ export function QuickAccessSettingsScreen(
       <SettingsGroup
         title={t("Your shortcuts")}
         footer={
-          quickAccess.saveError
+          partial
+            ? t("Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.")
+            : quickAccess.saveError
             ? t("Couldn't save quick access. Your previous list is back.")
             : t(
                 "Shown in the column under the clock, in this order. Saved to your account, so your other devices show the same list.",
               )
         }
       >
-        {!editable ? (
+        {!quickAccess.loaded ? (
           <SettingsRow label={t("Loading…")} disabled />
         ) : rows.length === 0 ? (
           <SettingsRow
@@ -239,9 +242,9 @@ export function QuickAccessSettingsScreen(
         <SettingsRow
           label={t("Reset to default")}
           tone="action"
-          disabled={!editable || saving || !customized}
+          disabled={!quickAccess.loaded || saving || !customized}
           onPress={() => {
-            begin(complete => quickAccess.reset(complete));
+            begin(complete => quickAccess.reset(complete), true);
           }}
         />
       </SettingsGroup>

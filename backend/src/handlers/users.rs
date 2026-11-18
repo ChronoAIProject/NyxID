@@ -528,6 +528,8 @@ pub struct QuickAccessResponse {
     pub items: Vec<QuickAccessItemResponse>,
     /// False while the person still has the default list.
     pub customized: bool,
+    /// Unknown stored entries were omitted; replacement needs a newer client/server.
+    pub has_unsupported_entries: bool,
 }
 
 impl From<crate::models::user::QuickAccessItem> for QuickAccessItemResponse {
@@ -555,6 +557,7 @@ fn quick_access_response(
     QuickAccessResponse {
         items: items.into_iter().map(Into::into).collect(),
         customized,
+        has_unsupported_entries: false,
     }
 }
 
@@ -564,12 +567,15 @@ pub async fn get_quick_access(
     auth_user: AuthUser,
 ) -> AppResult<Json<QuickAccessResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
-    let saved = crate::services::user_preferences_service::read_quick_access(
-        &state.db,
-        &auth_user.user_id.to_string(),
-    )
-    .await?;
-    Ok(Json(quick_access_response(saved)))
+    let (saved, has_unsupported_entries) =
+        crate::services::user_preferences_service::read_quick_access_with_compatibility(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+    let mut response = quick_access_response(saved);
+    response.has_unsupported_entries = has_unsupported_entries;
+    Ok(Json(response))
 }
 
 /// PUT /api/v1/users/me/quick-access
@@ -3241,6 +3247,97 @@ mod export_http_tests {
         let profile = row.get_document("profile_config").unwrap();
         assert_eq!(profile.get_document("quick_access").unwrap(), &expected);
         assert_eq!(profile.get_str("future_setting").unwrap(), "keep");
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mixed_version_quick_access_tests {
+    use super::*;
+    use crate::test_utils::*;
+    use mongodb::bson::{self, Document, doc};
+
+    #[tokio::test]
+    async fn m2622_08_partial_read_refuses_replacement_preserves_raw_unknowns_and_allows_reset() {
+        let db = connect_test_database("quick_access_mixed_version")
+            .await
+            .expect("MongoDB required");
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&id, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let raw = doc! { "items": [
+            { "kind": "destination", "id": "plugins" },
+            { "kind": "destination", "id": "future_destination" },
+            { "kind": "future_workflow", "id": "opaque", "future_config": { "preserve": true } }
+        ] };
+        let bytes = bson::to_vec(&raw).unwrap();
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &id},
+                doc! {"$set":{"profile_config.quick_access": &raw}},
+            )
+            .await
+            .unwrap();
+        // Actual model serde is intentionally tolerant; it silently hides both
+        // future entries, so the HTTP flag must be grounded in raw BSON.
+        let typed = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(typed.profile_config.quick_access.unwrap().items.len(), 1);
+        let state = test_app_state(db.clone());
+        let Json(read) = get_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert_eq!(read.items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["has_unsupported_entries"],
+            true
+        );
+        let result = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let stored = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_vec(
+                stored
+                    .get_document("profile_config")
+                    .unwrap()
+                    .get_document("quick_access")
+                    .unwrap()
+            )
+            .unwrap(),
+            bytes
+        );
+        let Json(reset) = reset_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert!(!reset.customized);
+        assert_eq!(
+            serde_json::to_value(&reset).unwrap()["has_unsupported_entries"],
+            false
+        );
+        let Json(saved) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert!(saved.customized);
         db.drop().await.unwrap();
     }
 }

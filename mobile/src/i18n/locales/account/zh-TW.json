@@ -247,6 +247,7 @@
   "Skip MFA for NyxID app sign-ins": "NyxID 應用程式核准登入時略過 MFA",
   "Skip MFA for app-approved sign-ins?": "經應用程式核准的登入要略過 MFA 嗎？",
   "Some features unavailable": "部分功能不可用",
+  "Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.": "部分快捷方式需要較新版本的 NyxID。請更新 App 後編輯，或使用「重設為預設」取代整份清單。",
   "Someone mentioned you in a group": "有人在羣組中提到了你",
   "Support": "支援",
   "Tap to retry.": "點一下以重試。",
