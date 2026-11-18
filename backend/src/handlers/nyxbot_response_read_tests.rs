@@ -971,3 +971,6 @@ async fn response_read_2588_failed_followed_turn_stays_empty_and_sends_failure_i
         completed
     );
 }
+
+#[path = "nyxbot_org_thread_notice_tests.rs"]
+mod org_thread_notice_tests;

@@ -22,11 +22,18 @@ pub struct ThreadReplyTarget {
     pub(super) route_key_id: String,
     pub(super) platform: String,
     pub(super) facts: ChannelThreadFacts,
-    pub(super) admitted: Option<(
+    pub(super) authority: ReplyBinding,
+}
+
+#[derive(Clone)]
+pub(super) enum ReplyBinding {
+    Source,
+    Turn(
         String,
         crate::models::assistant_conversation::ChannelOrigin,
         String,
-    )>,
+    ),
+    Notice(Box<super::gateway::notice::NoticeTarget>),
 }
 
 impl ThreadReplyTarget {
@@ -39,7 +46,7 @@ impl ThreadReplyTarget {
             route_key_id: "key".into(),
             platform: platform.into(),
             facts,
-            admitted: None,
+            authority: ReplyBinding::Source,
         }
     }
     pub fn facts(&self) -> &ChannelThreadFacts {

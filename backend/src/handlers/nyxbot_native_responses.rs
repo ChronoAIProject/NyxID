@@ -481,9 +481,18 @@ async fn snapshot_inner(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) => {
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Snapshot,
+            ))
+            .await;
+        }
     };
     match response_read::load(&state, &row, &id).await {
         Ok(Some(view)) => {
@@ -530,9 +539,23 @@ async fn events_inner(
     Query(query): Query<Cursor>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) if failure.closed.is_some() => {
+            let after = match cursor(query.starting_after.as_deref()) {
+                Ok(after) => after,
+                Err(error) => return provider_refusal::error(error),
+            };
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Events(after),
+            ))
+            .await;
+        }
+        Err(failure) => return failure.response,
     };
     let after = match cursor(query.starting_after.as_deref()) {
         Ok(v) => v,
