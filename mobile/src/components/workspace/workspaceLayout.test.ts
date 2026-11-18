@@ -16,7 +16,7 @@ import {
   workspaceQuickRailFrame,
   workspaceQuickRailToggleFrame,
   workspaceRightPanelLayout,
-  sidebarSectionHeaderMetaVisible,
+  sidebarSectionHeaderFitsInline,
 } from "./workspaceLayout";
 import { FLOATING_HEADER_MARGIN } from "./workspaceHeaderMetrics";
 
@@ -164,14 +164,14 @@ test("only corner insets are reclaimed below the sensor band", () => {
     ["bottom", "left", "right"],
   );
 });
-test("measured metadata yields before a single-line heading at large type", () => {
+test("large measured labels and counts move the section actions onto another row", () => {
   assert.equal(
-    sidebarSectionHeaderMetaVisible(232, 110, 70, 16, 88, 26),
+    sidebarSectionHeaderFitsInline(232, 110, 70, 16, 88, 26),
     false,
   );
-  assert.equal(sidebarSectionHeaderMetaVisible(360, 110, 70, 16, 88, 26), true);
+  assert.equal(sidebarSectionHeaderFitsInline(360, 110, 70, 16, 88, 26), true);
   assert.equal(
-    sidebarSectionHeaderMetaVisible(360, 220, 140, 16, 88, 26),
+    sidebarSectionHeaderFitsInline(360, 220, 140, 16, 88, 26),
     false,
   );
 });
@@ -191,7 +191,7 @@ test("the quick rail is on every corner-sensor window (folded and unfolded Duo) 
     "QUICK_RAIL_WIDTH",
     "RIGHT_PANEL_WIDTH",
     "quickRailCapsuleHeight",
-    "sidebarSectionHeaderMetaVisible",
+    "sidebarSectionHeaderFitsInline",
     "workspaceBodyEdges",
     "workspaceCornerSensor",
     "workspaceHeaderBand",

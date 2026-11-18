@@ -17,7 +17,10 @@ import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import { sidebarTextProps } from "./sidebarText";
-import { sidebarSectionHeaderMetaVisible } from "./workspaceLayout";
+import { sidebarSectionHeaderFitsInline } from "./workspaceLayout";
+
+const ACTION_SIZE = 44;
+const CHEVRON_SIZE = 16;
 
 export function SidebarSectionHeader({
   label,
@@ -52,16 +55,13 @@ export function SidebarSectionHeader({
   const [rowWidth, setRowWidth] = useState(0);
   const [labelWidth, setLabelWidth] = useState(0);
   const [metaWidth, setMetaWidth] = useState(0);
-  const [chevronWidth, setChevronWidth] = useState(0);
-  const [refreshWidth, setRefreshWidth] = useState(0);
-  const [createWidth, setCreateWidth] = useState(0);
   const Chevron = expanded ? ChevronDown : ChevronRight;
-  const showMeta = sidebarSectionHeaderMetaVisible(
+  const fitsInline = sidebarSectionHeaderFitsInline(
     rowWidth,
     labelWidth,
     metaWidth,
-    chevronWidth,
-    refreshWidth + createWidth,
+    CHEVRON_SIZE,
+    (onRefresh ? 2 : 1) * ACTION_SIZE,
     styles.sectionRow.gap * 2 + styles.sectionRow.paddingRight,
   );
   return (
@@ -69,7 +69,10 @@ export function SidebarSectionHeader({
       testID="sidebar-section-viewport"
       onLayout={(event) => setRowWidth(event.nativeEvent.layout.width)}
     >
-      <View style={styles.sectionHeading}>
+      <View
+        testID="sidebar-section-heading"
+        style={[styles.sectionHeading, !fitsInline && styles.stackedHeading]}
+      >
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t(section === "agents" ? expanded ? "Collapse agents" : "Expand agents" : section === "crews" ? expanded ? "Collapse crews" : "Expand crews" : expanded ? "Collapse {{section}}" : "Expand {{section}}", { section: label })}
@@ -77,7 +80,7 @@ export function SidebarSectionHeader({
           disabled={disabled}
           accessibilityValue={{ text: String(count) }}
           onPress={onPress}
-          style={styles.sectionRow}
+          style={[styles.sectionRow, !fitsInline && styles.stackedRow]}
         >
           <Text
             {...sidebarTextProps()}
@@ -92,77 +95,56 @@ export function SidebarSectionHeader({
           >
             {label}
           </Text>
-          <View
-            accessible={false}
+          <Text
+            {...sidebarTextProps()}
             testID="sidebar-section-meta"
-            accessibilityElementsHidden={!showMeta}
-            importantForAccessibility={
-              showMeta ? "auto" : "no-hide-descendants"
-            }
-            style={{ width: showMeta ? metaWidth : 0, overflow: "hidden" }}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            style={[styles.sectionCount, { color: colors.textMuted }]}
           >
-            <Text
-              {...sidebarTextProps()}
-              numberOfLines={1}
-              ellipsizeMode="tail"
+            {count}
+          </Text>
+          <Chevron size={CHEVRON_SIZE} color={colors.textMuted} />
+        </Pressable>
+        <View style={styles.actions}>
+          {onRefresh ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t(section === "agents" ? "Refresh agents" : section === "crews" ? "Refresh crews" : "Refresh {{section}}", {
+                section: label,
+              })}
+              accessibilityState={{
+                disabled: refreshDisabled || refreshing,
+                busy: refreshing,
+              }}
+              disabled={refreshDisabled || refreshing}
+              onPress={onRefresh}
               style={[
-                styles.sectionCount,
-                { color: colors.textMuted, width: metaWidth || undefined },
+                styles.createButton,
+                { opacity: refreshDisabled ? 0.4 : 1 },
               ]}
             >
-              {count}
-            </Text>
-          </View>
-          <View
-            testID="sidebar-section-chevron"
-            onLayout={(event) =>
-              setChevronWidth(event.nativeEvent.layout.width)
-            }
-          >
-            <Chevron size={16} color={colors.textMuted} />
-          </View>
-        </Pressable>
-        {onRefresh ? (
+              {refreshing ? (
+                <ActivityIndicator size="small" color={colors.textSecondary} />
+              ) : (
+                <RefreshCw size={18} color={colors.textSecondary} />
+              )}
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(section === "agents" ? "Refresh agents" : section === "crews" ? "Refresh crews" : "Refresh {{section}}", {
-              section: label,
-            })}
-            onLayout={(event) =>
-              setRefreshWidth(event.nativeEvent.layout.width)
-            }
-            accessibilityState={{
-              disabled: refreshDisabled || refreshing,
-              busy: refreshing,
-            }}
-            disabled={refreshDisabled || refreshing}
-            onPress={onRefresh}
-            style={[
-              styles.createButton,
-              { opacity: refreshDisabled ? 0.4 : 1 },
-            ]}
+            accessibilityLabel={createLabel}
+            accessibilityState={{ disabled: createDisabled }}
+            disabled={createDisabled}
+            onPress={onCreate}
+            style={styles.createButton}
           >
-            {refreshing ? (
-              <ActivityIndicator size="small" color={colors.textSecondary} />
-            ) : (
-              <RefreshCw size={18} color={colors.textSecondary} />
-            )}
+            <Plus
+              size={18}
+              color={createDisabled ? colors.textMuted : colors.textSecondary}
+            />
           </Pressable>
-        ) : null}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={createLabel}
-          onLayout={(event) => setCreateWidth(event.nativeEvent.layout.width)}
-          accessibilityState={{ disabled: createDisabled }}
-          disabled={createDisabled}
-          onPress={onCreate}
-          style={styles.createButton}
-        >
-          <Plus
-            size={18}
-            color={createDisabled ? colors.textMuted : colors.textSecondary}
-          />
-        </Pressable>
+        </View>
         <View
           pointerEvents="none"
           accessible={false}
@@ -204,11 +186,14 @@ export function SidebarSectionHeader({
   );
 }
 const styles = StyleSheet.create({
-  sectionHeading: { flex: 1, flexDirection: "row", alignItems: "center" },
+  sectionHeading: { flexDirection: "row", alignItems: "center" },
+  stackedHeading: { flexDirection: "column", alignItems: "stretch" },
+  stackedRow: { flexGrow: 0, flexShrink: 0, flexWrap: "wrap" },
+  actions: { flexDirection: "row", justifyContent: "flex-end" },
   createButton: {
     flexShrink: 0,
-    width: 44,
-    height: 44,
+    width: ACTION_SIZE,
+    height: ACTION_SIZE,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 8,
@@ -224,6 +209,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sectionCount: {
+    maxWidth: "100%",
     flexShrink: 0,
     fontFamily: fonts.bodyRegular,
     fontSize: 11,
@@ -231,8 +217,7 @@ const styles = StyleSheet.create({
   section: {
     ...sidebarSectionTitle,
     padding: 12,
-    flexGrow: 0,
-    flexShrink: 1,
-    minWidth: 0,
+    flexShrink: 0,
+    maxWidth: "100%",
   },
 });

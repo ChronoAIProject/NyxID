@@ -309,6 +309,31 @@ test("the stationary base and full-width translated slab retain the actual navig
   x.harness.unmount();
 });
 
+test("the gesture-only edge stays out of TalkBack and keyboard focus while the open sliver is a named button", () => {
+  const x = setup();
+  const edge = x.find("workspace-sidebar-reveal-edge").props;
+  assert.equal(edge.focusable, false);
+  assert.equal(edge.accessible, false);
+  assert.equal(edge.importantForAccessibility, "no-hide-descendants");
+  assert.equal(edge.accessibilityElementsHidden, true);
+  assert.equal(edge.onPress, undefined);
+  assert.equal(x.find("workspace-slab-content").props.importantForAccessibility, "auto");
+  assert.equal(x.find("workspace-sidebar-base").props.importantForAccessibility, "no-hide-descendants");
+  x.set({ visible: true, presented: true });
+  x.lastComplete();
+  const close = x.find("workspace-sidebar-close-sliver").props;
+  assert.equal(close.accessibilityRole, "button");
+  assert.equal(close.accessibilityLabel, "Close navigation");
+  assert.equal(close.focusable, true);
+  assert.equal(close.importantForAccessibility, "yes");
+  assert.equal(close.accessibilityElementsHidden, false);
+  assert.equal(x.find("workspace-slab-content").props.importantForAccessibility, "no-hide-descendants");
+  assert.equal(x.find("workspace-sidebar-base").props.importantForAccessibility, "auto");
+  close.onPress();
+  assert.deepEqual(x.changes, [false]);
+  x.harness.unmount();
+});
+
 test("edge pan follows the finger, clamps travel and settles at the projected threshold", () => {
   const x = setup();
   assert.equal(x.settings.activeOffsetX, 18);

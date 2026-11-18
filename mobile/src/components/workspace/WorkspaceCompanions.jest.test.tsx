@@ -38,74 +38,62 @@ it("renders group headings with visual uppercase while preserving their localize
   }
 });
 
-it("keeps the intrinsic one-line label and 44pt controls when scaled metadata cannot fit", async () => {
+it("reflows scaled section text and keeps the count and actions available as width or type changes", async () => {
+  const toggle = jest.fn();
+  const refresh = jest.fn();
+  const create = jest.fn();
   await render(
     <SidebarSectionHeader
       label="Agents"
       section="agents"
-      count="1 total"
+      count="4 total"
       expanded
-      onPress={() => {}}
+      onPress={toggle}
       createLabel="New agent"
-      onCreate={() => {}}
+      onCreate={create}
       createDisabled={false}
-      onRefresh={() => {}}
+      onRefresh={refresh}
     />,
   );
-  await fireEvent(screen.getByTestId("sidebar-section-viewport"), "layout", {
-    nativeEvent: { layout: { width: 276 } },
-  });
-  await fireEvent(screen.getByTestId("sidebar-section-label-measure", { includeHiddenElements: true }), "textLayout", {
-    nativeEvent: { lines: [{ width: 132 }] },
-  });
-  await fireEvent(
-    screen.getByTestId("sidebar-section-meta-measure", {
-      includeHiddenElements: true,
-    }),
-    "textLayout",
-    { nativeEvent: { lines: [{ width: 90 }] } },
-  );
-  await fireEvent(screen.getByTestId("sidebar-section-chevron"), "layout", {
-    nativeEvent: { layout: { width: 16 } },
-  });
+  const viewport = screen.getByTestId("sidebar-section-viewport");
+  const heading = screen.getByTestId("sidebar-section-heading");
+  const label = screen.getByTestId("sidebar-section-label");
+  const meta = screen.getByTestId("sidebar-section-meta");
+  const toggleButton = screen.getByRole("button", { name: "Collapse agents" });
+  const measure = async (id: string, width: number) => {
+    const text = screen.getByTestId(id, { includeHiddenElements: true });
+    await fireEvent(text, "textLayout", { nativeEvent: { lines: [{ width }] } });
+  };
+  // Native measurements include the current font, translated string, and
+  // platform scaling curve. Exercise a phone drawer at 2x and larger widths.
+  await fireEvent(viewport, "layout", { nativeEvent: { layout: { width: 276 } } });
+  await measure("sidebar-section-label-measure", 132);
+  await measure("sidebar-section-meta-measure", 90);
+  expect(StyleSheet.flatten(heading.props.style).flexDirection).toBe("column");
+  expect(StyleSheet.flatten(toggleButton.props.style).flexWrap).toBe("wrap");
+  expect(StyleSheet.flatten(label.props.style).flexShrink).toBe(0);
+  expect(label.props.numberOfLines).toBe(1);
+  expect(meta).toHaveTextContent("4 total");
+  expect(toggleButton).toHaveAccessibilityValue({ text: "4 total" });
   for (const name of ["Refresh agents", "New agent"]) {
     const button = screen.getByRole("button", { name });
-    await fireEvent(button, "layout", {
-      nativeEvent: { layout: { width: 44 } },
-    });
-    expect(StyleSheet.flatten(button.props.style).width).toBe(44);
+    expect(StyleSheet.flatten(button.props.style)).toMatchObject({ width: 44, height: 44 });
+    await fireEvent.press(button);
   }
-  const label = screen.getByTestId("sidebar-section-label");
-  expect(label.props.numberOfLines).toBe(1);
-  expect(StyleSheet.flatten(label.props.style).flexShrink).toBe(1);
-  expect(
-    StyleSheet.flatten(
-      screen.getByTestId("sidebar-section-meta", {
-        includeHiddenElements: true,
-      }).props.style,
-    ).width,
-  ).toBe(0);
-  await fireEvent(screen.getByTestId("sidebar-section-viewport"), "layout", {
-    nativeEvent: { layout: { width: 500 } },
-  });
-  expect(
-    StyleSheet.flatten(
-      screen.getByTestId("sidebar-section-meta", {
-        includeHiddenElements: true,
-      }).props.style,
-    ).width,
-  ).toBe(90);
-  // A subsequent Dynamic Type change hides metadata again, preserving the label.
-  await fireEvent(screen.getByTestId("sidebar-section-label-measure", { includeHiddenElements: true }), "textLayout", { nativeEvent: { lines: [{ width: 296 }] } });
-  expect(
-    StyleSheet.flatten(
-      screen.getByTestId("sidebar-section-meta", {
-        includeHiddenElements: true,
-      }).props.style,
-    ).width,
-  ).toBe(0);
-  expect(label.props.ellipsizeMode).toBe("tail");
-  expect(label.props.accessibilityLabel).toBeUndefined();
+  await fireEvent.press(toggleButton);
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(toggle).toHaveBeenCalledTimes(1);
+
+  await fireEvent(viewport, "layout", { nativeEvent: { layout: { width: 500 } } });
+  expect(StyleSheet.flatten(heading.props.style).flexDirection).toBe("row");
+  // An accessibility text-size change on an already open drawer reflows it
+  // again without deleting the count or either action.
+  await measure("sidebar-section-label-measure", 296);
+  expect(StyleSheet.flatten(heading.props.style).flexDirection).toBe("column");
+  expect(screen.getByTestId("sidebar-section-meta")).toHaveTextContent("4 total");
+  expect(screen.getByRole("button", { name: "Refresh agents" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "New agent" })).toBeEnabled();
 });
 
 it("registers an opt-in panel, replaces content and removes it when resized or the page leaves", async () => {

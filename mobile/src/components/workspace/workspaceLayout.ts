@@ -288,8 +288,8 @@ export function workspaceHeaderRightPadding(rightInset: number, base = 8) {
   return base + Math.max(0, rightInset || 0);
 }
 
-/** All widths come from the rendered row, including scaled text and controls. */
-export function sidebarSectionHeaderMetaVisible(
+/** Keep the actions beside the section only when both native text widths fit. */
+export function sidebarSectionHeaderFitsInline(
   rowWidth: number,
   labelWidth: number,
   metaWidth: number,
