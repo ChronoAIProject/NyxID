@@ -157,15 +157,17 @@ export function GroupedRow({
 }
 
 export function GroupedDisclosure({
+  leading,
   children,
   accessory,
   search,
   className,
   ...props
-}: ComponentProps<"button"> & { readonly accessory?: ReactNode; readonly search?: DrawerSearchMetadata }) {
+}: ComponentProps<"button"> & { readonly leading?: ReactNode; readonly accessory?: ReactNode; readonly search?: DrawerSearchMetadata }) {
   return (
-    <GroupedRow asChild interactive className={className} search={search}>
+    <GroupedRow asChild interactive className={className} search={search} leading={leading}>
       <button type="button" {...props}>
+        {leading && <span className="shrink-0 text-text-tertiary [&>svg]:size-[1.125em]">{leading}</span>}
         <span className="min-w-0 flex-1 break-words">{children}</span>
         {accessory}
         <ChevronRight

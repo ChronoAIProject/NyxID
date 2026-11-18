@@ -1,6 +1,11 @@
 @reference "../../typography.css";
 
 .billing-page {
+  /* Both shells already supply the horizontal page inset. Keep the detail
+     pages at that width so the existing cards retain their narrow layout. */
+  [data-grouped-detail] {
+    padding-inline: 0;
+  }
   --billing-chart-accent: color-mix(
     in srgb,
     var(--color-primary) 60%,

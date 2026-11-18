@@ -116,3 +116,16 @@ it("discloses the primary NyxBot's full account and service authority", async ()
     screen.getByText(/This NyxBot has full account and service access/),
   ).toBeInTheDocument();
 });
+
+it("keeps the action in the grouped card and help and errors in its footer", async () => {
+  mocks.request.mockRejectedValue(new Error("Voice connection unavailable"));
+  show();
+  const group = await screen.findByRole("region", { name: "Device voice" });
+  const button = screen.getByRole("button", { name: "Create voice connection" });
+  expect(button.closest("[data-grouped-list]")).toBeInTheDocument();
+  await waitFor(() => expect(button).toBeDisabled());
+  const footer = group.querySelector("[data-grouped-footer]")!;
+  expect(footer).toContainElement(await screen.findByText("Voice connection unavailable"));
+  expect(footer).toContainElement(screen.getByText(/Keys set to all services include it/));
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});

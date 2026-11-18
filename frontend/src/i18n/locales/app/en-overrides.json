@@ -44,6 +44,8 @@
   "{{count}} connections selected_other": "{{count}} connections selected",
   "{{count}} failed_one": "{{count}} failed",
   "{{count}} failed_other": "{{count}} failed",
+  "{{count}} grants_one": "{{count}} grant",
+  "{{count}} grants_other": "{{count}} grants",
   "{{count}} groups_one": "{{count}} group",
   "{{count}} groups_other": "{{count}} groups",
   "{{count}} matching activities in the last {{days}} days_one": "{{count}} matching activity in the last {{days}} days",

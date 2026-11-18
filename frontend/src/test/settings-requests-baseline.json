@@ -1,0 +1,144 @@
+{
+  "account": {
+    "root": [
+      "/sessions",
+      "/users/me"
+    ],
+    "profile": [],
+    "security": [
+      "/onboarding/bindings"
+    ],
+    "security/delete": [],
+    "sessions": [],
+    "mcp": [
+      "/public/config"
+    ],
+    "display": [],
+    "display/layout": [],
+    "display/colors": [],
+    "privacy": [
+      "/users/me/preferences/analytics"
+    ]
+  },
+  "billing": {
+    "root": [
+      "/billing/benefits?page=1",
+      "/billing/usage?period=30d",
+      "/billing/wallet",
+      "/catalog?include_all=true",
+      "/orgs"
+    ],
+    "billing/topup": [
+      "/billing/topups?page=1&per_page=10&period=30d"
+    ],
+    "billing/benefits": [],
+    "billing/bill": [
+      "/billing/bill",
+      "/billing/invoices?page=1&per_page=10"
+    ],
+    "billing/machines": [],
+    "billing/activity": [
+      "/api-keys/usage?days=7"
+    ],
+    "usage": [],
+    "usage/charts": [],
+    "usage/explorer": []
+  },
+  "agent": {
+    "root": [
+      "/assistant/nyxagent/agents/agent-researcher",
+      "/assistant/nyxagent/models",
+      "/assistant/nyxagent/settings"
+    ],
+    "overview/persona": [],
+    "overview/voice": [],
+    "overview/automations": [
+      "/triggers"
+    ],
+    "grants/services": [
+      "/assistant/nyxagent/agents/agent-researcher/guest-readiness",
+      "/assistant/nyxagent/grant-services",
+      "/keys"
+    ],
+    "grants/machines": [
+      "/assistant/nyxagent/agents/agent-researcher/machines",
+      "/nodes",
+      "/saved-logins?available=true"
+    ],
+    "grants/connections": [
+      "/keys"
+    ],
+    "skills": [
+      "/assistant/nyxagent/agents/agent-researcher/skills",
+      "/assistant/nyxagent/agents/agent-researcher/skills/history"
+    ],
+    "memory": [],
+    "channels": [
+      "/assistant/nyxagent/channels",
+      "/channel-bots?scope=all",
+      "/orgs"
+    ],
+    "grants": []
+  },
+  "base": {
+    "account": {
+      "root": [
+        "/users/me"
+      ],
+      "profile": [],
+      "security": [
+        "/onboarding/bindings"
+      ],
+      "sessions": [
+        "/sessions"
+      ],
+      "mcp": [
+        "/public/config"
+      ],
+      "display": [],
+      "privacy": [
+        "/users/me/preferences/analytics"
+      ]
+    },
+    "billing": {
+      "root": [
+        "/billing/benefits?page=1",
+        "/billing/bill",
+        "/billing/invoices?page=1&per_page=10",
+        "/billing/topups?page=1&per_page=10&period=30d",
+        "/billing/usage?period=30d",
+        "/billing/wallet",
+        "/catalog?include_all=true",
+        "/orgs"
+      ],
+      "usage": [
+        "/api-keys/usage?days=7"
+      ],
+      "billing": []
+    },
+    "agent": {
+      "root": [
+        "/assistant/nyxagent/agents/agent-researcher",
+        "/assistant/nyxagent/agents/agent-researcher/guest-readiness",
+        "/assistant/nyxagent/agents/agent-researcher/machines",
+        "/assistant/nyxagent/agents/agent-researcher/skills",
+        "/assistant/nyxagent/agents/agent-researcher/skills/history",
+        "/assistant/nyxagent/channels",
+        "/assistant/nyxagent/grant-services",
+        "/assistant/nyxagent/models",
+        "/assistant/nyxagent/settings",
+        "/channel-bots?scope=all",
+        "/keys",
+        "/nodes",
+        "/orgs",
+        "/saved-logins?available=true",
+        "/triggers"
+      ],
+      "overview": [],
+      "grants": [],
+      "skills": [],
+      "memory": [],
+      "channels": []
+    }
+  }
+}

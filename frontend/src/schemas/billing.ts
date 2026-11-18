@@ -1,3 +1,4 @@
+import { billingSections } from "@/lib/billing-sections";
 import { creditsSchema } from "./credits";
 import { BILLING_METRICS } from "./billing-metrics";
 import { z } from "zod";
@@ -17,6 +18,7 @@ const billingServiceKeySchema = z.string().trim().min(1).max(200);
 
 export const billingSearchSchema = z.object({
   ownerId: z.string().uuid().optional().catch(undefined),
+  section: z.unknown().transform(value => billingSections.normalize(value)).optional(),
   tab: z.enum(["billing", "usage"]).optional().catch(undefined),
   period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
   /** Legacy single-service filter; `services` wins when both are present. */
@@ -43,6 +45,7 @@ export function normalizeBillingSearch(search: Record<string, unknown>) {
   const parsed = billingSearchSchema.parse(search);
   return {
     tab: parsed.tab ?? "billing",
+    section: parsed.section,
     period: parsed.period ?? "30d",
     services:
       parsed.services ??

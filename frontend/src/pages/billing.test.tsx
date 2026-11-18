@@ -1,3 +1,4 @@
+import type { BillingSection } from "@/lib/billing-sections";
 import "@/i18n";
 import { consumeBillingCheckoutReturn } from "@/lib/billing-checkout-return";
 import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
@@ -87,7 +88,9 @@ const query = (data: unknown, error: unknown = null) => ({
 let user: ReturnType<typeof userEvent.setup>;
 const PAGE_ROUTES = ["/billing", "/assistant"] as const;
 let pageRoute: (typeof PAGE_ROUTES)[number] = "/billing";
-async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
+let visitBilling: (section: BillingSection) => Promise<void>;
+
+async function renderPage(url = "/billing?tab=usage", exploreGroups = true, from?: string) {
   if (pageRoute === "/assistant") {
     const old = new URL(url, "https://nyxid.test");
     const params = new URLSearchParams({
@@ -117,9 +120,9 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
         <BillingPage presentation="panel" />
       ),
   });
-  const history = createMemoryHistory({ initialEntries: [url] });
+  const history = createMemoryHistory({ initialEntries: from ? [from, url] : [url] });
   const router = createRouter({
-    routeTree: root.addChildren([route]),
+    routeTree: root.addChildren([route, createRoute({ getParentRoute: () => root, path: "/dashboard", component: () => <p>Before billing</p> })]),
     history,
   });
   render(
@@ -132,10 +135,11 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   if (pageRoute === "/assistant")
     expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
   expect(history.location.pathname).toBe(pageRoute);
-  if (exploreGroups) {
-    const disclosure = screen.queryByText("Explore by service, model or agent");
-    if (disclosure) await user.click(disclosure);
-  }
+  visitBilling = async section => {
+    const tab = section.split("/")[0] as "billing" | "usage";
+    await act(() => router.navigate({ to: pageRoute, search: previous => ({ ...previous, ...(pageRoute === "/assistant" ? { panelTab: tab, panelSection: section.includes("/") ? section : undefined } : { tab, section: section.includes("/") ? section : undefined }) }), replace: true }));
+  };
+  if (exploreGroups && !new URL(url, "https://nyxid.test").searchParams.has(pageRoute === "/assistant" ? "panelAction" : "action") && new URL(url, "https://nyxid.test").searchParams.get(pageRoute === "/assistant" ? "panelTab" : "tab") === "usage") await visitBilling("usage/explorer");
   return { history, router };
 }
 async function select(label: string, option: string) {
@@ -227,6 +231,40 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
   beforeEach(() => {
     pageRoute = route;
   });
+  it("pushes tabs and periods while drill-ins and parent Back replace", async () => {
+    const { history } = await renderPage("/billing", false, "/dashboard");
+    expect(history.length).toBe(2);
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
+    expect(history.length).toBe(2);
+    await user.click(screen.getByRole("button", { name: "Billing" }));
+    expect(history.length).toBe(2);
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
+    await user.click(screen.getByRole("tab", { name: "Usage" }));
+    expect(history.length).toBe(3);
+    await user.click(screen.getByRole("button", { name: "Usage charts" }));
+    expect(history.length).toBe(3);
+    await select("Time range", "Last 7 days");
+    expect(history.length).toBe(4);
+    await act(() => history.back());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Time range" })).toHaveTextContent("Last 30 days"));
+    await act(() => history.back());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Billing" })).toHaveAttribute("data-state", "active"));
+    expect(screen.getByRole("heading", { name: "Benefits & allowances" })).toBeVisible();
+    await act(() => history.forward());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Usage" })).toHaveAttribute("data-state", "active"));
+    expect(screen.getByRole("heading", { name: "Usage charts" })).toBeVisible();
+    await act(() => history.forward());
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Time range" })).toHaveTextContent("Last 7 days"));
+  });
+  it("returns to the prior route after opening and replacing sections", async () => {
+    const { history } = await renderPage("/billing", false, "/dashboard");
+    await user.click(screen.getByRole("button", { name: /^Benefits & allowances/ }));
+    expect(history.length).toBe(2);
+    await act(() => history.back());
+    expect(await screen.findByText("Before billing")).toBeVisible();
+    await act(() => history.forward());
+    expect(await screen.findByRole("heading", { name: "Benefits & allowances" })).toBeVisible();
+  });
   it("selects only administered owners and scopes every view with URL history", async () => {
     const { history } = await renderPage("/billing");
     await user.click(screen.getByRole("combobox", { name: "Billing owner" }));
@@ -241,6 +279,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(ORG));
     expect(mocks.usage).toHaveBeenLastCalledWith("30d", undefined, ORG);
+    await visitBilling("billing/topup");
     expect(mocks.history).toHaveBeenLastCalledWith(1, 10, "30d", ORG);
     expect(mocks.benefits).toHaveBeenLastCalledWith(1, ORG);
     const key = route === "/assistant" ? "panelOwnerId" : "ownerId";
@@ -325,6 +364,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       }),
     );
     await renderPage(`/billing?ownerId=${ORG}`);
+    await visitBilling("billing/topup");
     await user.click(
       screen.getAllByRole("button", { name: "Resume payment" })[0]!,
     );
@@ -354,26 +394,18 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await waitFor(() => expect(mocks.topup).toHaveBeenCalled());
     expect(mocks.topup.mock.calls[0]![0]).not.toHaveProperty("owner_id");
   });
-  it("opens on visual quantities and funding with the grouped list collapsed", async () => {
-    await renderPage("/billing?tab=usage", false);
-    expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
-    expect(
-      screen.getByRole("region", { name: "Funding composition" }),
-    ).toBeVisible();
-    expect(
-      screen.getByRole("combobox", { name: "Compare quantities by" }),
-    ).toHaveTextContent("Service");
-    expect(
-      document.querySelector(".usage-group-disclosure"),
-    ).not.toHaveAttribute("open");
-    expect(
-      document.querySelector(".expandable-service > summary"),
-    ).not.toBeVisible();
+  it("keeps usage overview concise and puts quantities, funding and tables on focused pages", async () => {
+    const { history } = await renderPage("/billing?tab=usage", false);
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    await user.click(screen.getByText("Explore by service, model or agent"));
-    expect(
-      document.querySelector(".expandable-service > summary"),
-    ).toBeVisible();
+    expect(document.querySelector(".tab-usage-summary")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Funding composition" })).not.toBeInTheDocument();
+    await visitBilling("usage/charts");
+    expect(screen.getByRole("combobox", { name: "Compare quantities by" })).toHaveTextContent("Service");
+    expect(screen.getByRole("region", { name: "Funding composition" })).toBeVisible();
+    await visitBilling("usage/explorer");
+    expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
+    expect(document.querySelector(".expandable-service > summary")).toBeVisible();
+    expect(history.length).toBe(1);
   });
   it("defaults to Billing and preserves the wallet and top-up history actions", async () => {
     await renderPage("/billing");
@@ -383,11 +415,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(screen.getByTitle("95")).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "View breakdown" }));
+    await visitBilling("billing/benefits");
     expect(screen.getByText("100 credits")).toBeVisible();
+    await visitBilling("billing/topup");
+    expect(screen.getAllByText("Top-up history", { exact: true })).toHaveLength(1);
+    expect(screen.getByText("Top-up history", { exact: true })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Add credits" }));
     expect(screen.getByRole("dialog")).toBeVisible();
-    expect(screen.getAllByText("Top-up history")).toHaveLength(1);
   });
   it("preserves exact fractional funding and independent allowance quantities in disclosures", async () => {
     mocks.usage.mockReturnValue(
@@ -406,6 +440,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       screen.getAllByText("0.00244", { exact: false }).length,
     ).toBeGreaterThan(0);
+    await visitBilling("usage/explorer");
     await user.click(screen.getByText("All metrics & funding"));
     const funding = screen.getByText("Funding breakdown").parentElement!;
     expect(within(funding).getByText("0.001 credits")).toBeVisible();
@@ -604,9 +639,27 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(screen.getByText("No usage in this period.")).toBeVisible();
     await user.click(screen.getByRole("tab", { name: "Billing" }));
+    await visitBilling("billing/topup");
     expect(
       screen.getByRole("combobox", { name: "Top-up history period" }),
     ).toHaveTextContent("Last 30 days");
+  });
+  it("does not replay a consumed checkout after leaving and returning to the shell", async () => {
+    const { history, router } = await renderPage("/billing?tab=billing&action=topup", false, "/dashboard");
+    expect(await screen.findByRole("dialog", { name: "Add credits" })).toBeVisible();
+    await waitFor(() => expect(history.location.search).not.toMatch(/(?:action|panelAction)=/));
+    expect(history.length).toBe(2);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await act(() => router.navigate({ to: "/dashboard" }));
+    await act(() => history.back());
+    expect(await screen.findByText("Billing owner")).toBeVisible();
+    expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await act(() => history.forward());
+    expect(await screen.findByText("Before billing")).toBeVisible();
+    await act(() => history.back());
+    expect(await screen.findByText("Billing owner")).toBeVisible();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
   it("opens Add credits once from action=topup and clears the param", async () => {
     const { history } = await renderPage("/billing?tab=billing&action=topup");
@@ -717,6 +770,9 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await act(() => history.forward());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Usage" })).toHaveAttribute("data-state", "active"));
+    expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await act(() => history.back());
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -762,10 +818,12 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(
       within(spend).getByText("0.72", { selector: "strong", exact: false }),
     ).toBeVisible();
+    await visitBilling("usage/explorer");
     await user.click(screen.getByText("All metrics & funding"));
     const quantities = screen.getByRole("heading", {
       name: "Requests & other units",
@@ -792,6 +850,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(
       within(spend).getByText("≥ 0.00244", { exact: false }),
@@ -802,6 +861,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     ).toBeVisible();
     expect(within(spend).queryByText("Unavailable")).not.toBeInTheDocument();
+    await visitBilling("usage/explorer");
     expect(
       screen.getByText("≥ 0.00244", { selector: ".row-credit", exact: false }),
     ).toBeVisible();
@@ -827,7 +887,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByText("Acknowledged", { selector: ".usage-status" }),
     ).toBeVisible();
     expect(
-      within(screen.getByRole("tabpanel", { name: "Usage" })).queryByText(
+      within(document.querySelector('[data-grouped-detail]:not([hidden])[aria-label="Usage explorer"]') as HTMLElement).queryByText(
         "Pending",
         { exact: true },
       ),
@@ -889,6 +949,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ]),
     );
     await renderPage();
+    await visitBilling("billing/activity");
     expect(
       screen.getByRole("img", {
         name: "Daily activity: 58 requests and 4 errors across 7 UTC days",
@@ -930,6 +991,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage();
+    await visitBilling("usage");
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(spend.querySelector("strong")).toHaveTextContent(
       "Unavailable credits",
@@ -949,7 +1011,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(mocks.usage().refetch).toHaveBeenCalled();
-    await user.click(screen.getByRole("tab", { name: "Billing" }));
+    await visitBilling("billing/topup");
     expect(screen.getByText("Failed to load top-up history.")).toBeVisible();
     expect(screen.queryByText("No top-ups yet.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add credits" })).toBeDisabled();

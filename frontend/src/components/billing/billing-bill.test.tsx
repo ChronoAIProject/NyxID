@@ -29,6 +29,22 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 describe("BillingBill", () => {
+  it("caps charge rows while retaining the complete bill totals and reveals every line on demand", async () => {
+    mocks.bill.mockReturnValue(query({
+      ...currentBill,
+      charges: Array.from({ length: 8 }, (_, index) => ({ ...currentBill.charges[0], name: `Charge ${index + 1}`, metric_code: `metric-${index}` })),
+    }));
+    render(<BillingBill enabled />);
+    expect(screen.getAllByText(/^Charge \d$/)).toHaveLength(5);
+    expect(screen.queryByText("Charge 8")).not.toBeInTheDocument();
+    const totals = document.querySelector("dl")!.textContent;
+    expect(totals).toContain("Total tax");
+    expect(totals).toContain("Tax rounding");
+    await userEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(screen.getAllByText(/^Charge \d$/)).toHaveLength(8);
+    expect(document.querySelector("dl")!.textContent).toBe(totals);
+    expect(screen.queryByRole("button", { name: "Show all" })).not.toBeInTheDocument();
+  });
   it("shows charges, GST, rounding and prepaid invoice totals; downloads an owned receipt", async () => {
     render(<BillingBill enabled />);
     expect(screen.getByText("AI requests")).toBeInTheDocument();

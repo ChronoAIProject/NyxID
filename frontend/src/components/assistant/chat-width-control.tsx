@@ -1,3 +1,4 @@
+import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { RangeControl } from "@/components/ui/range-control";
@@ -13,7 +14,7 @@ export function ChatWidthControl() {
   const setWidth = useThemeStore((state) => state.setChatContentWidth);
   return (
     <RangeControl
-      label={translateUi("Chat content width")}
+      label={translateUi(ACCOUNT_FIELD_LABELS.chatContentWidth)}
       description={translateUi("Maximum width for messages and the composer. Smaller screens fit automatically.")}
       saved={width}
       onChange={setWidth}
@@ -30,7 +31,7 @@ export function ComposerHeightControl() {
   const setHeight = useThemeStore((state) => state.setComposerMaxHeight);
   return (
     <RangeControl
-      label={translateUi("Maximum composer height")}
+      label={translateUi(ACCOUNT_FIELD_LABELS.maximumComposerHeight)}
       description={translateUi("How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen.")}
       saved={height}
       onChange={setHeight}

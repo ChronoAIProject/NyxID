@@ -45,19 +45,23 @@ export function useAccountPanel() {
   const change = useCallback((
     mode: "open" | "update" | "close",
     params: AccountPanelParams = {},
-    options: { history?: "push" | "replace"; panel?: AccountPanel; opener?: HTMLElement | null } = {},
+    options: { history?: "push" | "replace"; panel?: AccountPanel; opener?: HTMLElement | null; force?: boolean; ifUnchanged?: boolean } = {},
   ) => {
     const pathname = location.pathname;
+    const expectedHref = location.href;
     const expectedPanel = current.panel;
     const actor = useAuthStore.getState().user?.id;
     const generation = panelGeneration;
     return enqueue(async () => {
       if (!isAssistantShellRoute(pathname) || router.state.location.pathname !== pathname ||
         useAuthStore.getState().user?.id !== actor || coordinator.generation !== generation) return;
+      // Canonicalization belongs to the address the caller observed. A queued
+      // forced replace must not erase a newer section selected during a refresh.
+      if (options.ifUnchanged && router.state.location.href !== expectedHref) return;
       const live = parseAccountPanelSearch(router.state.location.search);
       if (mode !== "open" && (!expectedPanel || live.panel !== expectedPanel || coordinator.generation !== generation)) return;
       const replace = options.history === "replace";
-      if (mode === "update" && JSON.stringify(live) === JSON.stringify(parseAccountPanelSearch({
+      if (mode === "update" && !options.force && JSON.stringify(live) === JSON.stringify(parseAccountPanelSearch({
         ...live, ...(!replace ? { panelAction: undefined } : {}), ...params,
       }))) return;
       // Consume an abandoned top-up in its own history entry before pushing.
@@ -83,7 +87,7 @@ export function useAccountPanel() {
         };
       }, replace, resetScroll: false });
     });
-  }, [location.pathname, current.panel, enqueue, router, navigate, coordinator, panelGeneration]);
+  }, [location.pathname, location.href, current.panel, enqueue, router, navigate, coordinator, panelGeneration]);
 
   const close = useCallback((history: "push" | "replace" = "push") => change("close", {}, { history }), [change]);
   return useMemo(() => ({
@@ -91,8 +95,8 @@ export function useAccountPanel() {
     open: (panel: AccountPanel, params: AccountPanelParams = {}, opener: HTMLElement | null =
       document.activeElement instanceof HTMLElement ? document.activeElement : null) =>
       change("open", params, { panel, opener }),
-    update: (params: AccountPanelParams, history: "push" | "replace" = "replace") =>
-      change("update", params, { history }),
+    update: (params: AccountPanelParams, history: "push" | "replace" = "replace", options: { force?: boolean; ifUnchanged?: boolean } = {}) =>
+      change("update", params, { history, ...options }),
     close,
     opener: () => coordinator.opener,
     // Schedule outside the menu's lifetime: drawer dismissal unmounts that menu.

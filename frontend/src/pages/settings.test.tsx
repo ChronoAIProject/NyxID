@@ -1,3 +1,6 @@
+import { appI18n } from "@/i18n/instance";
+import zhCN from "@/i18n/locales/app/zh-CN";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -11,6 +14,7 @@ import {
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ACCOUNT_SETTINGS_SECTIONS } from "@/lib/account-settings-sections";
 import { SETTINGS_TABS } from "@/lib/url-tabs";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
@@ -25,7 +29,7 @@ const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() =>
 }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 vi.mock("@/hooks/use-auth", () => ({
-  useUser: () => ({ data: securityUser }),
+  useUser: () => ({ data: { ...securityUser, has_password: useAuthStore.getState().user?.has_password }, isSuccess: true }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
   useRevokeSession: () => ({ mutateAsync: vi.fn() }),
 }));
@@ -69,8 +73,12 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   useAuthStore.setState(initialAuth);
+  vi.restoreAllMocks();
+  void appI18n.changeLanguage("en");
   expect(unexpectedRequests).toEqual([]);
 });
+
+let visit: (section?: string) => Promise<void>;
 
 async function open(
   route: "/settings" | "/assistant",
@@ -85,7 +93,7 @@ async function open(
       route === "/settings" ? <SettingsPage /> : <SettingsPage presentation="panel" />,
   });
   const history = createMemoryHistory({
-    initialEntries: [route === "/settings" ? `${route}?tab=${tab}` : `${route}?c=chat&mock=1&panel=settings&panelTab=${tab}`],
+    initialEntries: [route === "/settings" ? `${route}${tab ? `?tab=${tab}` : ""}` : `${route}?c=chat&mock=1&panel=settings${tab ? `&panelTab=${tab}` : ""}`],
   });
   const router = createRouter({ routeTree: root.addChildren([page]), history });
   const client = new QueryClient({
@@ -100,9 +108,11 @@ async function open(
     </QueryClientProvider>,
   );
   await act(() => router.load());
-  await screen.findByRole("tab", { name: "Profile" });
-  if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-  return { router, history };
+  visit = async (section) => {
+    await act(() => router.navigate({ to: route, search: route === "/settings" ? { tab: section } : { c: "chat", mock: 1, panel: "settings", panelTab: section }, replace: true }));
+  };
+  await screen.findByRole("region", { name: translateUi("Account settings") });
+  return { router, history, client };
 }
 
 async function saveSettings() {
@@ -115,16 +125,40 @@ async function saveSettings() {
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
-    it("uses sibling groups across all six tabs with no nested cards or groups", async () => {
-      await open(route);
-      for (const label of ["Profile", "Security", "Sessions", "MCP", "Display", "Privacy"]) {
-        await userEvent.click(screen.getByRole("tab", { name: label }));
-        const panel = screen.getByRole("tabpanel");
-        await waitFor(() => expect(panel.querySelector("[data-grouped-list]")).not.toBeNull());
-        expect(panel.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
-        if (label === "security") await screen.findByText(/No active onboarding bindings/);
-      }
+    it("opens on six concise rows with no editor or save bar", async () => {
+      await open(route, "");
+      expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+    });
+
+    it.each(ACCOUNT_SETTINGS_SECTIONS)("keeps sibling groups without nested cards on %s", async section => {
+      await open(route, section);
+      const detail = document.querySelector(`[data-grouped-detail]:not([hidden])[aria-label]`)!;
+      expect(detail.querySelector("[data-grouped-list]")).not.toBeNull();
+      expect(detail.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+    });
+
+    it("keeps loaded summaries during refresh and hides a failed summary", async () => {
+      const { client } = await open(route, "");
+      const sessions = screen.getByRole("button", { name: "Sessions 0" });
+      expect(screen.getByRole("button", { name: "Profile Reader" })).toBeVisible();
+      expect(screen.getByRole("button", { name: "Security MFA off" })).toBeVisible();
+      const query = client.getQueryCache().find({ queryKey: ["sessions"] })!;
+      act(() => query.setState({ fetchStatus: "fetching" }));
+      expect(sessions).toHaveAccessibleName("Sessions 0");
+      act(() => query.setState({ fetchStatus: "idle", status: "error", error: new Error("Unavailable") }));
+      await waitFor(() => expect(sessions).toHaveAccessibleName("Sessions"));
+    });
+
+    it("uses the profile email when no display name is set", async () => {
+      const name = securityUser.display_name;
+      Object.assign(securityUser, { display_name: "" });
+      try {
+        await open(route, "");
+        expect(screen.getByRole("button", { name: `Profile ${securityUser.email}` })).toBeVisible();
+      } finally { Object.assign(securityUser, { display_name: name }); }
     });
 
     it("identifies editable text fields and keeps long email addresses available", async () => {
@@ -137,7 +171,7 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(email).toHaveAttribute("title", securityUser.email);
       expect(email).toHaveClass("truncate");
       act(() => useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } }));
-      await userEvent.click(screen.getByRole("tab", { name: "Security" }));
+      await visit("security");
       for (const [label, placeholder] of [["Current Password", "Enter current password"], ["New Password", "Enter new password"], ["Confirm New Password", "Re-enter new password"]] as const) {
         const input = screen.getByLabelText(label, { exact: true });
         expect(input).toHaveAttribute("placeholder", placeholder);
@@ -160,10 +194,10 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.clear(name);
       await userEvent.type(name, "Updated Reader");
       expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
-      await userEvent.click(screen.getByRole("tab", { name: "MCP" }));
+      await visit("mcp");
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
-      await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+      await visit("profile");
       expect(name).toHaveValue("Updated Reader");
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
@@ -539,7 +573,7 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("discloses deletion of every managed Machine and paused workspace in the actual confirmation", async () => {
-      await open(route, "security");
+      await open(route, "security/delete");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       expect(dialog).toHaveTextContent(/all (?:of your )?managed Machines/i);
@@ -557,24 +591,23 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("binds the displayed deletion policy only after the owner types the account email", async () => {
-      await open(route, "security");
-      const bindingsRequest = ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })];
+      await open(route, "security/delete");
       await userEvent.click(screen.getByRole("button", { name: "Delete My Account" }));
       const dialog = screen.getByRole("dialog", { name: "Delete Account" });
       const confirm = within(dialog).getByRole("button", { name: "Permanently Delete" });
       expect(confirm).toBeDisabled();
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.type(within(dialog).getByLabelText("Email"), "wrong@example.com");
       expect(confirm).toBeDisabled();
       await userEvent.click(confirm);
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.clear(within(dialog).getByLabelText("Email"));
       await userEvent.type(within(dialog).getByLabelText("Email"), "reader@example.com");
       expect(confirm).toBeEnabled();
-      expect(transport.mock.calls).toEqual([bindingsRequest]);
+      expect(transport.mock.calls).toEqual([["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })]]);
       await userEvent.click(confirm);
       await waitFor(() => expect(transport.mock.calls).toEqual([
-        bindingsRequest,
+        ["/api/v1/onboarding/bindings", expect.objectContaining({ method: "GET" })],
         ["/api/v1/users/me", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
@@ -584,38 +617,46 @@ describe.each(["/settings", "/assistant"] as const)(
       await waitFor(() => expect(confirm).toBeEnabled());
     });
 
-    it("replaces tab state on the supplied route for every account tab", async () => {
-      const { router, history } = await open(route);
-      for (const tab of SETTINGS_TABS) {
-        const trigger = screen.getByRole("tab", {
-          name:
-            tab === "mcp" ? "MCP" : tab.charAt(0).toUpperCase() + tab.slice(1),
-        });
-        await userEvent.click(trigger);
-        expect(router.state.location.pathname).toBe(route);
-        expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
-        expect(trigger).toHaveAttribute("data-state", "active");
-        expect(history.length).toBe(1);
-        if (tab === "security") await screen.findByText(/No active onboarding bindings/);
-        if (tab === "sessions")
-          expect(
-            screen.getByRole("link", { name: "Generate terminal login code" }),
-          ).toHaveAttribute("href", "/login/code");
-        if (tab === "privacy")
-          expect(
-            screen.getByRole("link", { name: "privacy policy" }),
-          ).toHaveAttribute("href", "/privacy");
-      }
+    it.each(SETTINGS_TABS)("replaces the %s section on the supplied route and keeps its legacy address", async tab => {
+      const { router, history } = await open(route, "");
+      await visit(tab);
+      expect(router.state.location.pathname).toBe(route);
+      expect(router.state.location.search).toEqual(route === "/settings" ? { tab } : { c: "chat", mock: 1, panel: "settings", panelTab: tab });
+      expect(history.length).toBe(1);
+      if (tab === "sessions") expect(screen.getByRole("link", { name: "Generate terminal login code" })).toHaveAttribute("href", "/login/code");
+      if (tab === "privacy") expect(screen.getByRole("link", { name: "privacy policy" })).toHaveAttribute("href", "/privacy");
       if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("type-compact-page-title", "sm:type-page-title");
       else expect(screen.queryByRole("heading", { name: "Account Settings" })).not.toBeInTheDocument();
     });
 
-    it("defaults invalid tab deep links to Profile", async () => {
-      await open(route, "unknown");
-      expect(screen.getByRole("tab", { name: "Profile" })).toHaveAttribute(
-        "data-state",
-        "active",
-      );
+    it("keeps addressed Display peer views on the supplied route", async () => {
+      const { router } = await open(route, "display/colors");
+      expect(screen.getByRole("heading", { name: "Display", level: 2 })).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "Layout" }));
+      expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/layout" } : { panelTab: "display/layout" });
+    });
+
+    it("replaces root-row navigation, display views and parent Back", async () => {
+      const { history } = await open(route, "");
+      await userEvent.click(screen.getByRole("button", { name: /^Display/ }));
+      for (const [label, section] of [["Colors", "display/colors"], ["Layout", "display/layout"], ["Appearance", "display"]]) {
+        await userEvent.click(screen.getByRole("tab", { name: label }));
+        expect(history.length).toBe(1);
+        expect(screen.getByRole("heading", { name: "Display", level: 2 })).toBeVisible();
+        expect(screen.getByRole("region", { name: "Display" })).toBeVisible();
+        expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe(section);
+      }
+      await userEvent.click(screen.getByRole("button", { name: "Account Settings" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Security/ }));
+      expect(history.length).toBe(1);
+      expect(new URLSearchParams(history.location.search).get(route === "/settings" ? "tab" : "panelTab")).toBe("security");
+    });
+    it("normalizes unknown sections to the root and unknown descendants to the nearest parent", async () => {
+      const { router, history } = await open(route, "unknown");
+      expect(document.querySelectorAll("button[data-drawer-page-trigger]")).toHaveLength(6);
+      await visit("display/colors/unknown");
+      await waitFor(() => expect(router.state.location.search).toMatchObject(route === "/settings" ? { tab: "display/colors" } : { panelTab: "display/colors" }));
+      expect(history.length).toBe(1);
     });
   },
 );
@@ -640,5 +681,91 @@ describe("MFA security settings", () => {
     if (hasPassword) await user.type(within(dialog).getByLabelText("Password"), "current-password");
     await user.click(within(dialog).getByRole("button", { name: "Disable MFA" }));
     await waitFor(() => expect(mockDisable).toHaveBeenCalledWith({ code: "Ab_cd-12", ...(hasPassword ? { password: "current-password" } : {}) }));
+  });
+});
+
+
+describe.each(["/settings", "/assistant"] as const)("wide Account Settings at %s", route => {
+  beforeEach(() => {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-form-viewport") || this.parentElement?.hasAttribute("data-form-viewport")
+        ? { ...original.call(this), width: 800 } : original.call(this);
+    });
+  });
+  it("defaults to Profile without writing the URL and replaces category choices with one selected item", async () => {
+    const { history } = await open(route, "");
+    const initial = history.location.href;
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    expect(within(navigation).getByRole("button", { name: "Profile" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+    expect(history.location.href).toBe(initial);
+    expect(new URL(history.location.href, "https://nyxid.test").searchParams.has(route === "/settings" ? "tab" : "panelTab")).toBe(false);
+    expect(screen.queryByRole("button", { name: "Account Settings" })).not.toBeInTheDocument();
+    const user = userEvent.setup({ delay: null });
+    within(navigation).getByRole("button", { name: "Profile" }).focus();
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(within(navigation).getByRole("button", { name: "Security" })).toHaveAttribute("aria-current", "page");
+    expect(navigation.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Security" })).toHaveFocus();
+    expect(history.length).toBe(1);
+    expect(history.location.search).toContain(route === "/settings" ? "tab=security" : "panelTab=security");
+  });
+  it("retains drafts and the single viewport save bar while choosing categories and returning from Delete", async () => {
+    await open(route, "profile");
+    const user = userEvent.setup({ delay: null });
+    await user.type(screen.getByRole("textbox", { name: "Name" }), " draft");
+    const bar = screen.getByRole("region", { name: "Unsaved changes" });
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    await user.click(within(navigation).getByRole("button", { name: "Security" }));
+    await user.click(screen.getByRole("button", { name: "Delete account" }));
+    await user.click(within(screen.getByRole("region", { name: "Delete account" })).getByRole("button", { name: "Security" }));
+    expect(bar).toBeVisible();
+    expect(bar.closest("[data-section-pane], [data-compact-scroll]")).toBeNull();
+    await user.click(within(navigation).getByRole("button", { name: "Profile" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader draft");
+    expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader");
+    expect(transport.mock.calls.filter(([, options]) => options?.method === "PUT")).toEqual([]);
+  });
+  it.each(["en", "zh-CN"])("searches rendered labels in %s, reveals the addressed setting and hides unavailable fields", async language => {
+    appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+    await appI18n.changeLanguage(language);
+    await open(route, "display/colors");
+    const user = userEvent.setup({ delay: null });
+    const navigation = screen.getByRole("navigation", { name: translateUi("Account Settings") });
+    const search = within(navigation).getByRole("searchbox", { name: translateUi("Search settings") });
+    await user.type(search, translateUi("Maximum composer height"));
+    const result = within(navigation).getByRole("button", { name: `${translateUi("Maximum composer height")} ${translateUi("Display")}` });
+    await user.click(result);
+    await waitFor(() => expect(screen.getByRole("slider", { name: translateUi("Maximum composer height") })).toHaveFocus());
+    expect(screen.getByRole("slider", { name: translateUi("Maximum composer height") })).toHaveAttribute("data-search-highlight");
+    expect(search).toHaveValue("");
+    await user.type(search, translateUi("New Password"));
+    expect(within(navigation).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(navigation).getByText(translateUi("No results found"))).toBeVisible();
+    await user.keyboard("{Escape}");
+    expect(search).toHaveValue("");
+    expect(within(navigation).getAllByRole("button")).toHaveLength(6);
+  });
+  it("reveals a hidden MCP client and can select the same setting again after changing clients", async () => {
+    await open(route, "mcp");
+    const user = userEvent.setup({ delay: null });
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    const search = within(navigation).getByRole("searchbox", { name: "Search settings" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await user.type(search, "Install to Codex");
+      await user.click(within(navigation).getByRole("button", { name: "Install to Codex MCP" }));
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Install to Codex" })).toHaveFocus());
+      expect(screen.getByRole("tab", { name: "Codex" })).toHaveAttribute("data-state", "active");
+      await user.click(screen.getByRole("tab", { name: "Cursor" }));
+    }
+  });
+  it.each(["security/delete", "display/layout", "display/colors"])("opens the %s deep link inside the pane", async section => {
+    await open(route, section);
+    expect(screen.getByRole("heading", { name: section.startsWith("display") ? "Display" : "Delete account" })).toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "Account Settings" });
+    expect(within(navigation).getByRole("button", { name: section.startsWith("display") ? "Display" : "Security" })).toHaveAttribute("aria-current", "page");
   });
 });

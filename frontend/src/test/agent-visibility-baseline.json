@@ -1,0 +1,1719 @@
+{
+  "nyxbot/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Retry saved order",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Notes",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Connected services and accountFull access",
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "Personal accounts first",
+      "Personal agent",
+      "SlackPersonal · slack"
+    ]
+  },
+  "personal/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Read my account",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Configuration unavailable",
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "None available.Save a login first, then grant it here.",
+      "Personal agent"
+    ]
+  },
+  "orgAdmin/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Edit note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Add shared note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Configuration unavailable",
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "orgMaintainer/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Edit note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Add shared note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Configuration unavailable",
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "orgReader/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills"
+    ],
+    "controls": [
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": true,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "sharedRecipient/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "textbox",
+        "label": "One note per line",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "DescriptionFinds urgent issues",
+      "No connection consent requests.",
+      "No skills attached.",
+      "Persona",
+      "Shared by Other",
+      "Team convention",
+      "Voice instructions"
+    ]
+  },
+  "sharedManager/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "textbox",
+        "label": "Description",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "One note per line",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "No connection consent requests.",
+      "No skills attached.",
+      "Shared by Other"
+    ]
+  },
+  "destroyed/default": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Delete permanently",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github Currently not executable (credential or node unavailable).",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "github",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Read my account",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": true,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Configuration unavailable",
+      "GitHubPersonal · github",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "None available.Save a login first, then grant it here.",
+      "Personal agent"
+    ]
+  },
+  "nyxbot/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Create voice connection",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Retry saved order",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Run learning now",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "spinbutton",
+        "label": "Learning threshold",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Enable automatic learning",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Notes",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Connected services and accountFull access",
+      "GitHubPersonal · github",
+      "No pending proposals.",
+      "No skills attached.",
+      "Personal accounts first",
+      "Personal agent",
+      "SlackPersonal · slack"
+    ]
+  },
+  "personal/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Create voice connection",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Run learning now",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Share agent",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "spinbutton",
+        "label": "Learning threshold",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Enable automatic learning",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Read my account",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "GitHubPersonal · github",
+      "No granted services",
+      "No pending proposals.",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "None available.Save a login first, then grant it here.",
+      "Personal agent"
+    ]
+  },
+  "orgAdmin/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Edit note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Run learning now",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "spinbutton",
+        "label": "Learning threshold",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Enable automatic learning",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Add shared note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "GitHubPersonal · github",
+      "No granted services",
+      "No pending proposals.",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "orgMaintainer/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Destroy",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Edit note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Run learning now",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Search",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "spinbutton",
+        "label": "Learning threshold",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Enable automatic learning",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Add shared note",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Search Ornn skills",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "GitHubPersonal · github",
+      "No granted services",
+      "No pending proposals.",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "orgReader/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Channels"
+    ],
+    "controls": [
+      {
+        "role": "checkbox",
+        "label": "github github",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github-key Currently not executable (credential or node unavailable).",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack-key",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": true,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Automatic learningOn",
+      "GitHubPersonal · github",
+      "No pending proposals.",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "Team"
+    ]
+  },
+  "sharedRecipient/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "textbox",
+        "label": "One note per line",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "DescriptionFinds urgent issues",
+      "No connection consent requests.",
+      "No skills attached.",
+      "Persona",
+      "Shared by Other",
+      "Team convention",
+      "Voice instructions"
+    ]
+  },
+  "sharedManager/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "textbox",
+        "label": "Description",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "One note per line",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": false,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "No connection consent requests.",
+      "No skills attached.",
+      "Shared by Other"
+    ]
+  },
+  "destroyed/all-features": {
+    "tabs": [
+      "Overview",
+      "Access",
+      "Skills",
+      "Memory"
+    ],
+    "controls": [
+      {
+        "role": "button",
+        "label": "Delete permanently",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Label urgent issues p0",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "button",
+        "label": "Forget: Weekly digests on Mondays",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "GitHub github Currently not executable (credential or node unavailable).",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "checkbox",
+        "label": "Slack slack",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent access mode",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "Agent model",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "combobox",
+        "label": "github",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage automations (0)",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "link",
+        "label": "Manage connected accounts",
+        "disabled": false,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Channel progress reply",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "switch",
+        "label": "Read my account",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Display name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Name",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Persona",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Role",
+        "disabled": true,
+        "readOnly": false
+      },
+      {
+        "role": "textbox",
+        "label": "Voice instructions",
+        "disabled": true,
+        "readOnly": false
+      }
+    ],
+    "rows": [
+      "Automatic learningOn",
+      "GitHubPersonal · github",
+      "No granted services",
+      "No pending proposals.",
+      "No skills attached.",
+      "None available.Pair a machine first, then grant it here.",
+      "None available.Save a login first, then grant it here.",
+      "Personal agent"
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { creditsLabel, knownTotal } from "@/lib/billing-display";
 import type { BillingUsageRow } from "@/schemas/billing";
@@ -65,7 +66,7 @@ export function BillingFundingChart({ rows }: { rows: BillingUsageRow[] }) {
       <div
         className={`funding-track${hasKnownFunding ? "" : " funding-track-empty"}`}
         role="img"
-        aria-label={t("{{value}}: {{barLabel}}", { value: incomplete > 0 ? t("Known funding") : t("Funding"), barLabel: barLabel })}
+        aria-label={t("{{value}}: {{barLabel}}", { value: incomplete > 0 ? t("Known funding") : t(BILLING_FIELD_LABELS.funding), barLabel: barLabel })}
       >
         {values.map((lane) => (
           <span

@@ -1,11 +1,19 @@
-import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import {
+  GroupedDialog,
+  GroupedDialogContent,
+} from "@/components/ui/grouped-dialog";
+import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
+import { useChannelBots } from "@/hooks/use-channel-bots";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
+import { confirmChanges } from "@/test-helpers/confirm-changes";
+import { DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import {
   act,
   cleanup,
@@ -23,6 +31,20 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { NyxBotSettingsContent } from "./nyxbot-settings-content";
 import { loadPersonalBindings } from "@/lib/platform-personal";
 
+vi.mock("@/hooks/use-nyxagent-live", () => ({ useNyxAgentLive: vi.fn() }));
+const summaryState = vi.hoisted(() => ({
+  fetching: false,
+  triggers: [] as { id: string; status: string; delivery: { type: string } }[],
+}));
+vi.mock("@/hooks/use-triggers", () => ({
+  useTriggers: () => ({
+    data: { triggers: summaryState.triggers },
+    isFetching: summaryState.fetching,
+    isSuccess: true,
+    isPending: false,
+    error: null,
+  }),
+}));
 vi.mock("@/lib/platform-personal", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/platform-personal")>()),
   loadPersonalBindings: vi.fn(),
@@ -45,15 +67,16 @@ vi.mock("@/hooks/use-channel-adapters", () => ({
 }));
 
 vi.mock("@/hooks/use-channel-bots", () => ({
-  useChannelBots: () => ({
+  useChannelBots: vi.fn(() => ({
     isPending: false,
+    isSuccess: true,
     error: null,
     refetch: vi.fn(),
     data: [
       { id: "bot-tg", platform: "telegram", label: "Home bot" },
-      { id: "bot-dc", platform: "discord", label: "Dev Notifications" },
+      { id: "bot-dc", platform: "discord", label: "Dev Notifications", user_id: "org-1", owner_kind: "org" },
     ],
-  }),
+  })),
 }));
 
 const json = (value: unknown, status = 200) =>
@@ -102,12 +125,15 @@ let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
 
 beforeEach(() => {
+  summaryState.triggers = [];
+  summaryState.fetching = false;
   vi.mocked(loadPersonalBindings).mockReset().mockResolvedValue({
     bindings: [],
     next_before_id: null,
   });
   useAuthStore.getState().setUser({
     id: "owner",
+    capabilities: { enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS] },
     email: "owner@example.com",
     display_name: "Owner",
     avatar_url: null,
@@ -284,33 +310,62 @@ afterEach(() => {
   useAuthStore.getState().setUser(null);
 });
 
-function renderPage() {
+let panelRouter: ReturnType<typeof createRouter>;
+function renderPage(section?: string) {
+  const root = createRootRoute();
+  const route = createRoute({
+    getParentRoute: () => root,
+    path: "/assistant",
+    validateSearch: withAccountPanelSearch(() => ({})),
+    component: () => (
+      <GroupedDialog open>
+        <GroupedDialogContent scrollMode="body">
+          <DialogTitle className="sr-only">NyxBot settings</DialogTitle>
+          <DialogDescription>All agents</DialogDescription>
+          <NyxBotSettingsContent />
+        </GroupedDialogContent>
+      </GroupedDialog>
+    ),
+  });
+  panelRouter = createRouter({
+    routeTree: root.addChildren([route]),
+    history: createMemoryHistory({
+      initialEntries: [
+        `/assistant?panel=nyxbot${section ? `&panelTab=${encodeURIComponent(section)}` : ""}`,
+      ],
+    }),
+  });
   render(
     <QueryClientProvider client={client}>
-      <Dialog open>
-        <DialogContent scrollMode="body">
-          <DialogTitle>NyxBot settings</DialogTitle>
-          <DialogDescription>All agents</DialogDescription>
-          <DialogBody>
-            <NyxBotSettingsContent />
-          </DialogBody>
-        </DialogContent>
-      </Dialog>
+      <RouterProvider router={panelRouter} />
     </QueryClientProvider>,
   );
   return userEvent.setup({ delay: null });
 }
+async function go(section?: string) {
+  await act(() =>
+    panelRouter.navigate({
+      to: "/assistant",
+      search: { panel: "nyxbot", panelTab: section },
+      replace: true,
+    }),
+  );
+}
 
 it("exposes phone setup only after the server enables the adapter rollout", async () => {
-  renderPage();
+  const user = renderPage("channels");
+  await screen.findByRole("heading", { name: "Chats & channels" });
   expect(
-    screen.queryByRole("region", { name: "Phone and speech connections" }),
+    screen.queryByRole("button", { name: "Adapter bindings" }),
   ).not.toBeInTheDocument();
   act(() =>
     useAuthStore.getState().setUser({
       ...useAuthStore.getState().user!,
       capabilities: { enabled_features: [FEATURE_FLAG.NYXBOT_ADAPTERS] },
     }),
+  );
+  await user.click(
+    await screen.findByRole("button", { name: "Adapter bindings" }),
   );
   expect(
     await screen.findByRole("region", { name: "Phone and speech connections" }),
@@ -321,12 +376,10 @@ it("exposes phone setup only after the server enables the adapter rollout", asyn
 // Auto (the default) confirms sensitive and destructive actions, Full access
 // is the old "off" position and carries the same warning.
 it("confirms destructive actions by default and saves only a changed access mode", async () => {
-  const user = renderPage();
+  const user = renderPage("permissions");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
-  const mode = await within(page).findByRole("combobox", {
-    name: "Access mode",
-  });
-  expect(mode).toHaveTextContent("Auto");
+  const mode = await within(page).findByRole("radio", { name: /^Auto / });
+  expect(mode).toHaveAttribute("aria-checked", "true");
   expect(
     within(page).getByText(
       "Acts on its own; asks before sensitive or destructive actions.",
@@ -339,9 +392,9 @@ it("confirms destructive actions by default and saves only a changed access mode
     within(page).queryByText(/without asking you first/),
   ).not.toBeInTheDocument();
 
-  await user.click(mode);
-  await user.click(await screen.findByRole("option", { name: "Full access" }));
-  expect(mode).toHaveTextContent("Full access");
+  const full = screen.getByRole("radio", { name: /^Full access / });
+  await user.click(full);
+  expect(full).toHaveAttribute("aria-checked", "true");
   expect(
     within(page).getByText(
       /deletes keys, channel bots, services and\s+nodes and changes access without asking you first/,
@@ -365,69 +418,42 @@ it("confirms destructive actions by default and saves only a changed access mode
       within(page).queryByRole("button", { name: "Save changes" }),
     ).not.toBeInTheDocument(),
   );
-  expect(mode).toHaveTextContent("Full access");
+  expect(full).toHaveAttribute("aria-checked", "true");
 });
 
-it("asks before every change in Ask every time and explains the specialist request policy", async () => {
-  const user = renderPage();
-  const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
-  const requests = await within(page).findByRole("combobox", {
-    name: "Specialist access requests",
-  });
-  expect(requests).toHaveTextContent("Deny requests");
+it("edits both permission groups through one reviewed save", async () => {
+  const user = renderPage("permissions");
+  await user.click(
+    await screen.findByRole("radio", { name: /^Ask every time / }),
+  );
   expect(
-    within(page).getByText(
-      /A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details/,
-    ),
-  ).toBeVisible();
-  // Denied mode: a direct chat is never handed to NyxBot; only assigned work reports there.
-  expect(
-    within(page).getByText(
+    screen.getByText(
       /Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead/,
     ),
   ).toBeVisible();
-  await user.click(within(page).getByRole("combobox", { name: "Access mode" }));
-  await user.click(
-    await screen.findByRole("option", { name: "Ask every time" }),
-  );
+  await user.click(screen.getByRole("radio", { name: /^Route to NyxBot / }));
   expect(
-    within(page).getByText(
-      "Asks before every action that changes something. Reading never asks.",
-    ),
-  ).toBeVisible();
-  await user.click(requests);
-  await user.click(
-    await screen.findByRole("option", { name: "Route to NyxBot" }),
-  );
-  expect(
-    within(page).getByText(
-      /For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it/,
-    ),
-  ).toBeVisible();
-  // Routed mode never claims that a direct chat with a specialist is handed to NyxBot.
-  expect(
-    within(page).getByText(
-      /A specialist you talk to directly still tells you what it is missing/,
-    ),
-  ).toBeVisible();
-  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+    screen
+      .getByRole("button", { name: "Save changes" })
+      .closest("[inert], [aria-hidden=true]"),
+  ).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() =>
-    expect(writes.at(-1)?.body).toEqual({
-      access_mode: "ask_every_time",
-      specialist_access_requests: "routed_to_nyxbot",
-    }),
+    expect(writes.map((write) => write.body)).toEqual([
+      { access_mode: "ask_every_time", specialist_access_requests: "routed_to_nyxbot" },
+    ]),
   );
 });
 
 it("validates specialist limits against the server limits before saving", async () => {
-  const user = renderPage();
+  const user = renderPage("tasks");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const live = await within(page).findByRole("spinbutton", {
     name: "Live specialists",
   });
   expect(live).toHaveValue(8);
-  expect(within(page).getByText(/spend credits faster/)).toBeVisible();
+  expect(within(page).getAllByText(/spend credits faster/).some(node => !node.closest("[hidden], [aria-hidden=true]"))).toBe(true);
   await user.clear(live);
   await user.type(live, "40");
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
@@ -443,7 +469,7 @@ it("validates specialist limits against the server limits before saving", async 
 });
 
 it("saves group hand-off limits within the server's bounds", async () => {
-  const user = renderPage();
+  const user = renderPage("tasks");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const perMessage = await within(page).findByRole("spinbutton", {
     name: "Group hand-offs per message",
@@ -475,7 +501,7 @@ it("saves group hand-off limits within the server's bounds", async () => {
 });
 
 it("lists connected bots with their agent, relinks one, and connects another to a chosen agent", async () => {
-  const user = renderPage();
+  const user = renderPage("channels");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const connected = await within(page).findByRole("list", {
     name: "Connected channel bots",
@@ -543,7 +569,7 @@ it("lists connected bots with their agent, relinks one, and connects another to 
 });
 
 it("opens a bot's chats and saves who can talk and how it answers", async () => {
-  const user = renderPage();
+  const user = renderPage("channels");
   const page = await screen.findByRole("dialog", { name: "NyxBot settings" });
   const connected = await within(page).findByRole("list", {
     name: "Connected channel bots",
@@ -602,7 +628,9 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
       body: { allow_posts: true },
     }),
   );
-  await user.click(within(page).getByRole("button", { name: "Back to Channels" }));
+  await user.click(
+    within(page).getByRole("button", { name: "Back to Channels" }),
+  );
   const audience = within(page).getByRole("region", {
     name: "Who can talk to this bot · Home bot",
   });
@@ -622,76 +650,44 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
   );
 });
 
-function settingsSection(title: string) {
-  const heading = screen.getByRole("heading", { name: title });
-  return within(heading.closest("section")!);
-}
-
-it("keeps Automations and Channel bots available while General loads", async () => {
+it("keeps root categories available with no guessed summaries while settings load", async () => {
   settingsRead = "pending";
-  renderPage();
-  expect(
-    await settingsSection("General").findByRole("status"),
-  ).toHaveTextContent("Loading settings...");
-  expect(screen.getByRole("heading", { name: "General" })).toBeVisible();
-  expect(screen.getByRole("heading", { name: "Automations" })).toBeVisible();
-  expect(
-    screen.getByRole("button", { name: "Timezone and automation budgets" }),
-  ).toBeVisible();
+  const user = renderPage();
+  const permissions = await screen.findByRole("button", {
+    name: "Permissions",
+  });
+  expect(permissions).not.toHaveTextContent("Auto");
+  expect(screen.getByRole("button", { name: "Automations 0" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Tasks & specialists" }));
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "Loading settings...",
+  );
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  await user.click(screen.getByRole("button", { name: "Chats & channels 2" }));
   expect(
     await screen.findByRole("list", { name: "Connected channel bots" }),
   ).toHaveTextContent("Home bot");
-  expect(
-    screen.queryByRole("form", { name: "NyxBot preferences" }),
-  ).not.toBeInTheDocument();
 });
 
-it("shows General's load error with retry without hiding the other sections", async () => {
+it("shows load errors with retry and retains independent channel and personal-link pages", async () => {
   settingsRead = "error";
   vi.mocked(loadPersonalBindings).mockRejectedValue(
     new Error("Links unavailable"),
   );
-  const user = renderPage();
-  expect(
-    await screen.findByText(
-      "Could not load settings. NyxBot is temporarily unavailable. Try again shortly.",
-    ),
-  ).toBeVisible();
-  expect(
-    screen.getByRole("button", { name: "Timezone and automation budgets" }),
-  ).toBeVisible();
-  expect(
-    await screen.findByRole("list", { name: "Connected channel bots" }),
-  ).toHaveTextContent("Home bot");
-  const personalLinks = screen.getByRole("region", {
-    name: "Personal chat links",
-  });
-  expect(
-    await within(personalLinks).findByText(
-      "Personal chat links are unavailable.",
-    ),
-  ).toBeVisible();
-  expect(
-    within(personalLinks).getByRole("button", { name: "Retry" }),
-  ).toBeVisible();
+  const user = renderPage("permissions");
+  expect((await screen.findAllByText(/Could not load settings/)).find(element => !element.closest("[hidden]"))).toBeVisible();
   settingsRead = "ready";
-  await user.click(
-    settingsSection("General").getByRole("button", { name: "Retry" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByRole("radio", { name: /^Auto / })).toBeVisible();
+  await go("channels/links");
   expect(
-    await screen.findByRole("form", {
-      name: "NyxBot preferences",
-    }),
-  ).toBeVisible();
-  expect(vi.mocked(loadPersonalBindings)).toHaveBeenCalledTimes(1);
-  expect(
-    within(personalLinks).getByRole("button", { name: "Retry" }),
+    await screen.findByText("Personal chat links are unavailable."),
   ).toBeVisible();
 });
 
 it("keeps dirty values and reports a failed General save inline", async () => {
   saveError = true;
-  const user = renderPage();
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
@@ -707,21 +703,20 @@ it("keeps dirty values and reports a failed General save inline", async () => {
 
 it("saves dirty General and Automation forms in order through one bar with independent payloads", async () => {
   settings.timezone = "UTC";
-  const user = renderPage();
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
   fireEvent.change(live, { target: { value: "12" } });
-  await user.click(
-    screen.getByRole("button", { name: "Timezone and automation budgets" }),
-  );
+  await go("automations");
+  await screen.findByRole("spinbutton", { name: "Runs per hour" });
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
   fireEvent.change(hourly, { target: { value: "4" } });
   expect(
     screen.getAllByRole("region", { name: "Unsaved changes" }),
   ).toHaveLength(1);
   expect(
-    screen.getByText("Unsaved: NyxBot preferences, automation preferences"),
+    screen.getByText("Unsaved: Tasks & specialists, automation preferences"),
   ).toBeInTheDocument();
   expect(
     [...document.forms].every((form) => !form.parentElement?.closest("form")),
@@ -731,12 +726,7 @@ it("saves dirty General and Automation forms in order through one bar with indep
   await waitFor(() =>
     expect(writes.map((write) => write.body)).toEqual([
       { max_live_subagents: 12 },
-      {
-        timezone: "UTC",
-        schedule_minimum_minutes: 5,
-        trigger_runs_per_hour: 4,
-        trigger_runs_per_day: 300,
-      },
+      { trigger_runs_per_hour: 4 },
     ]),
   );
   await waitFor(() =>
@@ -748,28 +738,27 @@ it("saves dirty General and Automation forms in order through one bar with indep
 
 it("keeps failed General changes dirty while Automation preferences succeed", async () => {
   settings.timezone = "UTC";
-  const user = renderPage();
+  const user = renderPage("tasks");
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
   fireEvent.change(live, { target: { value: "12" } });
   saveError = true;
-  await user.click(
-    screen.getByRole("button", { name: "Timezone and automation budgets" }),
-  );
+  await go("automations");
+  await screen.findByRole("spinbutton", { name: "Runs per hour" });
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
   fireEvent.change(hourly, { target: { value: "4" } });
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() => expect(writes).toHaveLength(2));
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "NyxBot is temporarily unavailable",
-  );
+  await go("tasks");
+  expect(await screen.findByRole("alert")).toHaveTextContent("NyxBot is temporarily unavailable");
+  await go("automations");
   expect(live).toHaveValue(12);
-  expect(screen.getByText("Unsaved: NyxBot preferences")).toBeInTheDocument();
-  expect(
-    screen.queryByRole("spinbutton", { name: "Runs per hour" }),
-  ).not.toBeInTheDocument();
+  expect(screen.getByText("Unsaved: Tasks & specialists")).toBeInTheDocument();
+  expect(screen.getByRole("spinbutton", { name: "Runs per hour" })).toHaveValue(
+    4,
+  );
   saveError = false;
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
@@ -782,7 +771,7 @@ it("keeps failed General changes dirty while Automation preferences succeed", as
 
 it("defaults new private chat posting off on legacy responses and saves without changing existing chats", async () => {
   const user = userEvent.setup({ delay: null });
-  renderPage();
+  renderPage("channels");
   const connected = await screen.findByRole("list", {
     name: "Connected channel bots",
   });
@@ -825,7 +814,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
 });
 it("keeps the posting switch unchanged and exposes a save failure", async () => {
   const user = userEvent.setup({ delay: null });
-  renderPage();
+  renderPage("channels");
   postsError = true;
   const connected = await screen.findByRole("list", {
     name: "Connected channel bots",
@@ -843,4 +832,168 @@ it("keeps the posting switch unchanged and exposes a save failure", async () => 
     ),
   );
   expect(toggle).not.toBeChecked();
+});
+
+it("normalizes a removed nested task page and returns focus to the root row", async () => {
+  const user = renderPage("tasks/specialists");
+  const heading = await screen.findByRole("heading", { name: "Tasks & specialists", level: 2 });
+  await waitFor(() => expect(heading).toHaveFocus());
+  expect(panelRouter.state.location.search).toEqual({ panel: "nyxbot", panelTab: "tasks" });
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  expect(screen.getByRole("button", { name: "Tasks & specialists" })).toHaveFocus();
+});
+
+it("falls back from disabled adapters to channels and replaces the URL", async () => {
+  renderPage("channels/adapters");
+  expect(
+    await screen.findByRole("heading", { name: "Chats & channels", level: 2 }),
+  ).toBeVisible();
+  await waitFor(() =>
+    expect(panelRouter.state.location.search).toEqual({
+      panel: "nyxbot",
+      panelTab: "channels",
+    }),
+  );
+  expect(new URLSearchParams(panelRouter.state.location.searchStr).get("panelTab")).toBe("channels");
+  expect(
+    screen.queryByRole("button", { name: "Adapter bindings" }),
+  ).not.toBeInTheDocument();
+});
+
+it("retains a dirty draft on refetch errors and applies live values to pristine fields", async () => {
+  renderPage("tasks");
+  const live = await screen.findByRole("spinbutton", {
+    name: "Live specialists",
+  });
+  fireEvent.change(live, { target: { value: "12" } });
+  act(() =>
+    client.setQueryData(nyxBotQueryKeys.settings("owner"), {
+      ...client.getQueryData(nyxBotQueryKeys.settings("owner"))!,
+      max_live_subagents: 20,
+      max_concurrent_subagent_turns: 5,
+    }),
+  );
+  expect(live).toHaveValue(12);
+  await waitFor(() => expect(screen.getByRole("spinbutton", { name: "Specialists working at once" })).toHaveValue(5));
+  settingsRead = "error";
+  await act(() =>
+    client.invalidateQueries({ queryKey: nyxBotQueryKeys.settings("owner") }),
+  );
+  expect((await screen.findAllByText(/Could not load settings/)).find(element => !element.closest("[hidden]"))).toBeVisible();
+  expect(live).toHaveValue(12);
+  await go();
+  expect(
+    screen.getByRole("button", { name: "Permissions" }),
+  ).not.toHaveTextContent("Auto");
+  await go("tasks");
+  expect(
+    screen.getByRole("spinbutton", { name: "Live specialists" }),
+  ).toHaveValue(12);
+});
+
+it("guards dirty Back once and retains the draft when editing continues", async () => {
+  const user = renderPage("tasks");
+  const live = await screen.findByRole("spinbutton", {
+    name: "Live specialists",
+  });
+  fireEvent.change(live, { target: { value: "12" } });
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  const guard = await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  });
+  await user.click(within(guard).getByRole("button", { name: "Keep editing" }));
+  expect(live).toHaveValue(12);
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  await user.click(
+    within(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).getByRole("button", {
+      name: "Discard",
+    }),
+  );
+  await waitFor(() =>
+    expect(panelRouter.state.location.search).toEqual({
+      panel: "nyxbot",
+    }),
+  );
+  expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
+});
+
+
+it("summarizes saved mode, active assistant automations, push kinds and bot count", async () => {
+  settings.notifications = { push: { automation_result: true, automation_problem: false, needs_decision: true, agent_update: false, chat_update: false, group_mention: false } };
+  summaryState.triggers = [
+    { id: "active", status: "active", delivery: { type: "assistant" } },
+    { id: "paused", status: "paused", delivery: { type: "assistant" } },
+    { id: "webhook", status: "active", delivery: { type: "webhook" } },
+  ];
+  renderPage();
+  expect(await screen.findByRole("button", { name: "Permissions Auto" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Automations 1" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Notifications 2 on" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Chats & channels 2" })).toBeVisible();
+});
+
+it("keeps loaded automation summaries during a background refresh", async () => {
+  summaryState.fetching = true;
+  summaryState.triggers = [{ id: "active", status: "active", delivery: { type: "assistant" } }];
+  renderPage();
+  expect(await screen.findByRole("button", { name: "Automations 1" })).toHaveTextContent("1");
+});
+
+
+it("keeps the saved automation summary during a refetch and shows Off for disabled push", async () => {
+  summaryState.fetching = true;
+  settings.notifications = { push: { automation_result: false, automation_problem: false, needs_decision: false, agent_update: false, chat_update: false, group_mention: false } };
+  renderPage();
+  expect(await screen.findByRole("button", { name: "Notifications Off" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Automations 0" })).toBeVisible();
+});
+
+it.each(["unknown", "tasks/", "[\"tasks\"]"])("normalizes invalid section %s to the root URL", async (section) => {
+  renderPage(section);
+  await waitFor(() => expect(panelRouter.state.location.search).toEqual({ panel: "nyxbot" }));
+  await waitFor(() => expect(new URLSearchParams(panelRouter.state.location.searchStr).has("panelTab")).toBe(false));
+  expect(screen.getByRole("button", { name: "Tasks & specialists" })).toBeVisible();
+});
+
+
+it("hides notifications and replaces its unavailable deep link with the root", async () => {
+  const owner = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({ ...owner, capabilities: { enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE] } });
+  renderPage("notifications");
+  await waitFor(() => expect(panelRouter.state.location.search).toEqual({ panel: "nyxbot" }));
+  expect(new URLSearchParams(panelRouter.state.location.searchStr).has("panelTab")).toBe(false);
+  expect(screen.queryByRole("button", { name: /^Notifications/ })).not.toBeInTheDocument();
+});
+
+it("uses named radio groups with keyboard selection", async () => {
+  const user = renderPage("permissions");
+  const auto = await screen.findByRole("radio", { name: /^Auto / });
+  expect(screen.getByRole("radiogroup", { name: "Access mode" })).toBeVisible();
+  let group = screen.getByRole("radiogroup", { name: "Access mode" });
+  const tabStops = () => within(group).getAllByRole("radio").filter(row => row.tabIndex === 0);
+  expect(tabStops()).toEqual([auto]);
+  expect(within(group).getAllByRole("radio").filter(row => row !== auto).every(row => row.tabIndex === -1)).toBe(true);
+  auto.focus();
+  await user.keyboard("{ArrowUp}");
+  expect(screen.getByRole("radio", { name: /^Full access / })).toHaveAttribute("aria-checked", "true");
+  expect(tabStops()).toEqual([screen.getByRole("radio", { name: /^Full access / })]);
+  await go("permissions");
+  group = screen.getByRole("radiogroup", { name: "Specialist access requests" });
+  const deny = within(group).getByRole("radio", { name: /^Deny requests / });
+  expect(screen.getByRole("radiogroup", { name: "Specialist access requests" })).toBeVisible();
+  expect(tabStops()).toEqual([deny]);
+  deny.focus();
+  await user.keyboard("{End}");
+  expect(screen.getByRole("radio", { name: /^Route to NyxBot / })).toHaveFocus();
+  expect(screen.getByRole("radio", { name: /^Route to NyxBot / })).toHaveAttribute("aria-checked", "true");
+  expect(tabStops()).toEqual([screen.getByRole("radio", { name: /^Route to NyxBot / })]);
+});
+
+it("counts the same all-scope inventory, including organisation bots, shown in Channels", async () => {
+  const user = renderPage();
+  await user.click(await screen.findByRole("button", { name: "Chats & channels 2" }));
+  expect(vi.mocked(useChannelBots)).toHaveBeenCalledWith({ scope: "all" });
+  expect(await screen.findByRole("listitem", { name: "Home bot connection" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Connect another bot" }));
+  expect(screen.getByText("Dev Notifications", { exact: true })).toBeVisible();
 });

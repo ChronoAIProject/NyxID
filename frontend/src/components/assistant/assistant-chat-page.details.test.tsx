@@ -30,7 +30,7 @@ vi.mock("@tanstack/react-router", async (original) => ({
     return Promise.resolve();
   },
   useRouterState: ({ select }: { select: (value: unknown) => unknown }) =>
-    select({ location: { pathname: "/assistant", search: state.search } }),
+    select({ location: { pathname: "/assistant", search: state.search, state: {} } }),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => false }));
 vi.mock("@/hooks/use-nyxbot-agents", async (original) => ({

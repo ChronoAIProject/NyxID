@@ -43,9 +43,14 @@ describe("parseAssistantSearch", () => {
     for (const details of ["overview", "memory", "channels"]) {
       expect(parseAssistantSearch({ agent: "a1", details })).toEqual({ agent: "a1", details });
     }
-    for (const invalid of ["", "unknown", "GRANTS", 1, true, ["grants"]]) {
+    for (const invalid of ["", 1, true, ["grants"]]) {
       expect(parseAssistantSearch({ agent: "a1", details: invalid })).toEqual({ agent: "a1" });
     }
+  });
+
+  it("normalises unknown agent details to their closest section", () => {
+    expect(parseAssistantSearch({ agent: "a1", details: "unknown" })).toEqual({ agent: "a1", details: "overview" });
+    expect(parseAssistantSearch({ agent: "a1", details: "grants/unknown" })).toEqual({ agent: "a1", details: "grants" });
   });
 
   it("drops junk rather than letting it reach the page", () => {

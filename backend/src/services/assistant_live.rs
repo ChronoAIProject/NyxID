@@ -95,6 +95,9 @@ pub enum LiveEvent {
         user_id: String,
         active: bool,
     },
+    Settings {
+        user_id: String,
+    },
     /// A NyxBot notification row was created or its read/resolved state
     /// changed; identifiers only.
     Notification {
@@ -143,6 +146,7 @@ impl LiveEvent {
             | Self::MachineSetup { user_id, .. }
             | Self::MachineDesktop { user_id, .. }
             | Self::TriggerCreated { user_id, .. }
+            | Self::Settings { user_id }
             | Self::Notification { user_id, .. } => Some(user_id),
             Self::Resync => None,
         }
@@ -458,7 +462,7 @@ fn pipeline() -> Vec<Document> {
                         1,
                     ]}},
                 ]},
-                {"ns.coll": {"$in": [GROUPS, GROUP_MESSAGES]}},
+                {"ns.coll": {"$in": [GROUPS, GROUP_MESSAGES, crate::models::assistant_settings::COLLECTION_NAME]}},
                 {"ns.coll": CHANNEL_THREADS,"$or":[
                     {"operationType":{"$in":["insert","replace"]}},
                     {"updateDescription.updatedFields.follow_state":{"$exists":true}},
@@ -525,6 +529,11 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
         return None;
     }
     let collection = change.ns.as_ref()?.coll.as_deref()?;
+    if collection == crate::models::assistant_settings::COLLECTION_NAME {
+        return Some(LiveEvent::Settings {
+            user_id: change.document_key.as_ref()?.get_str("_id").ok()?.into(),
+        });
+    }
     let full = change.full_document.as_ref()?;
     let user_id = full.get_str("user_id").ok()?.to_owned();
     let key = change

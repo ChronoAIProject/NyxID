@@ -2,9 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { SavedLogin, SavedLoginInput } from "@/schemas/saved-logins";
 
-export function useSavedLogins(owner: string | null = null) {
+export function useSavedLogins(owner: string | null = null, enabled = true) {
   return useQuery({
     queryKey: ["saved-logins", owner],
+    enabled,
     queryFn: () =>
       api.get<SavedLogin[]>(
         `/saved-logins${owner === "all" ? "?available=true" : owner ? `?owner_id=${encodeURIComponent(owner)}` : ""}`,

@@ -773,18 +773,26 @@ Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop 
 standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
-Account data (Settings with all six tabs, Billing & Usage when available, and
+Account data (Settings with six category pages, Billing & Usage when available, and
 NyxBot settings for the NyxAgent engine) opens as URL-driven modals over the
 current assistant view using `?panel=` and namespaced `panelTab`/filter keys,
 never as in-shell pages. The assistant has no desktop top bar: the sidebar column
-carries the logo, search (⌘K: recent chats, agents/groups, pages, settings tabs,
+carries the logo, search (⌘K: recent chats, agents/groups, pages, settings sections,
 theme) and the account menu, and both open the same panel URLs as NyxBot's
 settings links.
-Opening pushes history; Settings tab changes replace, Billing user changes push
-and automatic cleanup replaces. Back immediately after opening closes the panel;
+Settings and NyxBot use `panelTab` sections (slash paths), with short controls inline
+and pages reserved for forms, long text or lists. Root → page is the default; Billing
+adds `panelSection` beneath its two tabs. Agent `details` accepts tab/section paths.
+Nested Back replaces to the parent. One retained form scope preserves drafts; live settings refresh pristine fields.
+Opening account panels pushes history; Settings/NyxBot sections replace. Billing
+tab, owner and filter changes push; new drill-ins, parent Back and automatic cleanup
+replace. Back after opening or only drilling in closes the panel;
 Back after an explicit close reopens it with any pending top-up already consumed.
-Notification settings links to Studio. The agent details sheet and in-chat
-connection/setup flows keep their existing presentation. Studio `/settings` and
+Formerly local agent-sheet buttons open/close with replace; linked closes push. Agent
+tabs and drill-ins replace. Notification settings links to Studio. Agent details
+retains its five tabs: Overview identity/behaviour/ownership and Skills edit inline;
+long text and access lists have pages. Display uses Appearance/Layout/Colors views;
+in-chat connection/setup flows keep their existing presentation. Studio `/settings` and
 `/billing` remain available. Lago checkout returns to `/billing` (as configured in
 `docs/LAGO_SETUP.md`), even when started in the assistant.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
@@ -845,6 +853,9 @@ with no delivery retry.
 NyxBot owner settings include an enforced `access_mode` (`nyxmode`, `autopilot`,
 or `ask_every_time`) and optional specialist override. The backend acknowledgement
 service owns classification and approval; clients cannot bypass policy floors.
+NyxBot can read panel settings and change them on owner request; updates are Change,
+may only tighten access mode or deny specialist requests, and refuse mixed widening
+patches atomically with the exact owner page link. Agent overrides stay human-only.
 NyxAgent model selection is owner-authenticated, validated against live models,
 and changing an existing thread resets its upstream context.
 Delegated specialist tool images use server-authored assignment edges and a

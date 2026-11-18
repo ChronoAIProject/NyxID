@@ -1,10 +1,11 @@
 import "@/i18n";
+import { useState, type ReactNode } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AvailableBenefits } from "./available-benefits";
+import { AvailableBenefits, AvailableBenefitsCount, AvailableBenefitsProvider } from "./available-benefits";
 import { availableCreditTotal } from "@/lib/credits";
 import {
   billingWallet,
@@ -42,6 +43,16 @@ const response = (page = 1) => ({
   page,
   per_page: 50,
 });
+function BenefitsPages({ ownerId, actions }: { ownerId?: string; actions?: ReactNode }) {
+  const [view, setView] = useState<"summary" | "details">("summary");
+  return <AvailableBenefitsProvider ownerId={ownerId}>
+    <nav>{(["summary", "details"] as const).map(value => <button key={value} onClick={() => setView(value)}>{value}</button>)}</nav>
+    <AvailableBenefits view={view} actions={actions} />
+  </AvailableBenefitsProvider>;
+}
+async function visit(view: "summary" | "details") {
+  await userEvent.click(screen.getByRole("button", { name: view }));
+}
 function mount() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -49,7 +60,7 @@ function mount() {
   render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
-        <AvailableBenefits />
+        <BenefitsPages />
       </TooltipProvider>
     </QueryClientProvider>,
   );
@@ -90,7 +101,7 @@ it("isolates organization benefits and clears personal totals while the selected
     return (
       <QueryClientProvider client={client}>
         <TooltipProvider>
-          <AvailableBenefits key={ownerId ?? "personal"} ownerId={ownerId} />
+          <BenefitsPages key={ownerId ?? "personal"} ownerId={ownerId} />
         </TooltipProvider>
       </QueryClientProvider>
     );
@@ -132,22 +143,12 @@ it("adds exact wallet and spendable grants, with native allowance units and full
   expect(availableCreditTotal("2.000000000001", "12.000000000001")).toBe(
     "14.000000000002",
   );
-  const disclosure = screen.getByRole("button", { name: "View breakdown" });
-  expect(disclosure).toHaveAttribute("aria-expanded", "false");
-  expect(screen.getByText("Free allowances")).not.toBeVisible();
-  expect(screen.getByText("Pending activation")).not.toBeVisible();
-  expect(
-    screen.getByRole("heading", { name: "Available credits" }),
-  ).toBeVisible();
-  disclosure.focus();
-  await userEvent.keyboard("{Enter}");
-  expect(
-    screen.getByRole("button", { name: "Hide breakdown" }),
-  ).toHaveAttribute("aria-expanded", "true");
-  expect(
-    document.getElementById(disclosure.getAttribute("aria-controls")!),
-  ).toBeVisible();
+  expect(screen.queryByText("Free allowances")).not.toBeInTheDocument();
+  expect(screen.queryByText("Pending activation")).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Available credits" })).toBeVisible();
+  await visit("details");
   expect(screen.getByText("Free allowances")).toBeVisible();
+  await visit("details");
   expect(screen.getByText("Pending activation")).toBeVisible();
   expect(screen.getByText(/Available: 12 credits · Held:/)).toBeVisible();
 });
@@ -167,7 +168,7 @@ it("uses singular credit and grant labels in the headline and expanded history",
   );
   mount();
   expect(await screen.findByTitle("1")).toHaveTextContent("1 credit");
-  await userEvent.click(screen.getByText("View breakdown"));
+  await visit("details");
   expect(screen.getByText(/1 grant · page 1\./)).toBeVisible();
   expect(screen.getByText(/Granted 1 credit ·/)).toBeVisible();
 });
@@ -183,8 +184,8 @@ it("preserves the expanded breakdown and authoritative headline while the next p
         ),
   );
   mount();
-  await screen.findByText("View breakdown");
-  await userEvent.click(screen.getByText("View breakdown"));
+  await screen.findByTitle("107.000000000001");
+  await visit("details");
   await userEvent.click(screen.getByRole("button", { name: "Next grants" }));
   expect(screen.getByText("Individual grants")).toBeVisible();
   expect(screen.getByRole("button", { name: "Next grants" })).toBeDisabled();
@@ -222,7 +223,8 @@ it("shows a failed refresh as stale and does not silently discard it", async () 
 });
 it("clears benefit details after authorization is lost", async () => {
   const client = mount();
-  await screen.findByText("View breakdown");
+  await screen.findByTitle("14.000000000002");
+  await visit("details");
   get.mockRejectedValue(
     new ApiError(403, {
       error: "forbidden",
@@ -231,8 +233,9 @@ it("clears benefit details after authorization is lost", async () => {
     }),
   );
   await act(() => client.invalidateQueries());
+  await waitFor(() => expect(screen.queryByText("Individual grants")).not.toBeInTheDocument());
+  await visit("summary");
   expect(await screen.findByText("Unavailable")).toBeVisible();
-  expect(screen.queryByText("View breakdown")).not.toBeInTheDocument();
 });
 
 it("keeps grants spendable when the wallet is negative and shows the signed wallet separately", async () => {
@@ -247,8 +250,8 @@ it("keeps grants spendable when the wallet is negative and shows the signed wall
   expect(await screen.findByTitle("12.000000000001")).toHaveTextContent(
     "12 credits",
   );
-  expect(screen.getByText("-8 credits")).not.toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "View breakdown" }));
+  expect(screen.queryByText("-8 credits")).not.toBeInTheDocument();
+  await visit("details");
   expect(screen.getByText("-8 credits")).toBeVisible();
   expect(availableCreditTotal("-8", "12.000000000001")).toBe("12.000000000001");
 });
@@ -303,10 +306,23 @@ it("keeps wallet actions available while benefits load without showing a partial
   const client = new QueryClient();
   render(
     <QueryClientProvider client={client}>
-      <AvailableBenefits actions={<button>Add credits</button>} />
+      <BenefitsPages actions={<button>Add credits</button>} />
     </QueryClientProvider>,
   );
   expect(screen.getByRole("button", { name: "Add credits" })).toBeVisible();
   expect(screen.getByLabelText("Loading available credits")).toBeVisible();
   expect(screen.queryByTitle("95")).not.toBeInTheDocument();
+});
+
+
+it("summarizes the existing total grant count without an extra read and hides errors", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><AvailableBenefitsProvider><AvailableBenefitsCount /></AvailableBenefitsProvider></QueryClientProvider>);
+  expect(await screen.findByText("51 grants")).toBeVisible();
+  expect(get.mock.calls.map(([path]) => path).sort()).toEqual(["/billing/benefits?page=1", "/billing/wallet"]);
+  const queryKey = ["billing", "credits", "benefits", "account-a", undefined, 1];
+  act(() => client.getQueryCache().find({ queryKey })!.setState({ fetchStatus: "fetching" }));
+  expect(screen.getByText("51 grants")).toBeVisible();
+  act(() => client.getQueryCache().find({ queryKey })!.setState({ status: "error", error: new Error("Unavailable"), fetchStatus: "idle" }));
+  await waitFor(() => expect(screen.queryByText("51 grants")).not.toBeInTheDocument());
 });

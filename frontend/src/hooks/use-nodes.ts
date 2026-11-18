@@ -41,9 +41,10 @@ export function useMyNodeBindings() {
   });
 }
 
-export function useNodes(params: { readonly pollIntervalMs?: number } = {}) {
+export function useNodes(params: { readonly pollIntervalMs?: number; readonly enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["nodes"],
+    enabled: params.enabled,
     queryFn: async (): Promise<readonly NodeInfo[]> => {
       const res = await api.get<NodeListResponse>("/nodes");
       return res.nodes;

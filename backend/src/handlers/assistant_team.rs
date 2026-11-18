@@ -1409,6 +1409,7 @@ async fn execute_authorized_tool_impl(
     args: &Value,
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
+    let mut settings_noop = false;
     let result = async {
         // Outline arguments are valid only where discovery advertised them:
         // owner chats with `assistant:skill-runs` on. Ordinary calls skip the
@@ -1466,6 +1467,15 @@ async fn execute_authorized_tool_impl(
             }
         }
         let args = &normalized;
+        if name == "update_settings" {
+            engine::require_enabled(&state.db, &chat.user_id).await?;
+            let before = settings::get(&state.db, &chat.user_id).await?;
+            let patch = settings_patch(args)?;
+            if let Some(outcome) = patch.preflight(before) {
+                settings_noop = matches!(outcome, settings::PanelOutcome::Unchanged(_));
+                return settings_preflight_response(state, outcome);
+            }
+        }
         if matches!(
             name,
             "channel_bot_setup_link"
@@ -1578,7 +1588,11 @@ async fn execute_authorized_tool_impl(
         engine::require_enabled(&state.db, &chat.user_id).await?;
         let mut outcome = dispatch(state, chat, name, args, delegation_approved).await?;
         if let Some(preview) = &channel_preview { outcome.0["channel_preview"] = json!(preview); }
+        settings_noop = name == "update_settings"
+            && !outcome.1
+            && outcome.0["changed_sections"].as_array().is_some_and(Vec::is_empty);
         if !outcome.1
+            && !settings_noop
             && let Some(auto) = auto_allowed
         {
             acks::record_auto_allowed(
@@ -1613,27 +1627,23 @@ async fn execute_authorized_tool_impl(
         ),
         outcome.1,
     );
-    let _ = crate::services::audit_service::log_actor_event(
-        state.db.clone(),
-        &crate::services::audit_service::AuditActor {
-            user_id: chat.user_id.clone(),
-            ip_address: None,
-            user_agent: None,
-            api_key_id: Some(chat.api_key_id.clone()),
-            api_key_name: None,
-        },
-        "assistant_team_tool_call",
-        Some(json!({
-            "conversation_id": chat.conversation_id,
-            "agent_id": chat.agent_id,
-            "tool_name": tool_name,
-            "outcome": if outcome.1 {"refused"} else {"success"},
-            "reason": if name == "remember" { outcome.0["details"]["reason"].clone() } else { Value::Null },
-            "note_chars": if name == "remember" { args["text"].as_str().map(|s| s.chars().count()) } else { None },
-            "replace_requested": if name == "remember" { Some(args["replace_id"].is_string()) } else { None },
-        })),
-    )
-    .await;
+    if !settings_noop {
+        let _ = crate::services::audit_service::log_actor_event(
+            state.db.clone(),
+            &team_audit_actor(chat),
+            "assistant_team_tool_call",
+            Some(json!({
+                "conversation_id": chat.conversation_id,
+                "agent_id": chat.agent_id,
+                "tool_name": tool_name,
+                "outcome": if outcome.1 {"refused"} else {"success"},
+                "reason": if name == "remember" { outcome.0["details"]["reason"].clone() } else { Value::Null },
+                "note_chars": if name == "remember" { args["text"].as_str().map(|s| s.chars().count()) } else { None },
+                "replace_requested": if name == "remember" { Some(args["replace_id"].is_string()) } else { None },
+            })),
+        )
+        .await;
+    }
     outcome
 }
 
@@ -1715,7 +1725,9 @@ fn dispatch<'a>(
         "create_group" | "list_groups" | "post_to_group" | "update_group" | "delete_group" => {
             Box::pin(dispatch_groups(state, chat, name, args))
         }
-        "update_settings" | "settings_link" => Box::pin(dispatch_settings(state, chat, name, args)),
+        "get_settings" | "update_settings" | "settings_link" => {
+            Box::pin(dispatch_settings(state, chat, name, args))
+        }
         "channel_setup_guide"
         | "channel_bot_setup_link"
         | "connect_channel_bot"
@@ -2488,13 +2500,7 @@ async fn dispatch_agent_settings(
             if let Some(model) = args["model"].as_str() {
                 agent = team::set_agent_policy(
                     db,
-                    &crate::services::audit_service::AuditActor {
-                        user_id: owner.into(),
-                        ip_address: None,
-                        user_agent: None,
-                        api_key_id: Some(chat.api_key_id.clone()),
-                        api_key_name: None,
-                    },
+                    &team_audit_actor(chat),
                     &agent.id,
                     team::AgentPolicy {
                         model: Some(model),
@@ -2610,18 +2616,7 @@ async fn dispatch_permission_decisions(
                 }
                 Err(error) => return Err(error),
             };
-            acks::audit_decision(
-                db,
-                &crate::services::audit_service::AuditActor {
-                    user_id: owner.into(),
-                    ip_address: None,
-                    user_agent: None,
-                    api_key_id: Some(chat.api_key_id.clone()),
-                    api_key_name: None,
-                },
-                &row,
-            )
-            .await;
+            acks::audit_decision(db, &team_audit_actor(chat), &row).await;
             if let Some(auto) = gate.auto_allowed() {
                 acks::record_auto_allowed(
                     db,
@@ -2913,6 +2908,164 @@ async fn dispatch_org_groups(
     )))
 }
 
+fn team_audit_actor(chat: &ChatAuthority) -> crate::services::audit_service::AuditActor {
+    crate::services::audit_service::AuditActor {
+        user_id: chat.user_id.clone(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: Some(chat.api_key_id.clone()),
+        api_key_name: None,
+    }
+}
+
+fn settings_patch(args: &Value) -> AppResult<settings::PanelUpdate> {
+    let mut patch = args.clone();
+    if let Some(object) = patch.as_object_mut() {
+        object.remove("acknowledgement_id");
+    }
+    serde_json::from_value(patch)
+        .map_err(|_| AppError::ValidationError("Invalid settings patch".into()))
+}
+fn settings_preflight_response(
+    state: &AppState,
+    outcome: settings::PanelOutcome,
+) -> AppResult<(Value, bool)> {
+    match outcome {
+        settings::PanelOutcome::Refused(sections) => Ok(settings_refusal(state, &sections)),
+        settings::PanelOutcome::Unchanged(row) => {
+            Ok((settings_tool_response(state, row, &[])?, false))
+        }
+        settings::PanelOutcome::Changed {
+            after, sections, ..
+        } => Ok((settings_tool_response(state, *after, &sections)?, false)),
+    }
+}
+#[derive(Clone, Serialize)]
+struct SettingsSectionLink {
+    section: String,
+    url: String,
+}
+fn settings_section_link(state: &AppState, section: &str) -> SettingsSectionLink {
+    SettingsSectionLink {
+        section: section.into(),
+        url: crate::services::assistant_links::AssistantPage::NyxBotSettings {
+            section: Some(section),
+        }
+        .url(&state.config.frontend_url),
+    }
+}
+fn settings_refusal(state: &AppState, sections: &[&str]) -> (Value, bool) {
+    let pages: Vec<_> = sections
+        .iter()
+        .map(|section| settings_section_link(state, section))
+        .collect();
+    let url = pages.first().map(|page| page.url.as_str());
+    (
+        json!({
+            "error": "settings_authority_widening",
+            "message": "NyxBot never relaxes its own approvals. Change these permissions yourself in NyxID.",
+            "url": url,
+            "sections": pages,
+        }),
+        true,
+    )
+}
+
+/// Explicit owner-panel projection: new REST fields do not expand this tool.
+#[derive(Serialize)]
+struct ToolSettingsResponse {
+    max_auto_continuations: i32,
+    max_live_subagents: i32,
+    max_concurrent_subagent_turns: i32,
+    max_group_handoffs: i32,
+    max_group_handoffs_per_hour: i32,
+    timezone: Option<String>,
+    schedule_minimum_minutes: i32,
+    trigger_runs_per_hour: i32,
+    trigger_runs_per_day: i32,
+    access_mode: crate::models::assistant_settings::AccessMode,
+    specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
+    notifications: ToolNotificationPreferences,
+    limits: std::collections::BTreeMap<String, Value>,
+    sections: Vec<SettingsSectionLink>,
+    changed_sections: Vec<SettingsSectionLink>,
+}
+#[derive(Serialize)]
+struct ToolNotificationPreferences {
+    push: ToolNotificationPushPreferences,
+}
+#[derive(Serialize)]
+struct ToolNotificationPushPreferences {
+    automation_result: bool,
+    automation_problem: bool,
+    needs_decision: bool,
+    agent_update: bool,
+    chat_update: bool,
+    group_mention: bool,
+}
+impl From<crate::models::assistant_settings::NotificationPreferences>
+    for ToolNotificationPreferences
+{
+    fn from(row: crate::models::assistant_settings::NotificationPreferences) -> Self {
+        Self {
+            push: ToolNotificationPushPreferences {
+                automation_result: row.push.automation_result,
+                automation_problem: row.push.automation_problem,
+                needs_decision: row.push.needs_decision,
+                agent_update: row.push.agent_update,
+                chat_update: row.push.chat_update,
+                group_mention: row.push.group_mention,
+            },
+        }
+    }
+}
+fn settings_tool_response(
+    state: &AppState,
+    row: crate::models::assistant_settings::AssistantSettings,
+    changed: &[&str],
+) -> AppResult<Value> {
+    let sections: Vec<_> = crate::services::assistant_links::NYXBOT_SETTINGS_SECTIONS
+        .iter()
+        .map(|section| settings_section_link(state, section))
+        .collect();
+    let schema = assistant_team_tools::schema("update_settings");
+    let limits = schema["properties"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, spec)| spec["type"] == "integer")
+        .map(|(name, spec)| {
+            (
+                name.clone(),
+                json!({"minimum": spec["minimum"], "maximum": spec["maximum"]}),
+            )
+        })
+        .collect();
+    let changed_sections = sections
+        .iter()
+        .filter(|page| changed.contains(&page.section.as_str()))
+        .cloned()
+        .collect();
+    serde_json::to_value(ToolSettingsResponse {
+        max_auto_continuations: row.max_auto_continuations,
+        max_live_subagents: row.max_live_subagents,
+        max_concurrent_subagent_turns: row.max_concurrent_subagent_turns,
+        max_group_handoffs: row.max_group_handoffs,
+        max_group_handoffs_per_hour: row.max_group_handoffs_per_hour,
+        timezone: row.timezone,
+        schedule_minimum_minutes: row.schedule_minimum_minutes,
+        trigger_runs_per_hour: row.trigger_runs_per_hour,
+        trigger_runs_per_day: row.trigger_runs_per_day,
+        access_mode: row.access_mode,
+        specialist_access_requests: row.specialist_access_requests,
+        notifications: row.notifications.into(),
+        limits,
+        sections,
+        changed_sections,
+    })
+    .map_err(|_| AppError::Internal("Settings response failed".into()))
+}
+
 async fn dispatch_settings(
     state: &AppState,
     chat: &ChatAuthority,
@@ -2922,32 +3075,82 @@ async fn dispatch_settings(
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
     Ok(match name {
+        "get_settings" => (
+            settings_tool_response(state, settings::get(&state.db, owner).await?, &[])?,
+            false,
+        ),
         "update_settings" => {
-            let before = settings::get(&state.db, &chat.user_id).await?;
-            let maximum = args["max_auto_continuations"]
-                .as_i64()
-                .and_then(|v| i32::try_from(v).ok())
-                .unwrap_or(before.max_auto_continuations);
-            // The access mode is changed only by the owner in NyxID; NyxBot
-            // never relaxes its own approvals.
-            let after = settings::update(
-                &state.db,
-                &chat.user_id,
-                settings::Update {
-                    max_auto_continuations: Some(maximum),
-                    ..Default::default()
-                },
-            )
-            .await?;
-            settings::audit(&state.db, &chat.user_id, &before, &after).await;
-            (
-                serde_json::to_value(SettingsResponse::from(after))
-                    .map_err(|_| AppError::Internal("Settings response failed".into()))?,
-                false,
-            )
+            let patch = settings_patch(args)?;
+            let changes_mode = patch.access_mode.is_some();
+            match settings::apply_panel(&state.db, owner, patch).await? {
+                settings::PanelOutcome::Changed {
+                    before,
+                    after,
+                    sections,
+                } => {
+                    settings::audit(&state.db, owner, &before, &after).await;
+                    if changes_mode {
+                        settings::audit_access_mode(
+                            &state.db,
+                            &team_audit_actor(chat),
+                            None,
+                            Some(before.access_mode),
+                            Some(after.access_mode),
+                        )
+                        .await;
+                    }
+                    (settings_tool_response(state, *after, &sections)?, false)
+                }
+                other => return settings_preflight_response(state, other),
+            }
         }
         "settings_link" => {
             let area = text_arg(args, "area");
+            if area == "agent_details" || args.get("section").is_some() {
+                let section = args.get("section").and_then(Value::as_str);
+                if args.get("section").is_some()
+                    && !section.is_some_and(|section| {
+                        crate::services::assistant_team_tools::settings_section_allowed(
+                            area, section,
+                        )
+                    })
+                {
+                    return Err(AppError::ValidationError(
+                        "Unknown section for settings area".into(),
+                    ));
+                }
+                let page = match area {
+                    "agent_details" => {
+                        let agent =
+                            Box::pin(target_agent(state, owner, args["agent"].as_str())).await?;
+                        let path = crate::services::assistant_links::AssistantPage::AgentDetails {
+                            agent: &agent.id,
+                            tab: section.unwrap_or("overview"),
+                        }
+                        .url(&state.config.frontend_url);
+                        return Ok((
+                            json!({"area": area, "url": path, "note": "Open this agent details page in NyxID; changes remain owner actions."}),
+                            false,
+                        ));
+                    }
+                    "nyxbot_settings" => {
+                        crate::services::assistant_links::AssistantPage::NyxBotSettings { section }
+                    }
+                    "billing" | "usage" => {
+                        crate::services::assistant_links::AssistantPage::Billing {
+                            tab: area,
+                            section,
+                        }
+                    }
+                    _ => crate::services::assistant_links::AssistantPage::Settings {
+                        tab: section.unwrap_or(area),
+                    },
+                };
+                return Ok((
+                    json!({"area": area, "url": page.url(&state.config.frontend_url), "note": "Open this settings page in NyxID; sign-in-only changes happen on the page."}),
+                    false,
+                ));
+            }
             if matches!(area, "triggers" | "automations") && args.get("instruction").is_some() {
                 let agent = target_agent(state, owner, args["agent"].as_str()).await?;
                 return Ok((
@@ -3953,6 +4156,9 @@ pub struct SettingsResponse {
     voice: Option<super::assistant_voice::Preferences>,
     max_auto_continuations: i32,
     max_auto_continuations_limit: i32,
+    schedule_minimum_minutes_limit: i32,
+    trigger_runs_per_hour_limit: i32,
+    trigger_runs_per_day_limit: i32,
     trigger_runs_per_day: i32,
     trigger_runs_per_hour: i32,
     schedule_minimum_minutes: i32,
@@ -3979,6 +4185,12 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             timezone: row.timezone,
             schedule_minimum_minutes: row.schedule_minimum_minutes,
             trigger_runs_per_hour: row.trigger_runs_per_hour,
+            schedule_minimum_minutes_limit:
+                crate::models::assistant_settings::SCHEDULE_MINIMUM_MINUTES_LIMIT,
+            trigger_runs_per_hour_limit:
+                crate::models::assistant_settings::TRIGGER_RUNS_PER_HOUR_LIMIT,
+            trigger_runs_per_day_limit:
+                crate::models::assistant_settings::TRIGGER_RUNS_PER_DAY_LIMIT,
             trigger_runs_per_day: row.trigger_runs_per_day,
             skip_destructive_confirmation: row.skip_destructive_confirmation,
             access_mode: row.access_mode,
@@ -4048,6 +4260,8 @@ pub async fn update_settings(
         &state.db,
         &owner,
         settings::Update {
+            snapshot: None,
+            notification_push: None,
             voice: body.voice.map(|v| v.map(Into::into)),
             max_auto_continuations: body.max_auto_continuations,
             timezone: body.timezone,

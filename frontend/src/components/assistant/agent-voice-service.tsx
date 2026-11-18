@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAgentOwnerMutation } from "@/hooks/use-agent-owner-mutation";
@@ -77,43 +78,50 @@ function VoiceConnection({
   });
   const error = query.error || publish.error;
   return (
-    <section aria-label={translateUi("Device voice")} className="space-y-3">
-      <h3 className="type-group-heading text-foreground">{translateUi("Device voice")}</h3>
-      <p className="text-12 text-muted-foreground">{translateUi("Create a voice connection for ")}{agentTitle(agent)}{translateUi(", then allow this connection on your device’s Agent Key. It permits conversations with this Bot using its existing access, history and billing. Actions requiring owner confirmation are reviewed on their NyxID cards.")}{agent.kind === "nyxbot"
-          ? translateUi(" This NyxBot has full account and service access.")
-          : translateUi(" Other Bots require their own connections.")}
-      </p>
-      <p className="text-12 text-muted-foreground">{translateUi("Creating the connection grants no Key explicitly. Keys set to all services include it under their existing policy.")}</p>
-      {error ? (
-        <ErrorBanner
-          message={
-            error instanceof Error
-              ? error.message
-              : translateUi("Could not load voice connection.")
-          }
-        />
-      ) : null}
+    <GroupedList
+      aria-label={translateUi("Device voice")}
+      title={translateUi("Device voice")}
+      footer={
+        <>
+          <p>{translateUi("Create a voice connection for ")}{agentTitle(agent)}{translateUi(", then allow this connection on your device’s Agent Key. It permits conversations with this Bot using its existing access, history and billing. Actions requiring owner confirmation are reviewed on their NyxID cards.")}{agent.kind === "nyxbot"
+            ? translateUi(" This NyxBot has full account and service access.")
+            : translateUi(" Other Bots require their own connections.")}
+          </p>
+          <p>{translateUi("Creating the connection grants no Key explicitly. Keys set to all services include it under their existing policy.")}</p>
+          {error ? (
+            <ErrorBanner
+              message={
+                error instanceof Error
+                  ? error.message
+                  : translateUi("Could not load voice connection.")
+              }
+            />
+          ) : null}
+          {query.data?.service && <p>{translateUi("Remove the connection from the Key to revoke access, or disable it in Services.")}</p>}
+        </>
+      }
+    >
       {query.data?.service ? (
         <>
-          <p className="break-all text-12">{translateUi("Voice connection: ")}<code>{query.data.service.slug}</code>
-          </p>
-          <Button variant="outline" size="sm" asChild>
+          <GroupedRow className="block break-all">{translateUi("Voice connection: ")}<code>{query.data.service.slug}</code></GroupedRow>
+          <GroupedRow asChild interactive>
             <Link to="/api-keys">{translateUi("Manage Agent Key access")}</Link>
-          </Button>
-          <p className="text-12 text-muted-foreground">{translateUi("Remove the connection from the Key to revoke access, or disable it in Services.")}</p>
+          </GroupedRow>
         </>
       ) : (
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={
-            query.isPending || Boolean(query.error) || publish.isPending
-          }
-          onClick={() => publish.mutate()}
-        >
-          {publish.isPending ? translateUi("Creating…") : translateUi("Create voice connection")}
-        </Button>
+        <GroupedRow>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={
+              query.isPending || Boolean(query.error) || publish.isPending
+            }
+            onClick={() => publish.mutate()}
+          >
+            {publish.isPending ? translateUi("Creating…") : translateUi("Create voice connection")}
+          </Button>
+        </GroupedRow>
       )}
-    </section>
+    </GroupedList>
   );
 }

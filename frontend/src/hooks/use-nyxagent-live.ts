@@ -57,6 +57,8 @@ export function nyxAgentLiveRefresh(
         now: [],
         lists: [nyxBotQueryKeys.channels(userId), nyxBotQueryKeys.agents(userId)],
       };
+    case "settings":
+      return { now: [nyxBotQueryKeys.settings(userId)], lists: [] };
     case "notification":
       // The bell and an open feed follow at once; identifiers only.
       return { now: [notificationQueryKeys.root(userId)], lists: [] };

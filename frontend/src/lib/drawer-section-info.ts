@@ -2,6 +2,8 @@ import { createContext } from "react";
 
 /** Explicit drawer copy; dynamic service, chat and skill headings supply their own context. */
 export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
+  Identity: "The name, role and model this agent uses. Persona and notes have their own editor.",
+  Behaviour: "Choose when this agent asks first and whether it sends progress replies in connected chats.",
   Overview: "Profile, ownership and lifecycle settings for this agent. Search results open the matching setting.",
   Channels: "Messaging bots and chats connected to this agent. Search results open the matching connection or chat.",
   Profile: "The name, role and personality people see when talking to this agent. Model and access settings control how it responds and when it asks first.",

@@ -1,3 +1,4 @@
+import { ACCOUNT_FIELD_LABELS } from "@/lib/account-settings-sections";
 import { LANGUAGES } from "@/i18n/language";
 import { useAppTranslation } from "@/i18n/use-app-translation";
 import { Label } from "@/components/ui/label";
@@ -15,7 +16,7 @@ export function LanguageSettings() {
     <Card>
       <CardHeader>
         <CardTitle>
-          <Label htmlFor="interface-language">{t("Language")}</Label>
+          <Label htmlFor="interface-language">{t(ACCOUNT_FIELD_LABELS.language)}</Label>
         </CardTitle>
         <CardDescription>
           {t(

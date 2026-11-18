@@ -1,3 +1,4 @@
+import { agentDetailsSections, type AgentDetailsSection } from "./agent-details-sections";
 import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
 
 /**
@@ -13,7 +14,7 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  *   thread starts with; alone it lands on that agent's latest thread.
  * - `g`     opens a NyxBot group chat. With no `c`, `draft`, `agent` or `g`
  *   the NyxAgent engine shows the NyxBot home.
- * - `details` opens the agent details sheet on one tab (`grants` is Access; `skills`,
+ * - `details` opens the agent details sheet on a tab or slash-delimited section (`grants` is Access; `skills`,
  *   `overview`, `memory` and `channels` keep their names) for `agent`, else the open thread's agent. The sheet is URL
  *   state, so a server link (`AssistantPage::AgentDetails`) survives reload
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
@@ -39,15 +40,15 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly proposal?: string;
   readonly draft?: boolean;
   readonly agent?: string;
-  readonly details?: AgentDetailsTab;
+  readonly details?: AgentDetailsSection;
   /** Focus one connection in the agent Channels tab. */
   readonly connection?: string;
   readonly g?: string;
   readonly mock?: 1;
 }
 
-function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
-  return AGENT_DETAILS_TABS.find((tab) => tab === value);
+function agentDetailsTab(value: unknown): AgentDetailsSection | undefined {
+  return typeof value === "string" && value ? agentDetailsSections.normalize(value) ?? "overview" : undefined;
 }
 
 function parseChatSearch(

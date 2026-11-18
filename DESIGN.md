@@ -407,8 +407,49 @@ field-specific explanations directly below their field in `text-13 text-text-ter
 actions are destructive-colored rows in their own neutral group.
 
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
-multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
-eight items, and scroll internally only for long lists. `GroupedFormScope viewport` gives
+multi-select lists. Single-choice selection lists use named radio groups with
+checkmark rows and arrow-key navigation; search when there are more than eight
+items, and scroll internally only for long lists. A page earns its place with a
+list, several related fields or long text. Keep a short field, switch or small
+choice inline on its parent. Use root → page, with existing individual-item
+pages as the only third level; never add a page only to list further pages.
+Retain the explicitly separate channel-binding lists and destructive Delete account page.
+Aim for one phone screen: merge related controls into two or three titled groups,
+and cap growing lists with Show all or pagination. Roots remain short and show
+truthful saved summaries; keep them during background refreshes and omit them
+before first load or on error. Display may use three addressed peer views in one shell.
+Derive parents from section paths; deep links mount ancestors, Back walks one level
+with a replace, and focus returns to the originating row. Preserve existing history
+contracts: Account Settings navigation replaces; Billing tab, owner, period and
+service-filter changes push, while its new drill-ins and parent Back replace.
+Automatic Billing cleanup replaces and consumes top-up actions only once. Agent
+tab changes add no entries (URL replace); formerly local sheet buttons open/close
+with replace, while linked sheet closes retain push. Unavailable pages replace
+to the nearest available ancestor. Keep one form scope and save bar across the tree;
+live values refresh pristine fields while dirty drafts survive.
+Workspace search indexes each page's rendered setting and option labels in the
+current language, alongside synonyms, from the same definitions as the forms.
+Use distinct leading icons only on the first category list of each surface or tab; nested category lists omit them. Root summaries use already loaded values. Unvisited editors must not fetch; retained pages share their original query/form owners.
+Keep settings roots limited to category disclosures and at most one essential
+context sentence per group. Billing roots may also show the existing balance,
+period spend and benefits totals; Usage shows its summary inline. Put charts, tables and history on focused pages.
+Keep short editors at one level. Share section vocabulary, parent derivation and
+availability rules between navigation and search; retain the original form owner
+when its fields are spread across pages. Section cleanup waits for the address and
+rendered route to agree, so a pending navigation cannot erase its destination.
+
+Account Settings alone trials a sidebar and content pane when its available
+container width reaches 42rem. Use the existing selected navigation treatment,
+category icons and a divider between account and app categories; labels have no
+summaries beside visible content. Sidebar search indexes rendered setting labels
+in the current language and uses the drawer's focus/scroll/highlight reveal.
+An absent section shows Profile without a URL write. The pane retains visited
+forms, scrolls independently and owns the same pinned save bar. At narrower
+widths retain the summary root and drill-ins. Keep the dialog name Account
+Settings; title the content region with its category. NyxBot, Billing and agent
+details keep their existing navigation during this trial.
+
+`GroupedFormScope viewport` gives
 the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a compact row with `py-2`, right-aligned Discard and Save changes; wrap actions to another row when needed and allow long button labels to wrap within their insets. Announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
@@ -437,9 +478,10 @@ a dirty form; Create can submit valid pristine defaults. Cancel follows the same
 discard guard as X, Escape and the overlay. Dirty-only bars are for inline drawer
 tabs/drill-ins, the Account Settings and NyxBot settings panels and machine
 settings sheets. Account Settings uses the same background for its header and
-body, segmented tabs, and one save bar outside the tab scroll viewports.
-Visited tabs remain mounted to preserve drafts, and tab changes retain them
-without a discard prompt. Studio `/settings` shares these grouped sections
+body, a short category root, and one save bar outside the page scroll viewports.
+Visited pages remain mounted to preserve drafts. Agent details retains its five
+tabs; tab changes retain drafts without a discard prompt, while detail Back guards
+the departing page and its descendants. Studio `/settings` shares these grouped sections
 and reviewed saves; its page header and route remain intact. Display and
 privacy controls retain their immediate persistence. Persisted
 request retries stay explicit actions, available without a new draft;
@@ -525,9 +567,7 @@ live render data. Stable IDs identify entries and reveal targets. Index only
 entries shown for the current agent, permissions and flags; no DOM-derived index
 or separate inventory. Match case and diacritic insensitively, requiring every
 query word; rank exact titles, title prefixes, title substrings, then metadata.
-Cap results at 80 and group them in tab order. Channel chat metadata is fetched
-with its existing GET hook while the drawer is mounted so unopened chats are
-searchable; chat controls and mutations keep their existing behavior.
+Cap results at 80 and group them in tab order. Unvisited pages register their available setting labels from the shared vocabulary without mounting editors. Once Channels is first visited, its existing GET hooks index connected bots and unopened chats; chat controls and mutations keep their existing behavior.
 
 Search retains mounted tabs and visited detail pages, including their drafts.
 While searching, one opaque save bar aggregates dirty forms across the drawer,
@@ -691,8 +731,9 @@ capability-gated and NyxBot settings requires the NyxAgent engine. Notification
 settings links to Studio at `/approvals/settings` with a visible Studio hint.
 Open Studio and Log out complete both menus. Studio `/settings` and `/billing`
 retain their pages and chrome. Lago checkout returns to Studio `/billing`.
-Panels push on open and explicit close (Back after close reopens); Settings tabs
-replace, while Billing user changes push and automatic cleanup replaces.
+Panels push on open and explicit close (Back after close reopens). Account,
+NyxBot, agent and Billing section/tab changes replace, as does automatic cleanup;
+Billing owner, period and service-filter changes retain their existing push behavior.
 
 ### Naming reconciliation
 The sidebar label and page title can drift; track this when writing breadcrumbs or copy:
@@ -883,6 +924,10 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-18 | Trial a sidebar and content pane for wide Account Settings only | Search and categories stay beside independently scrolling content at 42rem of available width; phones retain the summary root. Default Profile does not rewrite the URL. |
+| 2026-11-17 | Consolidate settings pages after the first version over-split | Short choices and fields edit inline; related forms share a page. Roots stay short, lists are capped, and existing saves, authority, billing figures and history remain intact. |
+| 2026-11-17 | Account, agent and billing settings use focused section trees | Short roots expose current values; retained pages keep existing saves and authority fences. Slash paths support deep links and translated field-label search. New drill-ins and parent Back replace; Billing tabs/owner/filters still push, and cleanup replaces. Settings navigation and agent tabs add no entries; formerly local agent-sheet buttons retain no-entry opening/closing. Billing figures and checkout contracts are unchanged. |
+| 2026-11-16 | NyxBot settings use a URL-addressable hierarchy | Short category groups lead to retained focused pages with nested permission, task, automation and channel settings. Section navigation replaces history; one scope preserves reviewed saves and drafts. Live values refresh pristine fields, and NyxBot may change safe settings while approval widening stays with the owner. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
 | 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |

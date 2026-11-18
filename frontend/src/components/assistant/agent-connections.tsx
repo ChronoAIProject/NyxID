@@ -1,3 +1,4 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
@@ -22,6 +23,7 @@ import {
 import {
   connectionAvailable,
   connectionOwnerLabel,
+  connectionsForAgent,
 } from "@/lib/assistant/connection-context";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import type { KeyInfo } from "@/types/keys";
@@ -34,18 +36,10 @@ export function AgentConnections({
   useUiTranslation();
   const keys = useKeys();
   const inventory = keys.data ?? [];
-  const connections =
-    agent.kind === "nyxbot"
-      ? inventory
-      : inventory.filter(
-          (key) =>
-            agent.services.includes(key.id) ||
-            agent.services.includes(key.slug),
-        );
+  const connections = connectionsForAgent(agent, inventory);
   return (
     <section aria-label={translateUi("Connections")} className="space-y-3">
       <GroupedList
-        title={translateUi("Connections")}
         footer={
           <>
             <p>{translateUi("Accounts grouped by service, so you can see which source this agent can use. A connection chooses an account. Folder, database and other resource restrictions depend on the service’s operation limits.")}</p>
@@ -150,11 +144,12 @@ function ConnectionGroups({
   readonly disabled?: boolean;
 }) {
   useUiTranslation();
+  const visible = useCappedItems(groups.flatMap(group => group.connections));
   return (
     <div className="space-y-6">
-      {groups.map((group) => {
+      {groups.filter(group => group.id === order?.groupId || group.connections.some(key => visible.items.includes(key))).map((group) => {
         const editing = order?.groupId === group.id;
-        const rows = editing ? order.connections : group.connections;
+        const rows = editing ? order.connections : group.connections.filter(key => visible.items.includes(key));
         return (
           <GroupedList key={group.id} title={group.name} info="Accounts connected to this service. Choose which account this agent should try first.">
             <div className="space-y-0">
@@ -226,7 +221,7 @@ function ConnectionGroups({
                   <ConnectionOrderForm order={order} disabled={disabled} />
                 ) : (
                   group.id.startsWith("catalog:") &&
-                  rows.length > 1 && (
+                  group.connections.length > 1 && (
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
@@ -241,6 +236,7 @@ function ConnectionGroups({
           </GroupedList>
         );
       })}
+      {visible.remaining > 0 && <GroupedList><GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow></GroupedList>}
     </div>
   );
 }

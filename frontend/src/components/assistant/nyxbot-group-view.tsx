@@ -1,3 +1,5 @@
+import { useAgentDetailsNavigation } from "@/hooks/use-agent-details-navigation";
+import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -20,7 +22,7 @@ import {
   useState,
   type UIEvent,
 } from "react";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -746,7 +748,8 @@ export function NyxAgentGroupPage({
   const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
-  const [detailsAgentId, setDetailsAgentId] = useState<string>();
+  const search = useRouterState({ select: state => parseAssistantSearch(state.location.search as Record<string, unknown>) });
+  const { open: openAgentDetails, close: closeAgentDetails } = useAgentDetailsNavigation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftText, setDraftText] = useState("");
   const [recipientSelection, setRecipientSelection] =
@@ -834,7 +837,7 @@ export function NyxAgentGroupPage({
         {group || !transcript.error ? (
           <GroupHeader
             group={group}
-            onOpenAgent={setDetailsAgentId}
+            onOpenAgent={openAgentDetails}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         ) : null}
@@ -846,7 +849,7 @@ export function NyxAgentGroupPage({
                 messages={messages}
                 hasOlder={Boolean(transcript.data?.before_seq)}
                 onLoadOlder={transcript.loadOlder}
-                onOpenAgent={setDetailsAgentId}
+                onOpenAgent={openAgentDetails}
                 bottomInset={composerHeight}
               />
             </AssistantLinkModalHost>
@@ -871,13 +874,14 @@ export function NyxAgentGroupPage({
           <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading group...")}</div>
         )}
         <AgentDetailsSheet
-          agentId={detailsAgentId}
+          agentId={search.details ? search.agent : undefined}
+          tab={search.details}
           agents={agents.data?.agents ?? []}
-          open={detailsAgentId !== undefined}
+          open={Boolean(search.details && search.agent)}
           onOpenChange={(open) => {
-            if (!open) setDetailsAgentId(undefined);
+            if (!open) closeAgentDetails();
           }}
-          onDeleted={() => setDetailsAgentId(undefined)}
+          onDeleted={() => closeAgentDetails()}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (

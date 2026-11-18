@@ -869,7 +869,7 @@ NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent
 `wait_for_subagents` (at most 120 s), `list_subagents`, `read_subagent`,
 `grant_subagent`, `revoke_subagent`, `set_guest_access`, `update_subagent`, `decide_permission`,
 `destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
-`update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
+`update_group`, `delete_group`, `get_settings`, `update_settings`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
 `disconnect_channel_bot`. Every agent also has the owner-turn-only, read-only
 `task_status` tool: bounded correlated execution evidence for the acting person's
@@ -2670,3 +2670,34 @@ provider results and uncertain outcomes retain their existing receipt handling;
 settlement still marks every delivered request individually. This presentation
 also applies to queued wakes written by older replicas, without changing their
 stored identities or authority.
+
+### Owner settings tools and live updates
+
+NyxBot alone exposes `nyxid__get_settings`, `nyxid__update_settings` and
+`nyxid__settings_link`; specialists and guests cannot use this owner lane.
+`get_settings` is Read and returns panel settings, numeric server bounds and
+section URLs, without voice preferences or the legacy approval switch. The
+`settings_link` accepts optional `section` for NyxBot settings, Account Settings
+(and its existing category areas), agent details, Billing and Usage. Each area has
+a closed vocabulary drift-tested against the frontend; cross-area and unknown
+sections reject validation. Omitting it preserves the existing destination.
+Sections add links only: account security, profile, billing and agent overrides
+keep their existing human actions. Pages contain related forms or lists; short
+choices edit inline. Permissions includes specialist requests, Tasks all five
+limits, and Automations timezone/budgets. Removed section IDs reject tool
+validation; old browser URLs normalize to a surviving ancestor. See the
+[frontend navigation contract](05-frontend-ui.md#account-agent-and-billing-section-navigation).
+
+`update_settings` is a Change under the existing permission classifier. It
+accepts a nonempty partial panel patch, uses REST validation and server bounds,
+and audits actual changes through the shared settings audit service. See the
+[orchestrator contract](09-nyxbot-orchestrator.md#owner-settings-tool-contract)
+for fields, sparse push updates and authority restrictions. Only owner-requested
+changes belong in the prompt. NyxBot can tighten its approval mode or deny
+specialist requests; widening authority returns a stable error and owner page
+URL before any write or confirmation card. Per-agent overrides remain human-only.
+
+The owner live stream watches `assistant_settings` and emits an identifier-free
+`settings` frame only to that row's owner. The frontend invalidates the owner
+settings query, preserving dirty drafts while refreshing pristine fields. This
+also covers a panel opened over a workspace page without an active chat.

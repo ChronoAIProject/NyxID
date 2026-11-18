@@ -1,3 +1,5 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
+import { Button } from "@/components/ui/button";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import type { UserAllowanceBalance } from "@/schemas/billing-credits";
@@ -28,10 +30,11 @@ export function BillingAllowanceBenefits({
     const id = balance.allowance.service_id;
     services.set(id, [...(services.get(id) ?? []), balance]);
   }
+  const visible = useCappedItems([...services], 3);
   return (
     <div className="compact-benefits">
       <section className="benefit-section">
-        {[...services].map(([id, balances]) => {
+        {visible.items.map(([id, balances]) => {
           const slug = balances[0]!.allowance.service_slug;
           const units = new Map<string, typeof balances>();
           for (const balance of balances) {
@@ -145,6 +148,7 @@ export function BillingAllowanceBenefits({
           <p className="empty-inline">{translateUi("No free usage allowances.")}</p>
         )}
       </section>
+      {visible.remaining > 0 && <Button variant="ghost" onClick={visible.showAll}>{translateUi("Show all")}</Button>}
     </div>
   );
 }

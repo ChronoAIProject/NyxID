@@ -7,9 +7,9 @@ describe("account panel search", () => {
   it.each([undefined, null, "invalid", ["billing"], 1])("ignores invalid panel %s", (panel) => {
     expect(parseAccountPanelSearch({ panel, panelTab: "security" })).toEqual({});
   });
-  it("uses shared settings validation and defaults invalid tabs", () => {
+  it("uses shared settings validation and drops unknown sections", () => {
     expect(parseAccountPanelSearch({ panel: "settings", panelTab: "security", tab: "logins" })).toEqual({ panel: "settings", panelTab: "security" });
-    expect(parseAccountPanelSearch({ panel: "settings", panelTab: "invalid" })).toEqual({ panel: "settings", panelTab: "profile" });
+    expect(parseAccountPanelSearch({ panel: "settings", panelTab: "invalid" })).toEqual({ panel: "settings" });
     expect(parseAccountPanelSearch({ panel: "settings", panelTab: ["security"] })).toEqual({ panel: "settings" });
   });
   it("delegates every billing field to its schema exactly", () => {
@@ -25,4 +25,20 @@ describe("account panel search", () => {
     expect(withoutAccountPanel({ ...parsed })).toEqual({ tab: "logins", machine: "n", mock: 1 });
     expect(parseAssistantSearch({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" })).toEqual({ c: "chat", draft: true, agent: "agent", g: "group", mock: 1, panel: "nyxbot" });
   });
+});
+
+it.each([undefined, null, "", "tasks/", "/tasks", "unknown", "TASKS", ["tasks"], 1, "permissions%2Fspecialists"])("drops malformed or unknown NyxBot section %j", (panelTab) => {
+  expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab })).toEqual({ panel: "nyxbot" });
+});
+
+it("preserves every typed NyxBot section and ignores unnamespaced tabs", async () => {
+  const { NYXBOT_SETTINGS_SECTIONS } = await import("./nyxbot-settings-sections");
+  for (const panelTab of NYXBOT_SETTINGS_SECTIONS) {
+    expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab, tab: "security" })).toEqual({ panel: "nyxbot", panelTab });
+  }
+});
+
+it("keeps a surviving ancestor for a removed or unknown NyxBot descendant", () => {
+  for (const panelTab of ["tasks/extra", "tasks/specialists", "tasks/groups"])
+    expect(parseAccountPanelSearch({ panel: "nyxbot", panelTab })).toEqual({ panel: "nyxbot", panelTab: "tasks" });
 });

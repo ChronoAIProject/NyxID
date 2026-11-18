@@ -1,3 +1,4 @@
+import { useAgentDetailsNavigation } from "@/hooks/use-agent-details-navigation";
 import { TextBlock } from "./blocks/text-block";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -777,7 +778,7 @@ function NyxAgentThreadPage() {
   const agents = useNyxBotAgents();
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
-  const [detailsAgentId, setDetailsAgentId] = useState<string>();
+  const { open: openAgentDetails, close: closeAgentDetails } = useAgentDetailsNavigation();
   const [creating, setCreating] = useState<"agent" | "group">();
   // The open thread's agent, else the agent in the URL, else NyxBot.
   const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
@@ -786,7 +787,6 @@ function NyxAgentThreadPage() {
   // Names the exact linked agent even when it is not in the list.
   const linkedDetails = Boolean(search.details || search.proposal);
   const openDetailsAgentId =
-    detailsAgentId ??
     (linkedDetails ? (search.agent ?? threadAgent?.id ?? selectedAgent?.id) : undefined);
 
   const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
@@ -860,6 +860,7 @@ function NyxAgentThreadPage() {
         ...(search.proposal ? { proposal: search.proposal } : {}),
         ...(search.mock ? { mock: 1 as const } : {}),
       }),
+      state: previous => previous,
       replace: true,
     });
   }, [
@@ -876,7 +877,7 @@ function NyxAgentThreadPage() {
     search.proposal,
   ]);
 
-  function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
+  function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string; details?: import("@/lib/assistant/agent-details-sections").AgentDetailsSection }) {
     void navigateWithBuildUpdate(() => navigate({
       to: "/assistant",
       search: { ...next, ...(search.mock ? { mock: 1 } : {}) },
@@ -1069,7 +1070,7 @@ function NyxAgentThreadPage() {
         agentId={headerAgent?.id}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
-        onOpenDetails={headerAgent ? () => setDetailsAgentId(headerAgent.id) : undefined}
+        onOpenDetails={headerAgent ? () => openAgentDetails(headerAgent.id) : undefined}
         title={desktop ? chat.session.title : undefined}
         titleKey={selectedId}
         onRenameTitle={
@@ -1082,7 +1083,7 @@ function NyxAgentThreadPage() {
             <CmaSessionIndicator conversationId={machineConversation} />
             {machineToggle}
             {selectedId ? (
-              <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
+              <WorkingContextPanel conversationId={selectedId} onManageMemory={openAgentDetails} onReset={() => void chat.refreshHistory()} />
             ) : null}
           </>
         ) : undefined}
@@ -1144,19 +1145,17 @@ function NyxAgentThreadPage() {
           open={openDetailsAgentId !== undefined}
           onOpenChange={(open) => {
             if (!open) {
-              setDetailsAgentId(undefined);
               // Closing a linked sheet drops its URL state (push, like the
               // account panels, so Back after an explicit close reopens it).
               if (linkedDetails)
-                navigateTo({
+                closeAgentDetails(() => navigateTo({
                   c: search.c,
                   agent: search.agent,
                   draft: search.draft ? true : undefined,
-                });
+                }));
             }
           }}
           onDeleted={() => {
-            setDetailsAgentId(undefined);
             navigateTo({});
           }}
         />
@@ -1211,7 +1210,7 @@ function NyxAgentThreadPage() {
             onNewAgent={() => setCreating("agent")}
             onManageMemory={() => {
               const nyxbot = nyxBotOf(agents.data?.agents);
-              if (nyxbot) setDetailsAgentId(nyxbot.id);
+              if (nyxbot) openAgentDetails(nyxbot.id);
             }}
             nextSteps={onboarding.data?.suggestions_hidden ? undefined : onboarding.data?.recommendations}
             onStartNextStep={startNextStep}

@@ -1,3 +1,6 @@
+import { useCappedItems } from "@/hooks/use-capped-items";
+import type { TriggerResponse } from "@/schemas/triggers";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
@@ -13,15 +16,13 @@ import {
 import { Link } from "@tanstack/react-router";
 import { TimezoneSelect } from "@/components/shared/timezone-select";
 import { browserTimezone, formatAutomationTime } from "@/lib/automation-time";
+import { AUTOMATION_BUDGET_ROWS, AUTOMATION_TIMEZONE_LABEL } from "@/lib/assistant/nyxbot-settings-fields";
 import {
   DEFAULT_SCHEDULE_MINIMUM_MINUTES,
-  SCHEDULE_MINIMUM_MINUTES_LIMIT,
   DEFAULT_TRIGGER_RUNS_PER_HOUR,
-  TRIGGER_RUNS_PER_HOUR_LIMIT,
   DEFAULT_TRIGGER_RUNS_PER_DAY,
-  TRIGGER_RUNS_PER_DAY_LIMIT,
 } from "@/lib/automation-limits";
-import { useId, useState } from "react";
+import { useContext, useEffect, useId, useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTriggers } from "@/hooks/use-triggers";
 import {
@@ -45,22 +46,11 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
     triggers.data?.triggers.filter(
       (t) => t.delivery.type === "assistant" && t.delivery.agent_id === agentId,
     ) ?? [];
+  const visible = useCappedItems(rows, 3);
   return (
-    <GroupedList title={translateUi("Automations")}>
-      {rows.map((row) => (
-        <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
-          <Link to="/assistant/automations" search={{ agent: agentId }}>
-            <span className="min-w-0 flex-1 break-words">{row.label}</span>
-            <span className="text-13 text-text-tertiary">
-              {row.status === "active"
-                ? row.source === "webhook" ? translateUi("Runs on webhook events") : row.next_run_at
-                  ? formatAutomationTime(row.next_run_at, settings.data?.timezone ?? browserTimezone())
-                  : translateUi("No run scheduled")
-                : translateUi("Paused")}
-            </span>
-          </Link>
-        </GroupedRow>
-      ))}
+    <GroupedList>
+      {visible.items.map(row => <AutomationRow key={row.id} row={row} timezone={settings.data?.timezone} agentId={agentId} />)}
+      {visible.remaining > 0 && <GroupedRow asChild interactive><button type="button" onClick={visible.showAll}>{translateUi("Show all")}</button></GroupedRow>}
       <GroupedRow search={{ id: "manage-automations", title: `Manage automations (${rows.length})`, breadcrumb: "Overview › Automations" }} asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
           <span className="flex-1">{translateUi("Manage automations (")}{rows.length})</span>
@@ -74,30 +64,70 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
   );
 }
 
-export function AutomationPreferences({ title = "Automations" }: { readonly title?: string }) {
+/** Shared saved status and destination for global and per-agent lists. */
+export function AutomationRow({ row, timezone, agentId }: { readonly row: TriggerResponse; readonly timezone?: string | null; readonly agentId?: string }) {
+  useUiTranslation();
+  return <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} asChild interactive>
+    <Link to="/assistant/automations" search={agentId ? { agent: agentId } : {}}>
+      <span className="min-w-0 flex-1 break-words">{row.label}</span>
+      <span className="text-13 text-text-tertiary">
+        {row.status === "active"
+          ? row.source === "webhook" ? translateUi("Runs on webhook events") : row.next_run_at
+            ? formatAutomationTime(row.next_run_at, timezone ?? browserTimezone())
+            : translateUi("No run scheduled")
+          : translateUi("Paused")}
+      </span>
+    </Link>
+  </GroupedRow>;
+}
+
+export function AutomationPreferences({
+  title = "Automations",
+  detail = false,
+}: {
+  readonly title?: string;
+  readonly detail?: boolean;
+}) {
   useUiTranslation();
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
   const guard = useGroupedDraftGuard();
+  const owner = useContext(GroupedDraftOwnerContext);
+  const loadError = settings.error ? <ErrorBanner message={translateUi("Could not load settings. {{value1}}", { value1: settings.error.message })} onRetry={() => void settings.refetch()} /> : undefined;
   return (
     <div className="max-w-2xl space-y-6 text-14">
-      <GroupedList title={title}>
-        <GroupedDisclosure
-          aria-expanded={open}
-          onClick={async () => {
-            if (
-              !open ||
-              !guard ||
-              (await guard.confirmDiscard("automation-preferences"))
-            )
-              setOpen(!open);
-          }}
-        >{translateUi("Timezone and automation budgets")}</GroupedDisclosure>
-      </GroupedList>
-      {open && settings.data && (
-        <GroupedDraftOwnerContext value="automation-preferences">
-          <AutomationPreferencesForm
+      {!detail && (
+        <GroupedList title={translateUi(title)}>
+          <GroupedDisclosure
+            aria-expanded={open}
+            onClick={async () => {
+              if (
+                !open ||
+                !guard ||
+                (await guard.confirmDiscard("automation-preferences"))
+              )
+                setOpen(!open);
+            }}
+          >
+            {translateUi("Timezone and automation budgets")}
+          </GroupedDisclosure>
+        </GroupedList>
+      )}
+      {(detail || open) && settings.isPending && (
+        <GroupedList>
+          <GroupedRow
+            role="status"
+            title={translateUi("Loading settings...")}
+          />
+        </GroupedList>
+      )}
+      {(detail || open) && settings.error && !settings.data && <GroupedList footer={loadError} />}
+      {(detail || open) && settings.data && (
+        <GroupedDraftOwnerContext
+          value={detail ? owner : "automation-preferences"}
+        >
+          <AutomationPreferencesForm loadError={loadError}
             timezone={settings.data.timezone ?? browserTimezone()}
             minimum={
               settings.data.schedule_minimum_minutes ??
@@ -111,7 +141,7 @@ export function AutomationPreferences({ title = "Automations" }: { readonly titl
             }
             save={async (v) => {
               await update.mutateAsync(v);
-              setOpen(false);
+              if (!detail) setOpen(false);
             }}
           />
         </GroupedDraftOwnerContext>
@@ -125,17 +155,19 @@ function AutomationPreferencesForm({
   hourly,
   daily,
   save,
+  loadError,
 }: {
+  readonly loadError?: ReactNode;
   readonly timezone: string;
   readonly minimum: number;
   readonly hourly: number;
   readonly daily: number;
-  readonly save: (v: {
+  readonly save: (v: Partial<{
     timezone: string;
     schedule_minimum_minutes: number;
     trigger_runs_per_hour: number;
     trigger_runs_per_day: number;
-  }) => Promise<void>;
+  }>) => Promise<void>;
 }) {
   useUiTranslation();
   const id = useId();
@@ -149,10 +181,14 @@ function AutomationPreferencesForm({
     },
   });
   const [error, setError] = useState<string>();
+  const { reset } = form;
+  useEffect(() => {
+    reset({ timezone, schedule_minimum_minutes: minimum, trigger_runs_per_hour: hourly, trigger_runs_per_day: daily }, { keepDirtyValues: true });
+  }, [timezone, minimum, hourly, daily, reset]);
   const submit = form.handleSubmit(async (v) => {
     setError(undefined);
     try {
-      await save(v);
+      await save(Object.fromEntries(Object.entries(v).filter(([key]) => form.formState.dirtyFields[key as keyof typeof v])));
       form.reset(v);
     } catch (e) {
       setError(message(e));
@@ -163,45 +199,25 @@ function AutomationPreferencesForm({
       <GroupedList
         title={translateUi("Timezone and automation budgets")}
         footer={
-          error && (
+          <>{loadError}{error && (
             <p role="alert" className="text-destructive">
               {translateUi(error)}
             </p>
-          )
+          )}</>
         }
       >
         <TimezoneSelect
+          label={AUTOMATION_TIMEZONE_LABEL}
           grouped
           describedBy={`${id}-timezone-error`}
           invalid={Boolean(form.formState.errors.timezone)}
           value={form.watch("timezone")}
           onChange={(value) => form.setValue("timezone", value)}
         />
-        {(
-          [
-            [
-              "schedule_minimum_minutes",
-              "Minimum interval (minutes)",
-              DEFAULT_SCHEDULE_MINIMUM_MINUTES,
-              SCHEDULE_MINIMUM_MINUTES_LIMIT,
-            ],
-            [
-              "trigger_runs_per_hour",
-              "Runs per hour",
-              1,
-              TRIGGER_RUNS_PER_HOUR_LIMIT,
-            ],
-            [
-              "trigger_runs_per_day",
-              "Runs per day",
-              1,
-              TRIGGER_RUNS_PER_DAY_LIMIT,
-            ],
-          ] as const
-        ).map(([key, label, min, max]) => (
+        {AUTOMATION_BUDGET_ROWS.map(([key, label, min, max]) => (
           <GroupedRow key={key} asChild>
             <Label>
-              <span className="flex-1">{label}</span>
+              <span className="flex-1">{translateUi(label)}</span>
               <GroupedInput
                 className="w-20 text-right"
                 type="number"
@@ -223,7 +239,7 @@ function AutomationPreferencesForm({
         </GroupedFooter>
       </GroupedList>
       <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "timezone", label: "Timezone" }, { key: "schedule_minimum_minutes", label: "Minimum interval (minutes)" }, { key: "trigger_runs_per_hour", label: "Runs per hour" }, { key: "trigger_runs_per_day", label: "Runs per day" }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "timezone", label: AUTOMATION_TIMEZONE_LABEL }, ...AUTOMATION_BUDGET_ROWS.map(([key, label]) => ({ key, label }))])}
         label={translateUi("automation preferences")}
         dirty={form.formState.isDirty}
         pending={form.formState.isSubmitting}

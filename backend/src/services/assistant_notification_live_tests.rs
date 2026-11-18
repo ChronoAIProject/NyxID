@@ -91,3 +91,45 @@ async fn notification_stream_projects_content_and_routes_visible_changes_only_to
     drop(stream);
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn settings_stream_projects_no_preferences_and_routes_only_to_owner() {
+    let db = crate::test_utils::connect_transaction_test_database("nyxbot_settings_live").await;
+    let mut stream = db
+        .watch()
+        .pipeline(pipeline())
+        .full_document(FullDocumentType::UpdateLookup)
+        .await
+        .unwrap();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let rows = db.collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME);
+    rows.insert_one(doc! {"_id":&owner,"timezone":"private-zone","voice":{"secret":"private"}})
+        .await
+        .unwrap();
+    let change = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        !change
+            .full_document
+            .as_ref()
+            .is_some_and(|full| full.contains_key("timezone") || full.contains_key("voice"))
+    );
+    let expected = LiveEvent::Settings {
+        user_id: owner.clone(),
+    };
+    assert_eq!(decode(&change), Some(expected.clone()));
+    let live = AssistantLive::new();
+    let mut recipient = live.subscribe_owner(&owner).unwrap();
+    let mut other = live.subscribe_owner("someone-else").unwrap();
+    live.publish(expected.clone());
+    assert_eq!(recipient.events.try_recv().unwrap(), expected);
+    assert!(other.events.try_recv().is_err());
+    let mut deleted = change;
+    deleted.operation_type = OperationType::Delete;
+    assert_eq!(decode(&deleted), None);
+    drop(stream);
+    db.drop().await.unwrap();
+}

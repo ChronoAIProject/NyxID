@@ -1,3 +1,4 @@
+import { assistantAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
 import { ASSISTANT_SHELL_ROUTES, withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
 import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import type { ComponentProps, ReactNode } from "react";
@@ -16,8 +17,11 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { router as appRouter } from "@/router";
+import { appI18n } from "@/i18n/instance";
+import { translateUi } from "@/i18n/use-ui-translation";
+import zhCN from "@/i18n/locales/app/zh-CN";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import {
@@ -36,6 +40,7 @@ const state = vi.hoisted(() => ({
   mockUser: {} as User,
   logout: vi.fn(),
   walletPending: false,
+  agents: [] as AssistantAgent[],
 }));
 const person: User = {
   id: "person",
@@ -64,6 +69,11 @@ const query = (data: unknown) => ({
   isError: false,
   refetch: vi.fn(),
 });
+vi.mock("@/hooks/use-nyxbot-agents", async importOriginal => ({
+  ...await importOriginal<typeof import("@/hooks/use-nyxbot-agents")>(),
+  useNyxBotAgents: () => query({ agents: state.agents }),
+  useNyxBotChannels: () => query([]),
+}));
 vi.mock("@/hooks/use-billing", () => ({
   BILLING_INVOICES_PAGE_SIZE: 10,
   useCurrentBill: () => query(undefined),
@@ -179,6 +189,7 @@ const originalAuth = useAuthStore.getState();
 beforeEach(() => {
   state.mock = false;
   state.walletPending = false;
+  state.agents = [];
   useCreditsDenialStore.getState().reset();
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(input instanceof Request ? input.url : String(input), "http://localhost").pathname;
@@ -194,8 +205,9 @@ beforeEach(() => {
     user: person,
   });
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await appI18n.changeLanguage("en");
   useAuthStore.setState(originalAuth);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -216,6 +228,10 @@ async function open(path: string) {
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  onTestFinished(async () => {
+    await client.cancelQueries();
+    client.clear();
+  });
   await act(() => router.load());
   await act(() => vi.dynamicImportSettled());
   return router;
@@ -374,13 +390,22 @@ for (const nyxagent of [true, false]) {
     setEngine(nyxagent);
     const router = await open(`/assistant/plugins?panel=${panel}&panelTab=${panelTab}`);
     const dialog = await screen.findByRole("dialog", { name: title });
-    expect(within(dialog).getByRole("tab", { name: tab })).toHaveAttribute("data-state", "active");
+    if (panel === "settings") expect(within(dialog).getByRole("heading", { name: tab })).toBeVisible();
+    else expect(within(dialog).getByRole("tab", { name: tab })).toHaveAttribute("data-state", "active");
     expect(screen.getByRole("heading", { name: "Plugins workspace content", hidden: true })).toBeInTheDocument();
     expect(screen.getByTestId(`sidebar-${nyxagent ? "nyxagent" : "actor"}`)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Account menu", hidden: true })).toHaveClass("bg-overlay-strong");
     expect(router.state.location.pathname).toBe("/assistant/plugins");
   });
 }
+
+it.each(["display", "display/layout", "display/colors"])("keeps the Account Settings dialog name while the %s peer view is titled Display", async section => {
+  await open(`/assistant/plugins?panel=settings&panelTab=${section}`);
+  const dialog = await screen.findByRole("dialog", { name: "Account Settings" });
+  expect(within(dialog).getByRole("heading", { name: "Display" })).toBeVisible();
+  const segment = section === "display" ? "Appearance" : section === "display/layout" ? "Layout" : "Colors";
+  expect(within(dialog).getByRole("tab", { name: segment })).toHaveAttribute("data-state", "active");
+});
 
 it.each([false, undefined])("strips unavailable billing capability %s with replace", async (billing_available) => {
   useAuthStore.setState({ user: { ...person, capabilities: { billing_available } } });
@@ -492,9 +517,9 @@ it("hides Billing and Usage when unavailable", async () => {
   expect(screen.queryByRole("menuitem", { name: "Usage" })).not.toBeInTheDocument();
 });
 
-it.each(["unknown", "%5B%22security%22%5D"])("uses the Settings Profile fallback for panelTab=%s", async (tab) => {
+it.each(["unknown", "%5B%22security%22%5D"])("uses the Settings root fallback for panelTab=%s", async (tab) => {
   await open(`/assistant?panel=settings&panelTab=${tab}`);
-  expect(await screen.findByRole("tab", { name: "Profile" })).toHaveAttribute("data-state", "active");
+  expect(await screen.findByRole("button", { name: /^Profile/ })).toBeVisible();
 });
 
 it("restores focus to the account menu after closing", async () => {
@@ -570,19 +595,41 @@ it.each([
   await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
   const dialog = await screen.findByRole("dialog", { name: "Account Settings" });
   expect(router.state.location.search).toMatchObject(initial);
-  await userEvent.click(within(dialog).getByRole("tab", { name: "Security" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: /^Security/ }));
   await waitFor(() => expect(router.state.location.search).toMatchObject({ ...initial, panel: "settings", panelTab: "security" }));
   expect(router.history.length).toBe(2);
   await act(() => router.history.back());
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(router.state.location.search).toEqual(initial);
   await act(() => router.history.forward());
-  await screen.findByRole("dialog", { name: "Account Settings" });
+  const reopened = await screen.findByRole("dialog", { name: "Account Settings" });
+  expect(within(reopened).getByRole("heading", { name: "Security" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(router.state.location.search).toEqual(initial));
   expect(router.history.length).toBe(3);
   await act(() => router.history.back());
-  expect(await screen.findByRole("dialog", { name: "Account Settings" })).toBeVisible();
+  const back = await screen.findByRole("dialog", { name: "Account Settings" });
+  expect(back).toBeVisible();
+  expect(within(back).getByRole("heading", { name: "Security" })).toBeVisible();
+});
+
+it("pushes Billing opening and tabs while section navigation keeps Back-to-close", async () => {
+  const router = await open("/assistant?c=chat");
+  await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Billing" }));
+  const panel = await screen.findByRole("dialog", { name: "Billing & Usage" });
+  expect(router.history.length).toBe(2);
+  await userEvent.click(within(panel).getByRole("button", { name: "Benefits & allowances" }));
+  expect(router.history.length).toBe(2);
+  await act(() => router.history.back());
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(router.state.location.search).toEqual({ c: "chat" });
+  await act(() => router.history.forward());
+  expect(await screen.findByRole("dialog", { name: "Benefits & allowances" })).toBeVisible();
+  await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+  expect(router.history.length).toBe(3);
+  await act(() => router.history.back());
+  expect(await screen.findByRole("dialog", { name: "Benefits & allowances" })).toBeVisible();
 });
 
 it("consumes pending top-up before close so Back cannot replay after wallet resolution", async () => {
@@ -648,3 +695,87 @@ it.each(["settings", "billing", "nyxbot"])("preserves signed-out %s deep links i
   expect(router.state.location.search).toMatchObject({ panel });
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
+
+it.each(ASSISTANT_SHELL_ROUTES)("retains nested NyxBot addressing over %s", async (route) => {
+  const path = route.replace("$machineId", "machine-1");
+  const router = await open(`${path}?panel=nyxbot&panelTab=tasks`);
+  expect(await screen.findByRole("dialog", { name: "Tasks & specialists" })).toBeVisible();
+  expect(router.state.location.search).toMatchObject({ panel: "nyxbot", panelTab: "tasks" });
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(router.state.location.search.panel).toBeUndefined());
+  expect(router.state.location.pathname).toBe(path);
+});
+
+it("searches NyxBot section keywords and opens the exact nested page", async () => {
+  const router = await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  const search = await screen.findByRole("combobox");
+  await userEvent.type(search, "timezone");
+  await userEvent.click(await screen.findByRole("option", { name: /Automations NyxBot settings/ }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "automations" }));
+  expect(router.state.location.pathname).toBe("/assistant/plugins");
+});
+
+it("excludes disabled adapter settings from assistant search", async () => {
+  await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  await userEvent.type(await screen.findByRole("combobox"), "Adapter bindings");
+  expect(screen.queryByRole("option", { name: /Adapter bindings/ })).not.toBeInTheDocument();
+});
+
+it("excludes unavailable push settings from assistant search", async () => {
+  await open("/assistant/plugins");
+  await userEvent.click(screen.getAllByRole("button", { name: "Search" })[0]!);
+  await userEvent.type(await screen.findByRole("combobox"), "push");
+  expect(screen.queryByRole("option", { name: /Notifications.*NyxBot settings/ })).not.toBeInTheDocument();
+});
+
+// Completeness lives in settings-search.test.ts. Keep the router contract fixed:
+// one selection per fresh workspace, regardless of how many settings are added.
+const SEARCH_JOURNEY_TIMEOUT = 15_000;
+const scout = () => assistantAgentSchema.parse({ id: "scout", name: "Scout", kind: "specialist", status: "idle", created_at: "2026-01-01T00:00:00Z", last_active_at: "2026-01-01T00:00:00Z" });
+async function searchWorkspace(language = "en") {
+  appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+  await appI18n.changeLanguage(language);
+  state.agents = [scout()];
+  const router = await open("/assistant/plugins");
+  await screen.findByRole("heading", { name: "Plugins workspace content" });
+  const user = userEvent.setup({ delay: null });
+  await user.click(screen.getAllByRole("button", { name: translateUi("Search") })[0]!);
+  const dialog = await screen.findByRole("dialog", { name: translateUi("Search") });
+  const input = await within(dialog).findByRole("combobox");
+  return { router, user, dialog, input };
+}
+it.each([
+  { surface: "NyxBot consolidated Tasks", label: "Specialists working at once", title: "Tasks & specialists", hint: "NyxBot settings", address: { panel: "nyxbot", panelTab: "tasks" } },
+  { surface: "Account nested Display view", label: "Maximum composer height", title: "Layout", hint: "Account Settings", address: { panel: "settings", panelTab: "display/layout" } },
+  { surface: "Billing bill", label: "Past usage invoices", title: "This period's bill", hint: "Billing & Usage", address: { panel: "billing", panelTab: "billing", panelSection: "billing/bill" } },
+  { surface: "agent consolidated Overview", label: "Channel progress reply", title: "Overview", hint: "Scout", address: { agent: "scout", details: "overview" } },
+  { surface: "agent nested Voice", label: "Voice instructions", title: "Voice", hint: "Scout", address: { agent: "scout", details: "overview/voice" } },
+])("opens $surface from its rendered search label", async ({ label, title, hint, address }) => {
+  const { router, user, dialog, input } = await searchWorkspace();
+  await user.type(input, label);
+  await user.click(await within(dialog).findByRole("option", { name: `${title} ${hint}` }));
+  await waitFor(() => expect(router.state.location.search).toEqual(address));
+  expect(screen.queryByRole("dialog", { name: "Search" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
+
+it("opens the exact NyxBot section from a rendered setting label in zh-CN", async () => {
+  const { router, user, dialog, input } = await searchWorkspace("zh-CN");
+  await user.type(input, translateUi("Automatic task continuations"));
+  await user.click(await within(dialog).findByRole("option", { name: `${translateUi("Tasks & specialists")} ${translateUi("NyxBot settings")}` }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ panel: "nyxbot", panelTab: "tasks" }));
+  expect(screen.queryByRole("dialog", { name: translateUi("Search") })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
+
+it("omits a disabled push setting from workspace search", async () => {
+  const { user, dialog, input } = await searchWorkspace();
+  await user.type(input, "Automation results");
+  expect(within(dialog).queryByRole("option", { name: "Notifications NyxBot settings" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);
+
+it("omits a gated agent setting from workspace search", async () => {
+  const { user, dialog, input } = await searchWorkspace();
+  await user.type(input, "Device voice");
+  expect(within(dialog).queryByRole("option", { name: "Access Scout" })).not.toBeInTheDocument();
+}, SEARCH_JOURNEY_TIMEOUT);

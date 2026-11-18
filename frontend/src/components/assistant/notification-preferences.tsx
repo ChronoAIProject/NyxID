@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -11,7 +11,8 @@ import {
 } from "@/components/ui/form";
 import { GroupedField as FormItem } from "@/components/ui/grouped-fields";
 import { GroupedFormActions } from "@/components/ui/grouped-form";
-import { GroupedList } from "@/components/ui/grouped-list";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Switch } from "@/components/ui/switch";
 import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
 import { useNyxBotSettings, useUpdateNyxBotSettings } from "@/hooks/use-nyxbot-agents";
@@ -36,18 +37,25 @@ export function NotificationPreferences() {
   useUiTranslation();
   const enabled = useNotificationsEnabled();
   const settings = useNyxBotSettings(enabled);
-  if (!enabled || !settings.data) return null;
-  return (
-    <NotificationPreferencesForm
-      key={JSON.stringify(settings.data.notifications?.push ?? DEFAULT_NOTIFICATION_PUSH)}
+  if (!enabled) return null;
+  const loadError = settings.error ? <ErrorBanner
+    message={translateUi("Could not load settings. {{value1}}", { value1: settings.error.message })}
+    onRetry={() => void settings.refetch()}
+  /> : undefined;
+  return settings.data ? (
+    <NotificationPreferencesForm loadError={loadError}
       defaults={settings.data.notifications?.push ?? DEFAULT_NOTIFICATION_PUSH}
     />
-  );
+  ) : <GroupedList footer={loadError}>
+    {settings.isPending && <GroupedRow role="status" title={translateUi("Loading settings...")} />}
+  </GroupedList>;
 }
 
 function NotificationPreferencesForm({
   defaults,
+  loadError,
 }: {
+  readonly loadError?: ReactNode;
   readonly defaults: NotificationPushPreferences;
 }) {
   useUiTranslation();
@@ -57,6 +65,8 @@ function NotificationPreferencesForm({
     defaultValues: defaults,
   });
   const [error, setError] = useState<string>();
+  const { reset } = form;
+  useEffect(() => { reset(defaults, { keepDirtyValues: true }); }, [defaults, reset]);
 
   async function save(values: NotificationPushPreferences) {
     setError(undefined);
@@ -77,7 +87,6 @@ function NotificationPreferencesForm({
         className="space-y-6"
       >
         <GroupedList
-          title={translateUi("Notifications")}
           footer={
             <>
               <p>
@@ -86,6 +95,7 @@ function NotificationPreferencesForm({
               <p>
                 {translateUi("Chat delivery of an automation's result is chosen per automation, not here.")}
               </p>
+              {loadError}
               {error ? (
                 <p role="alert" className="text-destructive">
                   {error}

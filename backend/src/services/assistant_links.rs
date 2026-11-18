@@ -5,6 +5,54 @@ pub const AGENT_DETAILS_SKILLS: &str = "skills";
 /// The agent's Chats settings (channel bots and their chats).
 pub const AGENT_DETAILS_CHANNELS: &str = "channels";
 
+pub const NYXBOT_SETTINGS_SECTIONS: &[&str] = &[
+    "permissions",
+    "tasks",
+    "automations",
+    "notifications",
+    "channels",
+    "channels/adapters",
+    "channels/links",
+];
+
+pub const AGENT_DETAILS_SECTIONS: &[&str] = &[
+    "overview",
+    "overview/persona",
+    "overview/voice",
+    "overview/automations",
+    "grants",
+    "grants/services",
+    "grants/machines",
+    "grants/connections",
+    "skills",
+    "memory",
+    "channels",
+];
+
+pub const ACCOUNT_SETTINGS_SECTIONS: &[&str] = &[
+    "profile",
+    "security",
+    "security/delete",
+    "sessions",
+    "mcp",
+    "display",
+    "display/layout",
+    "display/colors",
+    "privacy",
+];
+
+pub const BILLING_SECTIONS: &[&str] = &[
+    "billing",
+    "billing/topup",
+    "billing/benefits",
+    "billing/bill",
+    "billing/machines",
+    "billing/activity",
+    "usage",
+    "usage/charts",
+    "usage/explorer",
+];
+
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
     Agent {
@@ -24,16 +72,19 @@ pub enum AssistantPage<'a> {
     Settings {
         tab: &'a str,
     },
-    NyxBotSettings,
+    NyxBotSettings {
+        section: Option<&'a str>,
+    },
     ReviewCard {
         conversation: &'a str,
         card: &'a str,
     },
     Billing {
         tab: &'a str,
+        section: Option<&'a str>,
     },
-    /// An agent's details sheet, opened on one section; the frontend ignores
-    /// other values and opens nothing.
+    /// An agent's details sheet, opened on a tab or slash-separated section.
+    /// The frontend normalizes unknown paths to their nearest known ancestor.
     AgentDetails {
         agent: &'a str,
         tab: &'a str,
@@ -100,14 +151,20 @@ impl AssistantPage<'_> {
                     .append_pair("card", card);
                 "/assistant".into()
             }
-            Self::NyxBotSettings => {
+            Self::NyxBotSettings { section } => {
                 query.append_pair("panel", "nyxbot");
+                if let Some(section) = section {
+                    query.append_pair("panelTab", section);
+                }
                 "/assistant".into()
             }
-            Self::Billing { tab } => {
+            Self::Billing { tab, section } => {
                 query
                     .append_pair("panel", "billing")
                     .append_pair("panelTab", tab);
+                if let Some(section) = section {
+                    query.append_pair("panelSection", section);
+                }
                 "/assistant".into()
             }
             Self::AgentDetails { agent, tab } => {
@@ -236,14 +293,20 @@ mod tests {
                 },
                 "/channel-bots?connect=telegram-new&request_id=a%26b",
             ),
-            (NyxBotSettings, "/assistant?panel=nyxbot"),
+            (NyxBotSettings { section: None }, "/assistant?panel=nyxbot"),
             (Approvals, "/assistant/approvals"),
             (
-                Billing { tab: "billing" },
+                Billing {
+                    tab: "billing",
+                    section: None,
+                },
                 "/assistant?panel=billing&panelTab=billing",
             ),
             (
-                Billing { tab: "usage" },
+                Billing {
+                    tab: "usage",
+                    section: None,
+                },
                 "/assistant?panel=billing&panelTab=usage",
             ),
             (
@@ -255,6 +318,7 @@ mod tests {
             (
                 Billing {
                     tab: "a&b c/中文+%",
+                    section: None,
                 },
                 "/assistant?panel=billing&panelTab=a%26b+c%2F%E4%B8%AD%E6%96%87%2B%25",
             ),
@@ -342,6 +406,125 @@ mod tests {
             assert_eq!(
                 page.url("https://nyxid.test/"),
                 format!("https://nyxid.test{path}")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    #[test]
+    fn nyxbot_sections_match_frontend_and_encode_links() {
+        let source =
+            include_str!("../../../frontend/src/lib/assistant/nyxbot-settings-sections.ts");
+        let list = source
+            .split("export const NYXBOT_SETTINGS_SECTIONS = [")
+            .nth(1)
+            .unwrap()
+            .split("] as const;")
+            .next()
+            .unwrap();
+        let frontend: Vec<&str> = list
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix("\","))
+            })
+            .collect();
+        assert_eq!(NYXBOT_SETTINGS_SECTIONS, frontend);
+        for section in NYXBOT_SETTINGS_SECTIONS {
+            let path = AssistantPage::NyxBotSettings {
+                section: Some(section),
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert_eq!(
+                url.query_pairs().find(|(k, _)| k == "panelTab").unwrap().1,
+                *section
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod clarity_section_tests {
+    use super::*;
+    fn frontend_sections(source: &str, name: &str) -> Vec<String> {
+        source
+            .split(&format!("export const {name} = ["))
+            .nth(1)
+            .unwrap()
+            .split("] as const;")
+            .next()
+            .unwrap()
+            .split(',')
+            .filter_map(|value| {
+                value
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+    #[test]
+    fn settings_section_vocabularies_match_frontend() {
+        assert_eq!(
+            AGENT_DETAILS_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/assistant/agent-details-sections.ts"),
+                "AGENT_DETAILS_SECTIONS"
+            )
+        );
+        assert_eq!(
+            ACCOUNT_SETTINGS_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/account-settings-sections.ts"),
+                "ACCOUNT_SETTINGS_SECTIONS"
+            )
+        );
+        assert_eq!(
+            BILLING_SECTIONS,
+            frontend_sections(
+                include_str!("../../../frontend/src/lib/billing-sections.ts"),
+                "BILLING_SECTIONS"
+            )
+        );
+    }
+    #[test]
+    fn detail_links_encode_sections_without_changing_legacy_tabs() {
+        for section in AGENT_DETAILS_SECTIONS {
+            let path = AssistantPage::AgentDetails {
+                agent: "a&b",
+                tab: section,
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "details" && value == *section)
+            );
+        }
+        for section in ACCOUNT_SETTINGS_SECTIONS {
+            let path = AssistantPage::Settings { tab: section }.path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "panelTab" && value == *section)
+            );
+        }
+        for section in BILLING_SECTIONS {
+            let path = AssistantPage::Billing {
+                tab: section.split('/').next().unwrap(),
+                section: Some(section),
+            }
+            .path();
+            let url = url::Url::parse(&format!("https://nyxid.test{path}")).unwrap();
+            assert!(
+                url.query_pairs()
+                    .any(|(key, value)| key == "panelSection" && value == *section)
             );
         }
     }

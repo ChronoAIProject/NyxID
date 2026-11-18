@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -137,12 +138,12 @@ export function BillingWalletBreakdown({
       <p className="type-secondary text-muted-foreground">{translateUi("Not all of your balance is spendable at any moment — requests in flight hold credits until they finish.")}</p>
       <div className="mt-3 space-y-1.5">
         <BreakdownRow
-          label={translateUi("Balance")}
+          label={translateUi(BILLING_FIELD_LABELS.purchasedCredits)}
           hint={translateUi("Last provider-synced balance")}
           value={formatCredits(wallet.balance ?? wallet.balance_credits)}
         />
         <BreakdownRow
-          label={translateUi("Reserved")}
+          label={translateUi(BILLING_FIELD_LABELS.reserved)}
           hint={translateUi("Held for requests in flight")}
           value={formatCredits(wallet.reserved ?? wallet.reserved_credits)}
         />
@@ -212,7 +213,7 @@ function AddCreditsDialog({
     <Button variant="primary" disabled={!billingReady || pending}>
       <ButtonIcon variant="primary">
         <Plus className="h-3 w-3" />
-      </ButtonIcon>{translateUi("Add credits")}</Button>
+      </ButtonIcon>{translateUi(BILLING_FIELD_LABELS.addCredits)}</Button>
   );
 
   if (!billingReady) {
@@ -231,7 +232,7 @@ function AddCreditsDialog({
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>{translateUi("Add credits")}</DialogTitle>
+          <DialogTitle>{translateUi(BILLING_FIELD_LABELS.addCredits)}</DialogTitle>
           <DialogDescription>{translateUi("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">

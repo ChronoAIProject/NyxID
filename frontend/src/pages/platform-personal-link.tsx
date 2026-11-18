@@ -1,3 +1,4 @@
+import { nyxBotSettingsHref } from "@/lib/assistant/nyxbot-settings-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
@@ -186,7 +187,7 @@ function PersonalLinkFlow({
           <p className="text-12 text-muted-foreground">
             {chat?.question_instruction}{translateUi(" Your dedicated ")}{chatName}{translateUi(" thread and approvals will be available in NyxID.")}</p>
           <Button asChild variant="primary">
-            <a href="/assistant?panel=nyxbot">{translateUi("Open NyxBot")}</a>
+            <a href={nyxBotSettingsHref("channels/links")}>{translateUi("Open NyxBot")}</a>
           </Button>
         </section>
       ) : denied ||

@@ -1,3 +1,4 @@
+import { BILLING_FIELD_LABELS } from "@/lib/billing-sections";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useTextSize } from "@/hooks/use-text-size";
@@ -307,7 +308,7 @@ export function BillingQuantityChart({
     <div className="usage-quantity-chart">
       <header>
         <div>
-          <h4>{translateUi("Quantity overview")}</h4>
+          <h4>{translateUi(BILLING_FIELD_LABELS.meteredQuantities)}</h4>
           <p className="fine-print">{translateUi("Totals for the selected billing period")}</p>
         </div>
       </header>

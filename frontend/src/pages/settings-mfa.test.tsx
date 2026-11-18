@@ -110,7 +110,6 @@ async function open(enabled = false) {
   await waitFor(() =>
     expect(toggle).toHaveAttribute("aria-checked", String(enabled)),
   );
-  await screen.findByText(/No active onboarding bindings/);
   return toggle;
 }
 async function beginVerification(toggle: HTMLElement) {

@@ -1435,9 +1435,12 @@ pub fn pause_notice(reason: &str, frontend: &str) -> String {
         reason,
         "insufficient_credits" | "wallet_suspended" | "plan_entitlement_required"
     ) {
-        AssistantPage::Billing { tab: "overview" }
+        AssistantPage::Billing {
+            tab: "overview",
+            section: None,
+        }
     } else {
-        AssistantPage::NyxBotSettings
+        AssistantPage::NyxBotSettings { section: None }
     };
     format!(
         "Automation paused: {} {}: {}. After fixing it, open {} and select Resume. Missed runs will not be replayed.",
@@ -1446,7 +1449,7 @@ pub fn pause_notice(reason: &str, frontend: &str) -> String {
         page.url(frontend),
         AssistantPage::Automations {
             setup: None,
-            agent: None
+            agent: None,
         }
         .url(frontend)
     )
