@@ -31,10 +31,17 @@ pub struct OnboardingStateResponse {
 /// User-scoped config / preferences surfaced on `GET /users/me`.
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
+    pub analytics: AnalyticsPreferencesResponse,
     pub security: SecurityPreferencesResponse,
     pub services_view: Option<ServiceViewResponse>,
     pub service_views: Option<ServiceViewsResponse>,
     pub onboarding: OnboardingStateResponse,
+}
+
+/// Prompt acknowledgement only; event admission still reads live consent.
+#[derive(Debug, Default, Serialize)]
+pub struct AnalyticsPreferencesResponse {
+    pub prompt_seen: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -823,6 +830,11 @@ pub async fn get_me(
         updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
+            analytics: AnalyticsPreferencesResponse {
+                prompt_seen: crate::services::analytics_consent_service::prompt_seen(
+                    &user_model.profile_config.analytics,
+                ),
+            },
             security: user_model.profile_config.security.into(),
             services_view: user_model.profile_config.services_view.map(Into::into),
             service_views: user_model.profile_config.service_views.map(Into::into),
@@ -1608,6 +1620,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1669,6 +1682,7 @@ mod tests {
             updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1721,6 +1735,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1774,6 +1789,7 @@ mod tests {
     #[test]
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
+            analytics: AnalyticsPreferencesResponse::default(),
             security: SecurityPreferencesResponse::default(),
             services_view: None,
             service_views: None,
@@ -1783,6 +1799,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["onboarding"].is_object());
+        assert_eq!(json["analytics"]["prompt_seen"], false);
         assert_eq!(
             json["onboarding"]["ai_services_completed_at"],
             "2025-01-01T00:00:00+00:00"
@@ -1920,6 +1937,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1989,6 +2007,7 @@ pub struct AnalyticsConsentResponse {
     pub diagnostics_available: bool,
     pub diagnostics_status: crate::services::crash_report_service::DiagnosticsStatus,
     pub account_id: String,
+    pub prompt_seen: bool,
     pub policy_version: Option<String>,
     pub revision: String,
     pub enabled: bool,
@@ -2015,6 +2034,7 @@ async fn analytics_consent_response(
                 == crate::services::crash_report_service::DiagnosticsStatus::Available,
             diagnostics_status: status,
             account_id: account_id.to_owned(),
+            prompt_seen: crate::services::analytics_consent_service::prompt_seen(&value),
             policy_version: value.policy_version,
             revision: value.revision,
             enabled: value.enabled,
@@ -2297,6 +2317,7 @@ mod analytics_tests {
         .await
         .unwrap();
         assert!(saved.enabled);
+        assert!(saved.prompt_seen);
         assert_eq!(saved.account_id, first);
         assert_eq!(
             saved.policy_version.as_deref(),

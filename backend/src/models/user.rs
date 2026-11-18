@@ -124,6 +124,14 @@ impl Default for SecurityPreferences {
 /// choices and DNT may narrow this account permission but never enable it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyticsConsent {
+    /// Whether the account has completed the one-time analytics prompt.
+    ///
+    /// This is separate from `enabled`: a declined account has still answered
+    /// the prompt and should not be shown the same prompt again on this
+    /// account. Legacy rows are treated as answered when they contain any of
+    /// the older consent markers.
+    #[serde(default)]
+    pub prompt_seen: bool,
     /// Policy recorded by the latest explicit choice; unknown for older rows.
     #[serde(default)]
     pub policy_version: Option<String>,
