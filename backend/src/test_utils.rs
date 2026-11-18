@@ -287,6 +287,12 @@ pub(crate) async fn connect_test_database_with_command_handler(
     Some(db)
 }
 
+pub(crate) fn selected_test_database_uri() -> &'static str {
+    TEST_DB_PINNED_URI
+        .get()
+        .expect("fixture pins its selected URI")
+}
+
 /// Concern assertions need replica discovery: the driver's Single topology
 /// legitimately sends primaryPreferred even for an explicitly Primary handle.
 /// Retain the ordinary fixture guard until this discovered client is dropped.
@@ -297,9 +303,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     let fixture = connect_test_database(prefix)
         .await
         .expect("Mongo8 fixture required");
-    let uri = TEST_DB_PINNED_URI
-        .get()
-        .expect("fixture pins its selected URI");
+    let uri = selected_test_database_uri();
     let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
     options.direct_connection = Some(false);
     options.server_selection_timeout = Some(Duration::from_secs(30));

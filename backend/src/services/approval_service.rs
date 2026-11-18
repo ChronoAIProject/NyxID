@@ -20,6 +20,7 @@ use crate::models::service_approval_config::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::approval_policy;
+use crate::services::audit_service::{AuditActor, required};
 use crate::services::notification_service;
 use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
@@ -2086,24 +2087,78 @@ pub async fn list_grants(
     Ok((grants, total))
 }
 
-/// Revoke a specific approval grant.
-pub async fn revoke_grant(db: &Database, user_id: &str, grant_id: &str) -> AppResult<()> {
-    let result = db
-        .collection::<ApprovalGrant>(GRANTS)
-        .update_one(
-            doc! {
-                "_id": grant_id,
-                "user_id": user_id,
-            },
-            revoke_grant_update(Utc::now()),
-        )
-        .await?;
+#[derive(Clone, Copy)]
+pub(crate) enum GrantRevokeSource {
+    Web,
+    AssistantAction,
+}
 
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Grant not found".to_string()));
+impl GrantRevokeSource {
+    fn intent(
+        self,
+        actor: &AuditActor,
+        user_id: &str,
+        grant_id: &str,
+    ) -> AppResult<crate::models::security_effect_intent::SecurityEffectIntent> {
+        let mut data = serde_json::json!({
+            "grant_id": required::text(required::TextField::Identifier, grant_id),
+            "owner_user_id": required::text(required::TextField::Identifier, user_id),
+        });
+        if matches!(self, Self::AssistantAction) {
+            data["assistant_action"] = true.into();
+        }
+        required::intent_preserving_actor(actor, "approval_grant_revoked", Some(data))
     }
+}
 
-    Ok(())
+pub(crate) async fn revoke_grant_with_audit(
+    db: &Database,
+    user_id: &str,
+    grant_id: &str,
+    actor: &AuditActor,
+    source: GrantRevokeSource,
+) -> AppResult<()> {
+    use super::api_key_mutation_service::{
+        abort_transaction, map_transaction_error, transaction_result,
+    };
+    let intents = [source.intent(actor, user_id, grant_id)?];
+    let filter = doc! { "_id": grant_id, "user_id": user_id };
+    let update = revoke_grant_update(Utc::now());
+    let db = db.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result = db
+                .collection::<ApprovalGrant>(GRANTS)
+                .update_one(filter.clone(), update.clone())
+                .session(&mut *session)
+                .await?;
+            // Legacy grants can already match the pipeline on a repeated revoke.
+            if result.matched_count != 1 {
+                return Err(abort_transaction(AppError::NotFound(
+                    "Grant not found".into(),
+                )));
+            }
+            transaction_result(
+                super::security_effect_service::enqueue_in_session(&db, session, &intents).await,
+            )
+        })
+        .await
+        .map_err(map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn revoke_grant(db: &Database, user_id: &str, grant_id: &str) -> AppResult<()> {
+    let actor = AuditActor {
+        user_id: user_id.into(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    revoke_grant_with_audit(db, user_id, grant_id, &actor, GrantRevokeSource::Web).await
 }
 
 /// Revoke all grants for a user.
@@ -2464,6 +2519,43 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn grant_revoke_audit_maximum_bson() {
+        let raw = "x".repeat(4096);
+        let actor = AuditActor {
+            user_id: raw.clone(),
+            ip_address: Some(raw.clone()),
+            user_agent: Some(raw.clone()),
+            api_key_id: Some(raw.clone()),
+            api_key_name: Some(raw.clone()),
+        };
+        let context = crate::turn_trace::TurnContext::for_turn(&uuid::Uuid::new_v4().to_string());
+        for source in [GrantRevokeSource::Web, GrantRevokeSource::AssistantAction] {
+            let intent = crate::turn_trace::scope(context, async {
+                source.intent(&actor, &raw, &raw).unwrap()
+            })
+            .await;
+            let crate::models::security_effect_intent::SecurityEffect::Audit { ref event } =
+                intent.effect
+            else {
+                panic!("expected audit intent");
+            };
+            let data = event.event_data.as_ref().unwrap();
+            for field in ["grant_id", "owner_user_id"] {
+                let value = data[field].as_str().unwrap();
+                assert_eq!(value.len(), 256);
+                assert!(value.ends_with("...[truncated]"));
+            }
+            let bytes = bson::to_vec(event).unwrap().len();
+            let total = bson::to_vec(&intent).unwrap().len();
+            assert!(total < 16 * 1024);
+            println!(
+                "REVOKE_MAX assistant={} event_bson={bytes} intent_bson={total}",
+                matches!(source, GrantRevokeSource::AssistantAction)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn noninteractive_callers_refuse_new_service_and_tool_requests_before_side_effects() {
