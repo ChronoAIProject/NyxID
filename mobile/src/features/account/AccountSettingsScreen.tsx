@@ -24,6 +24,7 @@ import {
   ScrollText,
   ShieldCheck,
   Wallet,
+  Watch,
 } from "lucide-react-native";
 import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
@@ -45,6 +46,7 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { assistantVoiceFeatures } from "../../lib/api/assistantVoiceApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
+import { nativeWatchLink } from "../../lib/watch/watchLink";
 import { AccountDeletionSheet } from "./AccountDeletionSheet";
 import { WorkspaceRailWindowContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { isApiError } from "../../lib/api/ApiError";
@@ -200,6 +202,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     [colors, stacked, fontScale],
   );
   const [toast, setToast] = useState<ToastState | null>(null);
+  // Only iOS builds that include the watch app can set it up.
+  const watchSupported = useMemo(() => nativeWatchLink() !== null, []);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
   const { isConnected, recheckConnection } = useNetworkStatus();
@@ -414,6 +418,13 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
               navigation.push("VoiceSettings", { voice: voiceEnabled })
             }
           />
+          {watchSupported ? (
+            <SettingsRow
+              icon={Watch}
+              label={t("Apple Watch")}
+              onPress={() => navigation.push("AppleWatchSettings")}
+            />
+          ) : null}
           <SettingsRow
             icon={Lock}
             label={t("Privacy")}

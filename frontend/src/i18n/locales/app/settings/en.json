@@ -106,6 +106,7 @@
   "No per-service overrides configured. All services use the global default.": "No per-service overrides configured. All services use the global default.",
   "Node / fetch client": "Node / fetch client",
   "Notification settings updated": "Notification settings updated",
+  "NyxID on Apple Watch": "NyxID on Apple Watch",
   "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.": "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.",
   "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.": "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.",
   "Or add manually · .claude/settings.json or .mcp.json": "Or add manually · .claude/settings.json or .mcp.json",

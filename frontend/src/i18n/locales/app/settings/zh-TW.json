@@ -106,6 +106,7 @@
   "No per-service overrides configured. All services use the global default.": "未設定依服務覆寫設定。所有服務均使用全域預設值。",
   "Node / fetch client": "節點 / fetch 用戶端",
   "Notification settings updated": "通知設定已更新",
+  "NyxID on Apple Watch": "Apple Watch 上的 NyxID",
   "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.": "透過 Cursor 的深層連結協定一鍵安裝。Cursor 將開啟並提示你確認安裝 MCP 伺服器。",
   "Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.": "選用的用量事件會連結到你的帳號。帳號權限在所有裝置上生效。每台裝置還必須在本機選擇加入；「不追蹤」或「全域隱私控制」一律會停用資料收集。安全稽核和計費記錄有各自的保留規則。",
   "Or add manually · .claude/settings.json or .mcp.json": "或手動新增 · .claude/settings.json 或 .mcp.json",

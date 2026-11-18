@@ -103,6 +103,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     plugins: [
       "./plugins/withVoiceAudio",
       "./plugins/withSceneLifecycle",
+      "./plugins/withWatchCompanion",
       [
         "./plugins/withAndroidGoogleServicesValidation",
         {
