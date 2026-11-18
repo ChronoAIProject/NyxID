@@ -596,6 +596,7 @@ pub mod assistant_cma_admission;
 pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
+pub(crate) mod org_thread_notice;
 
 pub mod generated_artifacts;
 pub(crate) mod invocation_diagnostic_service;

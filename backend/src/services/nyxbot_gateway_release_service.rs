@@ -719,17 +719,19 @@ pub(crate) async fn retire_connection(
     status: &str,
     error: Option<&str>,
 ) -> AppResult<Vec<String>> {
-    let state = state.clone();
+    let scoped_state = state.clone();
     let db = state.db.clone();
-    let row = row.clone();
+    let scoped_row = row.clone();
     let status = status.to_owned();
     let error = error.map(str::to_owned);
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    let (ids, retired_org_thread) = session.start_transaction().and_run2(async move |session| {
+        let state = &scoped_state;
+        let row = &scoped_row;
         let work:AppResult<_>=Box::pin(async {
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
-            if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok(Vec::new());}
-            let ids=retire_in_session(&state,&current,reason,session).await?;
+            if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}
+            let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
@@ -749,9 +751,13 @@ pub(crate) async fn retire_connection(
                 audit(&db, session, &current.user_id, "nyxbot_channel_org_access_lost",
                     json!({"channel_agent_id":current.id,"platform":current.platform})).await?;
             }
-            Ok(ids)
+            Ok((ids, current.transport == "gateway" && current.org_specialist.is_some() && matches!(current.platform.as_str(), "lark" | "feishu")))
         }).await;transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+    }).await.map_err(transactions::map_transaction_error)?;
+    if retired_org_thread {
+        super::org_thread_notice::after_retirement(state.db.clone(), row.id.clone());
+    }
+    Ok(ids)
 }
 
 fn live_filter(release: &Release) -> Document {

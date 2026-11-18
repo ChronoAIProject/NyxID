@@ -676,9 +676,16 @@ fn reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
     })
 }
 
-fn thread_reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
+fn thread_reply_token_use(
+    claims: &jwt::RelayReplyClaims,
+) -> AppResult<crate::services::channel_thread_service::delivery::ThreadReplyToken<'_>> {
     claims.require_unexpired()?;
-    reply_token_use(claims)
+    Ok(
+        crate::services::channel_thread_service::delivery::ThreadReplyToken {
+            usage: reply_token_use(claims)?,
+            claims,
+        },
+    )
 }
 
 async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult<bool> {
@@ -1596,6 +1603,16 @@ async fn record_thread_preflight_failure(
         && (token_bound || key_bound)
         && let Some(bot) = original.channel_bot_id.as_deref()
     {
+        if failure.class == ReplyFailure::Target
+            && original
+                .nyxbot_admission
+                .as_ref()
+                .is_some_and(|a| a.requires_org_notice)
+            && crate::services::org_thread_notice::record_source_refusal(&state.db, bot, source)
+                .await
+        {
+            return;
+        }
         crate::services::channel_thread_service::gateway::record_failure(
             &state.db,
             bot,
@@ -1723,6 +1740,11 @@ async fn deliver_reply(
     let bot_id = context.original.channel_bot_id.clone();
     let owner = context.original.user_id.clone();
     let source = context.original.id.clone();
+    let requires_notice = context
+        .original
+        .nyxbot_admission
+        .as_ref()
+        .is_some_and(|a| a.requires_org_notice);
     let mut failure_class = ReplyFailure::Transient;
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
@@ -1769,8 +1791,14 @@ async fn deliver_reply(
         {
             return Err(AppError::ChannelMediaTooLarge);
         }
-    } else {
-        validate_reply_for_adapter(&body.reply, adapter)?;
+    } else if let Err(error) = validate_reply_for_adapter(&body.reply, adapter) {
+        // Empty or malformed output may itself be a changed notice. The
+        // original credential has already authenticated this inbound UUID.
+        if thread && requires_notice {
+            failure_class = ReplyFailure::Target;
+            return Err(AppError::Conflict("thread_target_unavailable".into()));
+        }
+        return Err(error);
     }
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
@@ -1836,6 +1864,9 @@ async fn deliver_reply(
             &bot,
             &credentials,
             &original,
+            if prepared.is_none() && body.reply.metadata.is_none() && body.reply.attachments.is_empty() {
+                body.reply.text.as_deref()
+            } else { None },
         )
         .await.map_err(|failure| { failure_class = failure.class; failure.error })?;
         Some(target)
@@ -1850,7 +1881,7 @@ async fn deliver_reply(
             billing: billing.as_ref(), token: &bot_token,
             platform_bot_id: Some(&bot.platform_bot_id), platform_secrets: platform_secrets.as_ref(),
         };
-        let one_use = if let Some(validated) = reply_claims {
+        let one_use = if let Some(validated) = &reply_claims {
             let claims = &validated.0;
             if claims.inbound_message_id != original.id || claims.api_key_id != attributed_api_key_id
                 || claims.conversation_id != conversation.id || claims.platform != conversation.platform {
@@ -2067,6 +2098,12 @@ async fn deliver_reply(
         && failure_class.reason().is_some()
         && let Some(bot_id) = bot_id
         && let Err(error) = &result
+        && !(requires_notice
+            && failure_class == ReplyFailure::Target
+            && crate::services::org_thread_notice::record_source_refusal(
+                &state.db, &bot_id, &source,
+            )
+            .await)
     {
         crate::services::channel_thread_service::gateway::record_failure(
             &state.db,

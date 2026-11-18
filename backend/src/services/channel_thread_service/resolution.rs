@@ -130,7 +130,7 @@ pub async fn resolve_admitted(
     .await
     .unwrap_or(Ok(None))?;
     if let Some(t) = &mut target {
-        t.admitted = Some((owner.into(), origin.clone(), conversation.into()));
+        t.authority = ReplyBinding::Turn(owner.into(), origin.clone(), conversation.into());
     }
     Ok(target)
 }
@@ -294,7 +294,7 @@ async fn resolve_detailed(
         route_key_id: source.agent_api_key_id.unwrap(),
         platform: bot.platform.clone(),
         facts: resolved,
-        admitted: None,
+        authority: ReplyBinding::Source,
     })))
 }
 

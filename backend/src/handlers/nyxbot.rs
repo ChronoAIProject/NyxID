@@ -49,6 +49,7 @@ use crate::{
             THREADS_COLLECTION_NAME as THREADS, WATCHES_COLLECTION_NAME as WATCHES,
         },
         nyxbot_event_binding::{COLLECTION_NAME as EVENT_BINDINGS, NyxbotEventBinding},
+        nyxbot_response_read::NoticeKind,
     },
     services::{
         assistant_nyxagent::{self as engine, TurnStart, excerpt, identifier},
@@ -3635,13 +3636,54 @@ enum Inbound {
     /// The owner: a turn with the linked agent is running.
     Turn(broadcast::Receiver<Value>),
     /// A reply without a turn (link confirmation, refusal, busy notice).
-    Reply(String),
+    Reply(InboundReply),
     /// Accepted work; its acknowledgement must not clear the original target.
     Queued,
     /// A bounded reason for intentional silence; retained in owner diagnostics.
     Silent(&'static str),
     /// Retry later: this chat's turn is still running or the pool is full.
     Busy,
+}
+
+struct InboundReply {
+    text: String,
+    kind: Option<NoticeKind>,
+    followed: Option<Box<response_read::SelectedThread>>,
+}
+
+impl InboundReply {
+    fn fixed(kind: NoticeKind, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: Some(kind),
+            followed: None,
+        }
+    }
+}
+
+impl<T: Into<String>> From<T> for InboundReply {
+    fn from(text: T) -> Self {
+        Self {
+            text: text.into(),
+            kind: None,
+            followed: None,
+        }
+    }
+}
+
+impl std::ops::Deref for InboundReply {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Display for InboundReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 struct Sender<'a> {
@@ -3743,7 +3785,7 @@ async fn inbound_message(
             }
             chats::Admission::Waiting => {
                 return Ok(match chats::waiting_hint(state, &current_chat).await? {
-                    Some(hint) => Inbound::Reply(hint),
+                    Some(hint) => Inbound::Reply(hint.into()),
                     None => Inbound::Silent("refused_owner_absent"),
                 });
             }
@@ -3842,10 +3884,13 @@ async fn link_owner(
         return Ok(Some(owner_linked(state, row, "bot_creator").await));
     }
     if known && private && text.trim() == "/start" {
-        return Ok(Some(Inbound::Reply(format!(
-            "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
-            channel_agent_name(state, row).await
-        ))));
+        return Ok(Some(Inbound::Reply(
+            format!(
+                "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
+                channel_agent_name(state, row).await
+            )
+            .into(),
+        )));
     }
     Ok(None)
 }
@@ -3902,10 +3947,13 @@ async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> In
             .await;
         });
     }
-    Inbound::Reply(format!(
-        "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
+    Inbound::Reply(
+        format!(
+            "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
         account here. Send me anything to get started."
-    ))
+        )
+        .into(),
+    )
 }
 
 async fn thread_conversation(
@@ -4381,17 +4429,17 @@ async fn start_chat_turn(
                 && let Some(reply) =
                     repeated_question(state, row, &conversation_id, key, &origin).await?
             {
-                return Ok(Inbound::Reply(reply));
+                return Ok(Inbound::Reply(reply.into()));
             }
             // Someone other than the owner is asked to try again (only when
             // they spoke to the bot): their messages never queue up as the
             // owner's work or use the owner's wake-ups.
             if guest {
                 return Ok(if addressed {
-                    Inbound::Reply(
-                        "I'm answering another message right now. Please try again in a moment."
-                            .into(),
-                    )
+                    Inbound::Reply(InboundReply::fixed(
+                        NoticeKind::GuestBusy,
+                        "I'm answering another message right now. Please try again in a moment.",
+                    ))
                 } else {
                     Inbound::Silent("refused_busy")
                 });
@@ -4449,9 +4497,9 @@ async fn start_chat_turn(
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
             Ok(Inbound::Busy)
         }
-        Err(AppError::ServiceSelectionInvalid { reason, message }) => {
-            Ok(Inbound::Reply(format!("{reason}: {message}")))
-        }
+        Err(AppError::ServiceSelectionInvalid { reason, message }) => Ok(Inbound::Reply(
+            InboundReply::fixed(NoticeKind::ServiceSelection, format!("{reason}: {message}")),
+        )),
         Err(error) => Err(error),
     }
 }
@@ -4650,6 +4698,44 @@ async fn provider_channel_mode(
     headers: &HeaderMap,
     observe: bool,
 ) -> Result<(NyxbotChannel, Zeroizing<String>), Response> {
+    provider_channel_classified(state, headers, observe)
+        .await
+        .map_err(|failure| failure.response)
+}
+
+/// Only confirmed transport loss after provider authentication carries a
+/// channel. A credential or dependency failure can never expose a lifecycle.
+struct ProviderChannelFailure {
+    response: Response,
+    closed: Option<Box<NyxbotChannel>>,
+}
+
+impl From<Response> for ProviderChannelFailure {
+    fn from(response: Response) -> Self {
+        Self {
+            response,
+            closed: None,
+        }
+    }
+}
+
+impl ProviderChannelFailure {
+    fn closed(row: NyxbotChannel, response: Response) -> Self {
+        let closed = (row.org_specialist.is_some()
+            && row.gateway_source.is_none()
+            && row.binding_id.is_some()
+            && crate::services::channel_thread_service::gateway::negotiated(&row))
+        .then(|| Box::new(row));
+        Self { response, closed }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_channel_classified(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
+) -> Result<(NyxbotChannel, Zeroizing<String>), ProviderChannelFailure> {
     let raw = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -4674,7 +4760,7 @@ async fn provider_channel_mode(
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
     provider_refusal::channel(&row.user_id, &row.id);
     if observe && row.status != "active" {
-        return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found"));
+        return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found").into());
     }
     match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
@@ -4684,16 +4770,16 @@ async fn provider_channel_mode(
     {
         Ok(()) => {}
         Err(AppError::Forbidden(_)) => {
-            return Err(problem(
-                StatusCode::FORBIDDEN,
-                "shared_entry_requires_native_receipt",
+            return Err(ProviderChannelFailure::closed(
+                row,
+                problem(
+                    StatusCode::FORBIDDEN,
+                    "shared_entry_requires_native_receipt",
+                ),
             ));
         }
         Err(_) => {
-            return Err(problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "provider_unavailable",
-            ));
+            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
     match org_access(state, &row).await {
@@ -4706,13 +4792,13 @@ async fn provider_channel_mode(
                         problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
                     })?;
             }
-            return Err(problem(StatusCode::FORBIDDEN, "org_access_lost"));
+            return Err(ProviderChannelFailure::closed(
+                row,
+                problem(StatusCode::FORBIDDEN, "org_access_lost"),
+            ));
         }
         Ok(OrgAccess::Unavailable) | Err(_) => {
-            return Err(problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "provider_unavailable",
-            ));
+            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
     Ok((row, raw))
@@ -5920,9 +6006,11 @@ async fn responses_with_producers_impl(
         Ok(None) => {}
         Err(response) => return response,
     }
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(found) => found,
-        Err(response) => return response,
+        Err(failure) => {
+            return Box::pin(response_read::closed_post(&state, &headers, &body, failure)).await;
+        }
     };
     let Some(idempotency) = headers
         .get("idempotency-key")
@@ -6494,7 +6582,22 @@ async fn dispatch_relay_response(
             }
         }
         Ok(Inbound::Reply(text)) => {
-            finish("refused", None).await;
+            if text.followed.is_some() {
+                if let Err(error) = Box::pin(response_read::record_reply(
+                    &state.db,
+                    &row,
+                    &event_key,
+                    &response_id,
+                    &text,
+                    doc! {"status":"refused"},
+                ))
+                .await
+                {
+                    return provider_refusal::error(error);
+                }
+            } else {
+                finish("refused", None).await;
+            }
             sse(futures::stream::iter(
                 std::iter::once(created).chain(message_frames(&response_id, Some(&text))),
             ))
@@ -7737,7 +7840,7 @@ pub async fn relay_callback(
                 .await?;
             }
             let reply = match outcome? {
-                Inbound::Reply(text) => Some(text),
+                Inbound::Reply(text) => Some(text.text),
                 Inbound::Queued => {
                     late_delivery::process(&state, &admitted.id).await;
                     None

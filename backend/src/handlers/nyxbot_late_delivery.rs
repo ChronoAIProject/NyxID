@@ -109,7 +109,7 @@ pub(super) async fn prepare(
     }
     let metadata = bson::to_bson(&metadata)
         .map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?;
-    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
+    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null, "org_notice": null},
         vec![doc! {"$set": {"delivery": {"$mergeObjects": [
             {"$literal": metadata},
             {"$cond": [{"$eq": ["$gateway_replay_claimed", true]}, {"state":"replay"},

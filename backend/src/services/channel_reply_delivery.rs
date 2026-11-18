@@ -1,3 +1,4 @@
+use crate::models::reply_token_use::ReplyTokenUse;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -28,13 +29,54 @@ impl Delivery {
         original: &ChannelMessage,
         count: usize,
     ) -> AppResult<Self> {
+        let record = Self::record(uuid::Uuid::new_v4().to_string(), bot, original, count)?;
+        db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
+            .insert_one(&record)
+            .await?;
+        Ok(Self::from_record(record, bot))
+    }
+
+    /// The adapter is ready to POST a single fixed notice. Its caller commits
+    /// this dispatch barrier together with the final authority check.
+    pub(crate) async fn claim_org_notice(
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        bot: &ChannelBot,
+        source: &ChannelMessage,
+        token: Option<&ReplyTokenUse>,
+    ) -> AppResult<Self> {
+        let identity = format!("org-thread-notice:v1:{}:{}", bot.id, source.id);
+        let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes());
+        let mut record = Self::record(id.to_string(), bot, source, 1)?;
+        record.parts[0].status = PartStatus::Uncertain;
+        db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
+            .insert_one(&record)
+            .session(&mut *session)
+            .await
+            .map_err(claim_error)?;
+        if let Some(token) = token {
+            db.collection::<ReplyTokenUse>(crate::models::reply_token_use::COLLECTION_NAME)
+                .insert_one(token)
+                .session(session)
+                .await
+                .map_err(claim_error)?;
+        }
+        Ok(Self::from_record(record, bot))
+    }
+
+    fn record(
+        id: String,
+        bot: &ChannelBot,
+        original: &ChannelMessage,
+        count: usize,
+    ) -> AppResult<ChannelReplyDelivery> {
         if count == 0 || count > MAX_REPLY_PARTS {
             return Err(AppError::ValidationError(
                 "Reply exceeds the 64-part limit".into(),
             ));
         }
-        let record = ChannelReplyDelivery {
-            id: uuid::Uuid::new_v4().to_string(),
+        Ok(ChannelReplyDelivery {
+            id,
             user_id: bot.user_id.clone(),
             channel_bot_id: bot.id.clone(),
             inbound_message_id: original.id.clone(),
@@ -51,15 +93,16 @@ impl Delivery {
                 count
             ],
             created_at: chrono::Utc::now(),
-        };
-        db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
-            .insert_one(&record)
-            .await?;
+        })
+    }
+
+    fn from_record(record: ChannelReplyDelivery, bot: &ChannelBot) -> Self {
+        let count = record.parts.len();
         let trace = crate::turn_trace::TurnContext::current();
-        Ok(Self {
+        Self {
             id: record.id,
             bot_id: bot.id.clone(),
-            inbound_id: original.id.clone(),
+            inbound_id: record.inbound_message_id,
             telegram: matches!(bot.platform.as_str(), "telegram" | "telegram-new"),
             parts: record.parts,
             trace,
@@ -68,7 +111,7 @@ impl Delivery {
             } else {
                 Vec::new()
             },
-        })
+        }
     }
 
     pub fn formatting_receipt(&self, index: usize) -> super::telegram_formatting::Receipt {
@@ -83,10 +126,14 @@ impl Delivery {
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
         self.parts[index].status = PartStatus::Uncertain;
         self.save_part(db, index).await?;
+        self.trace_attempt(index);
+        Ok(())
+    }
+
+    pub(crate) fn trace_attempt(&mut self, index: usize) {
         if let Some(operation) = self.operations.get_mut(index) {
             *operation = Some(crate::turn_trace::Operation::part(self.trace, index));
         }
-        Ok(())
     }
 
     pub async fn accepted(
@@ -199,6 +246,15 @@ impl Delivery {
             );
         }
         Ok(())
+    }
+}
+
+fn claim_error(error: mongodb::error::Error) -> AppError {
+    if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000)
+    {
+        AppError::Unauthorized("Reply already claimed".into())
+    } else {
+        error.into()
     }
 }
 
