@@ -1,5 +1,6 @@
 import copy
 import fnmatch
+import json
 import os
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ from ci_gate_reuse import (
     strict_load_workflow,
     _has_event_sensitive_steps,
     _load_workflow_bundle,
+    _release_test_tree,
 )
 
 
@@ -444,7 +446,7 @@ class GateReuseTests(unittest.TestCase):
         return api, tree, (lambda commit: "parent"), (lambda parent, commit: ancestor)
 
     def _decide(self, api, *, sha="main", tree=None, parent=None, ancestor=None,
-                pr_workflows=WORKFLOWS):
+                pr_workflows=WORKFLOWS, repository="o/r"):
         tree = tree or (lambda commit: "tree")
         parent = parent or (lambda commit: "parent")
         ancestor = ancestor or (lambda parent_sha, commit: True)
@@ -452,7 +454,7 @@ class GateReuseTests(unittest.TestCase):
             api=api, git_tree=tree, git_parent=parent, git_is_ancestor=ancestor,
             git_blob=lambda commit, path: "workflow-blob", workflow_blob="workflow-blob",
             workflow=WORKFLOW, reusable_workflows=pr_workflows,
-            repository="o/r", sha=sha, event="push", ref="refs/heads/main",
+            repository=repository, sha=sha, event="push", ref="refs/heads/main",
         )
 
     def test_up_to_date_pr_reuses_without_using_reported_base_sha(self):
@@ -481,7 +483,7 @@ class GateReuseTests(unittest.TestCase):
                         run["head_branch"] = "dev"
                         ref = f"refs/pull/{run_pr_number}/merge"
                         run["referenced_workflows"] = [{
-                            "path": f"o/r/.github/workflows/backend-tests.yml@{ref}",
+                            "path": f"o/r/.github/workflows/backend-tests.yml@{merge}",
                             "ref": ref, "sha": merge,
                         }]
                     return result
@@ -493,7 +495,59 @@ class GateReuseTests(unittest.TestCase):
                     self.assertIn("backend-test", decision.jobs)
                     self.assertEqual(decision.tested_tree, tested_tree)
 
-    def test_release_without_workflow_provenance_requires_original_head_proof(self):
+    def test_saved_release_run_44281976093_reaches_tree_comparison(self):
+        fixture = Path(__file__).with_name("fixtures") / "release-run-44281976093.json"
+        run = json.loads(fixture.read_text())
+        repo = "ChronoAIProject/NyxID"
+        published = "90f56aba3b0af34d0359c1bd7c617b0f283a8f0a"
+        tested = "dbbc71a7b0af494bd1efe6eb18289e2724744d71"
+        published_tree = "6a5c49778ea264e3278e414887b78871dfab5749"
+        pr = {
+            "number": 2659, "merged_at": "2026-11-18T11:41:37Z", "merge_commit_sha": published,
+            "head": {"ref": "dev", "sha": run["head_sha"], "repo": {"full_name": repo}},
+            "base": {"ref": "main", "repo": {"full_name": repo}},
+        }
+        for need_attempt, tested_tree in ((False, published_tree), (True, "different-tree")):
+            with self.subTest(need_attempt=need_attempt):
+                listed = run.copy()
+                responses = {
+                    f"repos/{repo}/commits/{published}/pulls": [pr],
+                    f"repos/{repo}/actions/workflows/ci.yml/runs?event=pull_request"
+                    f"&head_sha={run['head_sha']}&per_page=100&branch=dev": {"workflow_runs": [listed]},
+                    "repos/{repo}/actions/runs/44281976093/jobs?per_page=100": {"jobs": decision_jobs()},
+                }
+                if need_attempt:
+                    del listed["referenced_workflows"]
+                    responses[f"repos/{repo}/actions/runs/44281976093/attempts/2"] = run
+                trees = {published: published_tree, tested: tested_tree}
+                decision = self._decide(responses.pop, sha=published, tree=trees.__getitem__, repository=repo)
+                self.assertEqual(decision.reason, "tree_match" if tested_tree == published_tree else "tree_mismatch")
+                self.assertEqual(decision.tested_tree, tested_tree)
+                self.assertEqual(decision.run_id, run["id"])
+                self.assertFalse(responses)
+
+    def test_release_workflow_reference_must_identify_one_tested_commit(self):
+        commit = "a" * 40
+        prefix = "o/r/.github/workflows/backend-tests.yml@"
+        ref = "refs/pull/2659/merge"
+        entry = {"path": prefix + commit, "ref": ref, "sha": commit}
+        for entries in (
+            [], [entry, entry], [entry, dict(entry, sha="b" * 40, path=prefix + "b" * 40)],
+            [dict(entry, ref="refs/pull/99/merge")], [{"path": prefix + ref, "sha": commit}],
+            [dict(entry, path="fork/r/.github/workflows/backend-tests.yml@" + commit)],
+            [dict(entry, path="o/r/.github/workflows/other.yml@" + commit)],
+            [dict(entry, path=prefix)], [dict(entry, sha="short")],
+            [dict(entry, path=prefix + "B" * 40)],
+        ):
+            with self.subTest(entries=entries), self.assertRaisesRegex(
+                WorkflowIdentityError, "release_test_commit_unavailable"
+            ):
+                _release_test_tree({"referenced_workflows": entries}, "o/r", 2659, self.fail, self.fail)
+        symbolic = dict(entry, path=prefix + "refs/heads/dev")
+        self.assertEqual(_release_test_tree({"referenced_workflows": [symbolic]}, "o/r", 2659,
+                                            {commit: "tree"}.__getitem__, self.fail), "tree")
+
+    def test_release_without_workflow_provenance_runs_full_gate(self):
         pr = self._pr()
         pr["head"]["ref"] = "dev"
         run = {"id": 7, "head_sha": "head", "head_branch": "dev", "event": "pull_request",
@@ -505,8 +559,10 @@ class GateReuseTests(unittest.TestCase):
                 if path.endswith("/actions/runs/7/attempts/1"):
                     return {"referenced_workflows": []}
                 return api(path)
-            self.assertEqual(self._decide(details, tree=tree, parent=parent,
-                                           ancestor=is_ancestor).reuse, ancestor)
+            with self.subTest(ancestor=ancestor):
+                decision = self._decide(details, tree=tree, parent=parent, ancestor=is_ancestor)
+                self.assertFalse(decision.reuse)
+                self.assertEqual(decision.reason, "release_test_commit_unavailable")
 
     def test_unfetchable_release_merge_uses_the_exact_git_commit_api_tree(self):
         merge = "a" * 40
@@ -517,7 +573,7 @@ class GateReuseTests(unittest.TestCase):
         run = {"id": 7, "head_sha": "head", "head_branch": "dev", "event": "pull_request",
                "status": "completed", "conclusion": "success", "path": ".github/workflows/ci.yml",
                "head_repository": {"full_name": "o/r"}, "referenced_workflows": [{
-                   "path": f"o/r/.github/workflows/backend-tests.yml@{ref}", "ref": ref, "sha": merge,
+                   "path": f"o/r/.github/workflows/backend-tests.yml@{merge}", "ref": ref, "sha": merge,
                }]}
         api, _, _, _ = self._main_api(pr=pr, run=run)
 
