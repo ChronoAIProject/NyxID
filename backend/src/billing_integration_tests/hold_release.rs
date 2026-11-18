@@ -714,7 +714,9 @@ async fn hold_conservation_settlement_lock_handoffs_are_exact() {
         let backlog = diagnostics
             .iter()
             .find(|d| d.code == "billing_hold_backlog");
-        let detail = backlog.map(|d| d.detail.as_str()).unwrap_or("");
+        let detail = backlog
+            .and_then(|d| d.technical_details.as_deref())
+            .unwrap_or("");
         assert!(!detail.contains("complete=false"), "{phase:?}: {detail}");
         for (kind, collection, field, unit) in [
             ("wallet", BILLING_WALLET, "reserved_credits", "credits"),

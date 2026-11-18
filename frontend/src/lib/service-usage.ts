@@ -47,7 +47,8 @@ export function serviceUsageSummary(
     const name = row.api_key_id
       ? (row.api_key_name ?? "Unnamed agent key")
       : null;
-    agents.set(name, (agents.get(name) ?? 0) + row.events);
+    if (row.detail_retained !== false)
+      agents.set(name, (agents.get(name) ?? 0) + row.events);
   }
   const estimates = matching.map((row) =>
     row.billable

@@ -903,7 +903,8 @@ platform splitting and formatting rules are unchanged. A gateway POST or email
 reply remains one operation; NyxID does not infer receipts for its internal
 parts. Provider sends are bounded to 120 seconds per part.
 
-No replica retries `sending`, `unknown` or `streamed`. An interrupted new send
+Outside the bounded gateway reply-target exception below, no replica retries
+`sending`, `unknown` or `streamed`. An interrupted new send
 becomes terminal `unknown` after its database-time deadline; an old `sending`
 row without that deadline is classified only when its stored `checked_at` is a
 BSON date at least 2,100 seconds old. Missing or malformed timestamps do not match.
@@ -2398,4 +2399,4 @@ return current settings plus `changed_sections` IDs/URLs. REST GET/PUT and store
 documents remain compatible; REST notification updates retain their full-object
 semantics. Owner live events refresh an open panel without replacing dirty drafts.
 
-Gateway reply-target receipt waits reuse this preparation state: exact 409 `routed_reply_in_progress` and exact 503 `routed_reply_unavailable` allow only the identical same-key operation, with admission recorded only for 409. The [receipt and dispatch lookup contract](../CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup) specifies bounds, automatic compatibility readiness and output suppression after local ownership.
+Gateway reply-target receipt waits reuse this preparation state: exact 409 `routed_reply_in_progress`, any 5xx, no HTTP response and unreadable/unparseable 2xx allow only the identical same-key operation, with admission recorded only for the exact 409. Marker v2 excludes #2561 workers; v1 upgrades on acquire. A stale sending row needs the frozen request hash v1 and committed target, and retains the original send barrier as its deadline anchor. Every pending wait remains `started` in dispatch lookup. The [receipt and dispatch lookup contract](../CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup) specifies bounds, automatic compatibility readiness and output suppression after local ownership.

@@ -150,7 +150,12 @@ async fn voice_component_dead_request_returns_five_grant_holds_once() {
             .is_empty()
     );
     clean(&f).await;
-    let detail = diagnostics(&f.db).await.unwrap().remove(0).detail;
+    let detail = diagnostics(&f.db)
+        .await
+        .unwrap()
+        .remove(0)
+        .technical_details
+        .unwrap();
     assert!(
         detail.contains("class=eligible_now eligible=true age=over_7d rows=5 requests=1"),
         "{detail}"
@@ -209,7 +214,12 @@ async fn voice_component_live_owner_is_untouched() {
             .try_collect()
             .await
             .unwrap();
-    let detail = diagnostics(&f.db).await.unwrap().remove(0).detail;
+    let detail = diagnostics(&f.db)
+        .await
+        .unwrap()
+        .remove(0)
+        .technical_details
+        .unwrap();
     assert!(
         detail.contains("class=owned_by_live_generation eligible=false"),
         "{detail}"
@@ -238,7 +248,12 @@ async fn voice_component_live_owner_is_untouched() {
 #[tokio::test]
 async fn voice_component_malformed_voice_identity_stays_excluded() {
     let (f, id) = fixture(false, true).await;
-    let detail = diagnostics(&f.db).await.unwrap().remove(0).detail;
+    let detail = diagnostics(&f.db)
+        .await
+        .unwrap()
+        .remove(0)
+        .technical_details
+        .unwrap();
     assert!(
         detail.contains("class=excluded_voice_unknown_shape eligible=false"),
         "{detail}"
@@ -273,7 +288,12 @@ async fn voice_component_legacy_carrier_is_not_an_ordinary_request() {
         )
         .await
         .unwrap();
-    let detail = diagnostics(&f.db).await.unwrap().remove(0).detail;
+    let detail = diagnostics(&f.db)
+        .await
+        .unwrap()
+        .remove(0)
+        .technical_details
+        .unwrap();
     assert!(
         detail.contains("class=excluded_channel_outbound eligible=false"),
         "{detail}"

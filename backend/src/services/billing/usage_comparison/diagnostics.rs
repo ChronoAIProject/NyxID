@@ -1,5 +1,5 @@
 //! Provider-free, bounded sentences for Integrity.
-use super::super::BillingStartupDiagnostic;
+use super::super::{BillingStartupDiagnostic, DiagnosticSeverity};
 use super::*;
 
 pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDiagnostic>> {
@@ -36,6 +36,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
     }) else {
         return Ok(vec![item(
             "billing_usage_coverage",
+            DiagnosticSeverity::Info,
             "Usage comparison is warming",
             format!(
                 "Usage comparison is waiting for a successful check of recorded receipt-capture support. Earlier results are not current. {capture}"
@@ -123,7 +124,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
                 ));
             }
         }
-        items.push(item("billing_usage_drift","Delivered usage differs from provider usage",detail,
+        items.push(item("billing_usage_drift", DiagnosticSeverity::Action,"Delivered usage differs from provider usage",detail,
             "Investigate captured deliveries and provider intake. Comparison never repairs or charges usage.",now));
     }
     let mut unsupported = String::new();
@@ -150,7 +151,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
         ));
     }
     if !unsupported.is_empty() {
-        items.push(item("billing_usage_unsupported","Usage comparison needs attention",unsupported,
+        items.push(item("billing_usage_unsupported", DiagnosticSeverity::Action,"Usage comparison needs attention",unsupported,
         "Check the subscription and provider charge layout. Stable subscription findings are revisited daily.",now));
     }
     if !waits.is_empty() || !capture.is_empty() {
@@ -174,6 +175,7 @@ pub(crate) async fn diagnostics(db: &Database) -> AppResult<Vec<BillingStartupDi
         detail.push_str(&capture);
         items.push(item(
             "billing_usage_coverage",
+            DiagnosticSeverity::Info,
             "Usage comparison coverage and waits",
             detail,
             "Comparison resumes automatically when the stated wait ends.",
@@ -221,19 +223,49 @@ fn second(row: &Document, key: &str) -> String {
         .map(human)
         .unwrap_or_else(|| "unknown".into())
 }
-fn explanation(reason: &str) -> &'static str {
+fn explanation(reason: &str) -> String {
     match reason {
-        "subscription_unavailable" => "the provider no longer exposes the subscription",
-        "provider_request_rejected" => "the provider rejected the usage request",
-        "delivered_metric_missing" => "a delivered metric is missing from provider usage",
-        "provider_target_mismatch" => "the returned customer or subscription does not match",
-        "response_too_large" => "the response exceeds the comparison size limit",
-        "invalid_provider_period" => "the provider period is invalid",
-        "unsupported_provider_units" => "the quantities cannot be represented exactly",
-        "duplicate_metric" => "the provider returned the same metric more than once",
-        "missing_metric_code" => "the provider omitted a metric code",
-        _ => "the provider usage shape is not supported, including grouped or filtered totals",
+        "subscription_unavailable" => "the provider no longer exposes the subscription".into(),
+        "provider_request_rejected" => "the provider rejected the usage request".into(),
+        "delivered_metric_missing" => "a delivered metric is missing from provider usage".into(),
+        "provider_target_mismatch" => "the returned customer or subscription does not match".into(),
+        "response_too_large" => "the response exceeds the comparison size limit".into(),
+        "invalid_provider_period" => "the provider period is invalid".into(),
+        "unsupported_provider_units" => "the quantities cannot be represented exactly".into(),
+        "duplicate_metric" => "the provider returned the same metric more than once".into(),
+        "missing_metric_code" => "the provider omitted a metric code".into(),
+        "missing_customer_usage" => "the provider omitted customer_usage".into(),
+        "missing_charges_usage" => {
+            "the provider omitted charges_usage or returned it in a non-array form".into()
+        }
+        "charge_not_object" => "a charges_usage entry is not an object".into(),
+        "too_many_charges" => "the provider returned more than 256 charges".into(),
+        "breakdown_mismatch" => {
+            "a provider usage breakdown does not add up to its charge total".into()
+        }
+        "unsupported_usage_shape" => {
+            "the previous release recorded an unsupported provider usage shape".into()
+        }
+        reason
+            if reason
+                .strip_prefix("non_sum_aggregation:")
+                .is_some_and(valid_aggregation_name) =>
+        {
+            let name = reason
+                .strip_prefix("non_sum_aggregation:")
+                .unwrap_or("other");
+            format!("a delivered metric has non-sum provider aggregation '{name}'")
+        }
+        _ => "the provider returned an unrecognized comparison finding".into(),
     }
+}
+
+fn valid_aggregation_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 fn wait_explanation(reason: &str) -> &'static str {
     match reason {
@@ -304,6 +336,7 @@ async fn capture_sample(db: &Database) -> AppResult<String> {
 }
 fn item(
     code: &str,
+    severity: DiagnosticSeverity,
     summary: &str,
     detail: String,
     remediation: &str,
@@ -316,6 +349,8 @@ fn item(
     }
     BillingStartupDiagnostic {
         code: code.into(),
+        severity,
+        technical_details: None,
         summary: summary.into(),
         detail: bounded,
         remediation: remediation.into(),

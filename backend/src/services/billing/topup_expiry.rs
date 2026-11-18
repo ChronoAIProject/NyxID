@@ -774,6 +774,8 @@ pub(super) async fn unresolved_diagnostics(
         .collect::<Vec<_>>()
         .join("; ");
     Ok(vec![super::BillingStartupDiagnostic {
+        severity: super::DiagnosticSeverity::Info,
+        technical_details: None,
         code: "billing_expiry_unresolved".into(),
         summary: "Purchased-credit expiry needs a provider receipt".into(),
         detail: format!("{count} unresolved operations; first samples: {samples}"),

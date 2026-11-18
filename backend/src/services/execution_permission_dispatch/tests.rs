@@ -330,7 +330,7 @@ impl Fixture {
             heartbeat.abort();
             let _ = heartbeat.await;
         }
-        self.state.db.drop().await.unwrap();
+        test_utils::drop_test_database(&self.state.db).await;
     }
 }
 
@@ -1120,7 +1120,7 @@ async fn owner_ask_turn_covered_suppresses_risk_card_and_preserves_live_turn_fen
             .unwrap(),
         0
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -1771,7 +1771,7 @@ async fn covered_risk_keeps_webhook_policy_delegation_and_org_instruction_floors
             "{floor} must survive coverage"
         );
     }
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -1921,7 +1921,7 @@ async fn message_root_admission_recovery_and_stop_fence_persistent_permission() 
             .await
             .is_err()
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -2169,7 +2169,7 @@ async fn invocation_admission_has_a_server_root_and_cancel_fences_recovery() {
         .await
         .unwrap();
     assert!(tasks::check(&f.state.db, task).await.is_err());
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -2271,7 +2271,7 @@ async fn message_delegation_preserves_root_but_new_human_input_does_not_inherit_
             .await
             .is_err()
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[test]

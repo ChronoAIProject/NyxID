@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   chainVerificationResponseSchema,
   chainVerifyStatusSchema,
+  startupDiagnosticSchema,
 } from "./admin-chain-verification";
 
 const baseStatus = {
@@ -22,6 +23,21 @@ const baseStatus = {
 };
 
 describe("admin chain verification schemas", () => {
+  it("retains additive presentation fields and accepts legacy diagnostics", () => {
+    const legacy = {
+      code: "billing_hold_backlog",
+      summary: "Unfinished billing reservations by status and age",
+      detail: "7 requests are holding funds.",
+      remediation: "This inventory is read-only.",
+      detected_at: "2026-11-17T01:00:00Z",
+    };
+    expect(startupDiagnosticSchema.parse(legacy)).toEqual(legacy);
+    for (const severity of ["info", "action"]) {
+      const current = { ...legacy, severity, technical_details: "complete=true" };
+      expect(startupDiagnosticSchema.parse(current)).toEqual(current);
+      expect(startupDiagnosticSchema.omit({ severity: true, technical_details: true }).parse(current)).toEqual(legacy);
+    }
+  });
   it("parses a healthy status", () => {
     const parsed = chainVerifyStatusSchema.parse(baseStatus);
     expect(parsed.outcome).toBe("ok");

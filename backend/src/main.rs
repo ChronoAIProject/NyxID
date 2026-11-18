@@ -21,6 +21,8 @@ mod handlers;
 mod login_cli;
 mod models;
 mod mw;
+#[cfg(test)]
+mod pool_starvation_tests;
 mod redaction;
 mod routes;
 mod services;
@@ -148,6 +150,7 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
@@ -1184,6 +1187,7 @@ async fn server_run(cli: Cli) {
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     let state = AppState {
+        refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
         #[cfg(test)]
         local_machine_platform: None,

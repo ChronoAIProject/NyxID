@@ -56,22 +56,27 @@ async fn usage_comparison_pinned_evidence_and_lease_fence_discard_races() {
 }
 
 #[tokio::test]
-async fn usage_comparison_period_rollover_and_unsupported_shapes_never_report_drift() {
+async fn usage_comparison_period_rollover_and_non_sum_aggregation_never_report_drift() {
     TEST_NOW
         .scope(std::cell::Cell::new(initial_now()), async {
             let f = Fixture::new().await;
             f.target("sub", 1).await;
             f.receipt("sub", 1, initial_now().to_chrono().timestamp(), "2")
                 .await;
-            let mut grouped = usage("1");
-            grouped["customer_usage"]["charges_usage"][0]["groups"] = serde_json::json!([]);
+            let mut non_sum = usage("1");
+            non_sum["customer_usage"]["charges_usage"][0]["billable_metric"]["aggregation_type"] =
+                serde_json::json!("count_agg");
             f.provider
                 .replies
                 .lock()
                 .unwrap()
-                .insert("sub".into(), Reply::Usage(grouped));
+                .insert("sub".into(), Reply::Usage(non_sum));
             f.pass().await.1.unwrap();
             assert_eq!(f.observation("sub").await.status, "unsupported");
+            assert_eq!(
+                f.observation("sub").await.reason,
+                "non_sum_aggregation:count_agg"
+            );
             assert!(
                 diagnostics(&f.db)
                     .await

@@ -75,6 +75,8 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+#[cfg(test)]
+mod key_authority_audit_tests;
 pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;

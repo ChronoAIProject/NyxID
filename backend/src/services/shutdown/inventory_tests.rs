@@ -423,6 +423,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Bounded export body releases its reservation and semaphore permit at EOF, Drop or a total 120-second deadline; non-deliveries refund via tracked shutdown cleanup.",
     ),
     (
+        "db/pool_monitor.rs",
+        "install",
+        "tokio::spawn",
+        1,
+        "Best-effort logging timer; weak pool-state reference ends after client teardown, no database I/O or durable execution ownership.",
+    ),
+    (
         "handlers/assistant_cma_agents.rs",
         "relay_events",
         "body_stream",

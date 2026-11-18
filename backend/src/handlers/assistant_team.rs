@@ -4457,6 +4457,12 @@ pub fn spawn_sweeps(state: AppState) {
             if state.shutdown.is_draining() {
                 break;
             }
+            if crate::services::nyxbot_response_read::expire(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel response lifecycle maintenance deferred");
+            }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
                 .is_err()

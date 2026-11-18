@@ -3,7 +3,10 @@ use bson::{Document, doc};
 use futures::TryStreamExt;
 use mongodb::{Database, IndexModel, options::IndexOptions};
 
-use crate::{errors::AppResult, models::startup_diagnostic::StartupDiagnostic};
+use crate::{
+    errors::AppResult,
+    models::startup_diagnostic::{DiagnosticSeverity, StartupDiagnostic},
+};
 
 const INDEX: &str = "org_deletion_requested";
 const STALE_SECONDS: i64 = 15 * 60;
@@ -85,6 +88,7 @@ pub(crate) async fn diagnostic(db: &Database) -> AppResult<Option<StartupDiagnos
     let code = "organization_deletion_incomplete";
     Ok(Some(StartupDiagnostic {
         id: code.into(), active:true, code:code.into(),
+        severity: DiagnosticSeverity::Action, technical_details: None,
         summary: format!("Organization deletions awaiting retry: {count_text}"),
         detail: format!("Requested at least {STALE_SECONDS} seconds ago; oldest pending age: {} seconds. Sample organization ids: {}.", (now-oldest).num_seconds(), ids.join(", ")),
         remediation: "An active organization administrator should retry DELETE /orgs/{id}. Deletion does not resume automatically; the marker does not grant access.".into(),

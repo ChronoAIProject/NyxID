@@ -46,6 +46,9 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+#[path = "proxy_ingress.rs"]
+pub(crate) mod ingress;
+
 #[path = "proxy_shared_connect.rs"]
 mod shared_connect;
 
@@ -779,6 +782,24 @@ pub async fn proxy_request(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((service_id, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &service_id,
+        request,
+        |request| proxy_request_unthrottled(&state, &auth_user, tele, &service_id, &path, request),
+    )
+    .await
+}
+
+async fn proxy_request_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    service_id: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -795,7 +816,7 @@ pub async fn proxy_request(
             // real slug (never a UUID from the route path) even when the error
             // happens after service resolution. See docs/TELEMETRY.md §5.1.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = std::time::Instant::now();
             let method = request.method().clone();
             request
@@ -813,10 +834,10 @@ pub async fn proxy_request(
             // Keep nested proxy dispatch off the handler frame (also called by
             // assistant operation-scope checks through the full router).
             let mut result = Box::pin(proxy_request_inner(
-                &state,
-                &auth_user,
-                &service_id,
-                &path,
+                state,
+                auth_user,
+                service_id,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -847,7 +868,7 @@ pub async fn proxy_request(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -1151,6 +1172,26 @@ pub async fn proxy_request_by_slug(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((slug, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &slug,
+        request,
+        |request| {
+            proxy_request_by_slug_unthrottled(&state, &auth_user, tele, &slug, &path, request)
+        },
+    )
+    .await
+}
+
+async fn proxy_request_by_slug_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    slug: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -1168,7 +1209,7 @@ pub async fn proxy_request_by_slug(
             // requires a resolved slug or empty, and the path param is unvalidated
             // user input until resolution succeeds.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = request
                 .extensions()
                 .get::<ProxyExchangeStartedAt>()
@@ -1187,10 +1228,10 @@ pub async fn proxy_request_by_slug(
             }
             let mut resolved_slug = String::new();
             let mut result = Box::pin(proxy_request_by_slug_inner(
-                &state,
-                &auth_user,
-                &slug,
-                &path,
+                state,
+                auth_user,
+                slug,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -1221,7 +1262,7 @@ pub async fn proxy_request_by_slug(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -12101,6 +12142,7 @@ mod proxy_resolution_integration_tests {
     include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
+    include!("proxy_refusal_parity_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
@@ -12469,16 +12511,8 @@ mod proxy_resolution_integration_tests {
             serde_json::from_str(&auth_response).expect("parse node auth response");
         assert_eq!(auth_response["type"], "auth_ok");
 
-        for _ in 0..100 {
-            if state.node_ws_manager.is_connected(&node.id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(
-            state.node_ws_manager.is_connected(&node.id),
-            "authenticated node WebSocket must be registered"
-        );
+        // auth_ok is sent only after the connection has been registered.
+        assert!(state.node_ws_manager.is_connected(&node.id));
 
         let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
             .expect("build node executor credentials");
@@ -12939,6 +12973,190 @@ mod proxy_resolution_integration_tests {
         assert_eq!(data["target_id"], "docs");
         assert_eq!(data["destination_origin"], "https://docs.googleapis.com");
         assert!(!data.to_string().contains("test-google-token"));
+    }
+
+    #[tokio::test]
+    async fn startup_imported_connection_dispatches_by_slug_to_its_binding_node() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::user_service_connection::COLLECTION_NAME as CONNECTIONS;
+        let db = crate::test_utils::connect_transaction_test_database("startup_slug_node").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let preferred = insert_online_node(&state, &owner, "preferred").await;
+        let secondary = insert_online_node(&state, &owner, "secondary").await;
+        let (base_url, echo) = start_node_echo_downstream().await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "legacy-node-route".into();
+        catalog.base_url = base_url.clone();
+        db.collection::<DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        db.collection::<bson::Document>(CONNECTIONS).insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": &owner, "service_id": &catalog.id,
+            "credential_encrypted": bson::Bson::Null, "is_active": true, "created_at": now, "updated_at": now,
+        }).await.unwrap();
+        crate::services::node_service::create_binding(&db, &owner, &preferred.id, &catalog.id)
+            .await
+            .unwrap();
+        let first =
+            crate::services::node_service::create_binding(&db, &owner, &secondary.id, &catalog.id)
+                .await
+                .unwrap();
+        crate::services::node_service::update_binding_priority(
+            &db,
+            &owner,
+            &secondary.id,
+            &first.id,
+            4,
+        )
+        .await
+        .unwrap();
+        crate::db::migrate_to_unified_collections(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let imported = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"source":"migration_connection"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported.node_id.as_deref(), Some(preferred.id.as_str()));
+        assert_eq!(imported.node_priority, 0);
+        let (executor, server) =
+            start_node_executor(state.clone(), &preferred, &imported.slug, &base_url).await;
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&owner),
+            &imported.slug,
+            "commands",
+            proxy_json_request("/proxy/s/legacy-node-route/commands", "{}"),
+            &mut String::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["body"],
+            "{}"
+        );
+        executor.await.unwrap();
+        server.abort();
+        echo.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binding_only_route_depends_on_whether_the_connection_is_pre_resolved() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, test_helpers::dummy_service,
+        };
+        use crate::services::{node_routing_service, node_service, proxy_service};
+
+        let db = crate::test_utils::connect_transaction_test_database("binding_only_route").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let catalog = dummy_service();
+        db.collection::<crate::models::downstream_service::DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let connection = insert_user_service(
+            &db,
+            &owner,
+            "binding-only",
+            "https://example.invalid",
+            Some(&catalog.id),
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connection.id},
+                doc! {"$unset": {"node_id": ""}},
+            )
+            .await
+            .unwrap();
+
+        let first = insert_online_node(&state, &owner, "first").await;
+        let (tx, _first_rx) = tokio::sync::mpsc::channel(8);
+        state.node_ws_manager.register_connection(&first.id, tx);
+        let binding = node_service::create_binding(&db, &owner, &first.id, &catalog.id)
+            .await
+            .unwrap();
+        node_service::update_binding_priority(&db, &owner, &first.id, &binding.id, 9)
+            .await
+            .unwrap();
+        let route = node_routing_service::resolve_node_route(
+            &db,
+            &owner,
+            &catalog.id,
+            &state.node_ws_manager,
+        )
+        .await
+        .unwrap()
+        .expect("the catalog resolver uses its one active binding");
+        assert_eq!(route.node_id, first.id);
+        assert!(route.fallback_node_ids.is_empty());
+
+        let resolved = proxy_service::resolve_proxy_target_from_user_service(
+            &db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &owner,
+            Some(&connection.slug),
+            None,
+            proxy_service::ProxyExecutionContext::new(None, state.platform_user_rate_limit),
+        )
+        .await
+        .unwrap()
+        .expect("resolve the owner's exact connection by slug");
+        assert_eq!(resolved.user_service_id, connection.id);
+        assert!(resolved.node_id.is_none());
+        let route = super::build_pre_resolved_node_route(
+            &state,
+            &super::resolved_user_service_owner(&access_token_auth(&owner), &owner, &resolved),
+            &resolved.target.service.id,
+            resolved.node_id.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            route.is_none(),
+            "selected-connection HTTP skips the binding without an explicit primary"
+        );
+
+        let preferred = insert_online_node(&state, &owner, "preferred").await;
+        let (tx, _preferred_rx) = tokio::sync::mpsc::channel(8);
+        state.node_ws_manager.register_connection(&preferred.id, tx);
+        node_service::create_binding(&db, &owner, &preferred.id, &catalog.id)
+            .await
+            .unwrap();
+        let route = node_routing_service::resolve_node_route(
+            &db,
+            &owner,
+            &catalog.id,
+            &state.node_ws_manager,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(route.node_id, preferred.id);
+        assert_eq!(route.fallback_node_ids, [first.id]);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
