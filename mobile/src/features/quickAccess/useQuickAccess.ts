@@ -31,7 +31,7 @@ export const QUICK_ACCESS_MUTATION_KEY = ["account", "quick-access", "change"] a
 export const QUICK_ACCESS_STALE_MS = 60_000;
 const writeKey = (epoch: number) => ['account', 'quick-access-write', epoch] as const;
 type WriteState = {revision: number; pending: number};
-type WriteTicket = {finished: boolean};
+type WriteTicket = {finished: boolean; owner: object};
 type MutationContext = {previous?: QuickAccessState; ticket?: WriteTicket};
 const writeState = (client: QueryClient, epoch: number): WriteState =>
   client.getQueryData<WriteState>(writeKey(epoch)) ?? {revision: 0, pending: 0};
@@ -41,11 +41,16 @@ function admitWrite(client: QueryClient, epoch: number): WriteTicket {
   client.setQueryDefaults(writeKey(epoch), {gcTime: Infinity});
   const state = writeState(client, epoch);
   client.setQueryData(writeKey(epoch), {revision: state.revision + 1, pending: state.pending + 1});
-  return {finished: false};
+  return {finished: false, owner: client.getQueryCache().find({queryKey: writeKey(epoch), exact: true})!};
 }
+const ownsWriteCache = (client: QueryClient, epoch: number, ticket?: WriteTicket) =>
+  !!ticket && client.getQueryCache().find({queryKey: writeKey(epoch), exact: true}) === ticket.owner;
 function finishWrite(client: QueryClient, epoch: number, ticket?: WriteTicket) {
   if (!ticket || ticket.finished) return;
   ticket.finished = true;
+  // A completed sign-out/replacement clears the client. Never recreate its
+  // retired metadata, or decrement a new login's ticket under the same key.
+  if (!ownsWriteCache(client, epoch, ticket)) return;
   const state = writeState(client, epoch);
   client.setQueryData(writeKey(epoch), {revision: state.revision + 1, pending: Math.max(0, state.pending - 1)});
 }
@@ -173,20 +178,20 @@ export function quickAccessMutationHandlers(
       change: QuickAccessChange & { authority?: ActionAuthority },
       context: MutationContext | undefined,
     ) => {
-      if (!current(change)) return;
       finishWrite(client, key[2], context?.ticket);
+      if (!current(change)) return;
       if (conflictError(_error)) client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'required'});
       if (_error instanceof Error && _error.name === 'AbortError') return;
       if (context?.previous) client.setQueryData(key, context.previous);
       else client.removeQueries({ queryKey: key, exact: true });
     },
     onSuccess: (saved: QuickAccessState, change?: QuickAccessChange & { authority?: ActionAuthority }, context?: MutationContext) => {
+      finishWrite(client, key[2], context?.ticket);
       if (!current(change)) return;
       // Also cancel reads which returned an optimistic cache value while this
       // write was pending, before publishing the authoritative response.
       void client.cancelQueries({queryKey: key});
       client.setQueryData(key, saved);
-      finishWrite(client, key[2], context?.ticket);
       if (change && 'reset' in change && needsRecovery(client, key[2]))
         client.setQueryData<ConflictRecovery>(conflictKey(key[2]), {phase: 'ready'});
     },
@@ -194,8 +199,19 @@ export function quickAccessMutationHandlers(
       _saved: QuickAccessState | undefined,
       error: unknown,
       change?: QuickAccessChange & { authority?: ActionAuthority },
+      context?: MutationContext,
     ) => {
-      if (!current(change)) return;
+      finishWrite(client, key[2], context?.ticket);
+      if (!current(change)) {
+        // A failed durable clear revokes the generation but leaves this exact
+        // account/cache alive. Its old response cannot publish; reconcile it
+        // with a new read after releasing the admitted write instead.
+        if (key[2] === getAuthEpoch()
+          && change?.authority?.account === getAuthAccountId()
+          && ownsWriteCache(client, key[2], context?.ticket))
+          void client.invalidateQueries({queryKey: key});
+        return;
+      }
       if (error) void client.invalidateQueries({ queryKey: key });
     },
   };
