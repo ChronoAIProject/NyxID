@@ -11,12 +11,14 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
   AppState,
+  Keyboard,
   Linking,
   Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
+  type ScrollView,
 } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { AuthSubmitButton } from "./AuthSubmitButton";
@@ -191,6 +193,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const socialLoginLock = useRef(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const loginScroll = useRef<ScrollView | null>(null);
   const [registrationNotice, setRegistrationNotice] = useState<string | null>(null);
   const [registrationPending, setRegistrationPending] = useState(false);
   const registrationLock = useRef(false);
@@ -453,6 +456,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <KeyboardScrollView
+        scrollRef={loginScroll}
         style={flowStyles.content}
         contentContainerStyle={[
           flowStyles.scrollContent,
@@ -605,17 +609,43 @@ export function AuthHomeScreen({ navigation }: Props) {
                 <AuthTextInput frameStyle={mode === "light" ? styles.field : undefined} accessibilityLabel={prompt.label}
                   placeholder={prompt.placeholder}
                   keyboardType={recoveryMode ? "default" : "number-pad"} style={styles.input} value={mfaCode}
-                  onChangeText={setMfaCode} maxLength={32} autoCapitalize="none" autoCorrect={false}
+                  onChangeText={(value) => { setMfaCode(value); setLoginError(null); }} maxLength={32} autoCapitalize="none" autoCorrect={false}
                   autoComplete="one-time-code" editable={!isEmailAuthPending} />
-                <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setRecoveryMode(!recoveryMode); setMfaCode(""); }}>
+                <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setRecoveryMode(!recoveryMode); setMfaCode(""); setLoginError(null); }}>
                   <Text style={styles.heroTagline}>{prompt.toggle}</Text>
                 </Pressable>
-                <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null); setMfaCode(""); setPassword(""); }}>
+                <Pressable accessibilityRole="button" disabled={isEmailAuthPending} onPress={() => { setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null); setMfaCode(""); setPassword(""); setLoginError(null); }}>
                   <Text style={styles.heroTagline}>
                       {translateApp("Back to sign-in")}
                     </Text>
                 </Pressable>
               </View>
+              )}
+              {loginError && (
+                <View style={styles.errorBanner}>
+                  <Text
+                    accessibilityRole="alert"
+                    accessibilityLiveRegion="assertive"
+                    style={styles.errorText}
+                    onLayout={({ currentTarget }) => {
+                      Keyboard.dismiss();
+                      const scroll = loginScroll.current;
+                      const viewport = scroll?.getNativeScrollRef();
+                      if (scroll && viewport) {
+                        currentTarget.measureLayout(viewport, (_x, y) => {
+                          scroll.scrollTo({ y: Math.max(0, y - spacing.lg), animated: false });
+                        });
+                      }
+                    }}
+                  >
+                    {loginError === "WAITLIST" ? (
+                      getFrontendUrl() ? <Translation
+                        message="Registration is invite-only. {{waitlist}} to get access."
+                        values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
+                      /> : translateApp("Registration is invite-only.")
+                    ) : loginError}
+                  </Text>
+                </View>
               )}
               <AuthSubmitButton
                 onPress={() => void handleEmailLogin()}
@@ -673,22 +703,6 @@ export function AuthHomeScreen({ navigation }: Props) {
         {registrationNotice ? (
           <Text accessibilityRole="alert" style={{ color: colors.textSecondary }}>{registrationNotice}</Text>
         ) : null}
-        {loginError && (
-          <View style={styles.errorBanner}>
-            {loginError === "WAITLIST" ? (
-              <>
-                <Text style={styles.errorText}>
-                  {getFrontendUrl() ? <Translation
-                    message="Registration is invite-only. {{waitlist}} to get access."
-                    values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
-                  /> : translateApp("Registration is invite-only.")}
-                </Text>
-              </>
-            ) : (
-              <Text style={styles.errorText}>{loginError}</Text>
-            )}
-          </View>
-        )}
       </KeyboardScrollView>
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>

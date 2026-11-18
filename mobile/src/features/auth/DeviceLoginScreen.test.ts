@@ -141,6 +141,34 @@ const pendingPreview = (label: string) => ({
   expires_at: new Date(Date.now() + 600_000).toISOString(),
 });
 
+for (const entry of ["scanner", "manual"] as const) {
+  for (const [status, expected] of [
+    ["pending", "Browser request"],
+    ["expired", "Login request expired"],
+    ["delivered", "Login request already used"],
+  ]) {
+    test(`${entry} shows the server's ${status} preview for the same browser code`, async (t) => {
+      const env = setup({ previewRequest: async () => ({ ...pendingPreview("Browser request"), status }) });
+      t.after(env.harness.unmount);
+      const scanner = env.find("DeviceCodeScanner");
+      if (entry === "scanner") {
+        scanner.props.onCode("ABCDEFGH", "device");
+      } else {
+        scanner.props.onManualEntry();
+        env.harness.flush();
+        env.find("TextInput").props.onChangeText("abcd-efgh");
+        env.harness.flush();
+        env.find("PrimaryButton").props.onPress();
+      }
+      await env.harness.settle();
+
+      assert.deepEqual(env.previews, [{ code: "ABCDEFGH" }]);
+      assert.ok(elements(env.harness.value()).some((item) => item.props.children === expected));
+      assert.deepEqual(env.decisions, []);
+    });
+  }
+}
+
 test("opening a login link loads its review without approving or denying", async () => {
   const env = setup({ userCode: "abcd-efgh", previewRequest: async () => pendingPreview("Browser request") });
   await env.harness.settle();
