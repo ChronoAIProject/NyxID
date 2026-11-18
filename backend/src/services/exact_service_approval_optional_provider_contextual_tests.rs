@@ -349,7 +349,7 @@ async fn caller_key_rules_cover_exact_create_observe_and_redeem() {
     for effect in ["deny", "require_approval"] {
         configs.delete_many(doc! {}).await.unwrap();
         configs.insert_one(doc! {"_id":&policy_id,"user_id":&f.caller.actor_user_id,"service_id":&f.catalog.id,"service_name":"Exact",
-            "approval_required":false,"rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":[callers[0].api_key_id.as_deref().unwrap()]}],
+            "approval_required":false,"approval_mode":"per_request","rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":[callers[0].api_key_id.as_deref().unwrap()]}],
             "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
         let listed = Box::pin(create_request(&f.state, &callers[0], input())).await;
         if effect == "deny" {
