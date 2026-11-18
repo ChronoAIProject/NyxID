@@ -105,10 +105,16 @@ export async function installSetupFixture(page: Page) {
       await state.adoptionGate;
       const binding = state.bindings.find((row) => row.id === body.binding_id);
       if (!binding || binding.generation !== body.binding_generation)
-        return route.fulfill({ status: 403, json: { error: "forbidden", message: "Binding is unavailable" } });
+        return route.fulfill({
+          status: 403,
+          json: { error: "forbidden", message: "Binding is unavailable" },
+        });
       const current = state.drafts.find((row) => row.id === draft.id);
       if (!current || current.revision !== body.revision)
-        return route.fulfill({ status: 409, json: { error: "conflict", message: "Anonymous draft expired or changed" } });
+        return route.fulfill({
+          status: 409,
+          json: { error: "conflict", message: "Anonymous draft expired or changed" },
+        });
       if (state.adoptError)
         return route.fulfill({
           status: 503,

@@ -69,21 +69,34 @@ it("clears consent on success and releases the guard for a newly reviewed draft"
   expect(state.mutate).toHaveBeenCalledTimes(2);
 });
 
-
-it.each(["success", "refusal"] as const)("keeps consent for a newer revision when an older submission settles: %s", (outcome) => {
-  const page = render(<AnonymousDraftReview binding={binding} />);
-  fireEvent.click(screen.getByRole("checkbox"));
-  fireEvent.click(screen.getByRole("button", { name: "Adopt reviewed draft" }));
-  const callbacks = state.mutate.mock.calls[0]![1];
-  state.drafts = [{ ...draft, revision: 4 }];
-  page.rerender(<AnonymousDraftReview binding={binding} />);
-  fireEvent.click(screen.getByRole("checkbox"));
-  act(() => {
-    if (outcome === "success") callbacks.onSuccess();
-    else callbacks.onError(new ApiError(409, { error: "conflict", error_code: -1, message: "Anonymous draft expired or changed" }));
-    callbacks.onSettled();
-  });
-  expect(screen.getByRole("checkbox")).toBeChecked();
-  expect(screen.getByRole("button", { name: "Adopt reviewed draft" })).toBeEnabled();
-  expect(state.mutate).toHaveBeenCalledTimes(1);
-});
+it.each(["success", "refusal"] as const)(
+  "keeps consent for a newer revision when an older submission settles: %s",
+  (outcome) => {
+    const page = render(<AnonymousDraftReview binding={binding} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Adopt reviewed draft" }),
+    );
+    const callbacks = state.mutate.mock.calls[0]![1];
+    state.drafts = [{ ...draft, revision: 4 }];
+    page.rerender(<AnonymousDraftReview binding={binding} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    act(() => {
+      if (outcome === "success") callbacks.onSuccess();
+      else
+        callbacks.onError(
+          new ApiError(409, {
+            error: "conflict",
+            error_code: -1,
+            message: "Anonymous draft expired or changed",
+          }),
+        );
+      callbacks.onSettled();
+    });
+    expect(screen.getByRole("checkbox")).toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "Adopt reviewed draft" }),
+    ).toBeEnabled();
+    expect(state.mutate).toHaveBeenCalledTimes(1);
+  },
+);

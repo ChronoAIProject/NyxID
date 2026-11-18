@@ -464,8 +464,12 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
       )}
       {(query.error || denied) && (
         <ErrorBanner
-          message={translateUi("Could not load drafts for this chat. Refresh your binding before trying again.")}
-          onRetry={() => { void query.refetch(); }}
+          message={translateUi(
+            "Could not load drafts for this chat. Refresh your binding before trying again.",
+          )}
+          onRetry={() => {
+            void query.refetch();
+          }}
         />
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
@@ -512,10 +516,13 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               if (event.detail > 1 || !review || adoptionPending.current) return;
               adoptionPending.current = true;
               const submitted = review;
-              const clearSubmittedReview = () => setReview((current) =>
-                current?.id === submitted.id && current.revision === submitted.revision
-                  ? null : current,
-              );
+              const clearSubmittedReview = () =>
+                setReview((current) =>
+                  current?.id === submitted.id &&
+                  current.revision === submitted.revision
+                    ? null
+                    : current,
+                );
               mutation.mutate(submitted, {
                 onSuccess: clearSubmittedReview,
                 onError: (error) => {

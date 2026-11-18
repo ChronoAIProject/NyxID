@@ -273,28 +273,49 @@ for (const failure of ["invalidDraft", "draftError", "adoptError"] as const) {
   });
 }
 
-
-test("a revision conflict refreshes the draft and requires a new acknowledgement", async ({ page }) => {
+test("a revision conflict refreshes the draft and requires a new acknowledgement", async ({
+  page,
+}) => {
   const fixture = await installSetupFixture(page);
   await page.goto("/onboarding/setups");
   await selectChat(page);
   await page.getByRole("checkbox", { name: reviewText }).check();
   fixture.drafts = [platformSetup({ revision: 4 })];
   await adopt(page).click();
-  await expect(page.getByText("Anonymous draft expired or changed", { exact: true })).toBeVisible();
-  await expect(page.getByText("Telegram cafe · revision 4", { exact: true })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: reviewText })).not.toBeChecked();
+  await expect(
+    page.getByText("Anonymous draft expired or changed", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Telegram cafe · revision 4", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: reviewText }),
+  ).not.toBeChecked();
   await expect(adopt(page)).toBeDisabled();
   expect(fixture.writes.map((write) => write.body)).toEqual([
-    { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+    {
+      revision: 3,
+      binding_id: setupBinding.id,
+      binding_generation: setupBinding.generation,
+    },
   ]);
   expect(fixture.saved).toHaveLength(0);
   await page.getByRole("checkbox", { name: reviewText }).check();
   await adopt(page).click();
-  await expect(page.getByText("No unowned drafts remain for this chat.", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("No unowned drafts remain for this chat.", { exact: true }),
+  ).toBeVisible();
   expect(fixture.writes.map((write) => write.body)).toEqual([
-    { revision: 3, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
-    { revision: 4, binding_id: setupBinding.id, binding_generation: setupBinding.generation },
+    {
+      revision: 3,
+      binding_id: setupBinding.id,
+      binding_generation: setupBinding.generation,
+    },
+    {
+      revision: 4,
+      binding_id: setupBinding.id,
+      binding_generation: setupBinding.generation,
+    },
   ]);
   expect(fixture.saved).toHaveLength(1);
   await singleModule(page, 0);
@@ -302,24 +323,46 @@ test("a revision conflict refreshes the draft and requires a new acknowledgement
   expect(fixture.pageErrors).toEqual([]);
 });
 
-
-test("a denied draft read discards facts through transient failure and authorized recovery", async ({ page }) => {
+test("read denial keeps facts discarded through transient failure and recovery", async ({
+  page,
+}) => {
   const fixture = await installSetupFixture(page);
-  const queryKey = ["onboarding", setupActor.id, "anonymous", setupBinding.id, setupBinding.generation];
+  const queryKey = [
+    "onboarding",
+    setupActor.id,
+    "anonymous",
+    setupBinding.id,
+    setupBinding.generation,
+  ];
   await page.goto("/onboarding/setups");
   await selectChat(page);
   await page.getByRole("checkbox", { name: reviewText }).check();
   fixture.draftErrorStatus = 403;
   await page.evaluate(async (key) => {
-    const client = (window as unknown as { __nyxQueryClient: import("@tanstack/react-query").QueryClient }).__nyxQueryClient;
+    const client = (
+      window as unknown as {
+        __nyxQueryClient: import("@tanstack/react-query").QueryClient;
+      }
+    ).__nyxQueryClient;
     await client.invalidateQueries({ queryKey: key, exact: true });
   }, queryKey);
   const expectNoPrivateDraft = async () => {
-    await expect(page.getByText("Could not load drafts for this chat. Refresh your binding before trying again.", { exact: true })).toBeVisible();
-    await expect(page.getByText("Telegram cafe · revision 3", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText(
+        "Could not load drafts for this chat. Refresh your binding before trying again.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Telegram cafe · revision 3", { exact: true }),
+    ).toHaveCount(0);
     await singleModule(page, 0);
     const cache = await page.evaluate((key) => {
-      const client = (window as unknown as { __nyxQueryClient: import("@tanstack/react-query").QueryClient }).__nyxQueryClient;
+      const client = (
+        window as unknown as {
+          __nyxQueryClient: import("@tanstack/react-query").QueryClient;
+        }
+      ).__nyxQueryClient;
       return JSON.stringify(client.getQueryData(key));
     }, queryKey);
     expect(cache).not.toContain('"facts"');
@@ -329,14 +372,22 @@ test("a denied draft read discards facts through transient failure and authorize
   };
   await expectNoPrivateDraft();
   fixture.draftErrorStatus = 503;
-  const failedRead = page.waitForResponse((response) => response.url().includes("/onboarding/anonymous-drafts") && response.status() === 503);
+  const failedRead = page.waitForResponse(
+    (response) =>
+      response.url().includes("/onboarding/anonymous-drafts") &&
+      response.status() === 503,
+  );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await failedRead;
   await expectNoPrivateDraft();
   fixture.draftErrorStatus = 0;
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(page.getByText("Telegram cafe · revision 3", { exact: true })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: reviewText })).not.toBeChecked();
+  await expect(
+    page.getByText("Telegram cafe · revision 3", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: reviewText }),
+  ).not.toBeChecked();
   await expect(adopt(page)).toBeDisabled();
   await page.getByRole("checkbox", { name: reviewText }).check();
   await expect(adopt(page)).toBeEnabled();
@@ -345,11 +396,14 @@ test("a denied draft read discards facts through transient failure and authorize
   expect(fixture.pageErrors).toEqual([]);
 });
 
-
-test("a failed conflict refresh cannot offer the rejected revision again", async ({ page }) => {
+test("a failed conflict refresh cannot offer the rejected revision again", async ({
+  page,
+}) => {
   const fixture = await installSetupFixture(page);
   let release!: () => void;
-  fixture.adoptionGate = new Promise<void>((resolve) => { release = resolve; });
+  fixture.adoptionGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   await page.goto("/onboarding/setups");
   await selectChat(page);
   await page.getByRole("checkbox", { name: reviewText }).check();
@@ -375,7 +429,9 @@ test("a failed conflict refresh cannot offer the rejected revision again", async
       page.getByText("Telegram cafe · revision 3", { exact: true }),
     ).toHaveCount(0);
     await expect(
-      page.getByText("No unowned drafts remain for this chat.", { exact: true }),
+      page.getByText("No unowned drafts remain for this chat.", {
+        exact: true,
+      }),
     ).toHaveCount(0);
     await singleModule(page, 0);
     expect(fixture.writes.map((write) => write.body)).toEqual([
@@ -383,8 +439,10 @@ test("a failed conflict refresh cannot offer the rejected revision again", async
     ]);
   };
   await expectRejectedSnapshotGone();
-  const failedRetry = page.waitForResponse((response) =>
-    response.url().includes("/onboarding/anonymous-drafts") && response.status() === 503,
+  const failedRetry = page.waitForResponse(
+    (response) =>
+      response.url().includes("/onboarding/anonymous-drafts") &&
+      response.status() === 503,
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await failedRetry;
@@ -394,7 +452,9 @@ test("a failed conflict refresh cannot offer the rejected revision again", async
   await expect(
     page.getByText("Telegram cafe · revision 4", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: reviewText })).not.toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: reviewText }),
+  ).not.toBeChecked();
   await expect(adopt(page)).toBeDisabled();
   await page.getByRole("checkbox", { name: reviewText }).check();
   await adopt(page).click();
