@@ -1237,17 +1237,14 @@ pub async fn revoke_grant(
         .ok()
         .flatten();
 
-    approval_service::revoke_grant(&state.db, &owner_user_id, &grant_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "approval_grant_revoked",
-        Some(serde_json::json!({
-            "grant_id": grant_id,
-            "owner_user_id": owner_user_id,
-        })),
-    );
+    approval_service::revoke_grant_with_audit(
+        &state.db,
+        &owner_user_id,
+        &grant_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        approval_service::GrantRevokeSource::Web,
+    )
+    .await?;
 
     // Resolve a meaningful service_slug. Approval grants store `service_id`
     // as either a `UserService` UUID (custom per-user service) or a
