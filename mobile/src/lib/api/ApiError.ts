@@ -41,6 +41,8 @@ export class ApiError extends Error {
     this.sourceMessage = opts.sourceMessage;
     if (opts.sourceMessage) {
       const source = opts.sourceMessage;
+      // Lazy stack formatters must not call the display getter during capture.
+      void this.stack;
       // Direct message consumers also format when they display the retained
       // error. Never freeze a local fallback into its creation-time locale.
       Object.defineProperty(this, "message", { configurable: true, get: () => translateApp(source) });

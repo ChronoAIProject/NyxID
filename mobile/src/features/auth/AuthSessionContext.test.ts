@@ -75,9 +75,10 @@ test('M2622-03 durable sign-out retries a failed tombstone without waiting for p
   const coordinator = createSessionCoordinator(storage, () => {});
   await coordinator.persist({accessToken:'token',refreshToken:'refresh',userId:'account'});
   const push = deferred<void>(); let teardowns = 0;
+  const crashDisarms: Array<{generation:number; account:string|null}> = [];
   const client = {clear() {}, cancelQueries: async () => {}};
   const h = hookHarness<any>({
-    "../../lib/crashReporting/runtime": {crashLifecycle: null},
+    "../../lib/crashReporting/runtime": {crashLifecycle: {setRestoring: () => {}, disarm: () => {crashDisarms.push({generation:coordinator.generation(),account});}}},
     'react/jsx-runtime': {jsx: (type: unknown, props: unknown) => ({type,props})},
     'react-native': {AppState: {currentState:'active',addEventListener: () => ({remove() {}})}},
     '@tanstack/react-query': {useQueryClient: () => client},
@@ -99,10 +100,13 @@ test('M2622-03 durable sign-out retries a failed tombstone without waiting for p
     // A held push must not hide the durable-write rejection.
     let rejected=false; const first=value().signOut().catch(() => {rejected=true;});
     await h.settle(); assert.equal(rejected,true); await first;
+    assert.equal(crashDisarms.length,0,'failed durable clear retains crash authority for admitted account');
     assert.equal(teardowns,0); assert.equal(value().isAuthenticated,true); assert.equal(account,'account');
     assert.ok(await createSessionCoordinator(storage,()=>{}).load());
     fail=false; let complete=false; const retry=value().signOut().then(() => {complete=true;});
     await h.settle(); assert.equal(complete,true); await retry;
+    assert.equal(crashDisarms.length,1,'successful clear disarms diagnostics once');
+    assert.equal(crashDisarms[0]!.account,'account','disarm precedes publishing signed-out owner');
     assert.equal(value().isAuthenticated,false); assert.equal(account,null); assert.equal(teardowns,1);
     assert.equal(await createSessionCoordinator(storage,()=>{}).load(),null);
     assert.ok(!values.has(SESSION_RECORD_KEY) || JSON.parse(values.get(SESSION_RECORD_KEY)!).session===null);
