@@ -4166,6 +4166,7 @@ async fn authorize_mcp_operation(
             auth.auth_method == AuthMethod::Session,
             target.is_auto_connected,
             auth.chat.as_ref(),
+            auth.api_key_id.as_deref(),
         )
     })
     .await
@@ -8681,6 +8682,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_id.clone(),
             service_id: catalog_service_id.clone(),
@@ -8903,6 +8905,7 @@ mod tests {
             .expect("insert allowlisted cancellation endpoint");
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: service.id.clone(),

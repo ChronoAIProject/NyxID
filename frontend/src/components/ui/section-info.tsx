@@ -5,7 +5,7 @@ import { Info } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 
 /** A single controlled surface supports hover, keyboard focus and touch taps. */
-export function SectionInfo({ title, children }: { readonly title: string; readonly children: string }) {
+export function SectionInfo({ title, children, align = "center" }: { readonly title: string; readonly children: string; /** Which edge of the tooltip lines up with the icon. */ readonly align?: "start" | "center" | "end" }) {
   useUiTranslation();
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -19,6 +19,6 @@ export function SectionInfo({ title, children }: { readonly title: string; reado
         <Info aria-hidden className="size-[1em]" />
       </button>
     </PopoverTrigger>
-    <PopoverContent id={id} role="tooltip" aria-label={translateUi("About {{value1}}", { value1: title })} className="w-70 max-w-[calc(100vw-2rem)] p-3 type-secondary" onMouseEnter={show} onMouseLeave={leave} onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()} onEscapeKeyDown={(event) => { event.stopPropagation(); setOpen(false); }}>{children}</PopoverContent>
+    <PopoverContent id={id} role="tooltip" align={align} aria-label={translateUi("About {{value1}}", { value1: title })} className="w-70 max-w-[calc(100vw-2rem)] p-3 type-secondary" onMouseEnter={show} onMouseLeave={leave} onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()} onEscapeKeyDown={(event) => { event.stopPropagation(); setOpen(false); }}>{children}</PopoverContent>
   </Popover>;
 }

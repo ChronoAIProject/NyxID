@@ -2,7 +2,6 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -12,23 +11,12 @@ import {
   useTelegramDisconnect,
   usePushDevices,
   useRemoveDevice,
-  useServiceApprovalConfigs,
-  useSetServiceApprovalConfig,
-  useDeleteServiceApprovalConfig,
 } from "@/hooks/use-approvals";
-import { useUserServices } from "@/hooks/use-user-services";
 import {
   updateNotificationSettingsSchema,
   type UpdateNotificationSettingsFormData,
 } from "@/schemas/approvals";
 import { ApiError } from "@/lib/api-client";
-import {
-  approvalPolicyLabel,
-  approvalVerbLabels,
-  approvalVerbs,
-  buildSimpleApprovalRules,
-  enabledSimpleApprovalVerbs,
-} from "@/lib/approval-policies";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -68,24 +56,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  RotateCcw,
   Smartphone,
   Trash2,
   Unlink,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Link } from "@tanstack/react-router";
 import { ApprovalSetupWizard } from "@/components/shared/approval-setup-wizard";
-import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
-import { AddCtaButton } from "@/components/shared/add-cta-button";
-import type {
-  ApprovalEffect,
-  ApprovalMode,
-  ApprovalRule,
-  ApprovalVerb,
-  ServiceApprovalConfigItem,
-} from "@/types/approvals";
 
 export function NotificationSettingsPage() {
   useUiTranslation();
@@ -107,29 +85,9 @@ export function NotificationSettingsPage() {
     ? { devices: [] }
     : rawPushDevices;
 
-  const { data: userServices } = useUserServices();
-  const {
-    data: serviceConfigs,
-    isLoading: isServiceConfigsLoading,
-    error: serviceConfigsError,
-    refetch: refetchServiceConfigs,
-  } = useServiceApprovalConfigs();
-  const setConfigMutation = useSetServiceApprovalConfig();
-  const deleteConfigMutation = useDeleteServiceApprovalConfig();
-
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
   const [removeDeviceId, setRemoveDeviceId] = useState<string | null>(null);
-  const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
-  const [selectedServiceId, setSelectedServiceId] = useState("");
-  const [selectedApprovalRequired, setSelectedApprovalRequired] =
-    useState(true);
-  const [selectedApprovalMode, setSelectedApprovalMode] = useState<
-    "per_request" | "grant"
-  >("per_request");
-  const [selectedApprovalVerbs, setSelectedApprovalVerbs] =
-    useState<readonly ApprovalVerb[]>(approvalVerbs);
-
   const linkData = telegramLinkMutation.data;
 
   const form = useAppForm<UpdateNotificationSettingsFormData>({
@@ -145,107 +103,6 @@ export function NotificationSettingsPage() {
         }
       : undefined,
   });
-
-  // Identifier set used to dedupe the picker. A single config may be
-  // keyed by either:
-  //   (a) a `UserService.id` (custom services, or explicitly targeted),
-  //   (b) a catalog `DownstreamService.id` that covers *all* of the
-  //       user's services sharing that `catalog_service_id`.
-  // Collect both so the picker hides every service already covered — not
-  // just the `user_service_id` the backend happened to return for case
-  // (b) (which is the most-recently-created sibling). Without this, an
-  // org/user with two OpenAI user services would still see the other one
-  // in the Add dialog and "adding" it would silently overwrite the same
-  // catalog-wide policy.
-  const configuredIds = new Set<string>();
-  for (const c of serviceConfigs?.configs ?? []) {
-    configuredIds.add(c.service_id);
-    if (c.user_service_id) configuredIds.add(c.user_service_id);
-  }
-
-  // `(org_id, service_id)` pairs where a specific org dominates the
-  // approval policy for a catalog service the caller inherits from it.
-  // `resolve_org_aware_approval` picks that org's policy before falling
-  // back to the actor's personal config, so personal overrides are
-  // silently ignored *for calls routed through that org*. We index by
-  // `org_id|service_id` so the picker only hides the org-specific
-  // entry; if the same catalog service is also inherited from a
-  // different org without a dominant policy, that entry stays
-  // selectable. Omitted on the org-scoped list — default to empty.
-  const dominantOrgPolicyKeys = new Set<string>(
-    (serviceConfigs?.dominant_org_policies ?? []).map(
-      (p) => `${p.org_id}|${p.service_id}`,
-    ),
-  );
-
-  // Picker entries for the Add-Override dialog. Two kinds of services
-  // are pickable:
-  //
-  //  1. **Personal** — the actor owns the UserService outright. We use
-  //     the `UserService.id` as the mutation key so the backend maps it
-  //     to the effective storage key (catalog id when catalog-backed,
-  //     user service id for custom services — see ChronoAIProject/NyxID#165).
-  //
-  //  2. **Org-inherited with a catalog id** — the UserService belongs to
-  //     an org the actor has proxy access to (member/admin), and the
-  //     org has no dominant per-service policy of its own. In that case
-  //     `resolve_org_aware_approval` falls back to the actor's personal
-  //     per-service config keyed by the catalog id, so the user *can*
-  //     author a personal override that affects their org-routed proxy
-  //     calls. We use `catalog_service_id` as the mutation key (the
-  //     legacy path accepts catalog ids) and label the entry with the
-  //     org name so the user knows the scope.
-  //
-  // Viewer-role entries carry `allowed: false` and are excluded — they
-  // can't proxy, so an approval policy would have nothing to gate.
-  // Custom (no-catalog) org services are also excluded: a personal
-  // policy can only key on the catalog id for org-shared resources,
-  // and there isn't one.
-  type PickerEntry = {
-    readonly id: string;
-    readonly label: string;
-  };
-  const selectableUserServices: readonly PickerEntry[] =
-    isServiceConfigsLoading || serviceConfigsError
-      ? []
-      : (() => {
-          const out: PickerEntry[] = [];
-          const seen = new Set<string>();
-          for (const s of userServices ?? []) {
-            if (!s.is_active) continue;
-            const src = s.credential_source;
-            let mutationId: string | null = null;
-            let label = s.slug;
-            if (src.type === "personal") {
-              mutationId = s.id;
-            } else if (src.type === "org" && src.allowed && s.catalog_service_id) {
-              mutationId = s.catalog_service_id;
-              label = `${s.slug} (via ${src.org_name})`;
-            }
-            if (!mutationId) continue;
-            if (configuredIds.has(mutationId)) continue;
-            if (configuredIds.has(s.id)) continue;
-            if (s.catalog_service_id && configuredIds.has(s.catalog_service_id))
-              continue;
-            // Skip org-inherited entries whose *specific* org already
-            // has a dominant policy for this catalog — a personal
-            // override would be ignored at proxy time. Scoped per
-            // (org_id, service_id) so another org inheriting the same
-            // catalog without its own policy stays selectable.
-            if (
-              src.type === "org" &&
-              s.catalog_service_id &&
-              dominantOrgPolicyKeys.has(
-                `${src.org_id}|${s.catalog_service_id}`,
-              )
-            )
-              continue;
-            if (seen.has(mutationId)) continue;
-            seen.add(mutationId);
-            out.push({ id: mutationId, label });
-          }
-          return out;
-        })();
 
   async function handleSave(data: UpdateNotificationSettingsFormData) {
     try {
@@ -302,170 +159,6 @@ export function NotificationSettingsPage() {
       );
     } finally {
       setRemoveDeviceId(null);
-    }
-  }
-
-  async function handleAddServiceConfig() {
-    if (!selectedServiceId) return;
-
-    const simplePolicy = buildSimpleApprovalRules(
-      selectedApprovalRequired ? selectedApprovalVerbs : [],
-      selectedApprovalMode,
-    );
-
-    try {
-      await setConfigMutation.mutateAsync({
-        serviceId: selectedServiceId,
-        approvalRequired: simplePolicy.approvalRequired,
-        approvalMode: selectedApprovalMode,
-        rules: simplePolicy.rules,
-        defaultEffect: simplePolicy.defaultEffect,
-      });
-      toast.success(translateUi("Per-service approval override added"));
-      setAddServiceDialogOpen(false);
-      setSelectedServiceId("");
-      setSelectedApprovalRequired(true);
-      setSelectedApprovalMode("per_request");
-      setSelectedApprovalVerbs(approvalVerbs);
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to add service config"),
-      );
-    }
-  }
-
-  async function handleToggleServiceConfig(
-    serviceId: string,
-    approvalRequired: boolean,
-  ) {
-    try {
-      // `serviceId` here is the mutation key — `user_service_id` when
-      // known, else the raw stored `service_id`. Match against either so
-      // catalog-keyed rows resolve too (their `service_id` is a catalog
-      // id, not a UserService id).
-      const existingConfig = serviceConfigs?.configs.find(
-        (c) =>
-          c.user_service_id === serviceId || c.service_id === serviceId,
-      );
-      const mode = existingConfig?.approval_mode ?? "per_request";
-      const simplePolicy = buildSimpleApprovalRules(
-        approvalRequired ? approvalVerbs : [],
-        mode,
-      );
-      await setConfigMutation.mutateAsync({
-        serviceId,
-        approvalRequired: simplePolicy.approvalRequired,
-        approvalMode: mode,
-        rules: simplePolicy.rules,
-        defaultEffect: simplePolicy.defaultEffect,
-      });
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError
-          ? err.message
-          : "Failed to update service config"),
-      );
-    }
-  }
-
-  async function handleChangeApprovalMode(
-    serviceId: string,
-    config: ServiceApprovalConfigItem,
-    approvalMode: ApprovalMode,
-  ) {
-    const simplePolicy = buildSimpleApprovalRules(
-      enabledSimpleApprovalVerbs(config),
-      approvalMode,
-    );
-
-    try {
-      await setConfigMutation.mutateAsync({
-        serviceId,
-        approvalRequired: simplePolicy.approvalRequired,
-        approvalMode,
-        rules: simplePolicy.rules,
-        defaultEffect: simplePolicy.defaultEffect,
-      });
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError
-          ? err.message
-          : "Failed to update approval mode"),
-      );
-    }
-  }
-
-  async function handleChangeVerbApproval(
-    serviceId: string,
-    config: ServiceApprovalConfigItem,
-    verb: ApprovalVerb,
-    enabled: boolean,
-  ) {
-    const current = new Set(enabledSimpleApprovalVerbs(config));
-    if (enabled) {
-      current.add(verb);
-    } else {
-      current.delete(verb);
-    }
-    const simplePolicy = buildSimpleApprovalRules(
-      approvalVerbs.filter((candidate) => current.has(candidate)),
-      config.approval_mode,
-    );
-
-    try {
-      await setConfigMutation.mutateAsync({
-        serviceId,
-        approvalRequired: simplePolicy.approvalRequired,
-        approvalMode: config.approval_mode,
-        rules: simplePolicy.rules,
-        defaultEffect: simplePolicy.defaultEffect,
-      });
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError
-          ? err.message
-          : "Failed to update approval rule"),
-      );
-    }
-  }
-
-  async function handleSaveAdvancedRules(
-    serviceId: string,
-    config: ServiceApprovalConfigItem,
-    rules: readonly ApprovalRule[],
-    defaultEffect: ApprovalEffect,
-  ) {
-    try {
-      await setConfigMutation.mutateAsync({
-        serviceId,
-        approvalRequired:
-          rules.length > 0 ||
-          defaultEffect === "require_approval" ||
-          defaultEffect === "deny",
-        approvalMode: config.approval_mode,
-        rules,
-        defaultEffect,
-      });
-      toast.success(translateUi("Approval rules updated"));
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError
-          ? err.message
-          : "Failed to update approval rules"),
-      );
-    }
-  }
-
-  async function handleDeleteServiceConfig(serviceId: string) {
-    try {
-      await deleteConfigMutation.mutateAsync({ serviceId });
-      toast.success(translateUi("Per-service override removed"));
-    } catch (err) {
-      toast.error(
-        translateErrorMessage(err instanceof ApiError
-          ? err.message
-          : "Failed to remove service config"),
-      );
     }
   }
 
@@ -781,173 +474,21 @@ export function NotificationSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* Per-Service Approval Overrides */}
+          {/* Per-service approval settings moved to the assistant's Approvals page. */}
           <Card>
             <CardHeader>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="space-y-1.5">
-                  <CardTitle>{translateUi("Per-Service Approval Overrides")}</CardTitle>
-                  <CardDescription>{translateUi("Override the global approval setting for specific services. Services without an override use per-request approval by default. Use overrides to switch services to time-based grants or to exempt them from approval.")}</CardDescription>
+                  <CardTitle>{translateUi("Approval rules for each service")}</CardTitle>
+                  <CardDescription>{translateUi("Choosing which services and actions need your approval now lives on the Approvals page, under Rules. Rules you set here before still apply and appear there.")}</CardDescription>
                 </div>
                 <div className="shrink-0 self-start sm:self-center">
-                  <AddCtaButton
-                    label={translateUi("Add Override")}
-                    onClick={() => setAddServiceDialogOpen(true)}
-                    disabled={
-                      isServiceConfigsLoading ||
-                      Boolean(serviceConfigsError) ||
-                      selectableUserServices.length === 0
-                    }
-                  />
+                  <Button asChild variant="outline">
+                    <Link to="/assistant/approvals">{translateUi("Open approval rules")}</Link>
+                  </Button>
                 </div>
               </div>
             </CardHeader>
-            <CardContent>
-              {isServiceConfigsLoading ? (
-                <div className="space-y-3 py-2">
-                  <Skeleton className="h-16 w-full" />
-                  <Skeleton className="h-16 w-full" />
-                </div>
-              ) : serviceConfigsError ? (
-                <ErrorBanner message={translateUi("Failed to load per-service overrides. Try refreshing the page.")} onRetry={refetchServiceConfigs} />
-              ) : serviceConfigs?.configs.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("No per-service overrides configured. All services use the global default.")}</div>
-              ) : (
-                <div className="space-y-3">
-                  {serviceConfigs?.configs.map((config) => {
-                    // Prefer the UserService id for API calls so the
-                    // backend resolves the same row the user sees on the
-                    // Keys page. Falls back to the raw service_id for
-                    // legacy rows without a matching active UserService.
-                    const mutationKey =
-                      config.user_service_id ?? config.service_id;
-                    const enabledVerbs = enabledSimpleApprovalVerbs(config);
-                    const hasApproval = enabledVerbs.length > 0;
-                    const hasPolicy =
-                      hasApproval ||
-                      config.rules.length > 0 ||
-                      config.default_effect === "deny";
-                    return (
-                    <div
-                      key={config.service_id}
-                      className="rounded-lg border border-border p-4"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="space-y-0.5">
-                          <p className="type-row-title">
-                            {config.service_name}
-                          </p>
-                          <p className="text-13 text-muted-foreground">
-                            {config.user_service_slug
-                              ? translateUi("{{user_service_slug}} — ", { user_service_slug: config.user_service_slug })
-                              : ""}
-                            {approvalPolicyLabel(config)}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <Switch
-                            checked={hasPolicy}
-                            onCheckedChange={(checked) =>
-                              void handleToggleServiceConfig(
-                                mutationKey,
-                                checked,
-                              )
-                            }
-                          />
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() =>
-                              void handleDeleteServiceConfig(mutationKey)
-                            }
-                            title={translateUi("Remove override (use global default)")}
-                          >
-                            <RotateCcw className="h-4 w-4 text-muted-foreground" />
-                          </Button>
-                        </div>
-                      </div>
-                      {hasPolicy && (
-                        <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
-                          <TabsList>
-                            <TabsTrigger value="simple">{translateUi("Simple")}</TabsTrigger>
-                            <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>
-                          </TabsList>
-                          <TabsContent value="simple" className="mt-3">
-                            <div className="flex flex-col gap-3">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Label htmlFor={`approval-mode-${mutationKey}`}>{translateUi("Mode")}</Label>
-                                <Select
-                                  value={config.approval_mode}
-                                  onValueChange={(value) =>
-                                    void handleChangeApprovalMode(
-                                      mutationKey,
-                                      config,
-                                      value as ApprovalMode,
-                                    )
-                                  }
-                                >
-                                  <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
-                                    <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
-                                  </SelectContent>
-                                </Select>
-                                <span className="text-13 text-muted-foreground">
-                                  {config.approval_mode === "grant"
-                                    ? translateUi("Approval creates a reusable grant")
-                                    : translateUi("Every request needs fresh approval")}
-                                </span>
-                              </div>
-                              <div className="flex flex-wrap gap-3">
-                                {approvalVerbs.map((verb) => (
-                                  <Label
-                                    key={verb}
-                                    className="flex items-center gap-2 text-muted-foreground"
-                                  >
-                                    <Switch
-                                      checked={enabledVerbs.includes(verb)}
-                                      onCheckedChange={(checked) =>
-                                        void handleChangeVerbApproval(
-                                          mutationKey,
-                                          config,
-                                          verb,
-                                          checked,
-                                        )
-                                      }
-                                    />
-                                    {approvalVerbLabels[verb]}
-                                  </Label>
-                                ))}
-                              </div>
-                            </div>
-                          </TabsContent>
-                          <TabsContent value="advanced" className="mt-3">
-                            <ApprovalPolicyEditor
-                              key={`${config.updated_at}:${config.rules.length}:${config.default_effect ?? "legacy"}`}
-                              approvalMode={config.approval_mode}
-                              defaultEffect={config.default_effect}
-                              disabled={setConfigMutation.isPending}
-                              rules={config.rules}
-                              onSave={(rules, defaultEffect) =>
-                                void handleSaveAdvancedRules(
-                                  mutationKey,
-                                  config,
-                                  rules,
-                                  defaultEffect,
-                                )
-                              }
-                            />
-                          </TabsContent>
-                        </Tabs>
-                      )}
-                    </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
           </Card>
         </div>
       )}
@@ -1021,125 +562,6 @@ export function NotificationSettingsPage() {
               onClick={() => void handleRemoveDevice()}
               isLoading={removeDeviceMutation.isPending}
             >{translateUi("Remove Device")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Per-Service Override Dialog */}
-      <Dialog
-        open={addServiceDialogOpen}
-        onOpenChange={setAddServiceDialogOpen}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{translateUi("Add Per-Service Override")}</DialogTitle>
-            <DialogDescription>{translateUi("Choose a service and set whether approval is required for it, overriding the global default.")}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="service-select">{translateUi("Service")}</Label>
-              <Select
-                value={selectedServiceId}
-                onValueChange={setSelectedServiceId}
-              >
-                <SelectTrigger id="service-select">
-                  <SelectValue placeholder={translateUi("Select a service")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {selectableUserServices.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-13 text-muted-foreground">{translateUi("Shows your configured AI services. To add a new one, go to the Keys page.")}</p>
-            </div>
-            <div className="flex items-center justify-between rounded-lg border border-border p-4">
-              <div className="space-y-0.5">
-                <p className="type-row-title">{translateUi("Require Approval")}</p>
-                <p className="text-13 text-muted-foreground">{translateUi("Whether this service requires approval for programmatic access.")}</p>
-              </div>
-              <Switch
-                checked={selectedApprovalRequired}
-                onCheckedChange={(checked) => {
-                  setSelectedApprovalRequired(checked);
-                  setSelectedApprovalVerbs(checked ? approvalVerbs : []);
-                }}
-              />
-            </div>
-            {selectedApprovalRequired && (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label
-
-                    htmlFor="approval-mode-select"
-                  >{translateUi("Approval Mode")}</Label>
-                  <Select
-                    value={selectedApprovalMode}
-                    onValueChange={(v) =>
-                      setSelectedApprovalMode(v as "per_request" | "grant")
-                    }
-                  >
-                    <SelectTrigger id="approval-mode-select">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
-                      <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-13 text-muted-foreground">
-                    {selectedApprovalMode === "grant"
-                      ? translateUi("Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires.")
-                      : translateUi("Every API request requires a fresh approval. No grant is created.")}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <p className="type-row-title">{translateUi("Require Approval For")}</p>
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    {approvalVerbs.map((verb) => (
-                      <Label
-                        key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
-                      >
-                        <span>{approvalVerbLabels[verb]}</span>
-                        <Switch
-                          checked={selectedApprovalVerbs.includes(verb)}
-                          onCheckedChange={(checked) => {
-                            setSelectedApprovalVerbs((current) => {
-                              const next = new Set(current);
-                              if (checked) {
-                                next.add(verb);
-                              } else {
-                                next.delete(verb);
-                              }
-                              const values = approvalVerbs.filter((candidate) =>
-                                next.has(candidate),
-                              );
-                              setSelectedApprovalRequired(values.length > 0);
-                              return values;
-                            });
-                          }}
-                        />
-                      </Label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setAddServiceDialogOpen(false)}
-            >{translateUi("Cancel")}</Button>
-            <Button
-              variant="primary"
-              onClick={() => void handleAddServiceConfig()}
-              disabled={!selectedServiceId}
-              isLoading={setConfigMutation.isPending}
-            >{translateUi("Add Override")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -3240,13 +3240,14 @@ async fn preflight_proxy_deny_before_resolution(
     }
 
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
-    let denied = approval_service::evaluate_deny_only(
+    let denied = approval_service::evaluate_deny_only_for_key(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
         hint.is_auto_connected,
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 
@@ -5034,6 +5035,7 @@ async fn execute_resolved_proxy_inner<'a>(
             auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
             is_auto_connected_for_approval,
             auth_user.assistant_chat.as_deref(),
+            auth_user.api_key_id.as_deref(),
         )
     })
     .await?;
@@ -12853,6 +12855,7 @@ mod proxy_resolution_integration_tests {
     fn approval_config(owner_user_id: &str, service_id: &str) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: Uuid::new_v4().to_string(),
             user_id: owner_user_id.to_string(),
             service_id: service_id.to_string(),

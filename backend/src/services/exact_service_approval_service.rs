@@ -2258,6 +2258,7 @@ mod tests {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: catalog_service_id.clone(),

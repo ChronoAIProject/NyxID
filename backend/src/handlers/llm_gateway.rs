@@ -2877,13 +2877,14 @@ pub(super) async fn preflight_llm_deny_before_resolution(
     // before approvals, billing and dispatch. Checking here would use the
     // catalog-only identity and intersect sibling connections' scopes.
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    let denied = approval_service::evaluate_deny_only(
+    let denied = approval_service::evaluate_deny_only_for_key(
         &state.db,
         &approval_owner_user_id,
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
         hint.is_auto_connected,
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 
@@ -2972,6 +2973,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected,
         auth_user.assistant_chat.as_deref(),
+        auth_user.api_key_id.as_deref(),
     )
     .await?;
 

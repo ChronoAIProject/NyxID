@@ -1337,6 +1337,10 @@ pub struct ServiceApprovalConfigItem {
     pub approval_mode: ApprovalMode,
     pub rules: Vec<ApprovalRule>,
     pub default_effect: Option<ApprovalEffect>,
+    /// Days an approval remembered under this policy lasts; absent means the
+    /// owner's account-wide setting applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_expiry_days: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
     /// The `UserService.id` that this policy applies to, when the config can
@@ -1409,6 +1413,10 @@ pub struct SetServiceApprovalConfigRequest {
     pub approval_mode: Option<ApprovalMode>,
     pub rules: Option<Vec<ApprovalRule>>,
     pub default_effect: Option<ApprovalEffect>,
+    /// Days (1 to 365) an approval remembered under this policy lasts.
+    /// Omitted leaves the stored value unchanged.
+    #[serde(default)]
+    pub grant_expiry_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1744,6 +1752,7 @@ pub async fn list_service_configs(
             approval_mode: c.approval_mode,
             rules: c.rules,
             default_effect: c.default_effect,
+            grant_expiry_days: c.grant_expiry_days,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
             user_service_id,
@@ -1873,6 +1882,7 @@ pub async fn get_service_config_authorization(
         approval_mode: config.approval_mode,
         rules: config.rules,
         default_effect: config.default_effect,
+        grant_expiry_days: config.grant_expiry_days,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
         user_service_id: matching.as_ref().map(|service| service.id.clone()),
@@ -1914,6 +1924,7 @@ pub async fn set_service_config(
         && body.approval_mode.is_none()
         && body.rules.is_none()
         && body.default_effect.is_none()
+        && body.grant_expiry_days.is_none()
     {
         return Err(AppError::ValidationError(
             "At least one approval config field must be provided".to_string(),
@@ -1923,6 +1934,30 @@ pub async fn set_service_config(
     if let Some(ref rules) = body.rules {
         crate::services::approval_policy::validate_rules(rules)
             .map_err(AppError::ValidationError)?;
+        // Key-limited rules are a personal setting over the caller's own keys.
+        let mut key_ids: Vec<&str> = rules
+            .iter()
+            .flat_map(|rule| rule.api_key_ids.iter().map(String::as_str))
+            .collect();
+        key_ids.sort_unstable();
+        key_ids.dedup();
+        if !key_ids.is_empty() {
+            if query.org_id.is_some() {
+                return Err(AppError::ValidationError(
+                    "Organization approval policies cannot be limited to API keys".to_string(),
+                ));
+            }
+            for key_id in key_ids {
+                crate::services::key_service::get_api_key(&state.db, &user_id, key_id)
+                    .await
+                    .map_err(|_| {
+                        AppError::ValidationError(
+                            "Approval rules can only be limited to your own active API keys"
+                                .to_string(),
+                        )
+                    })?;
+            }
+        }
     }
 
     let target = resolve_approval_target(&state.db, &user_id, &service_id).await?;
@@ -1960,6 +1995,18 @@ pub async fn set_service_config(
         },
     )
     .await?;
+    let config = match body.grant_expiry_days {
+        Some(days) => {
+            approval_service::set_service_grant_expiry_days(
+                &state.db,
+                &user_id,
+                &target.effective_service_id,
+                days,
+            )
+            .await?
+        }
+        None => config,
+    };
 
     // Telemetry: approval.config_updated. Prefer the UserService slug for
     // display; fall back to the stored effective_service_id (catalog id or
@@ -1988,6 +2035,7 @@ pub async fn set_service_config(
         approval_mode: config.approval_mode,
         rules: config.rules,
         default_effect: config.default_effect,
+        grant_expiry_days: config.grant_expiry_days,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
         user_service_id: target.user_service_id,

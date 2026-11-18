@@ -144,6 +144,8 @@ export interface ApprovalRule {
   readonly verbs: readonly ApprovalVerb[];
   readonly effect: ApprovalEffect;
   readonly mode: ApprovalMode;
+  /** NyxID API key ids this rule is limited to. Absent or empty means every caller. */
+  readonly api_key_ids?: readonly string[];
 }
 
 export interface ServiceApprovalConfigItem {
@@ -153,6 +155,8 @@ export interface ServiceApprovalConfigItem {
   readonly approval_mode: ApprovalMode;
   readonly rules: readonly ApprovalRule[];
   readonly default_effect: ApprovalEffect | null;
+  /** Days a remembered approval lasts under this policy; absent uses the account setting. */
+  readonly grant_expiry_days?: number;
   readonly created_at: string;
   readonly updated_at: string;
   /**
@@ -195,6 +199,7 @@ export interface SetServiceApprovalConfigRequest {
   readonly approval_mode?: ApprovalMode;
   readonly rules?: readonly ApprovalRule[];
   readonly default_effect?: ApprovalEffect;
+  readonly grant_expiry_days?: number;
 }
 
 export interface SetServiceApprovalConfigResponse {

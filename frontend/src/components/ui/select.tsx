@@ -127,8 +127,11 @@ SelectLabel.displayName = SelectPrimitive.Label.displayName;
 
 const SelectItem = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item> & {
+    /** Explanation shown under the option in the menu, never in the trigger. */
+    readonly description?: React.ReactNode;
+  }
+>(({ className, children, description, ...props }, ref) => (
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -142,7 +145,14 @@ const SelectItem = React.forwardRef<
         <Check className="h-3.5 w-3.5 text-primary-text" />
       </SelectPrimitive.ItemIndicator>
     </span>
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    {description ? (
+      <span className="flex min-w-0 flex-col">
+        <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+        <span className="type-secondary text-text-tertiary">{description}</span>
+      </span>
+    ) : (
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    )}
   </SelectPrimitive.Item>
 ));
 SelectItem.displayName = SelectPrimitive.Item.displayName;

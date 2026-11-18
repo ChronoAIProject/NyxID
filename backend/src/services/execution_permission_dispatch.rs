@@ -1812,6 +1812,7 @@ pub(crate) fn admit_http<'a>(
             false,
             auto_connected,
             auth.assistant_chat.as_deref(),
+            auth.api_key_id.as_deref(),
         )
         .await?;
         if matches!(outcome, super::approval_service::ApprovalOutcome::Denied) {
@@ -2035,10 +2036,11 @@ pub(crate) fn approval<'a>(
     bypass: bool,
     auto_connected: bool,
     chat: Option<&'a acks::ChatAuthority>,
+    api_key_id: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<PolicyDecision>> {
     Box::pin(async move {
         let Some(context) = context.filter(|c| c.drain.get().is_some()) else {
-            return super::approval_service::evaluate_for_chat(
+            return super::approval_service::evaluate_for_chat_for_key(
                 db,
                 actor,
                 owner,
@@ -2049,11 +2051,12 @@ pub(crate) fn approval<'a>(
                 bypass,
                 auto_connected,
                 chat,
+                api_key_id,
             )
             .await;
         };
         let key = format!(
-            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
+            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}:{api_key_id:?}"
         );
         let mut cache = context.policies.lock().await;
         if let Some((_, value)) = cache.iter().find(|(k, _)| k == &key) {
@@ -2078,7 +2081,7 @@ pub(crate) fn approval<'a>(
                 return Err(AppError::Forbidden("Mandatory organization operation review cannot be satisfied by an execution permission".into()));
             }
         }
-        let decision = super::approval_service::evaluate_for_chat(
+        let decision = super::approval_service::evaluate_for_chat_for_key(
             db,
             actor,
             owner,
@@ -2089,6 +2092,7 @@ pub(crate) fn approval<'a>(
             bypass,
             auto_connected,
             chat,
+            api_key_id,
         )
         .await?;
         cache.push((key, decision.clone()));

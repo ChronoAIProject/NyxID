@@ -162,6 +162,30 @@ pub async fn resolve_org_aware_approval(
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
 ) -> AppResult<ApprovalResolution> {
+    resolve_org_aware_approval_for_key(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        is_auto_connected,
+        None,
+    )
+    .await
+}
+
+/// As [`resolve_org_aware_approval`], for a caller identified by a NyxID API
+/// key. `api_key_id` only selects the actor's own key-limited rules; an
+/// org's policy never reads it.
+pub async fn resolve_org_aware_approval_for_key(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    is_auto_connected: bool,
+    api_key_id: Option<&str>,
+) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
     // `user_type`, NOT by comparing `actor_user_id` to
@@ -200,8 +224,10 @@ pub async fn resolve_org_aware_approval(
         .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
         .await?;
 
-    let (required, mode, effect, grant_scope) = if let Some(cfg) = actor_config {
-        let decision = approval_policy::evaluate(&cfg, descriptor);
+    let actor_decision = actor_config
+        .as_ref()
+        .and_then(|cfg| approval_policy::evaluate_for_key(cfg, descriptor, api_key_id));
+    let (required, mode, effect, grant_scope) = if let Some(decision) = actor_decision {
         (
             decision.effect == ApprovalEffect::RequireApproval,
             decision.mode,
@@ -249,13 +275,35 @@ pub async fn evaluate_deny_only(
     descriptor: &OperationDescriptor,
     is_auto_connected: bool,
 ) -> AppResult<bool> {
-    let resolution = resolve_org_aware_approval(
+    evaluate_deny_only_for_key(
         db,
         actor_user_id,
         service_owner_user_id,
         service_id,
         descriptor,
         is_auto_connected,
+        None,
+    )
+    .await
+}
+
+pub async fn evaluate_deny_only_for_key(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    is_auto_connected: bool,
+    api_key_id: Option<&str>,
+) -> AppResult<bool> {
+    let resolution = resolve_org_aware_approval_for_key(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        is_auto_connected,
+        api_key_id,
     )
     .await?;
     Ok(resolution.effect == ApprovalEffect::Deny)
@@ -301,13 +349,44 @@ pub async fn evaluate_and_check_with_options(
     is_auto_connected: bool,
     options: ApprovalOptions,
 ) -> AppResult<ApprovalOutcome> {
-    let mut resolution = resolve_org_aware_approval(
+    evaluate_and_check_for_key(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass_approval_flow,
+        is_auto_connected,
+        options,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_and_check_for_key(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+    is_auto_connected: bool,
+    options: ApprovalOptions,
+    api_key_id: Option<&str>,
+) -> AppResult<ApprovalOutcome> {
+    let mut resolution = resolve_org_aware_approval_for_key(
         db,
         actor_user_id,
         service_owner_user_id,
         service_id,
         descriptor,
         is_auto_connected,
+        api_key_id,
     )
     .await?;
 
@@ -378,6 +457,40 @@ pub async fn evaluate_for_chat(
     ApprovalOutcome,
     Option<super::assistant_acknowledgement_service::AutoAllowed>,
 )> {
+    evaluate_for_chat_for_key(
+        db,
+        actor,
+        service_owner,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass,
+        auto_connected,
+        chat,
+        None,
+    )
+    .await
+}
+
+/// As [`evaluate_for_chat`], for a caller identified by a NyxID API key.
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_for_chat_for_key(
+    db: &Database,
+    actor: &str,
+    service_owner: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass: bool,
+    auto_connected: bool,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    api_key_id: Option<&str>,
+) -> AppResult<(
+    ApprovalOutcome,
+    Option<super::assistant_acknowledgement_service::AutoAllowed>,
+)> {
     use super::assistant_acknowledgement_service as acks;
     if chat.is_some_and(|c| {
         c.org_agent_access
@@ -400,7 +513,7 @@ pub async fn evaluate_for_chat(
             ));
         }
     }
-    let outcome = evaluate_and_check_with_options(
+    let outcome = evaluate_and_check_for_key(
         db,
         actor,
         service_owner,
@@ -411,6 +524,7 @@ pub async fn evaluate_for_chat(
         bypass,
         auto_connected,
         chat.map_or_else(ApprovalOptions::default, |chat| chat.approval_options()),
+        api_key_id,
     )
     .await?;
     super::assistant_model_observer::evaluated_policy(actor, service_id, &outcome).await?;
@@ -1410,8 +1524,18 @@ impl DecisionMutation {
                 channel
             }
         };
-        let grant_expiry =
-            resolve_grant_expiry(self.now, self.duration_sec, channel.grant_expiry_days);
+        // The protection's own duration wins over the account-wide default.
+        let policy_days = db
+            .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .find_one(doc! {"user_id":&updated.user_id,"service_id":&updated.service_id})
+            .session(&mut *session)
+            .await?
+            .and_then(|config| config.grant_expiry_days);
+        let grant_expiry = resolve_grant_expiry(
+            self.now,
+            self.duration_sec,
+            policy_days.unwrap_or(channel.grant_expiry_days),
+        );
         let grant = ApprovalGrant {
             execution_review: None,
             execution_last_used_at: None,
@@ -2544,6 +2668,35 @@ async fn upsert_config(
         })
 }
 
+pub const MIN_GRANT_EXPIRY_DAYS: u32 = 1;
+pub const MAX_GRANT_EXPIRY_DAYS: u32 = 365;
+
+/// Set how long an approval remembered under this policy lasts. Applies to
+/// approvals granted from now on; existing grants keep their expiry.
+pub async fn set_service_grant_expiry_days(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    days: u32,
+) -> AppResult<ServiceApprovalConfig> {
+    if !(MIN_GRANT_EXPIRY_DAYS..=MAX_GRANT_EXPIRY_DAYS).contains(&days) {
+        return Err(AppError::ValidationError(format!(
+            "grant_expiry_days must be between {MIN_GRANT_EXPIRY_DAYS} and {MAX_GRANT_EXPIRY_DAYS}"
+        )));
+    }
+    db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one_and_update(
+            doc! { "user_id": user_id, "service_id": service_id },
+            doc! { "$set": {
+                "grant_expiry_days": i64::from(days),
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            } },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Per-service approval config not found".to_string()))
+}
+
 /// Delete a per-service approval config (revert to global default).
 /// Because the global default mode is `PerRequest`, deleting any override
 /// effectively switches the service to `per_request`. Active grants are
@@ -2688,9 +2841,16 @@ fn resolve_service_config_update(
         .unwrap_or_default();
     approval_policy::validate_rules(&resolved_rules).map_err(AppError::ValidationError)?;
 
-    let resolved_default_effect = default_effect
-        .cloned()
-        .or_else(|| existing.and_then(|config| config.default_effect.clone()));
+    // A policy made only of key-limited rules stays silent about other callers
+    // unless the request also sets a default for them. Without one, a stored
+    // default from an earlier general policy must not linger.
+    let key_limited_only = rules
+        .is_some_and(|rules| !rules.is_empty() && rules.iter().all(|r| !r.api_key_ids.is_empty()));
+    let resolved_default_effect = match default_effect {
+        Some(effect) => Some(effect.clone()),
+        None if key_limited_only => None,
+        None => existing.and_then(|config| config.default_effect.clone()),
+    };
 
     Ok((
         resolved_required,
@@ -4041,8 +4201,53 @@ mod tests {
     }
 
     #[test]
+    fn resolve_service_config_update_handles_defaults_for_key_limited_rules() {
+        let keyed = ApprovalRule {
+            mandatory_review: false,
+            methods: vec![],
+            resource_pattern: "*".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::Deny,
+            mode: ApprovalMode::PerRequest,
+            api_key_ids: vec!["key-a".to_string()],
+        };
+        let existing = ServiceApprovalConfig {
+            grant_expiry_days: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "user1".to_string(),
+            service_id: "svc1".to_string(),
+            service_name: "OpenAI".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: Some(ApprovalEffect::RequireApproval),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let rules = [keyed];
+
+        // Only key rules and no default: the old general default must not linger.
+        let (_, _, _, cleared) =
+            resolve_service_config_update(Some(&existing), None, None, Some(&rules), None)
+                .expect("ok");
+        assert_eq!(cleared, None);
+
+        // Key rules plus a default for everyone else is a valid combined policy.
+        let (_, _, _, combined) = resolve_service_config_update(
+            Some(&existing),
+            None,
+            None,
+            Some(&rules),
+            Some(&ApprovalEffect::AutoAllow),
+        )
+        .expect("ok");
+        assert_eq!(combined, Some(ApprovalEffect::AutoAllow));
+    }
+
+    #[test]
     fn resolve_service_config_update_preserves_existing_mode_when_omitted() {
         let existing = ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "user1".to_string(),
             service_id: "svc1".to_string(),
@@ -4351,6 +4556,7 @@ mod tests {
     #[test]
     fn service_config_grant_capability_includes_rule_level_grant_mode() {
         let mut config = ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: "cfg-1".to_string(),
             user_id: "user-1".to_string(),
             service_id: "svc-1".to_string(),
@@ -4369,6 +4575,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         });
 
         assert!(service_config_supports_grants(&config));
@@ -4750,6 +4957,7 @@ mod tests {
     ) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -5557,6 +5765,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         };
         set_service_approval_config(
             &db,
@@ -5634,6 +5843,7 @@ mod tests {
                 verbs: vec![],
                 effect: ApprovalEffect::RequireApproval,
                 mode: ApprovalMode::PerRequest,
+                api_key_ids: vec![],
             },
             ApprovalRule {
                 mandatory_review: false,
@@ -5642,6 +5852,7 @@ mod tests {
                 verbs: vec![],
                 effect: ApprovalEffect::RequireApproval,
                 mode: ApprovalMode::Grant,
+                api_key_ids: vec![],
             },
         ];
         set_service_approval_config(
@@ -6074,6 +6285,7 @@ mod tests {
             verbs: vec![],
             effect: ApprovalEffect::RequireApproval,
             mode: ApprovalMode::Grant,
+            api_key_ids: vec![],
         });
         insert_config(&db, &config).await;
 

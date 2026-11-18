@@ -261,6 +261,7 @@ export function useSetServiceApprovalConfig() {
       approvalMode,
       rules,
       defaultEffect,
+      grantExpiryDays,
       orgId,
     }: {
       readonly serviceId: string;
@@ -268,6 +269,8 @@ export function useSetServiceApprovalConfig() {
       readonly approvalMode?: ApprovalMode;
       readonly rules?: readonly ApprovalRule[];
       readonly defaultEffect?: ApprovalEffect;
+      /** Days (1 to 365) a remembered approval lasts under this policy. */
+      readonly grantExpiryDays?: number;
       /** When set, the policy is set on the given org's behalf. Caller
        *  must be an admin of that org. The org's policy is dominant for
        *  org-shared services. */
@@ -284,6 +287,9 @@ export function useSetServiceApprovalConfig() {
         ...(rules !== undefined ? { rules } : {}),
         ...(defaultEffect !== undefined
           ? { default_effect: defaultEffect }
+          : {}),
+        ...(grantExpiryDays !== undefined
+          ? { grant_expiry_days: grantExpiryDays }
           : {}),
       });
     },

@@ -70,13 +70,42 @@ pub struct ApprovalPolicyDecision {
     pub grant_scope: Option<String>,
 }
 
+pub const MAX_RULE_API_KEYS: usize = 20;
+const MAX_RULE_API_KEY_ID_LEN: usize = 64;
+
+/// Policy for a caller whose NyxID API key is unknown or irrelevant.
 pub fn evaluate(
     config: &ServiceApprovalConfig,
     descriptor: &OperationDescriptor,
 ) -> ApprovalPolicyDecision {
+    evaluate_for_key(config, descriptor, None).unwrap_or(ApprovalPolicyDecision {
+        effect: ApprovalEffect::AutoAllow,
+        mode: config.approval_mode.clone(),
+        grant_scope: None,
+    })
+}
+
+/// Policy for one call, honouring rules limited to specific NyxID API keys.
+///
+/// `None` means the config has no opinion about this caller: nothing matched,
+/// there is no explicit default, and every rule is limited to other keys. The
+/// caller then applies whatever it would have applied without this config.
+pub fn evaluate_for_key(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+    api_key_id: Option<&str>,
+) -> Option<ApprovalPolicyDecision> {
+    evaluate_rules(config, descriptor, api_key_id)
+}
+
+fn evaluate_rules(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+    api_key_id: Option<&str>,
+) -> Option<ApprovalPolicyDecision> {
     for rule in &config.rules {
-        if rule_matches(rule, descriptor) {
-            return ApprovalPolicyDecision {
+        if rule_matches(rule, descriptor, api_key_id) {
+            return Some(ApprovalPolicyDecision {
                 effect: rule.effect.clone(),
                 mode: rule.mode.clone(),
                 // Rule matches mint the rule pattern so one approval covers
@@ -84,38 +113,39 @@ pub fn evaluate(
                 grant_scope: require_approval_scope(&rule.effect, || {
                     scope_from_rule(descriptor, rule)
                 }),
-            };
+            });
         }
     }
 
     if let Some(effect) = &config.default_effect {
-        return ApprovalPolicyDecision {
+        return Some(ApprovalPolicyDecision {
             effect: effect.clone(),
             mode: config.approval_mode.clone(),
             grant_scope: require_approval_scope(effect, || concrete_scope(descriptor)),
-        };
+        });
     }
 
     if config.rules.is_empty() {
-        if config.approval_required {
-            return ApprovalPolicyDecision {
-                effect: ApprovalEffect::RequireApproval,
-                mode: config.approval_mode.clone(),
-                grant_scope: None,
-            };
-        }
-        return ApprovalPolicyDecision {
-            effect: ApprovalEffect::AutoAllow,
+        return Some(ApprovalPolicyDecision {
+            effect: if config.approval_required {
+                ApprovalEffect::RequireApproval
+            } else {
+                ApprovalEffect::AutoAllow
+            },
             mode: config.approval_mode.clone(),
             grant_scope: None,
-        };
+        });
     }
 
-    ApprovalPolicyDecision {
+    if config.rules.iter().all(|rule| !rule.api_key_ids.is_empty()) {
+        return None;
+    }
+
+    Some(ApprovalPolicyDecision {
         effect: ApprovalEffect::AutoAllow,
         mode: config.approval_mode.clone(),
         grant_scope: None,
-    }
+    })
 }
 
 /// Separately authored marker. Existing unmarked rules keep their mode semantics.
@@ -126,7 +156,7 @@ pub(crate) fn mandatory_review(
     config
         .rules
         .iter()
-        .find(|rule| rule_matches(rule, descriptor))
+        .find(|rule| rule_matches(rule, descriptor, None))
         .is_some_and(|rule| rule.mandatory_review)
 }
 
@@ -172,6 +202,28 @@ pub fn validate_rules(rules: &[ApprovalRule]) -> Result<(), String> {
             ));
         }
         validate_methods(idx, &rule.methods)?;
+        if rule.api_key_ids.len() > MAX_RULE_API_KEYS {
+            return Err(format!(
+                "approval rule {idx} cannot list more than {MAX_RULE_API_KEYS} API keys"
+            ));
+        }
+        if rule
+            .api_key_ids
+            .iter()
+            .any(|id| id.trim().is_empty() || id.len() > MAX_RULE_API_KEY_ID_LEN)
+        {
+            return Err(format!("approval rule {idx} lists an invalid API key id"));
+        }
+        // A remembered approval is recorded per account, not per key, so a
+        // key-limited rule that remembered would let other keys reuse it.
+        if !rule.api_key_ids.is_empty()
+            && rule.effect == ApprovalEffect::RequireApproval
+            && rule.mode == ApprovalMode::Grant
+        {
+            return Err(format!(
+                "approval rule {idx} is limited to API keys and must ask every time"
+            ));
+        }
         compile_resource_pattern(&resource_pattern, true)
             .and_then(|_| compile_resource_pattern(&resource_pattern, false))
             .map_err(|e| format!("approval rule {idx} resource_pattern is invalid: {e}"))?;
@@ -193,8 +245,15 @@ pub fn concrete_scope(descriptor: &OperationDescriptor) -> String {
     )
 }
 
-fn rule_matches(rule: &ApprovalRule, descriptor: &OperationDescriptor) -> bool {
-    methods_match(&rule.methods, descriptor)
+fn rule_matches(
+    rule: &ApprovalRule,
+    descriptor: &OperationDescriptor,
+    api_key_id: Option<&str>,
+) -> bool {
+    let key_matches = rule.api_key_ids.is_empty()
+        || api_key_id.is_some_and(|key| rule.api_key_ids.iter().any(|id| id == key));
+    key_matches
+        && methods_match(&rule.methods, descriptor)
         && verbs_match(&rule.verbs, descriptor)
         && resource_pattern_matches(&rule.resource_pattern, descriptor)
 }
@@ -453,6 +512,7 @@ mod tests {
     ) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: "cfg-1".to_string(),
             user_id: "user-1".to_string(),
             service_id: "svc-1".to_string(),
@@ -479,6 +539,7 @@ mod tests {
             verbs,
             effect,
             mode,
+            api_key_ids: vec![],
         }
     }
 
@@ -593,6 +654,146 @@ mod tests {
 
         assert_eq!(decision.effect, ApprovalEffect::AutoAllow);
         assert_eq!(decision.grant_scope, None);
+    }
+
+    fn keyed(mut rule: ApprovalRule, keys: &[&str]) -> ApprovalRule {
+        rule.api_key_ids = keys.iter().map(|key| (*key).to_string()).collect();
+        rule
+    }
+
+    #[test]
+    fn key_limited_rule_applies_only_to_listed_keys() {
+        let ask = keyed(
+            rule(
+                &[],
+                vec![],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            ),
+            &["key-a"],
+        );
+        let cfg = config(false, ApprovalMode::PerRequest, vec![ask], None);
+
+        let listed = evaluate_for_key(&cfg, &post_descriptor(), Some("key-a")).expect("decision");
+        assert_eq!(listed.effect, ApprovalEffect::RequireApproval);
+        // Other keys and callers without a key get no opinion, so the caller's
+        // ordinary default applies instead of a silent allow.
+        assert_eq!(
+            evaluate_for_key(&cfg, &post_descriptor(), Some("key-b")),
+            None
+        );
+        assert_eq!(evaluate_for_key(&cfg, &post_descriptor(), None), None);
+        // Readers that do not pass a key keep the historical fallthrough.
+        assert_eq!(
+            evaluate(&cfg, &post_descriptor()).effect,
+            ApprovalEffect::AutoAllow
+        );
+    }
+
+    #[test]
+    fn key_limited_rule_falls_through_to_general_rules_and_defaults() {
+        let block_for_a = keyed(
+            rule(&[], vec![], ApprovalEffect::Deny, ApprovalMode::PerRequest),
+            &["key-a"],
+        );
+        let ask_everyone = rule(
+            &[],
+            vec![],
+            ApprovalEffect::RequireApproval,
+            ApprovalMode::PerRequest,
+        );
+        let cfg = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![block_for_a.clone(), ask_everyone],
+            None,
+        );
+        assert_eq!(
+            evaluate_for_key(&cfg, &post_descriptor(), Some("key-a"))
+                .unwrap()
+                .effect,
+            ApprovalEffect::Deny
+        );
+        assert_eq!(
+            evaluate_for_key(&cfg, &post_descriptor(), Some("key-b"))
+                .unwrap()
+                .effect,
+            ApprovalEffect::RequireApproval
+        );
+
+        let with_default = config(
+            false,
+            ApprovalMode::PerRequest,
+            vec![block_for_a],
+            Some(ApprovalEffect::RequireApproval),
+        );
+        assert_eq!(
+            evaluate_for_key(&with_default, &post_descriptor(), Some("key-b"))
+                .unwrap()
+                .effect,
+            ApprovalEffect::RequireApproval
+        );
+    }
+
+    #[test]
+    fn key_limited_rules_are_bounded_and_cannot_remember() {
+        let ok = keyed(
+            rule(
+                &[],
+                vec![],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::PerRequest,
+            ),
+            &["key-a"],
+        );
+        assert!(validate_rules(&[ok.clone()]).is_ok());
+
+        let remembers = keyed(
+            rule(
+                &[],
+                vec![],
+                ApprovalEffect::RequireApproval,
+                ApprovalMode::Grant,
+            ),
+            &["key-a"],
+        );
+        assert!(
+            validate_rules(&[remembers])
+                .unwrap_err()
+                .contains("ask every time")
+        );
+
+        let blank = keyed(ok.clone(), &[" "]);
+        assert!(validate_rules(&[blank]).is_err());
+
+        let many: Vec<String> = (0..=MAX_RULE_API_KEYS)
+            .map(|i| format!("key-{i}"))
+            .collect();
+        let too_many = keyed(ok, &many.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(validate_rules(&[too_many]).is_err());
+    }
+
+    #[test]
+    fn key_limit_is_omitted_from_storage_when_empty() {
+        let plain = rule(
+            &[],
+            vec![],
+            ApprovalEffect::RequireApproval,
+            ApprovalMode::PerRequest,
+        );
+        assert!(
+            !bson::to_document(&plain)
+                .unwrap()
+                .contains_key("api_key_ids")
+        );
+        let limited = keyed(plain, &["key-a"]);
+        let doc = bson::to_document(&limited).unwrap();
+        assert_eq!(
+            bson::from_document::<ApprovalRule>(doc)
+                .unwrap()
+                .api_key_ids,
+            vec!["key-a"]
+        );
     }
 
     #[test]

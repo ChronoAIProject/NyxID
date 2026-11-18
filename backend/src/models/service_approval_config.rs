@@ -100,6 +100,11 @@ pub struct ApprovalRule {
     /// Approval mode when `effect = require_approval`.
     #[serde(default)]
     pub mode: ApprovalMode,
+    /// NyxID API key ids this rule is limited to. Empty means every caller.
+    /// A scoped rule never matches a caller whose key is unknown, and a
+    /// config made only of scoped rules has no opinion about other callers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_key_ids: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -148,6 +153,10 @@ pub struct ServiceApprovalConfig {
     /// `approval_required` fallback for empty rule sets.
     #[serde(default)]
     pub default_effect: Option<ApprovalEffect>,
+    /// How many days an approval remembered under this policy lasts.
+    /// `None` uses the owner's account-wide `grant_expiry_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_expiry_days: Option<u32>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -167,6 +176,7 @@ mod tests {
 
     fn make_config() -> ServiceApprovalConfig {
         ServiceApprovalConfig {
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -272,6 +282,7 @@ mod tests {
                 verbs: vec![ApprovalVerb::Write],
                 effect: ApprovalEffect::RequireApproval,
                 mode: ApprovalMode::Grant,
+                api_key_ids: vec![],
             }],
             default_effect: Some(ApprovalEffect::AutoAllow),
             ..make_config()
