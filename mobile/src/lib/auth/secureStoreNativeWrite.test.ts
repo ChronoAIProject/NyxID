@@ -8,6 +8,8 @@ const require = createRequire(import.meta.url);
 const root=path.dirname(require.resolve('expo-secure-store/package.json'));
 test('M2622-09 installed pinned SecureStore rejects a false encrypted SharedPreferences commit before legacy cleanup',()=>{
   assert.equal(JSON.parse(readFileSync(path.join(root,'package.json'),'utf8')).version,'55.0.12');
+  const app=JSON.parse(readFileSync(new URL('../../../package.json',import.meta.url),'utf8'));
+  assert.ok(app.expo.autolinking.android.buildFromSource?.includes('expo-secure-store'), 'patched Android Kotlin must be compiled instead of using the bundled Maven AAR');
   const source=readFileSync(path.join(root,'android/src/main/java/expo/modules/securestore/SecureStoreModule.kt'),'utf8');
   const write=source.slice(source.indexOf('private suspend fun setItemImpl'),source.indexOf('private fun saveEncryptedItem'));
   assert.match(write,/if \(!saveEncryptedItem\(encryptedItem, prefs, keychainAwareKey, options.requireAuthentication, options.keychainService\)\) \{\s*throw WriteException\("Could not write encrypted value to SecureStore", key, options.keychainService\)\s*\}/);

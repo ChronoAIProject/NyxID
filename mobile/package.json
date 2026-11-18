@@ -43,6 +43,9 @@
           "expo-dev-launcher",
           "expo-dev-menu",
           "expo-dev-menu-interface"
+        ],
+        "buildFromSource": [
+          "expo-secure-store"
         ]
       }
     }
