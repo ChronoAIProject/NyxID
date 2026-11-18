@@ -9,9 +9,12 @@ test("bubble preference hydrates before children mount and rapid changes persist
   const stored = deferred<string | null>();
   const firstWrite = deferred<void>();
   const writes: string[] = [];
+  const barStyles: string[] = [];
+  let systemScheme = "light";
   const harness = hookHarness<any>({
     "react/jsx-runtime": { jsx: (type: unknown, props: unknown) => ({ type, props }) },
-    "react-native": { useColorScheme: () => "light" },
+    "react-native": { Platform: { OS: "android" }, useColorScheme: () => systemScheme },
+    "expo-navigation-bar": { setButtonStyleAsync: async (style: string) => { barStyles.push(style); } },
     "./chatAppearance": appearance,
     "./mobileTheme": theme,
     "expo-secure-store": {
@@ -39,5 +42,14 @@ test("bubble preference hydrates before children mount and rapid changes persist
   firstWrite.resolve();
   await harness.settle();
   assert.deepEqual(writes, ["graphite", "gray"]);
+  assert.deepEqual(barStyles, ["dark"]);
+  harness.value().props.value.setPreference("dark");
+  await harness.settle();
+  harness.value().props.value.setPreference("system");
+  await harness.settle();
+  assert.deepEqual(barStyles, ["dark", "light", "dark"]);
+  systemScheme = "dark";
+  harness.render();
+  assert.deepEqual(barStyles, ["dark", "light", "dark", "light"]);
   harness.unmount();
 });

@@ -8,6 +8,27 @@ const setup = (params?: Record<string, unknown>) =>
     params,
   });
 
+test("contact support gives the address a full detail line and keeps the complete mail link accessible", () => {
+  const env = setup();
+  const address = "contact@chrono-ai.fun";
+  for (const width of [411, 343]) {
+    env.resize(width, 1);
+    const row = env.row("Contact support");
+    const email = elements(row).find((node) => node.props.children === address)!;
+    const detailColumn = env.parent(email)!;
+    assert.equal(row.props.accessibilityRole, "link");
+    assert.equal(row.props.accessibilityLabel, "Contact support, " + address);
+    assert.equal(row.props.accessibilityHint, "Email " + address);
+    row.props.onPress();
+    assert.equal(env.openedUrls.at(-1), "mailto:" + address + "?subject=NyxID%20app%20support");
+    assert.ok(elements(detailColumn).some((node) => node.props.children === "Contact support"));
+    assert.equal(style(detailColumn).maxWidth, "100%", "email shares the label's full column");
+    assert.equal(style(env.parent(detailColumn)!).flex, 1);
+    assert.equal(email.props.numberOfLines, undefined);
+  }
+  env.harness.unmount();
+});
+
 test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hold no controls", () => {
   const env = setup();
   const headings = env

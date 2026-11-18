@@ -1,3 +1,4 @@
+import { setAppTranslationLanguage } from "../../../i18n/appTranslation";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
@@ -220,10 +221,44 @@ test("xAI tariffs include reported token prices even when the duration metric li
       },
     }),
   );
-  assert.match(text, /0\.000000000021 per input tokens/);
-  assert.match(text, /0\.000000000089 per output tokens/);
+  assert.match(text, /0\.000000000021 per input token/);
+  assert.match(text, /0\.000000000089 per output token/);
   assert.doesNotMatch(text, /0\.9|cache read/);
 });
+
+for (const [language, platformText, ownText] of [
+  [
+    "zh-CN",
+    "每秒 0.02 积分，每个输入词元另收 0.000000000013 积分，每次通话启动另收 0.1 积分。",
+    "NyxID 不收取时长费用。服务提供商仍会收费。每个输入词元收取 0.000000000013 积分。",
+  ],
+  [
+    "zh-TW",
+    "每秒 0.02 點數，每個輸入詞元另收 0.000000000013 點數，每次通話啟動另收 0.1 點數。",
+    "NyxID 不收取時長費用。服務提供者仍會收費。每個輸入詞元收取 0.000000000013 點數。",
+  ],
+] as const) {
+  test(`voice settings localize exact duration, token and start prices in ${language}`, () => {
+    setAppTranslationLanguage(language);
+    try {
+      const price = { metric: "input_tokens", sync_status: "synced", credits_per_unit: "0.000000000013" };
+      const source = option();
+      const text = voiceTariff(option({
+        voice: { ...source.voice, protocol: "xai_realtime" },
+        pricing: {
+          metric: "voice_seconds", sync_status: "synced", credits_per_unit: "0.02",
+          components: [price, { ...price, metric: "requests", credits_per_unit: "0.1" }],
+        },
+      }));
+      assert.equal(text, platformText);
+      assert.equal(voiceTariff(option({
+        key_source: "own", reported_token_pricing: { ...price, components: [] },
+      })), ownText);
+    } finally {
+      setAppTranslationLanguage("en");
+    }
+  });
+}
 
 test("declared OpenAI billing metrics show only their synced prices", () => {
   const source = option();
@@ -252,7 +287,7 @@ test("declared OpenAI billing metrics show only their synced prices", () => {
       },
     }),
   );
-  assert.match(text, /0\.001 per input tokens/);
+  assert.match(text, /0\.001 per input token/);
   assert.doesNotMatch(text, /0\.009|output tokens/);
 });
 
@@ -278,8 +313,8 @@ test("own-key tariffs disclose provider charges and distinguish no duration from
     },
   });
   assert.match(text, /No NyxID duration charge/);
-  assert.match(text, /0\.000000000001 credits per input tokens/);
-  assert.match(text, /0\.000000000002 credits per output tokens/);
+  assert.match(text, /0\.000000000001 credits per input token/);
+  assert.match(text, /0\.000000000002 credits per output token/);
   assert.doesNotMatch(text, /7 credits|9 credits|requests/);
 });
 

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useColorScheme } from "react-native";
+import { Platform, useColorScheme } from "react-native";
+import { setButtonStyleAsync } from "expo-navigation-bar";
 import * as SecureStore from "expo-secure-store";
 import {
   darkColors,
@@ -78,6 +79,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     if (preference === "system") return systemScheme === "dark" ? "dark" : "light";
     return preference;
   }, [preference, systemScheme]);
+
+  useEffect(() => {
+    if (loaded && Platform.OS === "android") {
+      // The transparent navigation bar shows the app underneath. Its gesture
+      // handle and three-button controls need the opposite foreground.
+      void setButtonStyleAsync(mode === "dark" ? "light" : "dark").catch(() => {});
+    }
+  }, [loaded, mode]);
 
   const colors = mode === "light" ? lightColors : darkColors;
 

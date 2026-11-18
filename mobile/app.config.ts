@@ -124,6 +124,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       "expo-secure-store",
+      ["expo-navigation-bar", { enforceContrast: false }],
       [
         "expo-splash-screen",
         {

@@ -95,6 +95,9 @@ importers:
       expo-linear-gradient:
         specifier: ^55.0.12
         version: 55.0.12(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+      expo-navigation-bar:
+        specifier: ~55.0.11
+        version: 55.0.17(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
       expo-notifications:
         specifier: ~55.0.17
         version: 55.0.17(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
@@ -2317,6 +2320,13 @@ packages:
   expo-modules-core@55.0.21:
     resolution: {integrity: sha512-JGMREOmVHeHR3FdHqYWFtwJt2o6w9cXOCZ7al3x4cCcM9ihMpleze44SDYh3yfPo+BgWT3HCbpTunIsfNMMyPA==}
     peerDependencies:
+      react: '*'
+      react-native: '*'
+
+  expo-navigation-bar@55.0.17:
+    resolution: {integrity: sha512-ADtD/swAehqXLAd87rOW/MihxzMHvpJrhwMXZjgz6HKUZSJF5iohnMM/J6hH3xIX7alPHDk7SX/DXvUpBAFHcA==}
+    peerDependencies:
+      expo: '*'
       react: '*'
       react-native: '*'
 
@@ -6975,6 +6985,16 @@ snapshots:
       invariant: 2.2.4
       react: 19.2.0
       react-native: 0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0)
+
+  expo-navigation-bar@55.0.17(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0):
+    dependencies:
+      debug: 4.4.3
+      expo: 55.0.12(@babel/core@7.29.0)(@expo/dom-webview@55.0.5)(react-native-webview@13.16.0(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
+      react: 19.2.0
+      react-native: 0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0)
+      react-native-is-edge-to-edge: 1.2.1(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+    transitivePeerDependencies:
+      - supports-color
 
   expo-notifications@55.0.17(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)(typescript@5.9.3):
     dependencies:

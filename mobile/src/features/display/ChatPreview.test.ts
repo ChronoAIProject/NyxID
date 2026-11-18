@@ -29,7 +29,8 @@ test("Display keeps only compact Light/Dark samples and live palette choices thr
   const jsx = (type: unknown, props: unknown) => ({ type, props });
   const providerHarness = hookHarness<Element | null>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
-    "react-native": { useColorScheme: () => scheme },
+    "react-native": { Platform: { OS: "ios" }, useColorScheme: () => scheme },
+    "expo-navigation-bar": { setButtonStyleAsync: () => assert.fail("iOS has no Android navigation bar") },
     "expo-secure-store": {
       getItemAsync: async () => null,
       setItemAsync: async (key: string, value: string) => {

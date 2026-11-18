@@ -1,4 +1,4 @@
-import { translateApp } from "../../../i18n/appTranslation";
+import { appLocale, translateApp } from "../../../i18n/appTranslation";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
 
 // Server capability and per-thread eligibility still gate every voice entry.
@@ -59,6 +59,23 @@ export function resolveVoicePreferences(
   };
 }
 
+function voicePriceBasis(metric: string) {
+  switch (metric) {
+    case "requests": return translateApp("per start");
+    case "tokens": return translateApp("per token");
+    case "input_tokens": return translateApp("per input token");
+    case "output_tokens": return translateApp("per output token");
+    case "cache_read_tokens": return translateApp("per cache read token");
+    case "cache_write_tokens": return translateApp("per cache write token");
+    case "reasoning_tokens": return translateApp("per reasoning token");
+    case "audio_input_tokens": return translateApp("per audio input token");
+    case "audio_output_tokens": return translateApp("per audio output token");
+    case "image_input_tokens": return translateApp("per image input token");
+    case "image_output_tokens": return translateApp("per image output token");
+    default: return translateApp("per {{metric}}", { metric: metric.replaceAll("_", " ") });
+  }
+}
+
 export function voiceTariff(option: VoiceOption) {
   if (option.key_source === "own" && !option.pricing) {
     const prices = option.reported_token_pricing;
@@ -68,17 +85,12 @@ export function voiceTariff(option: VoiceOption) {
             price.sync_status === "synced" && price.metric.includes("tokens"),
         )
       : [];
-    return (tokens.length ? translateApp("No NyxID duration charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
-      .map(
-        (price) =>
-          ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
-      )
-      .join("") }) : translateApp("No NyxID voice charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
-          .map(
-            (price) =>
-              ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
-          )
-          .join("") }));
+    if (!tokens.length) return translateApp("No NyxID voice charge. Your provider’s charges still apply.");
+    const rates = tokens.map((price) => translateApp("{{credits}} credits {{basis}}.", {
+      credits: price.credits_per_unit,
+      basis: voicePriceBasis(price.metric),
+    }));
+    return [translateApp("No NyxID duration charge. Your provider’s charges still apply."), ...rates].join(appLocale() === "en" ? " " : "");
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -99,12 +111,10 @@ export function voiceTariff(option: VoiceOption) {
   );
   return translateApp("{{credits}} credits per second{{totalCost}}.", {
     credits: duration.credits_per_unit,
-    totalCost: extras
-    .map(
-      (price) =>
-        ` plus ${price.credits_per_unit} per ${price.metric === "requests" ? "start" : price.metric.replaceAll("_", " ")}`,
-    )
-    .join(""),
+    totalCost: extras.map((price) => translateApp(" plus {{credits}} {{basis}}", {
+      credits: price.credits_per_unit,
+      basis: voicePriceBasis(price.metric),
+    })).join(""),
   });
 }
 

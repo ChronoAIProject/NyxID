@@ -478,7 +478,7 @@ function ThemedAppShell({
   pushToastKey: number;
 }) {
   useAppLanguage();
-  const { mode } = useTheme();
+  const { mode, colors } = useTheme();
   const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuthSession();
   const sessionEpoch = getAuthEpoch();
@@ -954,7 +954,7 @@ function ThemedAppShell({
     </WorkspacePushShell>
   );
   return (
-    <View style={appRootStyles.fill}>
+    <View style={[appRootStyles.fill, { backgroundColor: colors.bg }]}>
       <NavigationContainer
         ref={navigationRef}
         linking={appLinking}

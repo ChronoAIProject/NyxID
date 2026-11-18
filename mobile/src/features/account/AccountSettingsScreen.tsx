@@ -463,7 +463,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           <SettingsRow
             icon={Mail}
             label={t("Contact support")}
-            value={SUPPORT_EMAIL}
+            detail={SUPPORT_EMAIL}
+            accessibilityLabel={t("Contact support") + ", " + SUPPORT_EMAIL}
             accessibilityRole="link"
             accessibilityHint={translateApp("Email {{email}}", {
               email: SUPPORT_EMAIL,

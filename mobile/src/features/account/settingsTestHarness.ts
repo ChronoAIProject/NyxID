@@ -115,6 +115,7 @@ export function setupSettingsScreen(
 ) {
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
+  const openedUrls: string[] = [];
   const mutations: unknown[] = [];
   const mutationOptions: Record<string, any>[] = [];
   const analyticsSaves:unknown[][]=[];
@@ -186,6 +187,7 @@ export function setupSettingsScreen(
     "./NyxBotPushSwitches": pushSwitches,
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
+      Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
       ...Object.fromEntries(
         [
           "View",
@@ -421,6 +423,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    openedUrls,
     mutationOptions, analyticsSaves,
     pushPreferenceMutations,
     deviceChoices,

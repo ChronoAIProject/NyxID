@@ -265,7 +265,7 @@ function setup(
       return timerId;
     },
     clearTimeout: (id: number) => timers.delete(id),
-    useTheme: () => ({ mode: "dark" }),
+    useTheme: () => ({ mode: "dark", colors: { bg: "#17171A" } }),
     useSafeAreaInsets: () => ({ top: 40 }),
     useDiagnosticsNotice: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
