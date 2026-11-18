@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -11,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-client";
 import { useKeys } from "@/hooks/use-keys";
@@ -44,6 +47,7 @@ export function MemberScopeDialog({
   member,
   onOpenChange,
 }: MemberScopeDialogProps) {
+  useUiTranslation();
   return (
     <Dialog open={member !== null} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -73,6 +77,7 @@ function MemberScopeForm({
   readonly member: MemberResponse;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const { data: keys, isLoading: keysLoading } = useKeys();
   const { data: roleScopes, isLoading: roleScopesLoading } =
     useOrgRoleScopes(orgId);
@@ -123,11 +128,11 @@ function MemberScopeForm({
                 allowed_service_ids: allowAll ? null : [...selectedIds],
               },
       });
-      toast.success("Service access updated");
+      toast.success(translateUi("Service access updated"));
       onClose();
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to update scope",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to update scope"),
       );
     }
   }
@@ -142,16 +147,13 @@ function MemberScopeForm({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Edit service access</DialogTitle>
-        <DialogDescription>
-          Choose which org services <strong>{memberName}</strong> is allowed
-          to proxy through.
-        </DialogDescription>
+        <DialogTitle>{translateUi("Edit service access")}</DialogTitle>
+        <DialogDescription>{translateUi("Choose which org services ")}<strong>{memberName}</strong>{translateUi(" is allowed to proxy through.")}</DialogDescription>
       </DialogHeader>
 
       <div className="space-y-4">
         <div className="grid gap-2">
-          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
             <input
               type="radio"
               name="member-scope-mode"
@@ -161,18 +163,16 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-12 font-medium text-foreground">
-                Inherit from role default
-              </span>
-              <span className="block text-xs text-muted-foreground">
+              <span className="block text-foreground">{translateUi("Inherit from role default")}</span>
+              <FieldHelp className="block text-muted-foreground">
                 {previewLoading
-                  ? "Loading current role permissions..."
-                  : `This member can access: ${inheritedSummary}`}
-              </span>
+                  ? translateUi("Loading current role permissions...")
+                  : translateUi("This member can access: {{value1}}", { value1: inheritedSummary })}
+              </FieldHelp>
             </span>
-          </label>
+          </Label>
 
-          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
             <input
               type="radio"
               name="member-scope-mode"
@@ -182,21 +182,13 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-12 font-medium text-foreground">
-                Customize for this member
-              </span>
-              <span className="block text-xs text-muted-foreground">
-                Custom scopes override role defaults until reset.
-              </span>
+              <span className="block text-foreground">{translateUi("Customize for this member")}</span>
+              <FieldHelp className="block text-muted-foreground">{translateUi("Custom scopes override role defaults until reset.")}</FieldHelp>
               {scopeMode === "override" && member.scope_source === "inherit" && (
-                <span className="block text-xs font-medium text-amber-600 dark:text-amber-400">
-                  Snapshot warning: saving will freeze this member at the
-                  current role scope ({inheritedSummary}). Future changes to
-                  the role default won't apply until you reset to inherit.
-                </span>
+                <FieldHelp variant="emphasis" className="block text-amber-600 dark:text-amber-400">{translateUi("Snapshot warning: saving will freeze this member at the current role scope (")}{inheritedSummary}{translateUi("). Future changes to the role default won't apply until you reset to inherit.")}</FieldHelp>
               )}
             </span>
-          </label>
+          </Label>
         </div>
 
         {scopeMode === "override" && (
@@ -210,23 +202,16 @@ function MemberScopeForm({
             <div className="space-y-1">
               <Label
                 htmlFor="member-scope-allow-all"
-                className="cursor-pointer text-12 font-medium"
-              >
-                Allow all org services
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                When enabled, the member can use every current and future
-                service this org owns.
-              </p>
+                className="cursor-pointer"
+              >{translateUi("Allow all org services")}</Label>
+              <p className="text-13 text-muted-foreground">{translateUi("When enabled, the member can use every current and future service this org owns.")}</p>
             </div>
           </div>
         )}
 
         {scopeMode === "override" && !allowAll && (
           <div className="space-y-2">
-            <Label className="text-xs font-medium text-muted-foreground">
-              Services
-            </Label>
+            <Label className="text-muted-foreground">{translateUi("Services")}</Label>
             {keysLoading ? (
               <div className="space-y-2">
                 <Skeleton className="h-8 w-full" />
@@ -234,9 +219,7 @@ function MemberScopeForm({
                 <Skeleton className="h-8 w-full" />
               </div>
             ) : orgServices.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-                This org has no services yet. Add one under AI Services first.
-              </div>
+              <div className="rounded-lg border border-dashed border-border p-4 text-center text-13 text-muted-foreground">{translateUi("This org has no services yet. Add one under AI Services first.")}</div>
             ) : (
               <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
                 {orgServices.map((service) => {
@@ -261,12 +244,12 @@ function MemberScopeForm({
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"
                       >
-                        <span className="block text-12 font-medium text-foreground">
+                        <span className="block text-foreground">
                           {service.label}
                         </span>
-                        <span className="block text-xs text-muted-foreground">
+                        <FieldHelp className="block text-muted-foreground">
                           {service.slug}
-                        </span>
+                        </FieldHelp>
                       </Label>
                     </div>
                   );
@@ -274,9 +257,7 @@ function MemberScopeForm({
               </div>
             )}
             {orgServices.length > 0 && (
-              <p className="text-11 text-muted-foreground">
-                Selecting nothing revokes proxy access to every org service.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("Selecting nothing revokes proxy access to every org service.")}</p>
             )}
           </div>
         )}
@@ -287,16 +268,12 @@ function MemberScopeForm({
           variant="outline"
           onClick={onClose}
           disabled={updateMutation.isPending}
-        >
-          Cancel
-        </Button>
+        >{translateUi("Cancel")}</Button>
         <Button
           variant="primary"
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
-        >
-          Save
-        </Button>
+        >{translateUi("Save")}</Button>
       </DialogFooter>
     </>
   );
@@ -307,10 +284,10 @@ function describeScope(
   services: readonly KeyInfo[],
 ): string {
   if (allowedServiceIds === null) {
-    return "Full access";
+    return translateUi("Full access");
   }
   if (allowedServiceIds.length === 0) {
-    return "No services";
+    return translateUi("No services");
   }
   const labels = allowedServiceIds.map((id) => {
     const service = services.find((item) => item.id === id);

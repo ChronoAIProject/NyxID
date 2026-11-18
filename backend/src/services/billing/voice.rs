@@ -137,12 +137,27 @@ pub async fn finalize(db: &Database, id: &str, uncertain: bool) -> AppResult<()>
         doc! {"$set":{"sealed":true,"uncertain":uncertain}},
     )
     .await?;
+    #[cfg(test)]
+    super::stuck_requests::voice_tests::round2::window_point(
+        super::stuck_requests::voice_tests::round2::WindowPhase::Sealed,
+    )
+    .await;
     let row = rows
         .find_one(doc! {"billing_request_id":id,"sealed":true})
         .await?
         .ok_or_else(|| AppError::NotFound("Voice window not found".into()))?;
+    #[cfg(test)]
+    super::stuck_requests::voice_tests::round2::window_point(
+        super::stuck_requests::voice_tests::round2::WindowPhase::Read,
+    )
+    .await;
     // An unknown tail is platform exposure; only observed units reach settlement.
     super::meter::settle_voice_window(db, id, row.observed_seconds, row.start_second == 0).await?;
+    #[cfg(test)]
+    super::stuck_requests::voice_tests::round2::window_point(
+        super::stuck_requests::voice_tests::round2::WindowPhase::Settled,
+    )
+    .await;
     rows.update_one(
         doc! {"_id":&row.id,"sealed":true},
         doc! {"$set":{"settled":true}},
@@ -152,13 +167,47 @@ pub async fn finalize(db: &Database, id: &str, uncertain: bool) -> AppResult<()>
 }
 
 pub async fn reconcile(db: &Database) -> AppResult<u64> {
-    let rows: Vec<VoiceWindow> = db.collection::<VoiceWindow>(WINDOWS).find(doc! {
+    // Missing retry timestamps sort first. Only failed attempts write this
+    // database-time marker, so poison windows cannot fill every later batch.
+    let rows: Vec<bson::Document> = db.collection::<bson::Document>(WINDOWS).find(doc! {
         "settled":false,"$or":[{"sealed":true},{"deadline":{"$lte":bson::DateTime::from_chrono(Utc::now())}}]
-    }).sort(doc! {"deadline":1}).limit(100).await?.try_collect().await?;
+    }).sort(doc! {"reconcile_failed_at":1,"deadline":1,"_id":1}).limit(100).await?.try_collect().await?;
     let mut count = 0;
-    for row in rows {
-        finalize(db, &row.billing_request_id, true).await?;
-        count += 1;
+    let mut failed_windows = 0_u64;
+    let mut retry_marker_failures = 0_u64;
+    for raw in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        let result = match bson::from_document::<VoiceWindow>(raw.clone()) {
+            Ok(row) => finalize(db, &row.billing_request_id, true).await,
+            Err(_) => Err(AppError::Internal("Voice window malformed".into())),
+        };
+        match result {
+            Ok(()) => count += 1,
+            Err(_) => {
+                failed_windows += 1;
+                if db
+                    .collection::<bson::Document>(WINDOWS)
+                    .update_one(
+                        doc! {"_id":raw.get("_id"),"settled":false},
+                        doc! {"$currentDate":{"reconcile_failed_at":true}},
+                    )
+                    .await
+                    .is_err()
+                {
+                    retry_marker_failures += 1;
+                }
+            }
+        }
+    }
+    if failed_windows > 0 {
+        tracing::error!(
+            code = "billing_voice_window_recovery_failed",
+            failed_windows,
+            retry_marker_failures,
+            "Voice windows remain retryable; continuing billing reconciliation"
+        );
     }
     Ok(count)
 }

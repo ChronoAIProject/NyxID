@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   chainVerificationResponseSchema,
   chainVerifyStatusSchema,
+  startupDiagnosticSchema,
 } from "./admin-chain-verification";
 
 const baseStatus = {
@@ -22,6 +23,21 @@ const baseStatus = {
 };
 
 describe("admin chain verification schemas", () => {
+  it("retains additive presentation fields and accepts legacy diagnostics", () => {
+    const legacy = {
+      code: "billing_hold_backlog",
+      summary: "Unfinished billing reservations by status and age",
+      detail: "7 requests are holding funds.",
+      remediation: "This inventory is read-only.",
+      detected_at: "2026-11-17T01:00:00Z",
+    };
+    expect(startupDiagnosticSchema.parse(legacy)).toEqual(legacy);
+    for (const severity of ["info", "action"]) {
+      const current = { ...legacy, severity, technical_details: "complete=true" };
+      expect(startupDiagnosticSchema.parse(current)).toEqual(current);
+      expect(startupDiagnosticSchema.omit({ severity: true, technical_details: true }).parse(current)).toEqual(legacy);
+    }
+  });
   it("parses a healthy status", () => {
     const parsed = chainVerifyStatusSchema.parse(baseStatus);
     expect(parsed.outcome).toBe("ok");
@@ -104,4 +120,15 @@ it("adds account verification without changing the cached client's chain enum", 
   expect(() =>
     chainVerificationResponseSchema.parse({ chains: [response.accounts] }),
   ).toThrow();
+});
+
+
+it("preserves bounded relay health and accepts an older replica without it", () => {
+  expect(chainVerificationResponseSchema.parse({ chains: [] }).security_effects).toBeUndefined();
+  const health = {
+    counts: [{ kind: "audit", state: "pending", count: 1000, at_least: true }, { kind: "cae", state: "uncertain", count: 1, at_least: false }],
+    oldest_pending_at: "2026-11-15T10:00:00Z",
+    oldest_pending_age_seconds: 7200,
+  };
+  expect(chainVerificationResponseSchema.parse({ chains: [], security_effects: health }).security_effects).toEqual(health);
 });

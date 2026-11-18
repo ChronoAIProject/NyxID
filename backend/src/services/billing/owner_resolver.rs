@@ -20,9 +20,55 @@ pub struct ResolvedBillingOwner {
     pub pays: PaysFrom,
 }
 
+/// Only a live server-verified organization channel guest selects OrgWallet
+/// for platform credentials. Ordinary execution keeps the billing principal
+/// and Personal classification, including for organization-owned API keys.
+#[derive(Clone, Copy)]
+pub enum ExecutionLane<'a> {
+    Ordinary,
+    OrgChannelGuest(&'a crate::services::org_channel_service::GuestPayer),
+}
+
 impl BillingOwnerResolver {
     pub fn new(db: DbHandle) -> Self {
         Self { db }
+    }
+
+    /// Caller-pays is exclusive to a server-resolved shared-agent lane.
+    /// Owner, org member and personal guest executions retain their existing rules;
+    /// org-channel guests use the separately verified billing exception below.
+    pub async fn resolve_for_assistant_execution(
+        &self,
+        principal: &str,
+        resource_owner: &str,
+        credential_class: CredentialClass,
+        access: Option<&crate::services::org_agent_service::RequestAccess>,
+    ) -> AppResult<ResolvedBillingOwner> {
+        if let Some(shared) = access.and_then(|a| a.shared()) {
+            if shared.actor() != principal
+                || (resource_owner != shared.owner() && resource_owner != principal)
+            {
+                return Err(AppError::Forbidden(
+                    "Shared billing authority mismatch".into(),
+                ));
+            }
+            return Ok(ResolvedBillingOwner {
+                owner_id: principal.into(),
+                pays: PaysFrom::Personal,
+            });
+        }
+        let guest = access
+            .and_then(|a| a.channel())
+            .and_then(|a| a.guest_payer());
+        self.resolve_for_execution(
+            principal,
+            resource_owner,
+            credential_class,
+            guest
+                .as_ref()
+                .map_or(ExecutionLane::Ordinary, ExecutionLane::OrgChannelGuest),
+        )
+        .await
     }
 
     /// Resolve the payer for an already-authorized resource operation.
@@ -47,15 +93,46 @@ impl BillingOwnerResolver {
     /// Resolve the payer after resource authorization and final credential selection.
     ///
     /// A platform-key grant authorizes use of NyxID's credential; it does not
-    /// make the granting organization pay. Master-key usage always draws from
-    /// the billing principal's personal wallet and rollout. All other classes
-    /// retain resource-owner billing and its organization ACL.
+    /// make the granting organization pay. Master-key usage keeps the billing
+    /// principal and Personal classification without reading its owner type,
+    /// including for organization-owned API keys. All other classes retain
+    /// resource-owner billing and its organization ACL.
+    pub async fn resolve_for_ordinary_execution(
+        &self,
+        principal: &str,
+        resource_owner: &str,
+        credential_class: CredentialClass,
+    ) -> AppResult<ResolvedBillingOwner> {
+        self.resolve_for_execution(
+            principal,
+            resource_owner,
+            credential_class,
+            ExecutionLane::Ordinary,
+        )
+        .await
+    }
+
     pub async fn resolve_for_execution(
         &self,
         billing_principal_user_id: &str,
         resource_owner_id: &str,
         credential_class: CredentialClass,
+        lane: ExecutionLane<'_>,
     ) -> AppResult<ResolvedBillingOwner> {
+        if let ExecutionLane::OrgChannelGuest(guest) = lane {
+            if billing_principal_user_id != guest.org_id() || resource_owner_id != guest.org_id() {
+                return Err(AppError::Forbidden(
+                    "Organization guest billing identity mismatch".into(),
+                ));
+            }
+            crate::services::org_channel_service::budget::require_payer(&self.db, guest).await?;
+            return Ok(ResolvedBillingOwner {
+                owner_id: guest.org_id().into(),
+                pays: PaysFrom::OrgWallet {
+                    org_id: guest.org_id().into(),
+                },
+            });
+        }
         if credential_class == CredentialClass::NyxidManagedMaster {
             return Ok(ResolvedBillingOwner {
                 owner_id: billing_principal_user_id.to_string(),
@@ -139,6 +216,97 @@ mod tests {
     use super::{BillingOwnerResolver, PaysFrom};
     use crate::models::org_membership::OrgRole;
     use crate::services::org_service::OwnerAccess;
+
+    #[tokio::test]
+    async fn ordinary_platform_keys_preserve_org_key_principal_without_database_reads() {
+        use super::{ExecutionLane, ResolvedBillingOwner};
+        use crate::models::{usage_meter::CredentialClass, user::UserType};
+        use crate::mw::auth::AuthMethod;
+        use crate::test_utils::{
+            connect_test_database_with_command_handler, test_auth_user, test_user,
+        };
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let observed = reads.clone();
+        let db = connect_test_database_with_command_handler(
+            "billing_ordinary_platform_key_no_reads",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && matches!(
+                        event.command_name.as_str(),
+                        "find" | "aggregate" | "count" | "distinct"
+                    )
+                {
+                    observed.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let resolver = BillingOwnerResolver::new(db.clone());
+        let resource_owner = uuid::Uuid::new_v4().to_string();
+        for owner_type in [UserType::Org, UserType::Person] {
+            let owner = uuid::Uuid::new_v4().to_string();
+            db.collection("users")
+                .insert_one(test_user(&owner, owner_type))
+                .await
+                .unwrap();
+            // An authenticated org-owned API key acts as its org, not the
+            // admin who created it. Measure only payer resolution, not auth.
+            let mut auth = test_auth_user(&owner);
+            auth.auth_method = AuthMethod::ApiKey;
+            auth.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+            let principal = auth.proxy_resolution_user_id();
+            assert_eq!(principal, owner);
+            let expected = ResolvedBillingOwner {
+                owner_id: owner,
+                pays: PaysFrom::Personal,
+            };
+            reads.lock().unwrap().clear();
+            assert_eq!(
+                resolver
+                    .resolve_for_execution(
+                        &principal,
+                        &resource_owner,
+                        CredentialClass::NyxidManagedMaster,
+                        ExecutionLane::Ordinary
+                    )
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                resolver
+                    .resolve_for_ordinary_execution(
+                        &principal,
+                        &resource_owner,
+                        CredentialClass::NyxidManagedMaster
+                    )
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                resolver
+                    .resolve_for_assistant_execution(
+                        &principal,
+                        &resource_owner,
+                        CredentialClass::NyxidManagedMaster,
+                        None
+                    )
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert!(
+                reads.lock().unwrap().is_empty(),
+                "ordinary platform-key payer resolution must not read users or any other collection"
+            );
+        }
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn direct_access_bills_personal_owner() {

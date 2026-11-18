@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { Label } from "@/components/ui/label";
 import { useId, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -69,6 +73,7 @@ export function FilterPicker({
   matches?: (value: string, option: FilterPickerOption) => boolean;
   limit?: number;
 }) {
+  useUiTranslation();
   const [draft, setDraft] = useState<string[]>([...values]);
   // Every opening starts from the applied selection, however it was opened
   // (trigger, keyboard, or a caller such as a filter chip).
@@ -90,7 +95,7 @@ export function FilterPicker({
       <PopoverTrigger asChild>
         <Button
           variant="outline"
-          aria-label={`Filter ${label.toLowerCase()}`}
+          aria-label={translateUi("Filter {{value1}}", { value1: label.toLowerCase() })}
           className="justify-between"
           disabled={disabled}
         >
@@ -100,15 +105,12 @@ export function FilterPicker({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 space-y-3 p-3">
         <div className="flex items-center justify-between">
-          <span className="text-12 font-medium">{label}</span>
-          <span className="text-11 text-muted-foreground">
-            {draft.length} selected
-          </span>
+          <span className="type-row-title">{label}</span>
+          <span className="text-13 text-muted-foreground">
+            {draft.length}{translateUi(" selected")}</span>
         </div>
         {description && (
-          <p className="-mt-1.5 text-11 text-muted-foreground">
-            {description}
-          </p>
+          <p className="-mt-1.5 text-13 text-muted-foreground">{description}</p>
         )}
         <div className="relative">
           <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
@@ -116,7 +118,7 @@ export function FilterPicker({
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder={searchPlaceholder}
-            aria-label={`Search ${label.toLowerCase()}`}
+            aria-label={translateUi("Search {{value1}}", { value1: label.toLowerCase() })}
             className="pl-8"
           />
         </div>
@@ -124,7 +126,7 @@ export function FilterPicker({
           <Skeleton className="h-24" />
         ) : options.status === "error" ? (
           <ErrorBanner
-            message={`Could not load ${label.toLowerCase()}.`}
+            message={translateUi("Could not load {{value1}}.", { value1: label.toLowerCase() })}
             onRetry={options.onRetry}
           />
         ) : (
@@ -154,7 +156,7 @@ export function FilterPicker({
                 <span className="min-w-0">
                   <span className="block truncate">{option.label}</span>
                   {option.detail && (
-                    <span className="block truncate text-10 text-muted-foreground">
+                    <span className="block truncate text-12 text-muted-foreground">
                       {option.detail}
                     </span>
                   )}
@@ -162,14 +164,10 @@ export function FilterPicker({
               </Button>
             ))}
             {options.options.length === 0 && (
-              <p className="p-2 text-12 text-muted-foreground">
-                No matches.
-              </p>
+              <p className="p-2 text-14 text-muted-foreground">{translateUi("No matches.")}</p>
             )}
             {options.total > options.options.length && (
-              <p className="text-10 text-muted-foreground">
-                Search to narrow {options.total.toLocaleString()} matches.
-              </p>
+              <p className="text-12 text-muted-foreground">{translateUi("Search to narrow ")}{options.total.toLocaleString(getFormattingLocale())}{translateUi(" matches.")}</p>
             )}
           </div>
         )}
@@ -179,17 +177,13 @@ export function FilterPicker({
             size="sm"
             disabled={!draft.length}
             onClick={() => setDraft([])}
-          >
-            Clear
-          </Button>
+          >{translateUi("Clear")}</Button>
           <Button
             variant="outline"
             size="sm"
             className="ml-auto"
             onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
+          >{translateUi("Cancel")}</Button>
           <Button
             variant="primary"
             size="sm"
@@ -197,9 +191,7 @@ export function FilterPicker({
               onChange(draft);
               onOpenChange(false);
             }}
-          >
-            Apply
-          </Button>
+          >{translateUi("Apply")}</Button>
         </div>
       </PopoverContent>
     </Popover>
@@ -219,6 +211,7 @@ export function FilterCard({
   aside: ReactNode;
   children?: ReactNode;
 }) {
+  useUiTranslation();
   return (
     <div className="space-y-3 rounded-xl border border-border/50 bg-card px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -232,36 +225,39 @@ export function FilterCard({
 
 export function AnalyticsSelect({
   label,
+  ariaLabel,
   value,
   options,
   onChange,
   inline = false,
 }: {
   label: string;
+  ariaLabel?: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (value: string) => void;
   inline?: boolean;
 }) {
+  useUiTranslation();
   const id = useId();
   return (
     <div
       className={cn(
-        "min-w-0",
-        inline ? "flex items-center gap-2" : "space-y-1.5",
+        "min-w-0 max-w-full",
+        inline ? "flex flex-wrap items-center gap-2" : "space-y-1.5",
       )}
     >
-      <label
+      <Label
         htmlFor={id}
-        className="whitespace-nowrap text-10 font-medium text-muted-foreground"
+        className="min-w-0 break-words text-muted-foreground"
       >
         {label}
-      </label>
+      </Label>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger
           id={id}
-          aria-label={label}
-          className={inline ? "w-40" : "w-full"}
+          aria-label={ariaLabel ?? label}
+          className={inline ? "w-40 max-w-full" : "w-full"}
           style={inline ? { marginTop: 0 } : undefined}
         >
           <SelectValue />

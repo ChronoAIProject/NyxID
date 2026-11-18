@@ -41,6 +41,7 @@ pub struct CreateInput {
     pub user_id: String,
     pub service_slug: String,
     pub use_platform_key: Option<bool>,
+    pub assistant_intent_locked: bool,
     pub scopes: Vec<String>,
     pub label: Option<String>,
     pub endpoint_url: Option<String>,
@@ -71,10 +72,14 @@ pub struct CatalogConnectInfo {
     pub service_name: String,
     pub auth_method: String,
     pub auth_key_name: String,
+    pub token_exchange_credential_fields:
+        Option<Vec<crate::models::downstream_service::CredentialFieldSpec>>,
     pub provider_id: Option<String>,
     pub provider_type: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
+    pub(crate) has_oauth_endpoints: bool,
+    pub(crate) supports_oauth_scopes: bool,
     pub requires_gateway_url: bool,
     pub api_key_url: Option<String>,
     pub api_key_instructions: Option<String>,
@@ -212,6 +217,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         user_id: input.user_id,
         service_slug: service.service_slug.clone(),
         use_platform_key: input.use_platform_key,
+        assistant_intent_locked: input.assistant_intent_locked,
         service_id: service.service_id.clone(),
         scopes,
         label,
@@ -393,6 +399,15 @@ pub async fn complete(
         context.actor.app_id = current.requesting_app_id.clone().or(context.actor.app_id);
         crate::services::service_history::context::replace(context);
     }
+    if current.assistant_intent_locked
+        && input
+            .use_platform_key
+            .is_some_and(|intent| Some(intent) != current.use_platform_key)
+    {
+        return Err(AppError::ValidationError(
+            "This assistant connection link has a fixed credential intent".into(),
+        ));
+    }
     let catalog = load_catalog_info_by_id(db, &current.service_id).await?;
 
     if let Some(service_id) = current.completed_user_service_id.clone() {
@@ -427,10 +442,24 @@ pub async fn complete(
         return Err(completion_conflict_error(db, &current.id).await?);
     };
 
-    let use_platform_key = input
-        .use_platform_key
-        .or(claimed.use_platform_key)
-        .unwrap_or(false);
+    if claimed.assistant_intent_locked
+        && input
+            .use_platform_key
+            .is_some_and(|intent| Some(intent) != claimed.use_platform_key)
+    {
+        release_claim(db, &claimed.id, &claim_id).await;
+        return Err(AppError::ValidationError(
+            "This assistant connection link has a fixed credential intent".into(),
+        ));
+    }
+    let use_platform_key = if claimed.assistant_intent_locked {
+        claimed.use_platform_key.unwrap_or(false)
+    } else {
+        input
+            .use_platform_key
+            .or(claimed.use_platform_key)
+            .unwrap_or(false)
+    };
     if use_platform_key
         && (input.credential.is_some()
             || input.endpoint_url.is_some()
@@ -1160,7 +1189,7 @@ fn spawn_terminal_webhook_delivery(
     dispatcher: crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
     link: ConnectLink,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let (Some(app_id), Some(event_id), Some(event_type)) = (
             link.requesting_app_id.as_deref(),
             link.webhook_event_id.as_deref(),
@@ -1324,7 +1353,7 @@ async fn load_catalog_info_by_id(
     catalog_info(db, service).await
 }
 
-async fn catalog_info(
+pub(crate) async fn catalog_info(
     db: &mongodb::Database,
     service: DownstreamService,
 ) -> AppResult<CatalogConnectInfo> {
@@ -1347,6 +1376,9 @@ async fn catalog_info(
         service_name: service.name,
         auth_method: service.auth_method,
         auth_key_name: service.auth_key_name,
+        token_exchange_credential_fields: service
+            .token_exchange_config
+            .map(|config| config.credential_fields),
         provider_id: provider.as_ref().map(|provider| provider.id.clone()),
         provider_type: provider
             .as_ref()
@@ -1359,6 +1391,25 @@ async fn catalog_info(
                 provider,
             )
         }),
+        has_oauth_endpoints: provider
+            .as_ref()
+            .is_some_and(|p| match p.provider_type.as_str() {
+                "oauth2" => {
+                    p.authorization_url
+                        .as_deref()
+                        .is_some_and(|v| !v.is_empty())
+                        && p.token_url.as_deref().is_some_and(|v| !v.is_empty())
+                }
+                "device_code" => {
+                    p.device_code_url.as_deref().is_some_and(|v| !v.is_empty())
+                        && p.device_token_url
+                            .as_deref()
+                            .or(p.token_url.as_deref())
+                            .is_some_and(|v| !v.is_empty())
+                }
+                _ => false,
+            }),
+        supports_oauth_scopes: provider.as_ref().is_some_and(|p| p.supports_oauth_scopes),
         requires_gateway_url: provider
             .as_ref()
             .is_some_and(|provider| provider.requires_gateway_url),
@@ -1529,6 +1580,167 @@ mod tests {
         service
     }
 
+    #[tokio::test]
+    async fn hosted_token_exchange_preview_fields_and_completion_preserve_the_entered_app_credentials()
+     {
+        let db =
+            crate::test_utils::connect_transaction_test_database("hosted_structured_credential")
+                .await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (owner, created) = create_test_link(&db, "structured").await;
+        db.collection("users")
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let config = crate::services::channel_adapters::lark::lark_family_token_exchange_config();
+        db.collection::<bson::Document>(DOWNSTREAM_SERVICES).update_one(
+            doc! {"_id":&created.link.service_id},
+            doc! {"$set":{"auth_method":"token_exchange", "auth_key_name":"", "token_exchange_config":bson::to_bson(&config).unwrap()}},
+        ).await.unwrap();
+        let view = preview(&db, &created.raw_token).await.unwrap();
+        let fields = view.service.token_exchange_credential_fields.unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["app_id", "app_secret"]
+        );
+        assert!(!fields[0].secret);
+        assert!(fields[1].secret);
+        let credential = r#"{"app_id":"cli_app","app_secret":"independent-bot-secret"}"#;
+        let completed = complete(
+            &db,
+            &keys,
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some(credential),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let CompleteResult::Completed(view) = completed else {
+            panic!("structured API-key setup completes without an OAuth exchange");
+        };
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id":view.link.completed_user_service_id.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let key = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! {"_id":service.api_key_id.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::super::credential_record_service::CredentialRecord::key(&key)
+                .text(
+                    &keys,
+                    "credential_encrypted",
+                    key.credential_encrypted.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .as_str(),
+            credential
+        );
+        assert!(matches!(
+            complete(
+                &db,
+                &keys,
+                &owner,
+                &created.raw_token,
+                CompleteInput {
+                    credential: Some(credential),
+                    ..Default::default()
+                },
+                false
+            )
+            .await,
+            Err(AppError::ConnectLinkAlreadyCompleted)
+        ));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assistant_intent_lock_rejects_override_before_completion_and_resume_but_legacy_keeps_override()
+     {
+        let db = connect_test_database("assistant_intent_lock")
+            .await
+            .expect("MongoDB 8 replica set required");
+        for intent in [false, true] {
+            let (owner, created) = create_test_link(&db, "locked").await;
+            db.collection::<bson::Document>(CONNECT_LINKS)
+                .update_one(
+                    doc! {"_id":&created.link.id},
+                    doc! {"$set":{"assistant_intent_locked":true,"use_platform_key":intent}},
+                )
+                .await
+                .unwrap();
+            for resume in [false, true] {
+                if resume {
+                    db.collection::<bson::Document>(CONNECT_LINKS)
+                        .update_one(
+                            doc! {"_id":&created.link.id},
+                            doc! {"$set":{"completed_user_service_id":"pinned-service"}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                assert!(matches!(
+                    complete(
+                        &db,
+                        &crate::test_utils::test_encryption_keys(),
+                        &owner,
+                        &created.raw_token,
+                        CompleteInput {
+                            use_platform_key: Some(!intent),
+                            ..Default::default()
+                        },
+                        false
+                    )
+                    .await,
+                    Err(AppError::ValidationError(_))
+                ));
+            }
+            let preview = preview(&db, &created.raw_token).await.unwrap();
+            assert!(preview.link.assistant_intent_locked);
+            assert_eq!(preview.link.use_platform_key, Some(intent));
+        }
+        let (owner, created) = create_test_link(&db, "legacy").await;
+        db.collection::<bson::Document>(CONNECT_LINKS)
+            .update_one(
+                doc! {"_id":&created.link.id},
+                doc! {"$set":{"use_platform_key":true},"$unset":{"assistant_intent_locked":""}},
+            )
+            .await
+            .unwrap();
+        let result = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                use_platform_key: Some(false),
+                credential: Some("test-secret"),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CompleteResult::Completed(_)));
+        db.drop().await.unwrap();
+    }
+
     async fn insert_oauth_client(
         db: &mongodb::Database,
         name: &str,
@@ -1571,6 +1783,7 @@ mod tests {
         let created = create(
             db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -1661,6 +1874,7 @@ mod tests {
 
     fn scope_create_input(service: &DownstreamService, scopes: &[&str]) -> CreateInput {
         CreateInput {
+            assistant_intent_locked: false,
             user_id: Uuid::new_v4().to_string(),
             service_slug: service.slug.clone(),
             use_platform_key: None,
@@ -1856,7 +2070,7 @@ mod tests {
                 Mock::given(method("POST"))
                     .and(path("/device"))
                     .and(body_string_contains(
-                        "scope=read%3Auser+read%3Aorg+public_repo",
+                        "scope=read%3Auser+read%3Aorg+public_repo+read%3Aproject",
                     ))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "device_code": "test-device-code", "user_code": "TEST-CODE",
@@ -1872,9 +2086,10 @@ mod tests {
                 State(state.clone()),
                 test_auth_user(&actor),
                 Json(handlers::CreateConnectLinkRequest {
+                    assistant_personal: false,
                     service_slug: service.slug.clone(),
                     use_platform_key: None,
-                    scopes: vec!["read:org, public_repo".to_string()],
+                    scopes: vec!["read:org, public_repo, read:project".to_string()],
                     label: None,
                     endpoint_url: None,
                     requested_by: None,
@@ -1903,7 +2118,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(preview.scopes, ["read:org", "public_repo"]);
+            assert_eq!(preview.scopes, ["read:org", "public_repo", "read:project"]);
             let Json(status) = handlers::get_connect_link(
                 State(state.clone()),
                 test_auth_user(&actor),
@@ -1956,7 +2171,10 @@ mod tests {
                         url::Url::parse(completed.authorization_url.as_deref().unwrap()).unwrap();
                     let params: std::collections::HashMap<_, _> =
                         url.query_pairs().into_owned().collect();
-                    assert_eq!(params["scope"], "read:user read:org public_repo");
+                    assert_eq!(
+                        params["scope"],
+                        "read:user read:org public_repo read:project"
+                    );
                     let oauth = db
                         .collection::<crate::models::oauth_state::OAuthState>(
                             crate::models::oauth_state::COLLECTION_NAME,
@@ -2036,6 +2254,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2074,6 +2293,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2106,6 +2326,7 @@ mod tests {
         let result = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
@@ -2774,6 +2995,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner,
                 service_slug: service.slug.clone(),
@@ -2817,6 +3039,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -2862,6 +3085,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
@@ -2904,6 +3128,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                assistant_intent_locked: false,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,

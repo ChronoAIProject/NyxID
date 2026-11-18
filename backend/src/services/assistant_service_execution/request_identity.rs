@@ -1,3 +1,4 @@
+use super::model_diagnostic::{Diagnostic, Reason};
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -31,6 +32,30 @@ pub(super) fn legacy_model_generation(
             })
 }
 
+/// The single stateless model transport predicate shared by turn admission and
+/// personal approval policy. It grants no connection or account authority.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assistant_model_transport(
+    auth: &crate::mw::auth::AuthUser,
+    service: &crate::models::downstream_service::DownstreamService,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    pool: Option<&str>,
+) -> bool {
+    auth.assistant_chat.as_deref().is_some_and(|chat| {
+        chat.turn_live
+            && chat.turn_id.is_some()
+            && auth.api_key_id.as_deref() == Some(chat.api_key_id.as_str())
+    }) && service.inference.is_some()
+        && method == "POST"
+        && pool.is_none()
+        && !mcp_service::http_carries_method_override(method, headers, query, body)
+        && serde_json::from_slice(body).is_ok_and(|body| model_shape(path, &body).is_ok())
+}
+
 /// Only catalog-declared inference on a closed model generation endpoint is
 /// account-fungible. Stateful response/file handles retain account identity.
 pub fn http_operation(
@@ -61,6 +86,16 @@ pub fn http_operation(
 /// provider extensions retain exact action consent. Function tools describe
 /// callbacks to NyxAgent; provider-hosted tools can execute effects themselves.
 pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
+    stateless_model_transport(path, body)
+}
+
+/// Shared closed generation contract. Correlation metadata is non-executable;
+/// the actual upstream payload is never modified by this projection.
+pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {
+    model_shape(path, body).is_ok()
+}
+
+pub(super) fn model_shape(path: &str, body: &Value) -> Result<(), Diagnostic> {
     let path = path
         .trim_matches('/')
         .strip_prefix("v1/")
@@ -69,20 +104,20 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         path,
         "chat/completions" | "responses" | "messages" | "embeddings"
     ) {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     let Some(object) = body.as_object() else {
-        return false;
+        return Err(Reason::RequestShape.into());
     };
     if object
         .get("model")
         .and_then(Value::as_str)
         .is_none_or(|model| model.trim().is_empty())
     {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     if path == "responses" && object.get("store") != Some(&Value::Bool(false)) {
-        return false;
+        return Err(Reason::RequestShape.into());
     }
     const FIELDS: &[&str] = &[
         "model",
@@ -128,16 +163,46 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         "safety_identifier",
         "prompt_cache_key",
         "prompt_cache_retention",
+        "client_metadata",
     ];
-    if object.keys().any(|key| !FIELDS.contains(&key.as_str()))
-        || object
-            .get("store")
-            .is_some_and(|value| value != &Value::Bool(false))
+    if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err(Diagnostic::unknown(
+            object.keys().filter(|key| !FIELDS.contains(&key.as_str())),
+        ));
+    }
+    if object
+        .get("store")
+        .is_some_and(|value| value != &Value::Bool(false))
         || object
             .get("background")
             .is_some_and(|value| value != &Value::Bool(false))
     {
-        return false;
+        return Err(Reason::RequestShape.into());
+    }
+    // Codex correlation fields are client telemetry, not stored provider
+    // resource handles. NyxAgent forwards this object on ordinary model calls.
+    // Keep the extension closed and bounded; unknown/nested values still deny.
+    if let Some(metadata) = object.get("client_metadata") {
+        const CORRELATION: &[&str] = &[
+            "root_turn_id",
+            "session_id",
+            "thread_id",
+            "turn_id",
+            "x-codex-installation-id",
+            "x-codex-turn-metadata",
+            "x-codex-window-id",
+        ];
+        if path != "responses"
+            || metadata.as_object().is_none_or(|fields| {
+                fields.len() > CORRELATION.len()
+                    || fields.iter().any(|(key, value)| {
+                        !CORRELATION.contains(&key.as_str())
+                            || value.as_str().is_none_or(|text| text.len() > 8192)
+                    })
+            })
+        {
+            return Err(Reason::RequestShape.into());
+        }
     }
     fn handles(value: &Value) -> bool {
         match value {
@@ -167,12 +232,16 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
         .as_object_mut()
         .expect("model request")
         .remove("tools");
+    executable
+        .as_object_mut()
+        .expect("model request")
+        .remove("client_metadata");
     if handles(&executable) {
-        return false;
+        return Err(Reason::HandlePresent.into());
     }
     if let Some(tools) = object.get("tools") {
         let Some(tools) = tools.as_array() else {
-            return false;
+            return Err(Reason::ToolShape.into());
         };
         if tools.iter().any(|tool| {
             !tool.is_object()
@@ -190,15 +259,35 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
                     )
                 }
         }) {
-            return false;
+            return Err(Reason::ToolShape.into());
         }
     }
-    true
+    Ok(())
+}
+
+pub(super) fn model_route_operation(
+    target: &crate::services::proxy_service::ProxyTarget,
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+) -> Option<Value> {
+    if target.service.inference.is_none() || method != "POST" {
+        return None;
+    }
+    let parsed = serde_json::from_slice::<Value>(body).ok()?;
+    stateless_model_transport(path, &parsed).then(|| {
+        json!({"kind":"raw_inference", "method":method, "path":path, "query":query,
+            "model":parsed["model"], "provider":target.service.id})
+    })
 }
 
 /// Bind sanitized semantic headers. Correlation metadata can change at each
 /// transport hop and carries no account/action authority. Account/project and
-/// idempotency values remain bound. Cards expose only this private digest.
+/// idempotency values remain bound, as do write preconditions (If-Match and
+/// If-Unmodified-Since). A changed revision is a new exact action and requires
+/// fresh consent; removing the condition must never widen an approved write.
+/// Cards expose only this private digest.
 pub fn bind_headers(operation: &mut Value, headers: &[(String, String)]) {
     let mut semantic: Vec<_> = headers
         .iter()

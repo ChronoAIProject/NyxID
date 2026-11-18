@@ -1518,6 +1518,7 @@ pub async fn create_key(
             body.platform.as_deref(),
             &body.selected_operations,
             expected_digest,
+            Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
         )
         .await?;
         let receipts = provisioned
@@ -1570,21 +1571,6 @@ pub async fn create_key(
         },
     )
     .await;
-
-    if scheduled {
-        audit_service::log_for_user(
-            state.db.clone(),
-            &auth_user,
-            "durable_grants_provisioned",
-            Some(serde_json::json!({
-                "api_key_id": &created.id,
-                "grant_ids": durable_grants.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
-                "operation_count": durable_grants.len(),
-                "owner_user_id": &user_id_str,
-                "decision": "authorized",
-            })),
-        );
-    }
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
@@ -1848,21 +1834,13 @@ pub async fn revoke_durable_grant(
     let actor = auth_user.user_id.to_string();
     let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let grant = durable_operation_grant_service::revoke_grant(
-        &state.db, &owner, &key_id, &grant_id, &actor,
+        &state.db,
+        &owner,
+        &key_id,
+        &grant_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "durable_grant_revoked",
-        Some(serde_json::json!({
-            "api_key_id": &key_id,
-            "grant_id": &grant_id,
-            "endpoint_id": &grant.endpoint_id,
-            "contract_digest": &grant.contract_digest,
-            "decision": "revoked",
-        })),
-    );
     Ok(Json(grant.into()))
 }
 
@@ -1893,7 +1871,7 @@ pub async fn reauthorize_durable_grants(
     let grants = durable_operation_grant_service::reauthorize_scheduled_key(
         &state.db,
         &state.node_ws_manager,
-        &actor,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
         &owner,
         &key_id,
         &body.selected_operations,
@@ -1902,17 +1880,6 @@ pub async fn reauthorize_durable_grants(
     .await?;
     let receipts: Vec<DurableGrantReceipt> =
         grants.into_iter().map(DurableGrantReceipt::from).collect();
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "durable_grants_reauthorized",
-        Some(serde_json::json!({
-            "api_key_id": &key_id,
-            "grant_ids": receipts.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
-            "operation_count": receipts.len(),
-            "decision": "authorized",
-        })),
-    );
     Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 
@@ -2197,6 +2164,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<ApiKey>(API_KEYS)
             .insert_one(ApiKey {
+                permission_policy_id: None,
                 id: key_id.clone(),
                 user_id: org_id,
                 name: "org-agent".to_string(),
@@ -2625,6 +2593,7 @@ mod tests {
 
         fn fixture_api_key(id: &str, owner_user_id: &str, name: &str) -> ApiKey {
             ApiKey {
+                permission_policy_id: None,
                 id: id.to_string(),
                 user_id: owner_user_id.to_string(),
                 name: name.to_string(),
@@ -3028,6 +2997,7 @@ mod tests {
             .unwrap();
 
         let make_key = |id: String, owner: String| ApiKey {
+            permission_policy_id: None,
             id,
             user_id: owner,
             name: "scheduled".to_string(),

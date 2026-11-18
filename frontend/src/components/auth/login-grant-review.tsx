@@ -1,11 +1,10 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronDown, KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { AgentKeySummary } from "@/schemas/agent-key-login";
-import type {
-  AccessEntry,
-  PermissionComparison,
-} from "@/lib/login-permissions";
+import type { AccessEntry } from "@/lib/login-permissions";
 import { PermissionIcon } from "./login-permission-picker";
 import { AgentKeyIssuanceNotice } from "./agent-key-permissions";
 
@@ -54,26 +53,27 @@ export function AccessEntries({
 
 export function LoginGrantReview({
   apiKey,
-  comparison,
   kind,
   children,
   customize,
   actions,
   credentialExpiresAt,
+  nameField,
 }: {
   apiKey: AgentKeySummary;
-  comparison: PermissionComparison;
   kind: "existing" | "new";
   children: ReactNode;
   customize: ReactNode;
   actions: ReactNode;
   credentialExpiresAt?: string;
+  nameField?: ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus({ preventScroll: true }), [apiKey.id]);
   const expiry = credentialExpiresAt || apiKey.expires_at;
   return (
-    <section aria-label="Authorize access" className="space-y-4">
+    <section aria-label={t("Authorize access")} className="space-y-4">
       <div className="flex items-start gap-3">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-border bg-muted/30">
           <KeyRound
@@ -91,48 +91,34 @@ export function LoginGrantReview({
               {apiKey.name}
             </h3>
             <Badge variant={kind === "new" ? "info" : "secondary"}>
-              {kind === "new" ? "Creates new key" : "Existing key"}
+              {kind === "new" ? t("Creates new key") : t("Existing key")}
             </Badge>
           </div>
           <p className="break-words text-11 text-muted-foreground">
             {apiKey.owner_name} ·{" "}
             {expiry
-              ? `Expires ${new Date(expiry).toLocaleDateString()}`
-              : "No expiry"}
+              ? t("Expires {{value}}", { value: new Date(expiry).toLocaleDateString(getFormattingLocale()) })
+              : t("No expiry")}
           </p>
         </div>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-11">
-        <p className="font-medium">Allow this device to access</p>
-        <span
-          className={
-            comparison.extras.length ? "text-warning" : "text-muted-foreground"
-          }
-        >
-          {comparison.matches
-            ? comparison.exact
-              ? "Exact match"
-              : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`
-            : "Selection needed"}
-        </span>
-      </div>
+      {nameField}
+      {/* The access rows render the sticky "Allow this device to access" bar. */}
       {children}
       {(apiKey.allow_all_services ||
         apiKey.allow_auto_connected_services ||
         apiKey.allow_all_nodes) && (
         <p className="text-11 text-warning">
           {apiKey.allow_all_services
-            ? "All current and future services. "
+            ? t("All current and future services. ")
             : apiKey.allow_auto_connected_services
-              ? "Includes future platform services. "
+              ? t("Includes future platform services. ")
               : ""}
           {apiKey.allow_all_nodes && "All current and future nodes."}
         </p>
       )}
       <details className="group border-t border-border">
-        <summary className="flex cursor-pointer list-none items-center gap-2 py-3 text-11 font-medium text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
-          Customize
-          <ChevronDown
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-3 text-11 font-medium text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">{t("Customize")}<ChevronDown
             aria-hidden="true"
             className="ml-auto size-3.5 transition-transform group-open:rotate-180"
           />

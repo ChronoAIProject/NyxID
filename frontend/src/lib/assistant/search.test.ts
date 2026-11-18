@@ -31,7 +31,7 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ g: "" })).toEqual({});
   });
 
-  it("keeps a linked agent details section only for the two sheet sections", () => {
+  it("keeps a linked agent details section for supported sheet tabs", () => {
     expect(parseAssistantSearch({ agent: "a1", details: "grants" })).toEqual({
       agent: "a1",
       details: "grants",
@@ -40,7 +40,10 @@ describe("parseAssistantSearch", () => {
       c: "conv-1",
       details: "skills",
     });
-    for (const invalid of ["", "memory", "GRANTS", 1, true, ["grants"]]) {
+    for (const details of ["overview", "memory", "channels"]) {
+      expect(parseAssistantSearch({ agent: "a1", details })).toEqual({ agent: "a1", details });
+    }
+    for (const invalid of ["", "unknown", "GRANTS", 1, true, ["grants"]]) {
       expect(parseAssistantSearch({ agent: "a1", details: invalid })).toEqual({ agent: "a1" });
     }
   });
@@ -163,4 +166,13 @@ it("accepts UUID card links while preserving the other search fields", () => {
   for (const invalid of ["", "bad", "<script>", 1, `${card}/extra`]) {
     expect(parseAssistantSearch({ card: invalid })).toEqual({});
   }
+});
+
+it("round-trips one connection only inside the agent Channels tab", async () => {
+  const connection = "11111111-1111-4111-8111-111111111111";
+  const router = buildAssistantRouter(`/assistant?agent=redqueen&details=channels&connection=${connection}`);
+  await router.load();
+  expect(parseAssistantSearch(router.state.location.search)).toEqual({ agent: "redqueen", details: "channels", connection });
+  expect(parseAssistantSearch({ details: "overview", connection }).connection).toBeUndefined();
+  expect(parseAssistantSearch({ details: "channels", connection: "invalid" }).connection).toBeUndefined();
 });

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 /**
  * GitHubButton — shared link to the NyxID source repository.
  *
@@ -14,12 +15,13 @@ export interface GitHubButtonProps {
 }
 
 export function GitHubButton({ className, label, size = 20 }: GitHubButtonProps) {
+  const { t } = useUiTranslation();
   return (
     <a
       href={GITHUB_URL}
       target="_blank"
       rel="noopener noreferrer"
-      aria-label={label ?? "GitHub"}
+      aria-label={label ?? t("GitHub")}
       className={`inline-flex items-center gap-2 transition-colors ${className ?? ""}`}
     >
       <svg

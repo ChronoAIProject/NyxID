@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useTextSize } from "@/hooks/use-text-size";
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -77,6 +80,8 @@ function QuantityPanel({
   comparison: Dimension;
   onChooseMetrics: () => void;
 }) {
+  useUiTranslation();
+  const tokenSize = useTextSize(13);
   const [page, setPage] = useState(0);
   const empty = metrics.length === 0;
   const totals = metricTotals(rows);
@@ -113,7 +118,7 @@ function QuantityPanel({
           });
   const plottedSeries =
     comparison === "metric" && !empty
-      ? [{ key: "quantity", label: "Period quantity", color: colors[0]! }]
+      ? [{ key: "quantity", get label() { return translateUi("Period quantity"); }, color: colors[0]! }]
       : series;
   const chartConfig = Object.fromEntries(
     plottedSeries.map((item) => [
@@ -135,7 +140,7 @@ function QuantityPanel({
     ),
   );
   return (
-    <section className="quantity-unit-panel" aria-label={`${label} comparison`}>
+    <section className="quantity-unit-panel" aria-label={translateUi("{{value1}} comparison", { value1: label })}>
       {!empty && (
         <dl className="quantity-chart-totals">
           {series.map((item) => (
@@ -165,8 +170,8 @@ function QuantityPanel({
           role="img"
           aria-label={
             empty
-              ? `Empty quantity graph by ${dimensions[comparison].toLowerCase()}: ${visiblePoints.map((point) => point.name).join("; ")}. No metrics selected.`
-              : `${label} by ${dimensions[comparison].toLowerCase()} for the selected period: ${visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? "not recorded" : number(point.values[item.key]!)}`).join(", ")}`).join("; ")}`
+              ? translateUi("Empty quantity graph by {{value1}}: {{value2}}. No metrics selected.", { value1: dimensions[comparison].toLowerCase(), value2: visiblePoints.map((point) => point.name).join("; ") })
+              : translateUi("{{value1}} by {{value2}} for the selected period: {{value3}}", { value1: label, value2: dimensions[comparison].toLowerCase(), value3: visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? "not recorded" : number(point.values[item.key]!)}`).join(", ")}`).join("; ") })
           }
         >
           <ChartContainer
@@ -174,16 +179,21 @@ function QuantityPanel({
             className="h-[200px] w-full aspect-auto"
           >
             <LineChart
+              // Recharts caches measured tick fonts; refresh the chart's axis
+              // registry together when Display changes the root size.
+              key={tokenSize}
               data={visiblePoints}
               margin={{ top: 12, right: 14, left: 0, bottom: 0 }}
             >
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis
+                height={Math.max(30, tokenSize * 2.5)}
                 dataKey="key"
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
-                minTickGap={16}
+                tick={{ fontSize: tokenSize, fill: "var(--color-muted-foreground)" }}
+                interval="preserveStartEnd"
+                minTickGap={tokenSize * 1.5}
                 tickFormatter={(value) => {
                   const text =
                     visiblePoints.find((point) => point.key === value)?.tick ??
@@ -195,11 +205,11 @@ function QuantityPanel({
                 tickFormatter={compact}
                 tickLine={false}
                 axisLine={false}
-                width={44}
+                width={Math.max(44, tokenSize * 4)}
                 tick={
                   empty
                     ? false
-                    : { fontSize: 10, fill: "var(--color-muted-foreground)" }
+                    : { fontSize: tokenSize, fill: "var(--color-muted-foreground)" }
                 }
                 domain={[0, empty ? 1 : yMax]}
                 ticks={empty ? [0, 0.25, 0.5, 0.75, 1] : undefined}
@@ -233,15 +243,9 @@ function QuantityPanel({
         {empty && (
           <div className="pointer-events-none absolute inset-x-4 top-3 bottom-8 flex items-center justify-center">
             <div className="pointer-events-auto max-w-xs space-y-2 rounded-lg border border-border bg-card p-3 text-center shadow-sm">
-              <p className="text-12 font-medium text-foreground">
-                Select metrics to display usage
-              </p>
-              <p className="text-11 text-muted-foreground">
-                Use the Metrics filter to select one or more metrics.
-              </p>
-              <Button variant="outline" size="sm" onClick={onChooseMetrics}>
-                Choose metrics
-              </Button>
+              <p className="type-row-title text-foreground">{translateUi("Select metrics to display usage")}</p>
+              <p className="text-13 text-muted-foreground">{translateUi("Use the Metrics filter to select one or more metrics.")}</p>
+              <Button variant="outline" size="sm" onClick={onChooseMetrics}>{translateUi("Choose metrics")}</Button>
             </div>
           </div>
         )}
@@ -251,25 +255,20 @@ function QuantityPanel({
         <div className="quantity-chart-pagination">
           <span>
             {currentPage * POINTS_PER_PAGE + 1}–
-            {Math.min((currentPage + 1) * POINTS_PER_PAGE, points.length)} of{" "}
-            {points.length} categories
-          </span>
+            {Math.min((currentPage + 1) * POINTS_PER_PAGE, points.length)}{translateUi(" of")}{" "}
+            {points.length}{translateUi(" categories")}</span>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)}
-          >
-            Previous categories
-          </Button>
+          >{translateUi("Previous categories")}</Button>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === lastPage}
             onClick={() => setPage(currentPage + 1)}
-          >
-            Next categories
-          </Button>
+          >{translateUi("Next categories")}</Button>
         </div>
       )}
     </section>
@@ -285,6 +284,7 @@ export function BillingQuantityChart({
   catalog: BillingCatalog;
   overview?: boolean;
 }) {
+  useUiTranslation();
   const totals = metricTotals(rows);
   const metrics = totals.map(([metric]) => metric);
   const defaultMetric =
@@ -307,8 +307,8 @@ export function BillingQuantityChart({
     <div className="usage-quantity-chart">
       <header>
         <div>
-          <h4>Quantity overview</h4>
-          <p className="fine-print">Totals for the selected billing period</p>
+          <h4>{translateUi("Quantity overview")}</h4>
+          <p className="fine-print">{translateUi("Totals for the selected billing period")}</p>
         </div>
       </header>
       <BillingMetricPicker
@@ -319,11 +319,11 @@ export function BillingQuantityChart({
         options={totals.map(([metric, quantity]) => ({
           id: metric,
           label: billingMetricLabel(metric),
-          detail: `${number(quantity)} in this period`,
+          detail: translateUi("{{quantity}} in this period", { quantity: number(quantity) }),
         }))}
       >
         <AnalyticsSelect
-          label="Compare quantities by"
+          label={translateUi("Compare quantities by")}
           inline
           value={comparison}
           onChange={(value) => setComparison(value as Dimension)}
@@ -368,11 +368,8 @@ export function BillingQuantityChart({
         })
       )}
       {selected.length > 0 && (
-        <p className="fine-print">
-          Each point is a period total for one{" "}
-          {dimensions[comparison].toLowerCase()}. Token metrics can overlap;
-          each metric is shown separately. Different units use separate graphs.
-        </p>
+        <p className="fine-print">{translateUi("Each point is a period total for one")}{" "}
+          {dimensions[comparison].toLowerCase()}{translateUi(". Token metrics can overlap; each metric is shown separately. Different units use separate graphs. ")}</p>
       )}
       <details className="quantity-exact-values">
         <summary>
@@ -380,9 +377,7 @@ export function BillingQuantityChart({
             size={12}
             className="disclosure-arrow"
             aria-hidden="true"
-          />
-          Exact quantities
-        </summary>
+          />{translateUi("Exact quantities")}</summary>
         <dl>
           {totals.map(([metric, quantity]) => (
             <div key={metric}>

@@ -894,6 +894,20 @@ export function useMachineDesktops(conversation: string, turnActive = false) {
   });
 }
 
+/** One entry per open desktop (machine, context and display) in a conversation. */
+export function useConversationDesktops(conversation: string, turnActive = false) {
+  const machines = useMachineDesktops(conversation, turnActive);
+  return [
+    ...new Map(
+      (machines.data ?? []).map((machine) => [conversationDesktopKey(machine), machine]),
+    ).values(),
+  ];
+}
+
+export function conversationDesktopKey(machine: MachineDesktopMetadata): string {
+  return `${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`;
+}
+
 export function useMachineUpdates() {
   return useQuery({
     queryKey: ["machine-updates"],

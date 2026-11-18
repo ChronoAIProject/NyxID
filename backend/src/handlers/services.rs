@@ -175,6 +175,8 @@ pub struct XChannelBillingResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub credential_verification:
+        Option<crate::models::credential_verification::CredentialVerificationCheck>,
     /// Server-owned provenance marker; lets clients mirror Catalog Manager
     /// own-row field rules (for example `auth_scheme`). Not an authority grant.
     pub catalog_manager_created: bool,
@@ -307,6 +309,10 @@ pub struct ServiceResponse {
     /// "manage in AI Services" link instead of picking one silently).
     #[serde(default)]
     pub your_binding_count: u32,
+    /// Whether the viewer may call `POST /services/{id}/resync-identity`.
+    /// Computed only by `GET /services/{id}`; absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_resync_identity: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -317,6 +323,12 @@ pub struct ServiceListResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ResyncIdentityResponse {
     pub catalog_service_id: String,
+    /// Connections to this service that were checked.
+    pub matched_count: u64,
+    /// Connections whose identity settings differed and were rewritten.
+    pub changed_count: u64,
+    /// Same value as `changed_count`; kept for existing callers.
+    #[schema(deprecated)]
     pub affected_count: u64,
 }
 
@@ -489,6 +501,14 @@ impl std::ops::DerefMut for BillingUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
+    /// Trusted, authenticated read-only verification operation. Null disables it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_verification:
+        Option<Option<crate::models::credential_verification::CredentialVerificationCheck>>,
     /// Omitted preserves the catalog scheme; null clears it to Bearer.
     #[serde(
         default,
@@ -613,6 +633,7 @@ impl UpdateServiceRequest {
     /// billing editor shares this handler's write path and audit.
     pub(crate) fn billing_only(billing: BillingUpdate) -> Self {
         Self {
+            credential_verification: None,
             auth_scheme: None,
             service_category: None,
             offering_kind: None,
@@ -1107,6 +1128,13 @@ pub async fn list_services(
         filter.insert("service_category", category.as_str());
     }
 
+    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+    if !can_inspect || super::login_client_context::require_first_party_human(&auth_user).is_err() {
+        filter.insert(
+            "platform_key.purpose",
+            doc! {"$nin":["model_route","model_offering"]},
+        );
+    }
     filter.extend(crate::services::retired_service_service::exclusion_filter());
     let services: Vec<DownstreamService> = state
         .db
@@ -1123,7 +1151,6 @@ pub async fn list_services(
     let catalog_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
     let mut viewer_routing = compute_viewer_routing(&state.db, &user_id_str, &catalog_ids).await?;
 
-    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
     let inspection_keys = can_inspect.then_some(state.encryption_keys.as_ref());
     let eligible =
         crate::services::tools_manager_service::eligible_manager_tool_ids(&state.db, &services)
@@ -1283,6 +1310,7 @@ async fn create_service_inner(
         body.service_category = Some("internal".into());
         body.service_type = Some("http".into());
         body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
             allowed_owner_ids: Vec::new(),
@@ -1943,6 +1971,8 @@ async fn create_service_inner(
         inference: body.inference.clone(),
         concurrency_policy: None,
         inference_admin_modified: body.inference.is_some(),
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing: body.billing.clone(),
         auth_notes: body.auth_notes.clone(),
         known_limitations: body.known_limitations.clone(),
@@ -1962,6 +1992,7 @@ async fn create_service_inner(
     };
     crate::services::tool_topics::validate_tool_service(&new_service)?;
     crate::services::telnyx_platform_service::validate_catalog(&new_service)?;
+    crate::services::platform_key_service::validate_model_purpose(&new_service)?;
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
@@ -2127,6 +2158,7 @@ pub async fn delete_service(
 
     let now = Utc::now();
     let authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -2231,23 +2263,36 @@ pub async fn get_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     let viewer_id = auth_user.user_id.to_string();
-    crate::services::catalog_service::enforce_catalog_read_access(&state.db, &viewer_id, &service)
+    if crate::services::platform_key_service::model_only(&service) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        super::admin_helpers::require_admin_or_operator(
+            &state,
+            &auth_user,
+            "admin.platform_models.credential_metadata",
+        )
         .await?;
+    } else {
+        crate::services::catalog_service::enforce_catalog_read_access(
+            &state.db, &viewer_id, &service,
+        )
+        .await?;
+    }
     // Issue #416: surface the viewer's own routing for this catalog row
     // so /services/$id can render the editable Routing section.
     let mut viewer_routing =
         compute_viewer_routing(&state.db, &viewer_id, &[service.id.as_str()]).await?;
     let routing = viewer_routing.remove(&service.id);
     let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
-    Ok(Json(
-        service_to_response_with_eligibility(
-            &state.db,
-            can_inspect.then_some(state.encryption_keys.as_ref()),
-            service,
-            routing.as_ref(),
-        )
-        .await?,
-    ))
+    let can_resync_identity = can_resync_identity(&state, &auth_user, &service).await?;
+    let mut response = service_to_response_with_eligibility(
+        &state.db,
+        can_inspect.then_some(state.encryption_keys.as_ref()),
+        service,
+        routing.as_ref(),
+    )
+    .await?;
+    response.can_resync_identity = Some(can_resync_identity);
+    Ok(Json(response))
 }
 
 /// PUT /api/v1/services/{service_id}
@@ -2305,7 +2350,20 @@ pub(crate) async fn update_service_inner(
     auth_user: AuthUser,
     tele: TelemetryContext,
     service_id: String,
+    body: UpdateServiceRequest,
+) -> AppResult<Json<ServiceResponse>> {
+    update_service_at_revision(state, auth_user, tele, service_id, body, None).await
+}
+
+/// Optional caller revision uses the existing catalog transaction's update predicate.
+/// Ordinary catalog callers retain their existing behavior.
+pub(crate) async fn update_service_at_revision(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    service_id: String,
     mut body: UpdateServiceRequest,
+    expected_updated_at: Option<chrono::DateTime<Utc>>,
 ) -> AppResult<Json<ServiceResponse>> {
     // Keep large transaction and billing futures out of this handler's state.
     // Direct callers and debug tests must fit the default thread stack too.
@@ -2325,20 +2383,25 @@ pub(crate) async fn update_service_inner(
             .map_err(|_| AppError::Internal("Cannot fingerprint service update".into()))?,
     );
     let service = fetch_service(&state, &service_id).await?;
+    if expected_updated_at.is_some_and(|expected| {
+        expected.timestamp_millis() != service.updated_at.timestamp_millis()
+    }) {
+        return Err(AppError::Conflict(
+            "Credential changed; reload before retrying".into(),
+        ));
+    }
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
-    let tool_authority =
-        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-            Some(
-                super::catalog_authority::require_tool_writer(&state, &auth_user, Some(&service))
-                    .await?,
-            )
-        } else {
-            None
-        };
+    if crate::services::platform_key_service::model_only(&service) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        require_admin(&state, &auth_user).await?;
+    }
+    let row_authority = super::catalog_authority::require_service_update_authority(
+        &state, &auth_user, &service, &body,
+    )
+    .await?;
     let tools_manager =
-        tool_authority == Some(super::catalog_authority::CatalogAuthority::ToolsManager);
+        row_authority == Some(super::catalog_authority::CatalogAuthority::ToolsManager);
     if tools_manager {
-        super::catalog_authority::check_tool_update(&body)?;
         if body
             .credential
             .as_ref()
@@ -2372,27 +2435,17 @@ pub(crate) async fn update_service_inner(
         if body.base_url.as_ref() == Some(&service.base_url) {
             body.base_url = None;
         }
-    } else if tool_authority.is_none() {
-        if body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool) {
-            require_admin(&state, &auth_user).await?;
-        } else {
-            if super::catalog_authority::require_catalog_row_writer(&state, &auth_user, &service)
-                .await?
-                == Some(super::catalog_authority::CatalogAuthority::CatalogManager)
-            {
-                super::catalog_authority::check_service_update(&body)?;
-                if body.is_active.is_some() && service.created_by != auth_user.user_id.to_string() {
-                    return Err(AppError::Forbidden("A Catalog Manager can only deactivate or reactivate services they created; ask an Admin".into()));
-                }
-                super::catalog_authority::check_destination_change(
-                    &state,
-                    &auth_user.user_id.to_string(),
-                    &service,
-                    body.base_url.as_deref(),
-                )
-                .await?;
-            }
+    } else if row_authority == Some(super::catalog_authority::CatalogAuthority::CatalogManager) {
+        if body.is_active.is_some() && service.created_by != auth_user.user_id.to_string() {
+            return Err(AppError::Forbidden("A Catalog Manager can only deactivate or reactivate services they created; ask an Admin".into()));
         }
+        super::catalog_authority::check_destination_change(
+            &state,
+            &auth_user.user_id.to_string(),
+            &service,
+            body.base_url.as_deref(),
+        )
+        .await?;
     }
 
     if body.destination_targets.is_some() {
@@ -2465,6 +2518,16 @@ pub(crate) async fn update_service_inner(
             service.provider_config_id.as_deref(),
         )
         .await?;
+    }
+    if crate::services::platform_key_service::model_only(&service)
+        && body.platform_key.as_ref().is_some_and(|next| {
+            service
+                .platform_key
+                .as_ref()
+                .is_some_and(|old| old.purpose != next.purpose)
+        })
+    {
+        return Err(AppError::ValidationError("Model-only credential purpose cannot be changed; create a separate ordinary catalog record".into()));
     }
     let mut lane_price_changed = false;
     let mut platform_price_changed = false;
@@ -2716,6 +2779,17 @@ pub(crate) async fn update_service_inner(
                 subtype: bson::spec::BinarySubtype::Generic,
                 bytes: encrypted,
             },
+        );
+    }
+    if let Some(check) = &body.credential_verification {
+        if let Some(check) = check {
+            crate::services::credential_verification::validate_declaration(check)?;
+        }
+        set_doc.insert("credential_verification_admin_modified", true);
+        set_doc.insert(
+            "credential_verification",
+            bson::to_bson(check)
+                .map_err(|_| AppError::Internal("Verification metadata encoding failed".into()))?,
         );
     }
     if let Some(inference) = &body.inference {
@@ -3331,11 +3405,14 @@ pub(crate) async fn update_service_inner(
     let managed_proposed: DownstreamService =
         bson::from_document(managed_proposed).map_err(|e| AppError::Internal(e.to_string()))?;
     crate::services::telnyx_platform_service::validate_catalog(&managed_proposed)?;
+    crate::services::platform_key_service::validate_model_purpose(&managed_proposed)?;
 
     let identity_fields = identity_update_fields(&body);
     let identity_changed = !identity_fields.is_empty();
     let mut now = Utc::now();
-    if identity_changed && now.timestamp_millis() <= service.updated_at.timestamp_millis() {
+    if (identity_changed || expected_updated_at.is_some())
+        && now.timestamp_millis() <= service.updated_at.timestamp_millis()
+    {
         now = service.updated_at + chrono::Duration::milliseconds(1);
     }
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
@@ -3384,6 +3461,29 @@ pub(crate) async fn update_service_inner(
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
+    if let Some(expected) = expected_updated_at {
+        catalog_filter.insert("updated_at", bson::DateTime::from_chrono(expected));
+    }
+
+    if body.platform_key.is_some() {
+        // Fence a stale ordinary update against a concurrent route-only cutover.
+        let purpose = service
+            .platform_key
+            .as_ref()
+            .map(|c| c.purpose)
+            .unwrap_or_default();
+        catalog_filter.insert(
+            "platform_key.purpose",
+            if purpose == crate::models::downstream_service::PlatformKeyPurpose::Ordinary {
+                bson::Bson::Document(
+                    doc! {"$in":[bson::Bson::Null,bson::Bson::String("ordinary".into())]},
+                )
+            } else {
+                bson::to_bson(&purpose)
+                    .map_err(|_| AppError::Internal("Invalid credential purpose".into()))?
+            },
+        );
+    }
     if let Some(filter) = header_source_filter {
         catalog_filter.extend(filter);
     }
@@ -3410,6 +3510,7 @@ pub(crate) async fn update_service_inner(
         set_doc.insert("tools_credential_frozen", true);
     }
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -3496,6 +3597,17 @@ pub(crate) async fn update_service_inner(
         ))
         .await?
     };
+
+    if body.base_url.is_some()
+        || body.openapi_spec_url.is_some()
+        || service.base_url != committed_service.base_url
+        || service.openapi_spec_url != committed_service.openapi_spec_url
+    {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(service_id.clone()),
+        );
+    }
 
     if body.credential.is_some() || body.clear_credential {
         audit_service::log_for_user(
@@ -3673,6 +3785,12 @@ async fn complete_replayed_skill_update(
     current: &DownstreamService,
     body: &UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    if body.base_url.is_some() || body.openapi_spec_url.is_some() {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(current.id.clone()),
+        );
+    }
     if body.billing.is_some() {
         Box::pin(state.billing.sync_service_price(current)).await?;
     }
@@ -3717,7 +3835,9 @@ async fn complete_replayed_skill_update(
 /// POST /api/v1/services/{service_id}/resync-identity
 ///
 /// Force every user-service instance back to the catalog's current identity
-/// settings. This deliberate recovery operation requires platform admin.
+/// settings, including customized ones. Rows that already match are left
+/// untouched. Allowed to the people who may change this row's identity fields
+/// through `PUT /services/{service_id}`, from a first-party human session.
 #[utoipa::path(
     post,
     path = "/api/v1/services/{service_id}/resync-identity",
@@ -3727,7 +3847,7 @@ async fn complete_replayed_skill_update(
     responses(
         (status = 200, description = "Identity settings resynchronized", body = ResyncIdentityResponse),
         (status = 400, description = "HTTP service required", body = crate::errors::ErrorResponse),
-        (status = 403, description = "Admin access required", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Admin or service creator access required", body = crate::errors::ErrorResponse),
         (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
     ),
     tag = "Services"
@@ -3737,20 +3857,19 @@ pub async fn resync_service_identity(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<ResyncIdentityResponse>> {
-    require_admin(&state, &auth_user).await?;
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let service = fetch_service(&state, &service_id).await?;
-    if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
-        super::login_client_context::require_first_party_human(&auth_user)?;
-    }
+    let admin = require_identity_resync_authority(&state, &auth_user, &service).await?;
     super::services_helpers::require_http_service(&service)?;
-    let affected_count = catalog_identity_service::force_resync(
+    let outcome = catalog_identity_service::force_resync(
         &state.db,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
                 .is_ok(),
-            admin_required: true,
+            admin_required: admin,
         },
         &service,
         state.audit_chain_hmac_key.as_ref().as_ref(),
@@ -3759,8 +3878,71 @@ pub async fn resync_service_identity(
 
     Ok(Json(ResyncIdentityResponse {
         catalog_service_id: service_id,
-        affected_count,
+        matched_count: outcome.matched_count,
+        changed_count: outcome.changed_count,
+        affected_count: outcome.changed_count,
     }))
+}
+
+/// Resync rewrites every identity field on every connection, so it is allowed
+/// exactly when `PUT /services/{id}` would accept a body changing all of them.
+/// Returns whether the caller acts as Admin (otherwise as the plain creator).
+async fn require_identity_resync_authority(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+) -> AppResult<bool> {
+    use super::catalog_authority::CatalogAuthority;
+    match super::catalog_authority::require_service_update_authority(
+        state,
+        auth_user,
+        service,
+        &identity_resync_probe(),
+    )
+    .await?
+    {
+        Some(CatalogAuthority::Admin) => Ok(true),
+        None => Ok(false),
+        // The manager field classifiers refuse identity fields.
+        Some(CatalogAuthority::CatalogManager | CatalogAuthority::ToolsManager) => Err(
+            AppError::Forbidden("Only an Admin or the service creator can resync identity".into()),
+        ),
+    }
+}
+
+/// Whether the caller may resync this service's connection identity. Policy
+/// denials read as `false`; database errors stay errors.
+async fn can_resync_identity(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+) -> AppResult<bool> {
+    if service.service_type != "http"
+        || super::login_client_context::require_first_party_human(auth_user).is_err()
+    {
+        return Ok(false);
+    }
+    match require_identity_resync_authority(state, auth_user, service).await {
+        Ok(_) => Ok(true),
+        Err(error) if super::services_helpers::is_capability_denial(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// A `PUT /services/{id}` body that sets every identity field. Only presence
+/// matters to the authority checks it is passed to.
+fn identity_resync_probe() -> UpdateServiceRequest {
+    serde_json::from_value(serde_json::json!({
+        "identity_propagation_mode": "none",
+        "identity_include_user_id": false,
+        "identity_include_email": false,
+        "identity_include_name": false,
+        "identity_jwt_audience": "",
+        "forward_access_token": false,
+        "inject_delegation_token": false,
+        "delegation_token_scope": "",
+    }))
+    .expect("the identity probe is a valid service update")
 }
 
 /// GET /api/v1/services/{service_id}/oidc-credentials
@@ -3795,6 +3977,8 @@ pub async fn get_oidc_credentials(
             "Service is not an OIDC service".to_string(),
         ));
     }
+
+    crate::services::platform_key_service::require_ordinary_use(&service)?;
 
     let oauth_client_id = service
         .oauth_client_id
@@ -3913,6 +4097,7 @@ pub async fn update_redirect_uris(
         &state.db,
         &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -3985,6 +4170,7 @@ pub async fn regenerate_oidc_secret(
     crate::services::catalog_mutation_service::commit_oidc_update(
         &state.db, &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user).is_ok(),
@@ -4134,6 +4320,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -4425,6 +4612,7 @@ mod tests {
         assert_eq!(
             stored_staged.platform_key,
             Some(crate::models::downstream_service::PlatformKeyConfig {
+                purpose: Default::default(),
                 enabled: false,
                 audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
                 allowed_owner_ids: vec![],
@@ -5127,23 +5315,348 @@ mod tests {
         assert_eq!(identity_update_fields(&body), ["forward_access_token"]);
     }
 
-    #[tokio::test]
-    async fn resync_identity_rejects_non_admin() {
-        let Some(db) = connect_test_database("h_services_resync_non_admin").await else {
-            eprintln!("skipping resync non-admin test: no local MongoDB available");
-            return;
-        };
-        let user_id = seed_user(&db, false).await;
-        let state = test_app_state(db);
+    #[test]
+    fn identity_resync_probe_sets_every_identity_field() {
+        assert_eq!(
+            identity_update_fields(&super::identity_resync_probe()),
+            [
+                "identity_propagation_mode",
+                "identity_include_user_id",
+                "identity_include_email",
+                "identity_include_name",
+                "identity_jwt_audience",
+                "forward_access_token",
+                "inject_delegation_token",
+                "delegation_token_scope",
+            ]
+        );
+    }
 
-        let error = resync_service_identity(
-            State(state),
-            test_auth_user(&user_id),
-            Path("catalog-service".to_string()),
+    fn api_key_auth_user(user_id: &str) -> crate::mw::auth::AuthUser {
+        let mut auth = test_auth_user(user_id);
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        auth.api_key_id = Some(Uuid::new_v4().to_string());
+        auth
+    }
+
+    async fn insert_resync_catalog(
+        db: &mongodb::Database,
+        id: &str,
+        created_by: &str,
+        configure: impl FnOnce(&mut DownstreamService),
+    ) {
+        let mut catalog = dummy_service();
+        catalog.id = id.to_string();
+        catalog.slug = id.to_string();
+        catalog.created_by = created_by.to_string();
+        catalog.identity_propagation_mode = "jwt".to_string();
+        catalog.forward_access_token = true;
+        catalog.delegation_token_scope = "account:read".to_string();
+        configure(&mut catalog);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert catalog service");
+    }
+
+    async fn insert_customized_instance(db: &mongodb::Database, id: &str, catalog_id: &str) {
+        let mut instance = test_user_service(id, "owner", id, id, Some(catalog_id), None);
+        instance.identity_propagation_mode = "both".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&instance)
+            .await
+            .expect("insert user service");
+    }
+
+    async fn resync_audit(db: &mongodb::Database, actor: &str) -> serde_json::Value {
+        let audit = db
+            .collection::<crate::models::audit_log::AuditLog>(AUDIT_LOGS)
+            .find_one(doc! {"event_type": "catalog_identity_resync_succeeded", "user_id": actor})
+            .await
+            .expect("find resync audit")
+            .expect("resync audit exists");
+        audit.event_data.expect("resync audit data")
+    }
+
+    async fn resync_flag(
+        state: &crate::AppState,
+        auth: crate::mw::auth::AuthUser,
+        service_id: &str,
+    ) -> Option<bool> {
+        let Json(response) =
+            super::get_service(State(state.clone()), auth, Path(service_id.to_string()))
+                .await
+                .expect("get service");
+        response.can_resync_identity
+    }
+
+    /// Resync follows the identity-field rule of `PUT /services/{id}`: Admins
+    /// and the row's plain creator; never Catalog Managers, Tools Managers,
+    /// other people, or non-human credentials.
+    #[tokio::test]
+    async fn resync_identity_authority_matches_service_update_identity_rule() {
+        let db = connect_test_database("h_services_resync_authority")
+            .await
+            .expect("MongoDB required");
+        let state = test_app_state(db.clone());
+        let admin = seed_user(&db, true).await;
+        let creator = seed_user(&db, false).await;
+        let stranger = seed_user(&db, false).await;
+        let manager = seed_operator(&db, true).await;
+
+        // Shared catalog row someone else created: only the Admin may resync.
+        insert_resync_catalog(&db, "shared", "seed", |_| {}).await;
+        insert_customized_instance(&db, "shared-instance", "shared").await;
+        // Legacy row created by a plain user: creator rule applies.
+        insert_resync_catalog(&db, "legacy", &creator, |_| {}).await;
+        insert_customized_instance(&db, "legacy-instance", "legacy").await;
+        // Row a Catalog Manager created: identity stays Admin-only.
+        insert_resync_catalog(&db, "managed", &manager, |row| {
+            row.catalog_manager_created = true;
+        })
+        .await;
+        // Owned private row: Admin only, even for its creator.
+        insert_resync_catalog(&db, "owned", &creator, |row| {
+            row.owner_user_id = Some(creator.clone());
+            row.visibility = "private".to_string();
+        })
+        .await;
+        insert_resync_catalog(&db, "ssh", &creator, |row| {
+            row.service_type = "ssh".to_string();
+        })
+        .await;
+
+        let refused = [
+            ("manager", test_auth_user(&manager), "shared"),
+            ("manager", test_auth_user(&manager), "managed"),
+            ("stranger", test_auth_user(&stranger), "shared"),
+            ("stranger", test_auth_user(&stranger), "legacy"),
+            ("creator", test_auth_user(&creator), "shared"),
+            ("creator", test_auth_user(&creator), "owned"),
+            ("creator key", api_key_auth_user(&creator), "legacy"),
+            ("admin key", api_key_auth_user(&admin), "shared"),
+        ];
+        for (role, auth, service_id) in refused {
+            let error =
+                resync_service_identity(State(state.clone()), auth, Path(service_id.into()))
+                    .await
+                    .expect_err("resync should be refused");
+            assert!(error.is_forbidden(), "{role} on {service_id}: {error:?}");
+        }
+        let unchanged = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id": "shared-instance"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.identity_propagation_mode, "both");
+
+        let Json(by_admin) = resync_service_identity(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path("shared".into()),
         )
         .await
-        .expect_err("non-admin resync should be rejected");
-        assert!(matches!(error, AppError::Forbidden(_)));
+        .expect("admin resync");
+        assert_eq!((by_admin.matched_count, by_admin.changed_count), (1, 1));
+        assert_eq!(resync_audit(&db, &admin).await["authority"], "admin");
+
+        let Json(by_creator) = resync_service_identity(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Path("legacy".into()),
+        )
+        .await
+        .expect("legacy creator resync");
+        assert_eq!((by_creator.matched_count, by_creator.changed_count), (1, 1));
+        let audit = resync_audit(&db, &creator).await;
+        assert_eq!(audit["authority"], "creator");
+        assert_eq!(audit["catalog_service_id"], "legacy");
+        assert_eq!(audit["changed_count"], 1);
+        let synced = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id": "legacy-instance"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(synced.identity_propagation_mode, "jwt");
+
+        let error = resync_service_identity(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path("ssh".into()),
+        )
+        .await
+        .expect_err("SSH services have no identity forwarding");
+        assert!(matches!(error, AppError::BadRequest(_)), "{error:?}");
+
+        let flags = [
+            ("admin", test_auth_user(&admin), "shared", true),
+            ("admin", test_auth_user(&admin), "managed", true),
+            ("admin", test_auth_user(&admin), "owned", true),
+            ("admin", test_auth_user(&admin), "ssh", false),
+            ("creator", test_auth_user(&creator), "legacy", true),
+            ("creator", test_auth_user(&creator), "shared", false),
+            ("creator", test_auth_user(&creator), "owned", false),
+            ("creator", test_auth_user(&creator), "ssh", false),
+            ("manager", test_auth_user(&manager), "shared", false),
+            ("manager", test_auth_user(&manager), "managed", false),
+            ("stranger", test_auth_user(&stranger), "legacy", false),
+            ("admin key", api_key_auth_user(&admin), "shared", false),
+            ("creator key", api_key_auth_user(&creator), "legacy", false),
+        ];
+        for (role, auth, service_id, expected) in flags {
+            assert_eq!(
+                resync_flag(&state, auth, service_id).await,
+                Some(expected),
+                "{role} on {service_id}"
+            );
+        }
+    }
+
+    /// The owning Tools Manager may edit their Tool, but not its identity
+    /// fields, so only an Admin may resync it.
+    #[tokio::test]
+    async fn resync_identity_tools_manager_cannot_resync_own_tool() {
+        let db = connect_test_database("h_services_resync_tool")
+            .await
+            .expect("MongoDB required");
+        let state = test_app_state(db.clone());
+        let admin = seed_user(&db, true).await;
+        let manager = seed_operator(&db, false).await;
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! {"slug": crate::models::role::TOOLS_MANAGER_ROLE_SLUG})
+            .await
+            .unwrap()
+            .expect("tools manager role is seeded");
+        role_service::assign_role_to_user(&db, &manager, &role.id)
+            .await
+            .expect("assign tools manager");
+        // A shape the owning Tools Manager is eligible to edit.
+        insert_resync_catalog(&db, "tool", &manager, |row| {
+            row.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+            row.tools_manager_created = true;
+            row.service_category = "internal".to_string();
+            row.identity_propagation_mode = "none".to_string();
+            row.forward_access_token = false;
+        })
+        .await;
+        let tool = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": "tool"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::super::catalog_authority::require_tool_writer(
+                &state,
+                &test_auth_user(&manager),
+                Some(&tool),
+            )
+            .await
+            .expect("owning Tools Manager may write the Tool"),
+            super::super::catalog_authority::CatalogAuthority::ToolsManager
+        );
+
+        let error = resync_service_identity(
+            State(state.clone()),
+            test_auth_user(&manager),
+            Path("tool".into()),
+        )
+        .await
+        .expect_err("Tools Managers cannot change identity");
+        assert!(error.is_forbidden(), "{error:?}");
+        assert_eq!(
+            resync_flag(&state, test_auth_user(&manager), "tool").await,
+            Some(false)
+        );
+        assert_eq!(
+            resync_flag(&state, test_auth_user(&admin), "tool").await,
+            Some(true)
+        );
+        let Json(response) =
+            resync_service_identity(State(state), test_auth_user(&admin), Path("tool".into()))
+                .await
+                .expect("admin resyncs a Tool");
+        assert_eq!((response.matched_count, response.changed_count), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn resync_identity_rewrites_only_rows_that_differ() {
+        let db = connect_test_database("h_services_resync_drift")
+            .await
+            .expect("MongoDB required");
+        let state = test_app_state(db.clone());
+        let admin = seed_user(&db, true).await;
+        insert_resync_catalog(&db, "drift", &admin, |_| {}).await;
+        let catalog = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": "drift"})
+            .await
+            .unwrap()
+            .unwrap();
+        let effective =
+            crate::services::catalog_identity_service::effective_identity_config(&catalog);
+        let earlier = chrono::Utc::now() - chrono::Duration::days(3);
+        let mut synced = test_user_service("synced", "owner-a", "a", "a", Some("drift"), None);
+        synced.identity_propagation_mode = effective.identity_propagation_mode.clone();
+        synced.identity_include_user_id = effective.identity_include_user_id;
+        synced.identity_include_email = effective.identity_include_email;
+        synced.identity_include_name = effective.identity_include_name;
+        synced.identity_jwt_audience = effective.identity_jwt_audience.clone();
+        synced.forward_access_token = effective.forward_access_token;
+        synced.inject_delegation_token = effective.inject_delegation_token;
+        synced.delegation_token_scope = effective.delegation_token_scope.clone();
+        synced.updated_at = earlier;
+        let mut customized = synced.clone();
+        customized.id = "customized".to_string();
+        customized.user_id = "owner-b".to_string();
+        customized.slug = "b".to_string();
+        customized.forward_access_token = false;
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([&synced, &customized])
+            .await
+            .unwrap();
+
+        let resync = || async {
+            resync_service_identity(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path("drift".into()),
+            )
+            .await
+            .expect("admin resync")
+            .0
+        };
+        let first = resync().await;
+        assert_eq!((first.matched_count, first.changed_count), (2, 1));
+        assert_eq!(first.affected_count, first.changed_count);
+        let row = |id: &'static str| {
+            let db = db.clone();
+            async move {
+                db.collection::<UserService>(USER_SERVICES)
+                    .find_one(doc! {"_id": id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            row("synced").await.updated_at.timestamp_millis(),
+            earlier.timestamp_millis()
+        );
+        let rewritten = row("customized").await;
+        assert!(rewritten.forward_access_token);
+        assert!(rewritten.updated_at > earlier);
+
+        let second = resync().await;
+        assert_eq!((second.matched_count, second.changed_count), (2, 0));
+        assert_eq!(second.affected_count, 0);
+        assert_eq!(
+            row("customized").await.updated_at.timestamp_millis(),
+            rewritten.updated_at.timestamp_millis()
+        );
     }
 
     #[tokio::test]
@@ -5799,6 +6312,7 @@ mod tests {
         );
         body.auth_method = Some("bearer".into());
         body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             ..Default::default()
         });
@@ -7342,7 +7856,11 @@ async fn validate_service_icon_url(state: &AppState, value: &str) -> AppResult<(
     if value.is_empty() {
         return Ok(());
     }
-    let id = crate::services::catalog_icon_service::asset_id(&state.config.base_url, value)?;
+    let id = crate::services::catalog_icon_service::asset_id_with_aliases(
+        &state.config.base_url,
+        &state.config.domain_aliases.base_urls,
+        value,
+    )?;
     crate::services::catalog_icon_service::require_asset(&state.db, id, None).await
 }
 

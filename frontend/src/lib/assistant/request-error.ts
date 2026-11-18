@@ -1,7 +1,14 @@
 /** Safe, short copy for failures without an actionable application message. */
-export function assistantRequestErrorMessage(status: number, message?: string): string {
+export function assistantRequestErrorMessage(
+  status: number,
+  message?: string,
+  errorKey?: string,
+): string {
   if (status === 0) {
     return "Connection interrupted. Check your connection and the chat before trying again; your message may have arrived.";
+  }
+  if (errorKey === "security_readiness_unavailable") {
+    return "This setting is unavailable until an administrator completes the security rollout. Your current permissions were not changed.";
   }
   if (status === 502 || status === 503) return "NyxBot is temporarily unavailable. Try again shortly.";
   if (status === 504 || status === 408) return "NyxBot took too long to respond. Check the chat before trying again.";

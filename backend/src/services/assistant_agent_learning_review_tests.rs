@@ -846,6 +846,16 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        voice_parent_conversation_id: None,
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -869,6 +879,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         with_nyxbot: false,
     };
     let agent = crate::models::assistant_agent::AssistantAgent {
+        channel_checking_notice: false,
         id: "agent".into(),
         user_id: "owner".into(),
         kind: crate::models::assistant_agent::AgentKind::Nyxbot,
@@ -877,6 +888,8 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         specialty: None,
         grants: Default::default(),
         guest_access: Default::default(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
         operation_scopes: Default::default(),
         skills: Vec::new(),
         skills_revision: 0,
@@ -887,11 +900,14 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         saved_login_ids: Vec::new(),
         created_by: "user".into(),
         model: "default".into(),
+        owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
         persona: None,
+        voice_instructions: None,
         destroyed_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -970,6 +986,7 @@ async fn org_review_fixture(
             description: "Learning worker".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -1576,6 +1593,10 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
+                automation_work: None,
+                execution_task: None,
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -1830,6 +1851,11 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            activity_execution: None,
+            automation_work: None,
+            execution_task: None,
+            connect_own: None,
+            activity_id: None,
             invocation_id: None,
             link: None,
             requester_agent_id: None,
@@ -2211,6 +2237,11 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            activity_execution: None,
+            automation_work: None,
+            execution_task: None,
+            connect_own: None,
+            activity_id: None,
             invocation_id: None,
             link: None,
             requester_agent_id: None,

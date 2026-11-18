@@ -520,6 +520,7 @@ describe("OAuthConsentPage", () => {
     expect(hiddenInput("consent_request")?.value).toBe(
       "signed-consent-request-token",
     );
+    expect(hiddenInput("browser_form")?.value).toBe("true");
     expect(hiddenInput("nonce")?.value).toBe("nonce-456");
     expect(hiddenInput("allow_all_services")?.value).toBe("false");
     expect(hiddenInput("allowed_service_ids")).toBeNull();

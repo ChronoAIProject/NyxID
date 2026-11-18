@@ -798,9 +798,9 @@ pub fn prefill_rotate(p: &RotatePrefill) -> Value {
 }
 
 /// Map a `WizardPrefill` (ai-key flow, local-server shape) onto the
-/// JSON payload the frontend pair page expects. Mirrors the
-/// `prefill_query` encoding the local server uses for its URL
-/// query-string, so the frontend can consume both shapes identically.
+/// JSON payload used by both the hosted pair page and local bootstrap.
+/// Keep all browser-consumed AI-key fields here so local and remote wizard
+/// transports preserve the same intent.
 pub fn prefill_ai_key(p: &WizardPrefill) -> Value {
     let mut obj = serde_json::Map::new();
     if let Some(v) = &p.slug {

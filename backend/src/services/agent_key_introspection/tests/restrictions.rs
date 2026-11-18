@@ -269,6 +269,7 @@ async fn private_auto_connection_rechecks_consent_expiry_and_client_status() {
         client_id: f.client.id.clone(),
         scopes: "openid".into(),
         revision: None,
+        write_version: None,
         issuance_fence: None,
         allow_all_services: false,
         allowed_service_ids: None,

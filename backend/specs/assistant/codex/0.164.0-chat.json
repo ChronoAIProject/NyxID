@@ -1,0 +1,210 @@
+{
+  "model": "gpt-5.6-sol",
+  "stream": true,
+  "input": [
+    {
+      "type": "message",
+      "id": "msg_8d84821c-6853-59ce-993a-62548b14385e",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Synthetic fixture instructions"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "msg_01a1874d-6720-7fa3-b1ec-8d0abab31027",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Synthetic visitor conversation"
+        },
+        {
+          "type": "input_text",
+          "text": "Synthetic runtime context (host paths and skill descriptions removed)."
+        },
+        {
+          "type": "input_text",
+          "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "msg_01a1874d-6720-7fa3-b1ec-8d1ded539ffe",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Synthetic runtime context (host paths and skill descriptions removed)."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "id": "msg_01a1874d-6725-77e2-a61d-c4405a46c6af",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Hello, synthetic fixture."
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "nyx__search_tools",
+      "description": "Search connected tools by keyword and inspect schemas and chat_access. granted: call freely; acknowledgement_required: call now so NyxID shows its Allow card; full_access_required: requires the chat Mode Full access. Search for Ornn skill search/retrieval tools when a task needs skills.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "nyx__call_tool",
+      "description": "Invoke a discovered tool using its exact schema. Call even when chat_access is acknowledgement_required: NyxID shows an Allow/Deny card. On that result, ask the user to decide the card, end the turn, and retry on the next user turn after approval. The same flow applies to nyxid__* account tools; action retries include acknowledgement_id. For full_access_required, relay NyxID's instructions about chat Mode Full access.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "arguments_json": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name",
+          "arguments_json"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "nyx__discover_services",
+      "description": "Discover catalog services the user can connect to.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "connection",
+              "internal"
+            ]
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "nyx__list_connected_services",
+      "description": "Find connected personal, organization and platform services.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "nyx__connect_service",
+      "description": "Create a hosted connection link. Give the link to the user; never ask for raw credentials.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "service_id": {
+            "type": "string"
+          },
+          "use_platform_key": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "service_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "function",
+      "name": "nyx__wait_for_connection",
+      "description": "Wait for the hosted service connection to complete.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "connect_link_id": {
+            "type": "string"
+          },
+          "timeout_secs": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connect_link_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "web_search",
+      "external_web_access": true
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {
+    "effort": "high"
+  },
+  "store": false,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "01a1874d-66e2-7452-8e1b-a021a82291ea",
+  "client_metadata": {
+    "x-codex-turn-metadata": "{\"installation_id\":\"31a0bddf-e5b0-4cbb-b141-1609f11bd9a2\",\"session_id\":\"01a1874d-66e2-7452-8e1b-a021a82291ea\",\"thread_id\":\"01a1874d-66e2-7452-8e1b-a021a82291ea\",\"agent_name\":\"/root\",\"turn_id\":\"01a1874d-6714-7f20-be68-332f92359f60\",\"window_id\":\"01a1874d-66e2-7452-8e1b-a021a82291ea:0\",\"window_number\":0,\"context_window_id\":\"01a1874d-66e8-7932-8c8e-add9953caf2a\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a1874d-6714-7f20-be68-332f92359f60\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":true,\"turn_started_at_unix_ms\":1793271359255,\"analytics_enabled\":true,\"model\":\"gpt-5.6-sol\",\"reasoning_effort\":\"high\"}",
+    "session_id": "01a1874d-66e2-7452-8e1b-a021a82291ea",
+    "x-codex-installation-id": "31a0bddf-e5b0-4cbb-b141-1609f11bd9a2",
+    "thread_id": "01a1874d-66e2-7452-8e1b-a021a82291ea",
+    "x-codex-window-id": "01a1874d-66e2-7452-8e1b-a021a82291ea:0",
+    "turn_id": "01a1874d-6714-7f20-be68-332f92359f60",
+    "root_turn_id": "01a1874d-6714-7f20-be68-332f92359f60"
+  }
+}

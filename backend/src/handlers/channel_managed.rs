@@ -153,7 +153,7 @@ pub async fn complete(
     {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let progress = channel_managed::ManagedProgress(Some(sender.clone()));
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let event = match complete_inner(&state, &auth, &platform, body, &progress).await {
                 Ok((_, Json(result))) => serde_json::json!({ "result": result }),
                 Err(error) => {

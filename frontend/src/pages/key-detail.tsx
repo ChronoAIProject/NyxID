@@ -1,3 +1,11 @@
+import { CredentialCheck } from "@/components/assistant/credential-check";
+import { credentialVerificationMeta } from "@/lib/credential-verification";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
+import { ServiceMonitoring } from "@/components/dashboard/service-monitoring";
 import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
@@ -96,7 +104,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
-import type { CatalogEntry } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   credentialStatusMeta,
   isReconnectableStatus,
@@ -123,39 +131,32 @@ function LarkPermissionSetupCard({
   readonly url: string;
   readonly scopes: readonly string[];
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-text-tertiary" />
-            <CardTitle className="text-15">Configure Permissions</CardTitle>
+            <CardTitle className="text-15">{translateUi("Configure Permissions")}</CardTitle>
           </div>
           <Button variant="primary" asChild>
-            <a href={url} target="_blank" rel="noopener noreferrer">
-              Open Permissions Page
-              <ButtonIcon variant="primary">
+            <a href={url} target="_blank" rel="noopener noreferrer">{translateUi("Open Permissions Page")}<ButtonIcon variant="primary">
                 <ExternalLink className="h-3 w-3" />
               </ButtonIcon>
             </a>
           </Button>
         </div>
-        <CardDescription>
-          Open this link to grant the scopes this service needs in the Lark /
-          Feishu developer console. The required scopes are pre-selected —
-          confirm and bulk-enable them so NyxID can call the API on your behalf.
-        </CardDescription>
+        <CardDescription>{translateUi("Open this link to grant the scopes this service needs in the Lark / Feishu developer console. The required scopes are pre-selected — confirm and bulk-enable them so NyxID can call the API on your behalf.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {scopes.length > 0 && (
           <div>
-            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-              Scopes pre-selected
-            </p>
+            <p className="type-secondary-emphasis text-text-tertiary uppercase tracking-wide">{translateUi("Scopes pre-selected")}</p>
             <ul className="mt-2 flex flex-wrap gap-2">
               {scopes.map((scope) => (
                 <li key={scope}>
-                  <Badge variant="secondary" className="text-xs">
+                  <Badge variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 </li>
@@ -192,6 +193,7 @@ function GooglePermissionsSection({
   readonly onRefresh: () => void;
   readonly refreshing: boolean;
 }) {
+  useUiTranslation();
   const granted = grantedScopes?.length ? new Set(grantedScopes) : null;
   const has = (scope: string) => granted?.has(`${GOOGLE_SCOPE_PREFIX}${scope}`) ?? false;
   const access = (scope: string) =>
@@ -240,45 +242,41 @@ function GooglePermissionsSection({
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-text-tertiary" />
-            <CardTitle className="text-15">Google permissions</CardTitle>
+            <CardTitle className="text-15">{translateUi("Google permissions")}</CardTitle>
           </div>
           <Button
             size="icon"
             variant="ghost"
-            aria-label="Refresh saved permissions"
-            title="Refresh saved permissions"
+            aria-label={translateUi("Refresh saved permissions")}
+            title={translateUi("Refresh saved permissions")}
             disabled={refreshing}
             onClick={onRefresh}
           >
             <RefreshCw className="h-4 w-4" />
           </Button>
         </div>
-        <CardDescription>
-          Last reported by Google at authorization or token refresh. Access can
-          change before the next token refresh.
-        </CardDescription>
+        <CardDescription>{translateUi("Last reported by Google at authorization or token refresh. Access can change before the next token refresh.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <dl className="divide-y divide-border/50">
           {rows.map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between gap-3 py-2 text-12">
-              <dt>{label}</dt>
+            <div key={label} className="flex items-center justify-between gap-3 py-2 text-14">
+              <dt>{translateUi(label ?? "")}</dt>
               <dd>
                 <Badge variant={value === "Not granted" ? "warning" : value === "Unknown" ? "secondary" : "success"}>
-                  {value}
+                  {translateUi(value ?? "")}
                 </Badge>
               </dd>
             </div>
           ))}
         </dl>
         {lastAuthorizedAt && (
-          <p className="text-11 text-muted-foreground">
-            Last authorized {new Date(lastAuthorizedAt).toLocaleString()}
+          <p className="text-13 text-muted-foreground">{translateUi("Last authorized ")}{new Date(lastAuthorizedAt).toLocaleString(getFormattingLocale())}
           </p>
         )}
         {granted && (
-          <details className="text-11 text-muted-foreground">
-            <summary className="cursor-pointer">Reported OAuth scopes</summary>
+          <details className="text-13 text-muted-foreground">
+            <summary className="cursor-pointer">{translateUi("Reported OAuth scopes")}</summary>
             <ul className="mt-2 space-y-1 break-all font-mono">
               {grantedScopes?.map((scope) => <li key={scope}>{scope}</li>)}
             </ul>
@@ -300,6 +298,7 @@ function EndpointSection({
   readonly nodeRouted: boolean;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [url, setUrl] = useState(endpointUrl);
   const updateEndpoint = useUpdateEndpoint();
@@ -308,7 +307,7 @@ function EndpointSection({
     if (!url.trim()) return;
     if (!isValidHttpUrl(url.trim())) {
       toast.error(
-        "Must be a full URL with a domain, e.g. https://api.example.com",
+        translateErrorMessage("Must be a full URL with a domain, e.g. https://api.example.com"),
       );
       return;
     }
@@ -316,13 +315,13 @@ function EndpointSection({
       { endpointId, url: url.trim() },
       {
         onSuccess: () => {
-          toast.success("Endpoint updated");
+          toast.success(translateUi("Endpoint updated"));
           setEditing(false);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update endpoint";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -340,9 +339,9 @@ function EndpointSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Globe className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Endpoint</CardTitle>
+          <CardTitle className="text-15">{translateUi("Endpoint")}</CardTitle>
         </div>
-        <CardDescription>Target URL for proxied requests</CardDescription>
+        <CardDescription>{translateUi("Target URL for proxied requests")}</CardDescription>
       </CardHeader>
       <CardContent>
         {editing ? (
@@ -351,7 +350,7 @@ function EndpointSection({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://api.example.com/v1"
-              className="flex-1 text-12"
+              className="flex-1 text-14"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -367,7 +366,7 @@ function EndpointSection({
           </div>
         ) : isEmpty && nodeRouted ? (
           <div className="flex items-center justify-between gap-2">
-            <Badge variant="secondary">Resolved by node agent</Badge>
+            <Badge variant="secondary">{translateUi("Resolved by node agent")}</Badge>
             {!readOnly && (
               <Button
                 size="icon"
@@ -381,7 +380,7 @@ function EndpointSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-14">
               {endpointUrl}
             </code>
             {!readOnly && (
@@ -410,6 +409,7 @@ function OpenApiSpecSection({
   readonly specUrl: string | null;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   // Seeded only when entering edit mode (handleEdit), not from specUrl
   // changes, to avoid a setState-in-effect loop that lint flags.
@@ -425,7 +425,7 @@ function OpenApiSpecSection({
     const trimmed = draft.trim();
     if (trimmed !== "" && !isValidHttpUrl(trimmed)) {
       toast.error(
-        "Must be a full URL with a domain, e.g. https://api.example.com/openapi.json",
+        translateErrorMessage("Must be a full URL with a domain, e.g. https://api.example.com/openapi.json"),
       );
       return;
     }
@@ -434,7 +434,7 @@ function OpenApiSpecSection({
       {
         onSuccess: () => {
           toast.success(
-            trimmed ? "OpenAPI spec URL saved" : "OpenAPI spec URL cleared",
+            translateUi(trimmed ? "OpenAPI spec URL saved" : "OpenAPI spec URL cleared"),
           );
           setEditing(false);
         },
@@ -443,7 +443,7 @@ function OpenApiSpecSection({
             err instanceof ApiError
               ? err.message
               : "Failed to update OpenAPI spec URL";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -458,12 +458,9 @@ function OpenApiSpecSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">OpenAPI Spec</CardTitle>
+          <CardTitle className="text-15">{translateUi("OpenAPI Spec")}</CardTitle>
         </div>
-        <CardDescription>
-          Optional — lets AI agents discover concrete API operations instead of
-          falling back to a single generic proxy tool.
-        </CardDescription>
+        <CardDescription>{translateUi("Optional — lets AI agents discover concrete API operations instead of falling back to a single generic proxy tool.")}</CardDescription>
       </CardHeader>
       <CardContent>
         {editing ? (
@@ -472,7 +469,7 @@ function OpenApiSpecSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="https://api.example.com/openapi.json"
-              className="flex-1 text-12"
+              className="flex-1 text-14"
               type="url"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
@@ -489,7 +486,7 @@ function OpenApiSpecSection({
           </div>
         ) : specUrl ? (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-14">
               {specUrl}
             </code>
             {!readOnly && (
@@ -505,7 +502,7 @@ function OpenApiSpecSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <Badge variant="secondary">Not set</Badge>
+            <Badge variant="secondary">{translateUi("Not set")}</Badge>
             {!readOnly && (
               <Button
                 size="icon"
@@ -534,6 +531,7 @@ function RecommendedSkillsSection({
   readonly skills: readonly string[];
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   // Seeded only when entering edit mode, mirroring OpenApiSpecSection.
   const [draft, setDraft] = useState("");
@@ -553,9 +551,9 @@ function RecommendedSkillsSection({
     const callbacks = {
       onSuccess: () => {
         toast.success(
-          list.length > 0
+          translateUi(list.length > 0
             ? "Recommended skills saved"
-            : "Recommended skills cleared",
+            : "Recommended skills cleared"),
         );
         setEditing(false);
       },
@@ -564,7 +562,7 @@ function RecommendedSkillsSection({
           err instanceof ApiError
             ? err.message
             : "Failed to update recommended skills";
-        toast.error(message);
+        toast.error(translateErrorMessage(message));
       },
     };
     if (serviceId) {
@@ -583,12 +581,9 @@ function RecommendedSkillsSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Recommended Skills</CardTitle>
+          <CardTitle className="text-15">{translateUi("Recommended Skills")}</CardTitle>
         </div>
-        <CardDescription>
-          Optional — skill names (Ornn or bundled) agents should load to use
-          this service, especially when no OpenAPI spec exists. Comma-separated.
-        </CardDescription>
+        <CardDescription>{translateUi("Optional — skill names (Ornn or bundled) agents should load to use this service, especially when no OpenAPI spec exists. Comma-separated.")}</CardDescription>
       </CardHeader>
       <CardContent>
         {editing ? (
@@ -596,8 +591,8 @@ function RecommendedSkillsSection({
             <Input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="nyxid-service-skill-authoring, my-service-skill"
-              className="flex-1 text-12"
+              placeholder={translateUi("nyxid-service-skill-authoring, my-service-skill")}
+              className="flex-1 text-14"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -618,7 +613,7 @@ function RecommendedSkillsSection({
                 <Badge
                   key={skill}
                   variant="secondary"
-                  className="font-mono text-11"
+                  className="font-mono text-12"
                 >
                   {skill}
                 </Badge>
@@ -637,7 +632,7 @@ function RecommendedSkillsSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <Badge variant="secondary">Not set</Badge>
+            <Badge variant="secondary">{translateUi("Not set")}</Badge>
             {!readOnly && (
               <Button
                 size="icon"
@@ -657,6 +652,7 @@ function RecommendedSkillsSection({
 
 function ApiKeySection({
   apiKeyId,
+  connection,
   credentialType,
   status,
   expiresAt,
@@ -665,6 +661,7 @@ function ApiKeySection({
   readOnly = false,
 }: {
   readonly apiKeyId: string;
+  readonly connection: KeyInfo;
   readonly credentialType: string;
   readonly status: string;
   readonly expiresAt: string | null;
@@ -672,6 +669,7 @@ function ApiKeySection({
   readonly errorMessage: string | null;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const [rotating, setRotating] = useState(false);
   const [newCredential, setNewCredential] = useState("");
   const updateApiKey = useUpdateExternalApiKey();
@@ -682,7 +680,7 @@ function ApiKeySection({
       { keyId: apiKeyId, credential: newCredential.trim() },
       {
         onSuccess: () => {
-          toast.success("Credential rotated");
+          toast.success(translateUi("Credential rotated"));
           setRotating(false);
           setNewCredential("");
         },
@@ -691,7 +689,7 @@ function ApiKeySection({
             err instanceof ApiError
               ? err.message
               : "Failed to rotate credential";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -713,7 +711,7 @@ function ApiKeySection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">API Key</CardTitle>
+            <CardTitle className="text-15">{translateUi("API Key")}</CardTitle>
           </div>
           {showRotateInHeader && (
             <Button
@@ -723,64 +721,50 @@ function ApiKeySection({
             >
               <ButtonIcon>
                 <RefreshCw className="h-3 w-3" />
-              </ButtonIcon>
-              Rotate Credentials
-            </Button>
+              </ButtonIcon>{translateUi("Rotate Credentials")}</Button>
           )}
         </div>
-        <CardDescription>Authentication credential</CardDescription>
+        <CardDescription>{translateUi("Authentication credential")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <Badge variant={credentialStatusMeta(status).variant}>
-            {credentialStatusMeta(status).label}
+          <Badge variant={credentialStatusMeta(status, connection).variant}>
+            {translateUi(credentialStatusMeta(status, connection).label)}
           </Badge>
-          <span className="text-xs text-muted-foreground">
-            Type: {credentialType}
+          <span className="text-13 text-muted-foreground">{translateUi("Type: ")}{credentialType}
           </span>
         </div>
 
+        <CredentialCheck connection={connection} canManage={!readOnly} />
         {errorMessage && (
-          <p className="text-xs text-destructive">{errorMessage}</p>
+          <p className="text-13 text-destructive">{errorMessage}</p>
         )}
 
         {expiresAt && (
-          <p className="text-xs text-muted-foreground">
-            Expires: {new Date(expiresAt).toLocaleString()}
+          <p className="text-13 text-muted-foreground">{translateUi("Expires: ")}{new Date(expiresAt).toLocaleString(getFormattingLocale())}
           </p>
         )}
 
         {lastUsedAt && (
-          <p className="text-xs text-muted-foreground">
-            Last used: {new Date(lastUsedAt).toLocaleString()}
+          <p className="text-13 text-muted-foreground">{translateUi("Last used: ")}{new Date(lastUsedAt).toLocaleString(getFormattingLocale())}
           </p>
         )}
 
         {readOnly ? (
-          <p className="text-xs text-muted-foreground">
-            This credential is shared from an org. Ask an admin of the owning
-            org to rotate or replace it.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("This credential is shared from an org. Ask an admin of the owning org to rotate or replace it.")}</p>
         ) : credentialType === "node_managed" ? (
-          <p className="text-xs text-muted-foreground">
-            This credential is managed on the node agent. Update it on the node
-            instead of storing it in NyxID.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("This credential is managed on the node agent. Update it on the node instead of storing it in NyxID.")}</p>
         ) : status === "pending_auth" ? (
-          <p className="text-xs text-muted-foreground">
-            Complete the required credential setup to activate this service.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("Complete the required credential setup to activate this service.")}</p>
         ) : credentialType === "oauth2" ? (
-          <p className="text-xs text-muted-foreground">
-            This credential is managed through the provider connection flow.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("This credential is managed through the provider connection flow.")}</p>
         ) : rotating ? (
           <div className="space-y-2">
             <Input
               type="password"
               value={newCredential}
               onChange={(e) => setNewCredential(e.target.value)}
-              placeholder="Enter new credential"
+              placeholder={translateUi("Enter new credential")}
             />
             <div className="flex justify-end gap-2">
               <Button
@@ -789,16 +773,12 @@ function ApiKeySection({
                   setRotating(false);
                   setNewCredential("");
                 }}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleRotate}
                 disabled={updateApiKey.isPending || !newCredential.trim()}
-              >
-                Save
-              </Button>
+              >{translateUi("Save")}</Button>
             </div>
           </div>
         ) : null}
@@ -809,6 +789,7 @@ function ApiKeySection({
 
 function ServiceSection({
   slug,
+  connection,
   authMethod,
   authKeyName,
   isActive,
@@ -821,6 +802,7 @@ function ServiceSection({
   readOnly = false,
 }: {
   readonly slug: string;
+  readonly connection: KeyInfo;
   readonly authMethod: string;
   readonly authKeyName: string;
   readonly isActive: boolean;
@@ -839,6 +821,7 @@ function ServiceSection({
   readonly nodeStatus?: string | null;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const updateService = useUpdateUserService();
 
   const isNodeBound = nodeId !== undefined && nodeId !== null && nodeId !== "";
@@ -905,17 +888,23 @@ function ServiceSection({
     }
   }
 
+  const verification = credentialVerificationMeta(connection);
+  if (isActive && !isNodeBound && !credentialBlocked && verification) {
+    badgeLabel = verification.label;
+    badgeVariant = verification.variant === "success" ? "success" : verification.variant === "destructive" ? "destructive" : "secondary";
+  }
+
   function toggleActive() {
     updateService.mutate(
       { serviceId, is_active: !isActive },
       {
         onSuccess: () => {
-          toast.success(isActive ? "Service disabled" : "Service enabled");
+          toast.success(translateUi(isActive ? "Service disabled" : "Service enabled"));
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update service";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -927,7 +916,7 @@ function ServiceSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Server className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">Service</CardTitle>
+            <CardTitle className="text-15">{translateUi("Service")}</CardTitle>
           </div>
           {/* Disable is reversible, so it is not a destructive action —
               `destructive` (red) is reserved for Delete, the one action here
@@ -941,9 +930,7 @@ function ServiceSection({
               >
                 <ButtonIcon>
                   <Power className="h-3 w-3" />
-                </ButtonIcon>
-                Disable
-              </Button>
+                </ButtonIcon>{translateUi("Disable")}</Button>
             ) : (
               <Button
                 variant="primary"
@@ -952,53 +939,47 @@ function ServiceSection({
               >
                 <ButtonIcon variant="primary">
                   <Power className="h-3 w-3" />
-                </ButtonIcon>
-                Enable
-              </Button>
+                </ButtonIcon>{translateUi("Enable")}</Button>
             ))}
         </div>
-        <CardDescription>Proxy routing configuration</CardDescription>
+        <CardDescription>{translateUi("Proxy routing configuration")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <code className="rounded bg-muted px-2 py-1 font-mono text-12">
+          <code className="rounded bg-muted px-2 py-1 font-mono text-14">
             /proxy/s/{slug}
           </code>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
 
         {credentialBlocked && (
-          <p className="text-xs text-muted-foreground">
-            The service record is enabled, but its credential is{" "}
+          <p className="text-13 text-muted-foreground">{translateUi("The service record is enabled, but its credential is")}{" "}
             <span className="font-medium text-foreground">
               {credentialStatus}
             </span>
-            . Real requests will fail until the credential is restored.
-          </p>
+            {translateUi(". Real requests will fail until the credential is restored. ")}</p>
         )}
 
         {credentialMissing && (
-          <p className="text-xs font-medium text-warning">
-            Reconnect or delete this service before enabling it.
-          </p>
+          <p className="type-secondary-emphasis text-warning">{translateUi("Reconnect or delete this service before enabling it.")}</p>
         )}
 
         {nodeWarning && (
-          <p className="text-xs text-destructive font-medium">{nodeWarning}</p>
+          <p className="type-secondary-emphasis text-destructive">{nodeWarning}</p>
         )}
         {nodeHint && (
-          <p className="text-xs text-muted-foreground font-medium">
+          <p className="type-secondary-emphasis text-muted-foreground">
             {nodeHint}
           </p>
         )}
 
-        <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <div className="grid gap-2 text-13 text-muted-foreground sm:grid-cols-2">
           <div>
-            <span className="font-medium text-foreground">Auth method:</span>{" "}
+            <span className="font-medium text-foreground">{translateUi("Auth method:")}</span>{" "}
             {authMethod}
           </div>
           <div>
-            <span className="font-medium text-foreground">Auth key:</span>{" "}
+            <span className="font-medium text-foreground">{translateUi("Auth key:")}</span>{" "}
             {authKeyName}
           </div>
         </div>
@@ -1016,6 +997,7 @@ function UserAgentOverrideSection({
   readonly customUserAgent?: string | null;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const updateService = useUpdateUserService();
   const [editingUa, setEditingUa] = useState(false);
   const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
@@ -1027,9 +1009,9 @@ function UserAgentOverrideSection({
         onSuccess: () => {
           setEditingUa(false);
           toast.success(
-            uaDraft.trim()
+            translateUi(uaDraft.trim()
               ? "Custom User-Agent saved"
-              : "Custom User-Agent cleared",
+              : "Custom User-Agent cleared"),
           );
         },
         onError: (err) => {
@@ -1037,7 +1019,7 @@ function UserAgentOverrideSection({
             err instanceof ApiError
               ? err.message
               : "Failed to update User-Agent";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -1048,22 +1030,20 @@ function UserAgentOverrideSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Server className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">User-Agent override</CardTitle>
+          <CardTitle className="text-15">{translateUi("User-Agent override")}</CardTitle>
         </div>
-        <CardDescription>
-          Optional outgoing User-Agent override for proxied HTTP requests.
-        </CardDescription>
+        <CardDescription>{translateUi("Optional outgoing User-Agent override for proxied HTTP requests.")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">User-Agent</Label>
+          <Label className="text-muted-foreground">User-Agent</Label>
           {editingUa ? (
             <div className="flex items-center gap-2">
               <Input
                 value={uaDraft}
                 onChange={(e) => setUaDraft(e.target.value)}
-                placeholder="Passthrough (default)"
-                className="h-8 text-xs"
+                placeholder={translateUi("Passthrough (default)")}
+                className="h-8 text-14"
                 maxLength={256}
               />
               <Button
@@ -1089,9 +1069,9 @@ function UserAgentOverrideSection({
             </div>
           ) : (
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs">
+              <span className="text-13">
                 {customUserAgent || (
-                  <Badge variant="secondary">Passthrough (default)</Badge>
+                  <Badge variant="secondary">{translateUi("Passthrough (default)")}</Badge>
                 )}
               </span>
               {!readOnly && (
@@ -1132,6 +1112,7 @@ function NodeSetupHelper({
   readonly authKeyName: string;
   readonly catalogServiceName: string | null;
 }) {
+  useUiTranslation();
   const urlFlag = endpointUrl ? ` \\\n  --url ${endpointUrl}` : "";
 
   let credentialFlags: string;
@@ -1160,13 +1141,13 @@ function NodeSetupHelper({
 
   function handleCopySetup() {
     void copyToClipboard(setupCommand).then(() => {
-      toast.success("Command copied to clipboard");
+      toast.success(translateUi("Command copied to clipboard"));
     });
   }
 
   function handleCopyManual() {
     void copyToClipboard(manualCommand).then(() => {
-      toast.success("Command copied to clipboard");
+      toast.success(translateUi("Command copied to clipboard"));
     });
   }
 
@@ -1175,19 +1156,15 @@ function NodeSetupHelper({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Node Setup</CardTitle>
+          <CardTitle className="text-15">{translateUi("Node Setup")}</CardTitle>
         </div>
-        <CardDescription>
-          Run this on your node to configure credentials
-          {catalogServiceName ? ` for ${catalogServiceName}` : ""}
+        <CardDescription>{translateUi("Run this on your node to configure credentials")}{catalogServiceName ? translateUi(" for {{value1}}", { value1: catalogServiceName }) : ""}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-11 font-medium text-muted-foreground">
-          Recommended (auto-detects requirements):
-        </p>
+        <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Recommended (auto-detects requirements):")}</p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {setupCommand}
           </pre>
           <Button
@@ -1199,9 +1176,9 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-11 font-medium text-muted-foreground">Manual:</p>
+        <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Manual:")}</p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {manualCommand}
           </pre>
           <Button
@@ -1213,10 +1190,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-11 text-muted-foreground">
-          The agent will prompt for the secret value securely. After adding, the
-          credential will be encrypted and stored locally on the node.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("The agent will prompt for the secret value securely. After adding, the credential will be encrypted and stored locally on the node.")}</p>
       </CardContent>
     </Card>
   );
@@ -1235,10 +1209,11 @@ function SshConnectionSection({
   readonly principals: readonly string[] | null;
   readonly certTtlMinutes: number | null;
 }) {
+  useUiTranslation();
   function handleCopyCa() {
     if (!caPublicKey) return;
     void copyToClipboard(caPublicKey).then(() => {
-      toast.success("CA public key copied");
+      toast.success(translateUi("CA public key copied"));
     });
   }
 
@@ -1247,40 +1222,32 @@ function SshConnectionSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">SSH Connection</CardTitle>
+          <CardTitle className="text-15">{translateUi("SSH Connection")}</CardTitle>
         </div>
-        <CardDescription>
-          SSH certificate authentication details
-        </CardDescription>
+        <CardDescription>{translateUi("SSH certificate authentication details")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 text-12 sm:grid-cols-2">
+        <div className="grid gap-4 text-14 sm:grid-cols-2">
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
-              Host
-            </span>
+            <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Host")}</span>
             <p>
               {sshHost}:{sshPort}
             </p>
           </div>
           {certTtlMinutes !== null && (
             <div>
-              <span className="text-xs font-medium text-muted-foreground">
-                Certificate TTL
-              </span>
-              <p>{certTtlMinutes} minutes</p>
+              <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Certificate TTL")}</span>
+              <p>{certTtlMinutes}{translateUi(" minutes")}</p>
             </div>
           )}
         </div>
 
         {principals && principals.length > 0 && (
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
-              Allowed Principals
-            </span>
+            <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Allowed Principals")}</span>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {principals.map((p) => (
-                <Badge key={p} variant="secondary" className="text-xs">
+                <Badge key={p} variant="secondary" className="text-12">
                   {p}
                 </Badge>
               ))}
@@ -1290,11 +1257,9 @@ function SshConnectionSection({
 
         {caPublicKey && (
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
-              CA Public Key
-            </span>
+            <span className="type-secondary-emphasis text-muted-foreground">{translateUi("CA Public Key")}</span>
             <div className="relative mt-1">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {caPublicKey}
               </pre>
               <Button
@@ -1310,25 +1275,22 @@ function SshConnectionSection({
         )}
 
         <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
-          <p className="text-xs font-medium">Target Machine Setup</p>
-          <ol className="list-decimal list-inside space-y-1 text-xs text-muted-foreground">
-            <li>
-              Add the CA public key to{" "}
+          <p className="type-secondary-emphasis">{translateUi("Target Machine Setup")}</p>
+          <ol className="list-decimal list-inside space-y-1 text-13 text-muted-foreground">
+            <li>{translateUi("Add the CA public key to")}{" "}
               <code className="rounded bg-background px-1">
                 /etc/ssh/trusted-user-ca-keys.pem
               </code>
             </li>
-            <li>
-              Add{" "}
+            <li>{translateUi("Add")}{" "}
               <code className="rounded bg-background px-1">
                 TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem
-              </code>{" "}
-              to{" "}
+              </code>{" "}{translateUi("to")}{" "}
               <code className="rounded bg-background px-1">
                 /etc/ssh/sshd_config
               </code>
             </li>
-            <li>Restart sshd</li>
+            <li>{translateUi("Restart sshd")}</li>
           </ol>
         </div>
       </CardContent>
@@ -1345,11 +1307,12 @@ function SshConnectionInstructionsCard({
   readonly serviceSlug: string;
   readonly sshConfig: SshServiceConfig;
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Connection Instructions</CardTitle>
-        <CardDescription>How to connect to this SSH service</CardDescription>
+        <CardTitle>{translateUi("Connection Instructions")}</CardTitle>
+        <CardDescription>{translateUi("How to connect to this SSH service")}</CardDescription>
       </CardHeader>
       <CardContent>
         <SshServiceInstructions
@@ -1481,6 +1444,7 @@ function ApiUsageSection({
   readonly catalogEntry: CatalogEntry | undefined;
   readonly showAgentSetup?: boolean;
 }) {
+  useUiTranslation();
   const proxyUrl = `${window.location.origin}/api/v1/proxy/s/${slug}`;
   const catalogSlug = catalogServiceSlug ?? catalogEntry?.slug ?? slug;
   const slugText = serviceText([slug, catalogSlug]);
@@ -1552,13 +1516,13 @@ function ApiUsageSection({
 
   function handleCopyUrl() {
     void copyToClipboard(proxyUrl).then(() => {
-      toast.success("Proxy URL copied");
+      toast.success(translateUi("Proxy URL copied"));
     });
   }
 
   function handleCopyExample(example: string) {
     void copyToClipboard(example).then(() => {
-      toast.success("Example copied");
+      toast.success(translateUi("Example copied"));
     });
   }
 
@@ -1568,7 +1532,7 @@ function ApiUsageSection({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-center gap-2">
             <Code className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">API Usage</CardTitle>
+            <CardTitle className="text-15">{translateUi("API Usage")}</CardTitle>
           </div>
           {showAgentSetup && (
             <Button variant="outline" asChild>
@@ -1582,23 +1546,17 @@ function ApiUsageSection({
               >
                 <ButtonIcon>
                   <Link2 className="h-3 w-3" />
-                </ButtonIcon>
-                Set Up Agent
-              </Link>
+                </ButtonIcon>{translateUi("Set Up Agent")}</Link>
             </Button>
           )}
         </div>
-        <CardDescription>
-          How to connect to this service through NyxID proxy
-        </CardDescription>
+        <CardDescription>{translateUi("How to connect to this service through NyxID proxy")}</CardDescription>
       </CardHeader>
       <CardContent className="min-w-0 space-y-4">
         <div>
-          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
-            Base URL
-          </p>
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">{translateUi("Base URL")}</p>
           <div className="relative">
-            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-12">
+            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
               {proxyUrl}
             </pre>
             <Button
@@ -1610,9 +1568,7 @@ function ApiUsageSection({
               <Copy className="h-3.5 w-3.5" />
             </Button>
           </div>
-          <p className="mt-1.5 text-11 text-muted-foreground">
-            Append the downstream API path after this URL
-            {examplePath ? (
+          <p className="mt-1.5 text-13 text-muted-foreground">{translateUi("Append the downstream API path after this URL")}{examplePath ? (
               <>
                 {" "}
                 (e.g.{" "}
@@ -1625,42 +1581,30 @@ function ApiUsageSection({
             . {authNote}
           </p>
           {showGenericEndpointExample && (
-            <p className="mt-1.5 text-11 text-muted-foreground">
-              Run{" "}
+            <p className="mt-1.5 text-13 text-muted-foreground">{translateUi("Run")}{" "}
               <code className="rounded bg-background px-1">
                 nyxid catalog endpoints {catalogSlug}
-              </code>{" "}
-              to discover available endpoints for this service.
-            </p>
+              </code>{" "}{translateUi("to discover available endpoints for this service.")}</p>
           )}
         </div>
 
         <div>
-          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
-            Authentication
-          </p>
-          <div className="space-y-2 text-xs text-muted-foreground">
-            <p>Authenticate with NyxID using one of these methods:</p>
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">{translateUi("Authentication")}</p>
+          <div className="space-y-2 text-13 text-muted-foreground">
+            <p>{translateUi("Authenticate with NyxID using one of these methods:")}</p>
             <ul className="list-disc list-inside space-y-1 pl-1">
               <li>
-                <span className="font-medium text-foreground">API Key:</span>{" "}
+                <span className="font-medium text-foreground">{translateUi("API Key:")}</span>{" "}
                 <code className="rounded bg-background px-1">
                   X-API-Key: {apiKeyHeaderValue}
-                </code>{" "}
-                header (create one in the{" "}
+                </code>{" "}{translateUi("header (create one in the")}{" "}
                 <Link
                   to="/keys"
                   search={{ tab: "nyxid" }}
                   className="font-medium text-primary-text underline-offset-4 hover:underline"
-                >
-                  Agent Keys
-                </Link>{" "}
-                tab on AI Services)
-              </li>
+                >{translateUi("Agent Keys")}</Link>{" "}{translateUi("tab on AI Services)")}</li>
               <li>
-                <span className="font-medium text-foreground">
-                  Bearer Token:
-                </span>{" "}
+                <span className="font-medium text-foreground">{translateUi("Bearer Token:")}</span>{" "}
                 <code className="rounded bg-background px-1">
                   Authorization: Bearer &lt;access_token&gt;
                 </code>
@@ -1672,18 +1616,13 @@ function ApiUsageSection({
 
         {apiKeyExample && (
           <div>
-            <p className="mb-1.5 text-11 font-medium text-muted-foreground">
-              Example (with API key)
-            </p>
+            <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">{translateUi("Example (with API key)")}</p>
             {modelExample.needsProviderModelNote && requestBody && (
-              <p className="mb-1.5 text-11 text-muted-foreground">
-                Replace{" "}
-                <code className="rounded bg-background px-1">gpt-4o</code> with
-                your provider&apos;s model.
-              </p>
+              <p className="mb-1.5 text-13 text-muted-foreground">{translateUi("Replace")}{" "}
+                <code className="rounded bg-background px-1">gpt-4o</code>{translateUi(" with your provider's model.")}</p>
             )}
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {apiKeyExample}
               </pre>
               <Button
@@ -1700,17 +1639,11 @@ function ApiUsageSection({
 
         {bearerTokenExample && (
           <details className="rounded-lg border border-border bg-muted/20 p-3">
-            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
-              Advanced: Bearer token example
-            </summary>
+            <summary className="cursor-pointer type-secondary-emphasis text-muted-foreground">{translateUi("Advanced: Bearer token example")}</summary>
             <div className="mt-3 space-y-2">
-              <p className="text-11 text-muted-foreground">
-                Bearer auth is intended for self-hosted deployments or
-                environments where you already have a NyxID access token. For
-                most users, prefer the API Key example above.
-              </p>
+              <p className="text-13 text-muted-foreground">{translateUi("Bearer auth is intended for self-hosted deployments or environments where you already have a NyxID access token. For most users, prefer the API Key example above.")}</p>
               <div className="relative">
-                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                   {bearerTokenExample}
                 </pre>
                 <Button
@@ -1743,6 +1676,7 @@ function DeleteKeyDialog({
   readonly providerName: string;
   readonly revokesGrant: boolean;
 }) {
+  useUiTranslation();
   const navigate = useNavigate();
   const deleteKey = useDeleteKey();
   const [cascadeDetails, setCascadeDetails] =
@@ -1761,9 +1695,9 @@ function DeleteKeyDialog({
     deleteKey.mutate(input, {
       onSuccess: (response) => {
         toast.success(
-          response?.upstream_revocation_scheduled === true
+          translateUi(response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
-            : "Removed from NyxID. Upstream revocation is not confirmed.",
+            : "Removed from NyxID. Upstream revocation is not confirmed."),
           { action: { label: "View history", onClick: () => { void navigate({ to: "/keys/$keyId", params: { keyId } }); } }, duration: 15000 },
         );
         close();
@@ -1780,7 +1714,7 @@ function DeleteKeyDialog({
         }
         const message =
           err instanceof ApiError ? err.message : "Failed to delete key";
-        toast.error(message);
+        toast.error(translateErrorMessage(message));
       },
     });
   }
@@ -1807,24 +1741,20 @@ function DeleteKeyDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete service</DialogTitle>
+          <DialogTitle>{translateUi("Delete service")}</DialogTitle>
           <DialogDescription>
             {revokesGrant
               ? grantRevocationDescription(providerName)
-              : "This permanently deletes the service and its stored credential. Proxied requests using it will stop working, and this cannot be undone. To stop it temporarily instead, use Disable."}
+              : translateUi("This permanently deletes the service and its stored credential. Proxied requests using it will stop working, and this cannot be undone. To stop it temporarily instead, use Disable.")}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{translateUi("Cancel")}</Button>
           <Button
             variant="destructive"
             onClick={() => handleDelete(keyId)}
             disabled={deleteKey.isPending}
-          >
-            Delete
-          </Button>
+          >{translateUi("Delete")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1840,6 +1770,7 @@ function LabelEditor({
   readonly currentLabel: string;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(currentLabel);
   const updateKey = useUpdateKey();
@@ -1848,7 +1779,7 @@ function LabelEditor({
   if (readOnly) {
     return (
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1867,13 +1798,13 @@ function LabelEditor({
       { keyId, label: trimmed },
       {
         onSuccess: () => {
-          toast.success("Label updated");
+          toast.success(translateUi("Label updated"));
           setEditing(false);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update label";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -1890,7 +1821,7 @@ function LabelEditor({
         <Input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="text-2xl font-normal tracking-tight md:text-4xl"
+          className="type-body tracking-tight md:type-body"
           autoFocus
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSave();
@@ -1915,7 +1846,7 @@ function LabelEditor({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1947,6 +1878,7 @@ function IconEditor({
   readonly catalogIconUrl?: string | null;
   readonly readOnly: boolean;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(iconUrl ?? "");
   const updateKey = useUpdateKey();
@@ -1969,13 +1901,13 @@ function IconEditor({
       {
         onSuccess: () => {
           toast.success(
-            trimmed ? "Service icon updated" : "Default icon restored",
+            translateUi(trimmed ? "Service icon updated" : "Default icon restored"),
           );
           setOpen(false);
         },
         onError: (error) => {
           toast.error(
-            error instanceof ApiError ? error.message : "Failed to update icon",
+            translateErrorMessage(error instanceof ApiError ? error.message : "Failed to update icon"),
           );
         },
       },
@@ -1991,8 +1923,8 @@ function IconEditor({
             size="icon"
             variant="ghost"
             className="h-6 w-6"
-            title="Change service icon"
-            aria-label="Change service icon"
+            title={translateUi("Change service icon")}
+            aria-label={translateUi("Change service icon")}
             onClick={() => handleOpenChange(true)}
           >
             <Pencil className="h-3 w-3" />
@@ -2002,8 +1934,8 @@ function IconEditor({
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Service icon</DialogTitle>
-            <DialogDescription>Use an image URL for this service.</DialogDescription>
+            <DialogTitle>{translateUi("Service icon")}</DialogTitle>
+            <DialogDescription>{translateUi("Use an image URL for this service.")}</DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-3 py-2">
             <ServiceIcon
@@ -2012,7 +1944,7 @@ function IconEditor({
               size="lg"
             />
             <div className="min-w-0 flex-1 space-y-2">
-              <Label htmlFor="service-icon-url">Image URL</Label>
+              <Label htmlFor="service-icon-url">{translateUi("Image URL")}</Label>
               <Input
                 id="service-icon-url"
                 type="url"
@@ -2023,25 +1955,19 @@ function IconEditor({
                 aria-invalid={!valid}
               />
               {!valid && (
-                <p className="text-xs text-destructive">
-                  Enter an HTTP(S) image URL without credentials or a fragment.
-                </p>
+                <p className="text-13 text-destructive">{translateUi("Enter an HTTP(S) image URL without credentials or a fragment.")}</p>
               )}
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDraft("")} disabled={!draft}>
-              Use default
-            </Button>
+            <Button variant="outline" onClick={() => setDraft("")} disabled={!draft}>{translateUi("Use default")}</Button>
             <Button
               variant="primary"
               onClick={handleSave}
               disabled={
                 !valid || trimmed === (iconUrl ?? "") || updateKey.isPending
               }
-            >
-              Save
-            </Button>
+            >{translateUi("Save")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -2058,6 +1984,7 @@ function AccessPolicySection({
   readonly adminOnly: boolean;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   const updateService = useUpdateUserService();
 
   function updateAccess(next: boolean) {
@@ -2066,7 +1993,7 @@ function AccessPolicySection({
       {
         onSuccess: () => {
           toast.success(
-            next ? "Service restricted to org admins" : "Member access enabled",
+            translateUi(next ? "Service restricted to org admins" : "Member access enabled"),
           );
         },
         onError: (err) => {
@@ -2074,7 +2001,7 @@ function AccessPolicySection({
             err instanceof ApiError
               ? err.message
               : "Failed to update access policy";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -2085,22 +2012,15 @@ function AccessPolicySection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Access policy</CardTitle>
+          <CardTitle className="text-15">{translateUi("Access policy")}</CardTitle>
         </div>
-        <CardDescription>
-          Org-owned services can require an admin role for proxy execution.
-        </CardDescription>
+        <CardDescription>{translateUi("Org-owned services can require an admin role for proxy execution.")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="flex items-center justify-between gap-4 rounded-lg border border-border/50 px-3 py-2">
           <div className="min-w-0">
-            <Label htmlFor="admin-only-policy" className="text-xs font-medium">
-              Admin-only execution
-            </Label>
-            <p className="text-11 text-muted-foreground">
-              When enabled, regular organization members cannot proxy this
-              service. Organization admins retain access.
-            </p>
+            <Label htmlFor="admin-only-policy">{translateUi("Admin-only execution")}</Label>
+            <p className="text-13 text-muted-foreground">{translateUi("When enabled, regular organization members cannot proxy this service. Organization admins retain access.")}</p>
           </div>
           <Switch
             id="admin-only-policy"
@@ -2125,6 +2045,7 @@ function DefaultHeadersSection({
   readonly catalogHeaders: readonly DefaultRequestHeader[] | null;
   readonly readOnly?: boolean;
 }) {
+  useUiTranslation();
   // Draft only exists while editing — we seed it on Edit click and discard
   // on Save/Cancel. This keeps render pure: outside edit mode we render
   // `userHeaders` directly, which always reflects server truth.
@@ -2172,15 +2093,15 @@ function DefaultHeadersSection({
       },
       {
         onSuccess: () => {
-          toast.success("Default headers updated");
+          toast.success(translateUi("Default headers updated"));
           setEditing(false);
           setSaveError(null);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update headers";
-          setSaveError(message);
-          toast.error(message);
+          setSaveError(translateErrorMessage(message));
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -2191,21 +2112,14 @@ function DefaultHeadersSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Default request headers</CardTitle>
+          <CardTitle className="text-15">{translateUi("Default request headers")}</CardTitle>
         </div>
-        <CardDescription>
-          Headers NyxID injects on every proxied request for this service.
-          Non-overridable entries replace caller-supplied values; overridable
-          ones yield to them. Values stored in plaintext in v1 — do not place
-          real secrets here (use the key&apos;s auth method instead).
-        </CardDescription>
+        <CardDescription>{translateUi("Headers NyxID injects on every proxied request for this service. Non-overridable entries replace caller-supplied values; overridable ones yield to them. Values stored in plaintext in v1 — do not place real secrets here (use the key's auth method instead).")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {catalogHeaders && catalogHeaders.length > 0 && (
           <div className="space-y-2">
-            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-              From catalog (admin-configured)
-            </p>
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("From catalog (admin-configured)")}</p>
             <DefaultHeadersEditor
               value={catalogHeaders}
               onChange={() => {
@@ -2219,9 +2133,7 @@ function DefaultHeadersSection({
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-              Your headers
-            </p>
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Your headers")}</p>
             {!readOnly && !editing && (
               <Button
                 size="icon"
@@ -2246,23 +2158,19 @@ function DefaultHeadersSection({
                 errors={rowErrors}
               />
               {saveError && (
-                <p className="text-xs text-destructive">{saveError}</p>
+                <p className="text-13 text-destructive">{translateUi(saveError)}</p>
               )}
               <div className="flex justify-end items-center gap-2">
                 <Button
                   variant="outline"
                   onClick={handleCancel}
                   disabled={updateService.isPending}
-                >
-                  Cancel
-                </Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   onClick={handleSave}
                   disabled={updateService.isPending}
-                >
-                  Save
-                </Button>
+                >{translateUi("Save")}</Button>
               </div>
             </div>
           ) : (
@@ -2287,6 +2195,7 @@ function WsFrameInjectionsSection({
   readonly serviceId: string;
   readonly rules: readonly WsFrameInjection[];
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<WsFrameInjection[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -2332,7 +2241,7 @@ function WsFrameInjectionsSection({
       },
       {
         onSuccess: () => {
-          toast.success("WebSocket auth frames updated");
+          toast.success(translateUi("WebSocket auth frames updated"));
           setEditing(false);
           setSaveError(null);
         },
@@ -2341,8 +2250,8 @@ function WsFrameInjectionsSection({
             err instanceof ApiError
               ? err.message
               : "Failed to update WebSocket auth frames";
-          setSaveError(message);
-          toast.error(message);
+          setSaveError(translateErrorMessage(message));
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -2352,12 +2261,8 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-13 font-semibold text-foreground">
-            WebSocket auth frames
-          </h3>
-          <p className="text-11 text-muted-foreground mt-0.5">
-            User-owned frame injection rules for post-upgrade auth.
-          </p>
+          <h3 className="type-card-title text-foreground">{translateUi("WebSocket auth frames")}</h3>
+          <p className="text-13 text-muted-foreground mt-0.5">{translateUi("User-owned frame injection rules for post-upgrade auth.")}</p>
         </div>
         {!editing && (
           <Button
@@ -2388,25 +2293,19 @@ function WsFrameInjectionsSection({
               variant="outline"
               onClick={handleCancel}
               disabled={updateService.isPending}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={handleSave}
               disabled={updateService.isPending}
-            >
-              Save
-            </Button>
+            >{translateUi("Save")}</Button>
           </div>
         </div>
       ) : (
         <div className="px-5 py-4">
           <Badge variant="secondary">{rules.length}/4 rules</Badge>
           {rules.length === 0 && (
-            <p className="mt-2 text-12 text-muted-foreground">
-              No user-owned WebSocket auth-frame rules.
-            </p>
+            <p className="mt-2 text-14 text-muted-foreground">{translateUi("No user-owned WebSocket auth-frame rules.")}</p>
           )}
         </div>
       )}
@@ -2415,12 +2314,15 @@ function WsFrameInjectionsSection({
 }
 
 export function KeyDetailPage() {
+  useUiTranslation();
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const identity = useAuthStore((state) => state.user?.id);
   return <KeyDetailView key={JSON.stringify([identity, keyId])} keyId={keyId} />;
 }
 
 function KeyDetailView({ keyId }: { readonly keyId: string }) {
+  useUiTranslation();
+  const monitoringEnabled = useAuthStore((state) => userHasFeature(state.user, FEATURE_FLAG.SERVICE_MONITORING));
   const navigate = useNavigate();
   const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
@@ -2478,10 +2380,10 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
   useEffect(() => {
     if (search.provider_status === "success") {
-      toast.success("Service connected successfully");
+      toast.success(translateUi("Service connected successfully"));
       void navigate({ to: ".", search: {}, replace: true });
     } else if (search.provider_status === "error") {
-      toast.error(search.message ?? "Failed to connect service");
+      toast.error(translateErrorMessage(search.message ?? "Failed to connect service"));
       void navigate({ to: ".", search: {}, replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2505,13 +2407,13 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
     const detailsMissing = retainedHistory && error instanceof ApiError && error.status === 404;
     return (
       <div className="space-y-8">
-        <PageHeader title={detailsMissing ? "Service history" : "Service details unavailable"} />
+        <PageHeader title={detailsMissing ? translateUi("Service history") : translateUi("Service details unavailable")} />
         {retainedHistory && <ServiceHistory serviceId={keyId} />}
         {!detailsMissing && <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : "Failed to load key details."
+              : translateUi("Failed to load key details.")
           }
           onRetry={refetch}
         />}
@@ -2583,19 +2485,17 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
     <div className="space-y-8">
       {error && (
         <ErrorBanner
-          message="Unable to refresh service details. Your unsaved edits are preserved."
+          message={translateUi("Unable to refresh service details. Your unsaved edits are preserved.")}
           onRetry={refetch}
         />
       )}
       {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
-          <p>Local preview · full details from production. Account changes and execution are disabled.</p>
-          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-13">
+          <p>{translateUi("Local preview · full details from production. Account changes and execution are disabled.")}</p>
+          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">{translateUi("Back to services")}</Link>
         </div>
       )}
-      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">
-        ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
-      </Link>
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex type-row-title text-muted-foreground hover:text-foreground">{translateUi("← All ")}{keyInfo.catalog_service_name ?? keyInfo.label}{translateUi(" service details")}</Link>
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
@@ -2609,7 +2509,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2
-                  className="text-28 font-bold leading-none tracking-tight"
+                  className="type-page-title tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
                 >
                   {keyInfo.label}
@@ -2622,20 +2522,20 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 />
               )}
               <div className="flex items-center gap-2">
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   {keyInfo.catalog_service_name
-                    ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
+                    ? translateUi("{{value1}} -- /proxy/s/{{value2}}", { value1: keyInfo.catalog_service_name, value2: keyInfo.slug })
                     : `/proxy/s/${keyInfo.slug}`}
                 </p>
                 {keyInfo.auto_connected && (
                   <Badge variant="secondary">
                     {keyInfo.source_app_name
-                      ? `Connected via ${keyInfo.source_app_name}`
-                      : "Auto-connected"}
+                      ? translateUi("Connected via {{value1}}", { value1: keyInfo.source_app_name })
+                      : translateUi("Auto-connected")}
                   </Badge>
                 )}
                 {keyInfo.admin_only && (
-                  <Badge variant="secondary">Admin-only</Badge>
+                  <Badge variant="secondary">{translateUi("Admin-only")}</Badge>
                 )}
               </div>
             </div>
@@ -2658,9 +2558,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               >
                 <ButtonIcon>
                   <Terminal className="h-4 w-4" />
-                </ButtonIcon>
-                Terminal
-              </Button>
+                </ButtonIcon>{translateUi("Terminal")}</Button>
             )}
             {canReconnect && (
               <Button variant="primary" onClick={() => setReconnectOpen(true)}>
@@ -2674,17 +2572,13 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <Button variant="outline" onClick={() => setReconnectOpen(true)}>
                 <ButtonIcon>
                   <SlidersHorizontal className="h-4 w-4" />
-                </ButtonIcon>
-                Manage permissions
-              </Button>
+                </ButtonIcon>{translateUi("Manage permissions")}</Button>
             )}
             {!keyInfo.auto_connected && !readOnly && (
               <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
                 <ButtonIcon variant="destructive">
                   <Trash2 className="h-4 w-4 text-destructive" />
-                </ButtonIcon>
-                Delete
-              </Button>
+                </ButtonIcon>{translateUi("Delete")}</Button>
             )}
           </div>
         </div>
@@ -2694,14 +2588,11 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <Shield className="h-4.5 w-4.5 text-success" />
             </div>
             <div>
-              <p className="text-13 font-semibold text-foreground">
-                Shared from {source.org_name}
+              <p className="type-card-title text-foreground">{translateUi("Shared from ")}{source.org_name}
               </p>
-              <p className="text-11 text-muted-foreground">
-                You are a {source.role} of this organization and can
-                {source.allowed
-                  ? " use this credential through the proxy, but only admins can modify it."
-                  : " see this service but not use it. Ask an admin to grant you member access."}
+              <p className="text-13 text-muted-foreground">{translateUi("You are a ")}{source.role}{translateUi(" of this organization and can")}{source.allowed
+                  ? translateUi(" use this credential through the proxy, but only admins can modify it.")
+                  : translateUi(" see this service but not use it. Ask an admin to grant you member access.")}
               </p>
             </div>
           </div>
@@ -2710,12 +2601,8 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <div className="space-y-1">
-              <p className="text-13 font-semibold text-foreground">
-                Credential missing
-              </p>
-              <p className="text-12 text-warning">
-                The stored credential no longer exists. Reconnect or delete this service.
-              </p>
+              <p className="type-card-title text-foreground">{translateUi("Credential missing")}</p>
+              <p className="text-14 text-warning">{translateUi("The stored credential no longer exists. Reconnect or delete this service.")}</p>
             </div>
           </div>
         )}
@@ -2723,6 +2610,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
       {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
+      {monitoringEnabled && tab === "overview" && keyInfo.service_type === "http" && (source?.type !== "org" || source.allowed) && (
+        <ServiceMonitoring key={`${identity}:${keyInfo.id}`} serviceId={keyInfo.id} />
+      )}
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <Tabs
@@ -2731,40 +2621,32 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           className="space-y-6"
         >
           <TabsList>
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            {catalogTransferResource && <TabsTrigger value="advanced">Advanced</TabsTrigger>}
-            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+            <TabsTrigger value="overview">{translateUi("Overview")}</TabsTrigger>
+            {catalogTransferResource && <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>}
+            {keyInfo.authorship && <TabsTrigger value="history">{translateUi("History")}</TabsTrigger>}
           </TabsList>
           <TabsContent value="overview" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-15">Service Details</CardTitle>
+              <CardTitle className="text-15">{translateUi("Service Details")}</CardTitle>
               <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid gap-4 text-12 sm:grid-cols-2">
+              <div className="grid gap-4 text-14 sm:grid-cols-2">
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Endpoint
-                  </span>
-                  <p className="text-xs">Platform managed</p>
+                  <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Endpoint")}</span>
+                  <p className="text-13">{translateUi("Platform managed")}</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Proxy Path
-                  </span>
-                  <p className="text-xs">/proxy/s/{keyInfo.slug}</p>
+                  <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Proxy Path")}</span>
+                  <p className="text-13">/proxy/s/{keyInfo.slug}</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Auth Method
-                  </span>
-                  <p className="text-xs">{autoConnectedAuthLabel}</p>
+                  <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Auth Method")}</span>
+                  <p className="text-13">{autoConnectedAuthLabel}</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
-                    Routing
-                  </span>
+                  <span className="type-secondary-emphasis text-muted-foreground">{translateUi("Routing")}</span>
                   {/*
                     Issue #416: read the actual routing rather than
                     hardcoding "Direct". Auto-connected keys are
@@ -2772,17 +2654,16 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                     but the display now reflects reality if the key
                     happens to be node-routed.
                   */}
-                  <p className="text-xs">
+                  <p className="text-13">
                     {nodeName && keyInfo?.node_id ? (
                       <Link
                         to="/nodes/$nodeId"
                         params={{ nodeId: keyInfo.node_id }}
                         className="text-foreground hover:underline"
-                      >
-                        Via {nodeName}
+                      >{translateUi("Via ")}{nodeName}
                       </Link>
                     ) : (
-                      "Direct"
+                      translateUi("Direct")
                     )}
                   </p>
                 </div>
@@ -2841,9 +2722,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               mechanics. */}
           {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
-              <summary className="cursor-pointer text-sm font-medium text-foreground">
-                Advanced: inherited request headers
-              </summary>
+              <summary className="cursor-pointer type-row-title text-foreground">{translateUi("Advanced: inherited request headers")}</summary>
               <div className="mt-4">
                 <DefaultHeadersSection
                   serviceId={keyInfo.id}
@@ -2865,9 +2744,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
       ) : (
         <Tabs value={tab} onValueChange={setTab} className="space-y-6">
           <TabsList className="w-full max-w-full">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="advanced">Advanced</TabsTrigger>
-            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+            <TabsTrigger value="overview">{translateUi("Overview")}</TabsTrigger>
+            <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>
+            {keyInfo.authorship && <TabsTrigger value="history">{translateUi("History")}</TabsTrigger>}
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
@@ -2880,6 +2759,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               />
               {keyInfo.api_key_id && (
                 <ApiKeySection
+                  connection={keyInfo}
                   apiKeyId={keyInfo.api_key_id}
                   credentialType={keyInfo.credential_type}
                   status={keyInfo.status}
@@ -2890,6 +2770,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 />
               )}
               <ServiceSection
+                connection={keyInfo}
                 slug={keyInfo.slug}
                 authMethod={keyInfo.auth_method}
                 authKeyName={keyInfo.auth_key_name}

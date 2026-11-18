@@ -346,3 +346,236 @@ it("uses dialog copy for an in-place handoff", async () => {
   expect(await screen.findByText(/You can close this dialog/)).toBeVisible();
   expect(screen.queryByText(/You can close this page/)).toBeNull();
 });
+
+const recoverable: TelegramNewRequest = {
+  ...request, status: "waiting_bot", can_open_creation_form: true, expires_at: "2099-10-27T02:00:00Z",
+  prompt_delivery: {
+    attempt_id: "43cd44db-fc22-4f8d-aa8c-c835f8f568b2", phase: "keyboard", outcome: "rejected",
+    attempted_at: "2026-10-27T01:00:00Z", completed_at: "2026-10-27T01:00:01Z",
+    failure: "http_rejected", reason: "bad_request", http_status: 400, error_code: 400, retry_after: null,
+  },
+};
+const creationUrl = "https://t.me/newbot/NyxSetupBot/support_bot?name=Support";
+
+it.each([
+  ["rejected", "Telegram rejected the creation message"],
+  ["unknown", "Delivery of the Create bot message is unconfirmed"],
+  ["accepted", "Telegram accepted the Create bot message"],
+  ["sending", "Sending the creation instructions and button"],
+] as const)("explains %s delivery without claiming rendering or creation", async (outcome, text) => {
+  mockGet.mockResolvedValue(configuration({ ...recoverable, prompt_delivery: { ...recoverable.prompt_delivery!, outcome } }));
+  setup();
+  expect(await screen.findByText(new RegExp(text))).toHaveAttribute("role", "status");
+  expect(screen.getByRole("button", { name: "Open creation form" })).toBeEnabled();
+  expect(screen.queryByText(/Waiting for you to create your bot/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Your bot has not been created/)).not.toBeInTheDocument();
+  if (outcome === "accepted") expect(screen.getByText(/does not confirm the button appeared/)).toBeInTheDocument();
+});
+
+it("opens recovery for the exact saved request and keeps a popup fallback", async () => {
+  vi.spyOn(window, "open").mockReturnValue(null);
+  mockGet.mockResolvedValue(configuration(recoverable));
+  mockPost.mockResolvedValue({ request: recoverable, creation_url: creationUrl });
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toHaveAttribute("href", creationUrl);
+  expect(mockPost).toHaveBeenCalledExactlyOnceWith(`/channel-bots/telegram-new/requests/${request.id}/creation-link`);
+  expect(view.onStarted).not.toHaveBeenCalled();
+  mockGet.mockResolvedValue(configuration(ready));
+  await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+  await waitFor(() => expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument());
+});
+
+it("refuses stale recovery when polling observes creation during issuance", async () => {
+  mockGet.mockResolvedValue(configuration(recoverable));
+  let settle: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(screen.getByRole("button", { name: "Open creation form" })).toBeDisabled();
+  mockGet.mockResolvedValue(configuration(ready));
+  await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+  await act(async () => settle({ request: recoverable, creation_url: creationUrl }));
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it("keeps the existing handoff usable when recovery is unavailable", async () => {
+  mockGet.mockResolvedValue(configuration(recoverable));
+  mockPost.mockRejectedValue(new Error("This setup cannot open the creation form"));
+  setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByText("This setup cannot open the creation form")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Reopen Telegram" })).toBeEnabled();
+  expect(close).toHaveBeenCalledOnce();
+  expect(replace).not.toHaveBeenCalled();
+});
+
+it.each(["unmount", "account switch"])("discards recovery after %s", async (change) => {
+  mockGet.mockResolvedValue(configuration(recoverable));
+  let settle: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  if (change === "unmount") view.unmount();
+  else {
+    mockActor.id = "actor-2";
+    view.rerender(<QueryClientProvider client={view.client}><TelegramNew label="Support" orgId={null} onConnected={view.onConnected} /></QueryClientProvider>);
+  }
+  await act(async () => settle({ request: recoverable, creation_url: creationUrl }));
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it("legacy metadata absence preserves handoff and never grants recovery", async () => {
+  mockGet.mockResolvedValue(configuration({ ...request, status: "waiting_bot" }));
+  setup();
+  expect(await screen.findByText(/Delivery details were not recorded for this setup/)).toBeInTheDocument();
+  expect(screen.queryByText(/Delivery of the Create bot message is unconfirmed/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Open creation form" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Reopen Telegram" })).toBeEnabled();
+});
+
+it("discards a successful recovery result that arrives after its deadline", async () => {
+  const expires = Date.now() + 60_000;
+  const saved = { ...recoverable, expires_at: new Date(expires).toISOString() };
+  mockGet.mockResolvedValue(configuration(saved));
+  let settle: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+  setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  vi.spyOn(Date, "now").mockReturnValue(expires + 1);
+  await act(async () => settle({ request: saved, creation_url: creationUrl }));
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+  vi.restoreAllMocks();
+});
+
+it("removes the cached recovery anchor when its deadline passes with stale polling data", async () => {
+  vi.spyOn(window, "open").mockReturnValue(null);
+  const saved = { ...recoverable, expires_at: new Date(Date.now() + 1000).toISOString() };
+  mockGet.mockResolvedValue(configuration(saved));
+  mockPost.mockResolvedValue({ request: saved, creation_url: creationUrl });
+  setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument(), { timeout: 2000 });
+  expect(screen.queryByRole("button", { name: "Open creation form" })).not.toBeInTheDocument();
+});
+
+it("shows the server setup reason and recovery actions instead of stale creation instructions", async () => {
+  mockGet.mockResolvedValue(configuration({
+    ...request,
+    status: "waiting_bot",
+    setup_notice: {
+      reason: "superseded",
+      message: "This setup link was replaced or its destination changed.",
+      status_url: "https://app.nyxid.test/channel-bots?connect=telegram-new&request_id=old",
+      new_setup_url: "https://app.nyxid.test/channel-bots?connect=telegram-new",
+      agent_url: "https://app.nyxid.test/assistant?agent=original",
+    },
+  }));
+  setup();
+  expect(await screen.findByText("This setup link was replaced or its destination changed.")).toHaveAttribute("role", "status");
+  expect(screen.getByRole("link", { name: "Check status" })).toHaveAttribute("href", expect.stringContaining("request_id=old"));
+  expect(screen.getByRole("link", { name: "Open the agent" })).toHaveAttribute("href", "https://app.nyxid.test/assistant?agent=original");
+  expect(screen.getByRole("link", { name: "Start a new setup" })).toHaveAttribute("href", "https://app.nyxid.test/channel-bots?connect=telegram-new");
+  expect(screen.queryByRole("button", { name: "Reopen Telegram" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Waiting for a verified bot creation/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Saved until/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Cancel setup" })).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("keeps saved setup recovery visible when the manager is unavailable", async () => {
+  mockGet.mockResolvedValue({
+    ...configuration({
+      ...request,
+      setup_notice: {
+        reason: "manager_changed",
+        message: "The Telegram setup manager changed. Check status in NyxID.",
+        status_url: "https://app.nyxid.test/channel-bots?connect=telegram-new&request_id=old",
+        new_setup_url: "https://app.nyxid.test/channel-bots?connect=telegram-new",
+        agent_url: null,
+      },
+    }),
+    available: false,
+    manager_username: null,
+  });
+  setup();
+  expect(await screen.findByText("The Telegram setup manager changed. Check status in NyxID.")).toHaveAttribute("role", "status");
+  expect(screen.getByRole("link", { name: "Check status" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open the agent" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/An administrator needs to configure a manager/)).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+
+const usernames = ["support_a12340_bot", "support_a12341_bot", "support_a12342_bot"];
+const suggestionResponse = (saved: TelegramNewRequest) => ({
+  request: saved,
+  creation_url: `https://t.me/newbot/NyxSetupBot/${saved.username_suggestions![0]}?name=Support`,
+  username_suggestions: saved.username_suggestions!.map((username) => ({
+    username, creation_url: `https://t.me/newbot/NyxSetupBot/${username}?name=Support`,
+  })),
+});
+
+it("opens an alternative username for the saved request with unchanged bot name", async () => {
+  const saved = { ...recoverable, username_suggestions: usernames };
+  mockGet.mockResolvedValue(configuration(saved));
+  mockPost.mockResolvedValue(suggestionResponse(saved));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: `Use ${usernames[1]}` }));
+  expect(replace).toHaveBeenCalledWith(`https://t.me/newbot/NyxSetupBot/${usernames[1]}?name=Support`);
+  expect(mockPost).toHaveBeenCalledExactlyOnceWith(`/channel-bots/telegram-new/requests/${request.id}/creation-link`);
+  expect(view.onStarted).not.toHaveBeenCalled();
+  expect(screen.getByText(/these suggestions have not been checked/)).toBeInTheDocument();
+});
+
+it("regenerates usernames in place and removes the old creation link", async () => {
+  vi.mocked(window.open).mockReturnValue(null);
+  const saved = { ...recoverable, username_suggestions: usernames };
+  const renewed = { ...saved, username_suggestions: usernames.map((name) => name.replace("a1234", "b1234")) };
+  mockGet.mockResolvedValue(configuration(saved));
+  mockPost.mockImplementation(async (path: string) => {
+    if (path.endsWith("regenerate-username")) {
+      mockGet.mockResolvedValue(configuration(renewed));
+      return renewed;
+    }
+    return suggestionResponse(saved);
+  });
+  const view = setup();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Regenerate username" }));
+  expect(await screen.findByRole("button", { name: `Use ${renewed.username_suggestions[1]}` })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  expect(mockPost).toHaveBeenCalledWith(`/channel-bots/telegram-new/requests/${request.id}/regenerate-username`);
+  expect(view.onStarted).not.toHaveBeenCalled();
+  expect(view.onCancelled).not.toHaveBeenCalled();
+  expect(screen.getByText("Support", { selector: "strong" })).toBeInTheDocument();
+});
+
+it("discards an alternative form response after another client regenerates suggestions", async () => {
+  const saved = { ...recoverable, username_suggestions: usernames };
+  mockGet.mockResolvedValue(configuration(saved));
+  let settle: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: `Use ${usernames[1]}` }));
+  mockGet.mockResolvedValue(configuration({ ...saved, username_suggestions: usernames.map((name) => name.replace("a1234", "b1234")) }));
+  await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+  await act(async () => settle(suggestionResponse(saved)));
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+
+it("keeps the primary form usable when an older replica omits username alternatives", async () => {
+  mockGet.mockResolvedValue(configuration({ ...recoverable, username_suggestions: usernames }));
+  mockPost.mockResolvedValue({ request: recoverable, creation_url: creationUrl });
+  setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(replace).toHaveBeenCalledWith(creationUrl);
+});

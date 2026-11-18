@@ -94,6 +94,6 @@ describe("ChatActorControls state fence", () => {
     rerender(
       <ChatActorControls projection={committed} disabled={false} {...callbacks} />,
     );
-    expect(screen.getByText("Approved and sent")).toBeVisible();
+    expect(screen.getByText("Approved")).toBeVisible();
   });
 });

@@ -383,6 +383,9 @@ pub async fn enrollment_epoch(
     agent: &AssistantAgent,
     snapshot: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Option<i64>> {
+    if snapshot.is_some_and(|a| a.shared().is_some()) {
+        return Ok(None);
+    }
     let pilot = feature_flag_service::flag_enabled_people(db, FLAG_KEY).await?;
     if pilot
         .as_ref()
@@ -488,6 +491,7 @@ async fn candidate_threads(
         "learning_epoch": config.learning_epoch,
         "automation_thread": false,
         "channel": bson::Bson::Null,
+        "collaboration": bson::Bson::Null,
         "group_id": bson::Bson::Null,
         "guest_turn": false,
         "active_turn": bson::Bson::Null,
@@ -587,18 +591,25 @@ fn sensitive_text(input: &str) -> String {
     text
 }
 
-fn redact(input: &str) -> String {
+pub(crate) struct RedactedExcerpt {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub(crate) fn redacted_excerpt(input: &str) -> RedactedExcerpt {
     // Detect before truncation so a PEM block or multiline field cannot be split
     // into a fragment that escapes the detector. Tool bodies never enter here.
     let text = sensitive_text(input);
-    crate::telemetry::scrub::scrub_string(&text)
-        .lines()
-        .take(80)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .chars()
-        .take(MAX_EXCERPT_CHARS)
-        .collect()
+    let scrubbed = crate::telemetry::scrub::scrub_string(&text);
+    let lines = scrubbed.lines().take(80).collect::<Vec<_>>().join("\n");
+    RedactedExcerpt {
+        truncated: scrubbed.lines().count() > 80 || lines.chars().count() > MAX_EXCERPT_CHARS,
+        text: lines.chars().take(MAX_EXCERPT_CHARS).collect(),
+    }
+}
+
+fn redact(input: &str) -> String {
+    redacted_excerpt(input).text
 }
 
 fn build_input(
@@ -1059,7 +1070,8 @@ async fn evidence_is_current(
             "learning_epoch": run.learning_epoch,
             "automation_thread": false,
             "channel": bson::Bson::Null,
-            "group_id": bson::Bson::Null,
+            "collaboration": bson::Bson::Null,
+        "group_id": bson::Bson::Null,
             "guest_turn": false,
             "active_turn": bson::Bson::Null,
         })
@@ -1366,7 +1378,7 @@ pub async fn run_now(state: &AppState, actor: &str, agent_id: &str) -> AppResult
     };
     let id = run.id.clone();
     let worker_state = state.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) = process_with_state(&worker_state, run).await {
             tracing::warn!(
                 error_code = error.error_code(),
@@ -1387,6 +1399,9 @@ async fn tick(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for config in configs {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         if !flag_on(
             &state.db,
             &config
@@ -1447,11 +1462,13 @@ async fn tick(state: &AppState) -> AppResult<()> {
 }
 
 pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = tick(&state).await {
                 tracing::warn!(
                     error_code = error.error_code(),
@@ -1475,6 +1492,24 @@ mod tests {
         assert!(!value.contains("secret@example.com"));
         assert!(value.len() <= MAX_EXCERPT_CHARS);
         assert!(!redact("password: one\npassword: two").contains("two"));
+    }
+
+    #[test]
+    fn excerpt_truncation_tracks_redacted_output() {
+        let shortened = redacted_excerpt(&format!("password: {}", "x".repeat(3_000)));
+        assert_eq!(shortened.text, "[SECRET_REDACTED]");
+        assert!(!shortened.truncated);
+
+        let expanded = redacted_excerpt(&"sk-a ".repeat(200));
+        assert_eq!(expanded.text.chars().count(), MAX_EXCERPT_CHARS);
+        assert!(expanded.truncated);
+        assert!(!expanded.text.contains("sk-a"));
+
+        assert!(redacted_excerpt(&"short line\n".repeat(81)).truncated);
+        assert!(!redacted_excerpt(&"short line\n".repeat(80)).truncated);
+        let unicode = redacted_excerpt(&"\u{754c}".repeat(MAX_EXCERPT_CHARS + 1));
+        assert_eq!(unicode.text.chars().count(), MAX_EXCERPT_CHARS);
+        assert!(unicode.truncated);
     }
 
     #[test]
@@ -1524,6 +1559,7 @@ mod tests {
         commands.lock().unwrap().clear();
         let now = Utc::now();
         let agent = AssistantAgent {
+            channel_checking_notice: false,
             id: Uuid::new_v4().to_string(),
             user_id: "learning-test-owner".into(),
             kind: AgentKind::Specialist,
@@ -1532,6 +1568,8 @@ mod tests {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_operation_scopes: Default::default(),
+            guest_operation_scope_revisions: Default::default(),
             operation_scopes: Default::default(),
             skills: Vec::new(),
             skills_revision: 0,
@@ -1542,11 +1580,14 @@ mod tests {
             saved_login_ids: Vec::new(),
             created_by: "learning-test-owner".into(),
             model: "test".into(),
+            owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             destroyed_at: None,
             created_at: now,
             updated_at: now,
@@ -1656,6 +1697,7 @@ mod tests {
                 description: "Learn reusable procedures".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

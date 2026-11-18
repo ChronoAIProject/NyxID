@@ -29,6 +29,7 @@ const state = vi.hoisted(() => ({
   close: vi.fn(),
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({ children, to }: { children: ReactNode; to: string }) => (
     <a href={to}>{children}</a>
   ),
@@ -137,7 +138,7 @@ afterEach(() => {
 const show = () => render(<RemoteMachineCreate onCreated={state.created} />);
 const accept = () =>
   userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    screen.getByRole("switch", { name: /I accept the shared environment/ }),
   );
 
 it("requires policy acceptance and sends only explicit free-slot creation with durable intent", async () => {
@@ -154,8 +155,10 @@ it("requires policy acceptance and sends only explicit free-slot creation with d
   ).toBeInTheDocument();
   expect(screen.queryByText(/2 GiB temporary storage/)).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", { name: "Create free remote machine" }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   expect(
     screen.getByText(/Account wallet available: 12 Credits/),
   ).toBeInTheDocument();
@@ -236,8 +239,10 @@ it("blocks a fresh request on expiry and never silently switches an occupied slo
   show();
   await accept();
   expect(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", { name: "Create free remote machine" }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   expect(
     screen.getByRole("button", { name: "Refresh preflight" }),
   ).toBeInTheDocument();
@@ -259,8 +264,10 @@ it("does not treat stale eligibility or funds as a successful live preflight", a
   show();
   await accept();
   expect(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", { name: "Create free remote machine" }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   expect(
     screen.getByText(/Account wallet available: Unavailable/),
   ).toBeInTheDocument();
@@ -299,8 +306,10 @@ it("blocks new admission and explains platform blockers without claiming physica
   show();
   await accept();
   expect(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", { name: "Create free remote machine" }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   expect(screen.getAllByText(/storage class missing/i).length).toBeGreaterThan(
     0,
   );
@@ -385,11 +394,15 @@ it("preserves configuration through free and paid quote review and replays a pai
   expect(screen.getByLabelText("Machine name")).toHaveValue("paid-research");
   expect(screen.getByRole("checkbox", { name: /^Browser/ })).toBeChecked();
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   state.paid = false;
   await userEvent.click(
     screen.getByRole("button", { name: "Review free slot" }),
@@ -400,7 +413,7 @@ it("preserves configuration through free and paid quote review and replays a pai
     screen.getByRole("button", { name: "Review paid creation" }),
   );
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Accept quote and create" }),
@@ -421,7 +434,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   expect(screen.getByLabelText("Machine name")).toHaveValue("paid-research");
   expect(screen.getByLabelText("Machine name")).toBeDisabled();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Retry saved create request" }),
@@ -436,8 +449,10 @@ it("requires a valid name and at least one enabled capability", async () => {
   await userEvent.click(screen.getByRole("checkbox", { name: /^Commands/ }));
   await userEvent.click(screen.getByRole("checkbox", { name: /^Files/ }));
   expect(
-    screen.getByRole("button", { name: "Create free remote machine" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", { name: "Create free remote machine" }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   await userEvent.click(screen.getByRole("checkbox", { name: /^Commands/ }));
   await userEvent.clear(screen.getByLabelText("Machine name"));
   await userEvent.type(screen.getByLabelText("Machine name"), "Invalid name");
@@ -476,7 +491,7 @@ it("keeps selected configuration when a rejected intent is explicitly reset for 
   expect(screen.getByLabelText("Machine name")).toHaveValue("preserved-name");
   expect(screen.getByRole("checkbox", { name: /^Browser/ })).toBeChecked();
   expect(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    screen.getByRole("switch", { name: /I accept the shared environment/ }),
   ).not.toBeChecked();
   await accept();
   await userEvent.click(

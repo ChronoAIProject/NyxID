@@ -20,11 +20,21 @@ const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 #[derive(Clone, Debug, Default)]
 pub struct MeteredProxyContext {
     pub route: Option<BillingRouteContext>,
+    // Actual admitted funding, not merely a configured billable route.
+    pub(crate) funded: bool,
 }
 
 impl MeteredProxyContext {
+    pub(crate) fn with_funding(mut self, funded: bool) -> Self {
+        self.funded = funded;
+        self
+    }
+
     pub fn disabled() -> Self {
-        Self { route: None }
+        Self {
+            route: None,
+            funded: false,
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -34,29 +44,32 @@ impl MeteredProxyContext {
     pub(crate) fn from_route(route: &BillingRouteContext) -> Self {
         Self {
             route: Some(route.clone()),
+            funded: false,
         }
     }
-}
-
-pub(crate) async fn has_complete_meter(
-    db: &mongodb::Database,
-    ctx: &BillingRouteContext,
-) -> AppResult<bool> {
-    complete_meter(db, ctx, false).await
 }
 
 pub(crate) async fn has_complete_funded_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
-    complete_meter(db, ctx, true).await
+    complete_meter(db, ctx, true)
+        .await
+        .map(|value| value.is_some())
+}
+
+pub(crate) async fn complete_meter_funding(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<Option<bool>> {
+    complete_meter(db, ctx, false).await
 }
 
 async fn complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     require_funding: bool,
-) -> AppResult<bool> {
+) -> AppResult<Option<bool>> {
     let mut transaction_ids = Vec::with_capacity(2);
     if ctx.platform_metered() {
         for (_, code) in ctx.platform_specs() {
@@ -71,7 +84,7 @@ async fn complete_meter(
         ));
     }
     if transaction_ids.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let rows: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -80,10 +93,11 @@ async fn complete_meter(
         .try_collect()
         .await?;
     if rows.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if rows.iter().any(|row| {
-        row.billing_owner_id != ctx.billing_owner_id
+        row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
+            || row.billing_owner_id != ctx.billing_owner_id
             || row.actor_user_id != ctx.actor_user_id
             || row.api_key_id != ctx.api_key_id
             || row.service_id.as_deref()
@@ -184,6 +198,12 @@ async fn complete_meter(
             ));
         }
     }
+    for row in &rows {
+        let expected = ctx.model_tariff.as_ref().map(|t| t.tariff().id.as_str());
+        if row.model_tariff.as_ref().map(|t| t.tariff_id.as_str()) != expected {
+            return Err(AppError::Conflict("Billing model tariff changed".into()));
+        }
+    }
     if require_funding && rows.iter().any(|row| row.funding.is_none()) {
         return Err(AppError::Conflict(
             "Incomplete funding record; retry with a fresh billing request id".into(),
@@ -199,7 +219,7 @@ async fn complete_meter(
         })
         .count();
     if rows.len() == transaction_ids.len() && active_count == transaction_ids.len() {
-        return Ok(true);
+        return Ok(Some(rows.iter().any(|row| row.wallet_id.is_some())));
     }
     Err(AppError::Conflict(
         "billing request id belongs to released or incomplete usage; retry with a fresh billing request id"
@@ -214,6 +234,15 @@ pub async fn open(
 ) -> AppResult<MeteredProxyContext> {
     if !ctx.is_metered() {
         return Ok(MeteredProxyContext::disabled());
+    }
+
+    if reservation.is_none()
+        && let Some(tariff) = &ctx.model_tariff
+    {
+        if tariff.paid() {
+            return Err(super::model_tariffs::unavailable("funding_required"));
+        }
+        return Box::pin(open_free_model(db, ctx)).await;
     }
 
     let mut inserted_row_ids = Vec::with_capacity(2);
@@ -291,6 +320,48 @@ pub async fn open(
         return Err(error);
     }
 
+    Ok(MeteredProxyContext::from_route(ctx).with_funding(reservation.is_some()))
+}
+
+// Free tariffs still need a live binding fence and atomic component rows.
+// They use the ordinary meter representation without wallet/benefit funding.
+async fn open_free_model(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<MeteredProxyContext> {
+    if complete_meter(db, ctx, false).await?.is_some() {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    let rows: Vec<_> = ctx
+        .platform_specs()
+        .map(|(metric, code)| {
+            reserved_row(ctx, BillingLayer::Platform, metric, code.into(), None, None)
+        })
+        .collect();
+    let context = (db.clone(), ctx.clone(), rows);
+    let result = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, ctx, rows)| {
+            Box::pin(async move {
+                let tariff = ctx
+                    .model_tariff
+                    .as_ref()
+                    .ok_or_else(|| super::model_tariffs::unavailable("missing_tariff"))?;
+                super::model_tariffs::fence_admission(db, session, tariff).await?;
+                db.collection::<UsageMeterRow>(USAGE_METER)
+                    .insert_many(rows)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    if result.is_err() && complete_meter(db, ctx, false).await?.is_some() {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    result?;
     Ok(MeteredProxyContext::from_route(ctx))
 }
 
@@ -301,20 +372,16 @@ pub async fn mark_forwarded(
     let Some(ctx) = &metered.route else {
         return Ok(());
     };
-
+    let mut set = doc! {"status":"forwarded","forwarded":true,"updated_at":"$$NOW"};
+    if let Some(generation) = crate::services::security_readiness_service::local_generation() {
+        set.insert("forwarded_owner",doc! {
+            "generation_id":{"$literal":generation},"ingress":ctx.ingress.as_str(),"marked_at":"$$NOW",
+        });
+    }
     db.collection::<UsageMeterRow>(USAGE_METER)
         .update_many(
-            doc! {
-                "billing_request_id": &ctx.billing_request_id,
-                "status": "reserved",
-            },
-            doc! {
-                "$set": {
-                    "status": "forwarded",
-                    "forwarded": true,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
+            doc! {"billing_request_id":&ctx.billing_request_id,"status":"reserved"},
+            vec![doc! {"$set":set}],
         )
         .await?;
     Ok(())
@@ -342,16 +409,42 @@ pub(super) async fn persist_settlement_intent(
         return Ok(Vec::new());
     };
 
-    if ctx.platform_metered() && !ctx.platform_components.is_empty() {
-        let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-        collection.update_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None), "status": "forwarded", "pending_platform_usage": Bson::Null },
-            doc! { "$set": {
-                "pending_platform_usage": bson::to_bson(&platform).map_err(|e| AppError::Internal(e.to_string()))?,
-                "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some()).map(|r| r.quantity.max(0)),
-                "model": &model,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            } }).await?;
-        if let Some(coordinator) = collection.find_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None) }).await? {
+    if let Some(selected) = &ctx.model_tariff {
+        let vector = platform
+            .model_charges
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_usage_evidence"))?;
+        if selected.usage(&vector.native_usage)?.model_charges.as_ref() != Some(vector) {
+            return Err(super::model_tariffs::unavailable(
+                "invalid_normalized_usage",
+            ));
+        }
+        if vector.tariff_id != selected.tariff().id
+            || vector.public_model != selected.tariff().public_model
+            || vector.quantities.len() != selected.tariff().components.len()
+            || selected.tariff().components.iter().any(|c| {
+                vector
+                    .quantities
+                    .get(&c.lago_metric_code)
+                    .is_none_or(|n| *n < 0 || *n > c.max_quantity)
+            })
+            || platform.reported_model.is_some()
+        {
+            return Err(super::model_tariffs::unavailable("invalid_usage_evidence"));
+        }
+    } else if platform.model_charges.is_some() {
+        return Err(super::model_tariffs::unavailable("unexpected_model_usage"));
+    }
+    let model = ctx
+        .model_tariff
+        .as_ref()
+        .map(|s| s.tariff().public_model.clone())
+        .or(model);
+    if ctx.platform_metered() && (!ctx.platform_components.is_empty() || ctx.model_tariff.is_some())
+    {
+        if let Some(coordinator) =
+            save_component_intent(db, ctx, &platform, resale, model.as_deref()).await?
+        {
             return materialize_component_intent(db, &coordinator).await;
         }
         return Ok(Vec::new());
@@ -439,6 +532,68 @@ pub(super) async fn persist_settlement_intent(
     Ok(finalized_rows)
 }
 
+/// Persist the validated evidence and complete recovery intent together, before
+/// touching component rows. A crash after this write needs no caller retry.
+pub(super) async fn save_component_intent(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    platform: &PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<&str>,
+) -> AppResult<Option<UsageMeterRow>> {
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity = transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None);
+    let mut filter = doc! {
+        "transaction_id": &identity,
+        "status": "forwarded",
+        "pending_platform_usage": Bson::Null,
+    };
+    let mut fields = doc! {
+        "pending_platform_usage": bson::to_bson(platform)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some())
+            .map(|r| r.quantity.max(0)),
+        "model": model,
+        "updated_at": bson::DateTime::now(),
+    };
+    let digest = if let Some(vector) = &platform.model_charges {
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
+        filter.insert(
+            "model_tariff.evidence_digest",
+            doc! {"$in": [Bson::Null, Bson::String(digest.clone())]},
+        );
+        fields.insert("model_tariff.evidence_digest", &digest);
+        fields.insert(
+            "model_tariff.evidence",
+            bson::to_bson(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+        Some(digest)
+    } else {
+        None
+    };
+    collection.update_one(filter, doc! {"$set": fields}).await?;
+    let saved = collection
+        .find_one(doc! {"transaction_id": &identity})
+        .await?;
+    if let Some(digest) = digest {
+        let saved = saved
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_meter"))?;
+        if saved
+            .model_tariff
+            .as_ref()
+            .and_then(|t| t.evidence_digest.as_deref())
+            != Some(digest.as_str())
+        {
+            return Err(AppError::Conflict("Model usage evidence changed".into()));
+        }
+    }
+    Ok(saved)
+}
+
 pub(super) async fn materialize_component_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
@@ -463,11 +618,35 @@ async fn materialize_component_rows(
 ) -> AppResult<Vec<UsageMeterRow>> {
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let mut materialized = Vec::new();
+    if let Some(vector) = &usage.model_charges {
+        if rows.len() != vector.quantities.len()
+            || rows.iter().any(|row| {
+                row.model_tariff.as_ref().is_none_or(|t| {
+                    t.tariff_id != vector.tariff_id
+                        || t.public_model != vector.public_model
+                        || vector
+                            .quantities
+                            .get(&row.lago_metric_code)
+                            .is_none_or(|n| *n < 0 || *n > t.max_quantity)
+                })
+            })
+        {
+            return Err(super::model_tariffs::unavailable(
+                "durable_usage_identity_mismatch",
+            ));
+        }
+    } else if rows.iter().any(|row| row.model_tariff.is_some()) {
+        return Err(super::model_tariffs::unavailable("missing_durable_usage"));
+    }
     for row in rows {
         if let Some(finalized) = finalize_matching(
             db,
             doc! { "_id": &row.id, "status": "forwarded" },
-            platform_quantity(row.metric, usage),
+            usage
+                .model_charges
+                .as_ref()
+                .map(|v| v.quantities[&row.lago_metric_code])
+                .unwrap_or_else(|| platform_quantity(row.metric, usage)),
             coordinator.model.clone(),
             // Classes describe the request, not each independently priced row.
             (row.transaction_id
@@ -523,6 +702,27 @@ pub(super) async fn settle_voice_window(
     seconds: i64,
     initial_window: bool,
 ) -> AppResult<()> {
+    settle_voice_checkpoint(
+        db,
+        request_id,
+        PlatformUsage {
+            voice_seconds: seconds,
+            requests: i64::from(initial_window && seconds > 0),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+/// A durable voice checkpoint supplies observed units; the existing meter owns
+/// pricing, funding, finalization and idempotent settlement for every component.
+pub(crate) async fn settle_voice_checkpoint(
+    db: &mongodb::Database,
+    request_id: &str,
+    usage: PlatformUsage,
+    model: Option<String>,
+) -> AppResult<()> {
     reservation::release_unforwarded_rows(
         db,
         request_id,
@@ -536,23 +736,15 @@ pub(super) async fn settle_voice_window(
         .await?
         .try_collect()
         .await?;
-    let usage = PlatformUsage {
-        voice_seconds: seconds,
-        ..Default::default()
-    };
     let mut finalized = Vec::new();
     for row in rows {
         if let Some(saved) = finalize_matching(
             db,
             doc! {"_id":&row.id,"status":"forwarded"},
-            if row.metric == BillingMetric::Requests {
-                i64::from(initial_window && seconds > 0)
-            } else {
-                platform_quantity(row.metric, &usage)
-            },
-            None,
-            None,
-            None,
+            platform_quantity(row.metric, &usage),
+            model.clone(),
+            Some(&usage),
+            usage.reported_model.as_deref(),
             None,
             Utc::now(),
         )
@@ -572,39 +764,57 @@ pub(super) async fn settle_voice_window(
 }
 
 pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> AppResult<u64> {
-    let components: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    use super::recovery_batch::{self, Failures};
+    let mut failures = Failures::default();
+    let components: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! { "pending_platform_usage": { "$type": "object" } })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
-    for coordinator in components {
-        let rows = materialize_component_intent(db, &coordinator).await?;
-        settle_persisted(db, rows).await?;
+    for raw in components {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                let rows = materialize_component_intent(db, &coordinator).await?;
+                settle_persisted(db, rows).await
+            })
+            .await;
     }
-    let coordinators: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    let coordinators: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! {
             "layer": "platform",
             "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
         })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
 
     let mut recovered = 0;
-    for coordinator in coordinators {
-        if materialize_pending_resale_intent(db, &coordinator)
-            .await?
+    for raw in coordinators {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        if failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                materialize_pending_resale_intent(db, &coordinator).await
+            })
+            .await
+            .flatten()
             .is_some()
         {
             recovered += 1;
         }
     }
 
-    Ok(recovered)
+    failures.finish(recovered)
 }
 
 pub(super) async fn settle_persisted(
@@ -615,7 +825,10 @@ pub(super) async fn settle_persisted(
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
             reservation::record_settlement_failure(db, &row, Utc::now()).await?;
-            if first_error.is_none() {
+            if first_error
+                .as_ref()
+                .is_none_or(super::recovery_batch::is_wait)
+            {
                 first_error = Some(error);
             }
         }
@@ -691,6 +904,23 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            reserved_quantity: Some(item.estimated_quantity),
+            wallet_only: ctx.model_tariff.is_some()
+                && super::amounts::rate_pico(
+                    item.credits_per_unit_pico,
+                    item.credits_per_unit_micros,
+                ) == 0,
+            settlement_rate: ctx
+                .model_tariff
+                .as_ref()
+                .map(|_| {
+                    crate::models::credits::Credits::from_pico(super::amounts::rate_pico(
+                        item.credits_per_unit_pico,
+                        item.credits_per_unit_micros,
+                    ))
+                })
+                .transpose()
+                .expect("validated tariff rate"),
             tax_accounting: true,
             applied_tax: item.applied_tax.clone(),
             credits_per_unit_pico: item.credits_per_unit_pico,
@@ -712,6 +942,23 @@ pub(super) fn reserved_row(
         .then(|| ctx.operation.clone())
         .flatten();
     UsageMeterRow {
+        model_tariff: ctx.model_tariff.as_ref().and_then(|s| {
+            s.tariff()
+                .components
+                .iter()
+                .find(|c| c.lago_metric_code == lago_metric_code)
+                .map(|c| {
+                    Box::new(crate::models::platform_model_tariff::ModelMeterBinding {
+                        evidence: None,
+                        evidence_digest: None,
+                        tariff_id: s.tariff().id.clone(),
+                        public_model: s.tariff().public_model.clone(),
+                        max_quantity: c.max_quantity,
+                    })
+                })
+        }),
+        org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
+        stuck_request_exit: None,
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -733,7 +980,10 @@ pub(super) fn reserved_row(
         lago_metric_code,
         operation,
         credential_class: ctx.credential_class,
-        model: None,
+        model: ctx
+            .model_tariff
+            .as_ref()
+            .map(|s| s.tariff().public_model.clone()),
         reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
@@ -743,6 +993,8 @@ pub(super) fn reserved_row(
         quantity: None,
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        usage_checkpoint: None,
+        realtime_session: None,
         pool_attempt: ctx.pool_attempt.clone(),
         machine_usage: ctx.machine_usage.clone(),
         status: UsageStatus::Reserved,
@@ -815,6 +1067,47 @@ async fn finalize_matching(
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
+    let literal_set = finalization_fields(
+        quantity,
+        model,
+        request_usage,
+        reported_model,
+        pending_resale_quantity,
+        finalized_at,
+    );
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity: bson::Document = filter
+        .iter()
+        .filter(|(key, _)| matches!(key.as_str(), "_id" | "transaction_id"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let claimed = collection
+        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
+        .with_options(
+            mongodb::options::FindOneAndUpdateOptions::builder()
+                .return_document(mongodb::options::ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        // A recovered terminal decision wins over a paused finalizer. Read its
+        // state and stop; never publish the stale caller's quantity afterward.
+        let _winner = collection.find_one(identity).await?;
+        return Ok(None);
+    };
+
+    Ok(Some(claimed))
+}
+
+pub(super) fn finalization_fields(
+    quantity: i64,
+    model: Option<String>,
+    request_usage: Option<&PlatformUsage>,
+    reported_model: Option<&str>,
+    pending_resale_quantity: Option<i64>,
+    finalized_at: chrono::DateTime<Utc>,
+) -> bson::Document {
     let model_for_row = model.clone();
     let mut set = doc! {
         "status": "finalized",
@@ -860,21 +1153,7 @@ async fn finalize_matching(
             "$pool_attempt"
         ]},
     );
-    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-    let claimed = collection
-        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
-        .with_options(
-            mongodb::options::FindOneAndUpdateOptions::builder()
-                .return_document(mongodb::options::ReturnDocument::After)
-                .build(),
-        )
-        .await?;
-
-    let Some(claimed) = claimed else {
-        return Ok(None);
-    };
-
-    Ok(Some(claimed))
+    literal_set
 }
 
 pub(super) async fn materialize_pending_resale_intent(
@@ -988,13 +1267,21 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::OutputTokens => "platform_output_tokens",
         BillingMetric::CacheReadTokens => "platform_cache_read_tokens",
         BillingMetric::CacheWriteTokens => "platform_cache_write_tokens",
+        BillingMetric::ReasoningTokens => "platform_reasoning_tokens",
+        BillingMetric::ImageInputTokens => "platform_image_input_tokens",
+        BillingMetric::ImageOutputTokens => "platform_image_output_tokens",
+        BillingMetric::AudioInputTokens => "platform_audio_input_tokens",
+        BillingMetric::AudioOutputTokens => "platform_audio_output_tokens",
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
+        BillingMetric::SandboxCpuMillisSeconds => "cma_sandbox_cpu_millis_seconds",
+        BillingMetric::SandboxMemoryMibSeconds => "cma_sandbox_memory_mib_seconds",
+        BillingMetric::SandboxDiskGibSeconds => "cma_sandbox_disk_gib_seconds",
     }
 }
 
-fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
+pub(super) fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
     match metric {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests => usage.requests.max(0),
@@ -1006,7 +1293,15 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
         // Machine runtime is measured by its evidence-bound interval path.
-        BillingMetric::MachineRunningSeconds => 0,
+        BillingMetric::ReasoningTokens
+        | BillingMetric::ImageInputTokens
+        | BillingMetric::ImageOutputTokens
+        | BillingMetric::AudioInputTokens
+        | BillingMetric::AudioOutputTokens
+        | BillingMetric::MachineRunningSeconds
+        | BillingMetric::SandboxCpuMillisSeconds
+        | BillingMetric::SandboxMemoryMibSeconds
+        | BillingMetric::SandboxDiskGibSeconds => 0,
     }
 }
 
@@ -2402,6 +2697,9 @@ mod tests {
         let now = Utc::now();
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),

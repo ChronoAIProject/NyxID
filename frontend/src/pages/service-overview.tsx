@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { useEffect, useId, useRef, useState } from "react";
 import { useServiceGroupOrder } from "@/hooks/use-service-group-order";
@@ -27,6 +29,7 @@ import { connectionSourceLabel } from "@/lib/service-view";
 import { useServiceRoutingPools } from "@/hooks/use-service-routing-pools";
 
 export function ServiceOverviewPage() {
+  useUiTranslation();
   const { groupId } = useParams({ strict: false }) as { groupId: string };
   const keys = useKeys();
   const catalog = useCatalog({ includeAll: true });
@@ -83,11 +86,9 @@ export function ServiceOverviewPage() {
           ? { view: "routing" }
           : {}
       }
-      className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+      className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
     >
-      <ArrowLeft className="size-3" />
-      All services
-    </Link>
+      <ArrowLeft className="size-3" />{translateUi("All services")}</Link>
   );
 
   if (keys.isLoading) return <Skeleton className="h-96 w-full" />;
@@ -96,7 +97,7 @@ export function ServiceOverviewPage() {
       <div className="space-y-4">
         {back}
         <ErrorBanner
-          message="Service information could not be loaded."
+          message={translateUi("Service information could not be loaded.")}
           onRetry={keys.refetch}
         />
       </div>
@@ -106,8 +107,8 @@ export function ServiceOverviewPage() {
       <div className="space-y-4">
         {back}
         <PageHeader
-          title="Service unavailable"
-          description="This service is no longer in your accessible connections."
+          title={translateUi("Service unavailable")}
+          description={translateUi("This service is no longer in your accessible connections.")}
         />
       </div>
     );
@@ -131,17 +132,16 @@ export function ServiceOverviewPage() {
         }
         description={
           group.description ??
-          "Connections, configuration and history for this service."
+          translateUi("Connections, configuration and history for this service.")
         }
       />
-      <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-4 text-13 text-muted-foreground">
         <span>
           {group.connections.length}{" "}
-          {group.connections.length === 1 ? "connection" : "connections"}
+          {group.connections.length === 1 ? translateUi("connection") : translateUi("connections")}
         </span>
         <span>
-          {group.connections.filter((key) => key.is_active).length} enabled
-        </span>
+          {group.connections.filter((key) => key.is_active).length}{translateUi(" enabled")}</span>
         <span>
           {[...new Set(group.connections.map(connectionSourceLabel))].join(
             " · ",
@@ -153,15 +153,13 @@ export function ServiceOverviewPage() {
               href={entry.documentation_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary-text hover:underline"
-            >
-              Service documentation
-            </a>
+              className="type-row-title text-primary-text hover:underline"
+            >{translateUi("Service documentation")}</a>
           )}
       </div>
       {catalog.error && (
         <ErrorBanner
-          message="Catalog metadata could not be loaded."
+          message={translateUi("Catalog metadata could not be loaded.")}
           onRetry={catalog.refetch}
         />
       )}
@@ -179,8 +177,8 @@ export function ServiceOverviewPage() {
         >
           <div className="flex min-h-12 flex-wrap items-center gap-4 py-2">
             <TabsList>
-              <TabsTrigger value="connections">Connections</TabsTrigger>
-              <TabsTrigger value="history">History</TabsTrigger>
+              <TabsTrigger value="connections">{translateUi("Connections")}</TabsTrigger>
+              <TabsTrigger value="history">{translateUi("History")}</TabsTrigger>
             </TabsList>
           </div>
           {tab === "connections" && (
@@ -200,13 +198,11 @@ export function ServiceOverviewPage() {
                     disabled={Boolean(agentOrder.reason)}
                     title={
                       agentOrder.reason ??
-                      "Reorder discovery within this service"
+                      translateUi("Reorder discovery within this service")
                     }
                     onClick={() => agentOrder.start(group)}
                   >
-                    <ListOrdered className="size-4" aria-hidden="true" />
-                    Reorder discovery
-                  </Button>
+                    <ListOrdered className="size-4" aria-hidden="true" />{translateUi("Reorder discovery")}</Button>
                 )
               }
             />
@@ -218,7 +214,7 @@ export function ServiceOverviewPage() {
         >
           {keys.error && (
             <ErrorBanner
-              message="Failed to refresh connections. Your edits are kept."
+              message={translateUi("Failed to refresh connections. Your edits are kept.")}
               onRetry={keys.refetch}
             />
           )}
@@ -245,7 +241,7 @@ export function ServiceOverviewPage() {
         <TabsContent value="history" className="mt-4 space-y-4">
           <Select value={historyConnection?.id} onValueChange={setHistoryId}>
             <SelectTrigger
-              aria-label="Connection history"
+              aria-label={translateUi("Connection history")}
               className="w-full sm:w-80"
             >
               <SelectValue />

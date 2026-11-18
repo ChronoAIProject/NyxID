@@ -33,7 +33,7 @@ their existing contracts and are outside this edit-form change.
 | Users, roles, groups, service accounts | Changed fields compared with the dialog's opening values. Edited role/permission arrays are compared with the latest observed record before confirmation. |
 | Service endpoints | The review and mutation use the same parsed JSON delta. Null clears optional fields; whitespace-only JSON formatting is a no-op. |
 | Credit allowances and schedules | Changed editable fields; immutable schedule recurrence is excluded. Replacement recipient/service selections have observed-conflict checks. Status changes also require review. |
-| Flag metadata | Sparse PATCH of description/owner. Omission preserves; null or trimmed blank clears. |
+| Flag metadata | Sparse PATCH of description/owner/group/tags/sunset. Omission preserves; nullable text clears; `[]` clears tags. Tag edits carry the saved tag baseline and reject unseen conflicts with 409. Sunset affects list visibility only. |
 | Feature rollout | A copied batch shows each flag, target scope/ID, and before/after override. No mutation occurs before confirmation. |
 | Anonymous public rules | Staged enabled/method/path/quota changes, sparse normalized payloads, wildcard exposure warnings, and reviewed deletion. |
 | Invite notes | Copied note and code ID are reviewed before saving. |

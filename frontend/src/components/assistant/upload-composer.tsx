@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
 import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import {
@@ -62,12 +65,16 @@ type Pending = {
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
   readonly attachmentMenuItems?: ReactNode;
+  readonly imageWarning?: string;
+  readonly onVoiceSettings?: () => void;
+  readonly onVoicePrepare?: () => boolean;
   readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
+  useUiTranslation();
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -147,7 +154,7 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
     for (const file of incoming) {
       if (pending.current.size >= 10) {
         setNotice(
-          "Up to 10 files fit in one message. Send the remaining files in another message.",
+          translateUi("Up to 10 files fit in one message. Send the remaining files in another message."),
         );
         break;
       }
@@ -242,6 +249,10 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
     if (props.disabled || !voiceAvailable) cancelVoicePreparation();
   }, [props.disabled, voiceAvailable]);
   async function openVoice(configureOnly = false) {
+    if (configureOnly && onVoiceSettings) {
+      onVoiceSettings();
+      return;
+    }
     if (openingVoice.current) {
       cancelVoicePreparation();
       return;
@@ -257,6 +268,8 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
       !onVoice
     )
       return;
+    if (!configureOnly && onVoicePrepare && !onVoicePrepare()) return;
+    void loadVoicePanel().catch(() => {});
     // Permission and AudioContext originate in the actual waveform activation,
     // before lazy loading, draft creation or catalog requests.
     const ticket = ++voiceGeneration.current;
@@ -326,17 +339,13 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
           {preparingVoice && (
             <div
               role="status"
-              className="flex items-center justify-between gap-2 pb-2 text-12 text-text-secondary"
-            >
-              Allow microphone access…
-              <Button
+              className="flex items-center justify-between gap-2 pb-2 text-14 text-text-secondary"
+            >{translateUi("Allow microphone access…")}<Button
                 type="button"
                 size="sm"
                 variant="ghost"
                 onClick={cancelVoicePreparation}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           )}
           {props.voiceControls}
@@ -389,65 +398,69 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
       }
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
+          {imageWarning && files.some((file) => file.kind === "image" && !file.error) && (
+            <p role="status" className="text-14 text-muted-foreground">{imageWarning}</p>
+          )}
           {files.length > 0 && (
             <div className="relative min-w-0">
               <ul
                 ref={attachmentStrip}
-                aria-label="Attachments"
+                aria-label={translateUi("Attachments")}
                 tabIndex={0}
+                data-scroll-fade=""
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
               >
                 {files.map((file) => (
                   <li
                     key={file.key}
-                    title={`${file.name} · Type @${file.handle} to refer to this file`}
-                    className={`relative h-24 shrink-0 overflow-hidden rounded-xl border bg-card text-xs ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-24" : "w-44"}`}
+                    title={translateUi("{{value1}} · Type @{{value2}} to refer to this file", { value1: file.name, value2: file.handle })}
+                    className={`relative flex min-h-[8em] max-w-[75vw] shrink-0 flex-col overflow-hidden rounded-xl border bg-card text-14 ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-[8em]" : "w-[14em]"}`}
                   >
                     {file.preview ? (
                       <button
                         type="button"
-                        className="h-full w-full bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                        aria-label={`Preview ${file.name}`}
+                        className="w-full flex-1 bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        aria-label={translateUi("Preview {{value1}}", { value1: file.name })}
                         onClick={() => setPreview(file)}
                       >
                         <img
                           src={file.preview}
                           alt={file.name}
-                          className="h-full w-full object-cover"
+                          className="aspect-square max-h-[8em] w-full object-cover"
                         />
                       </button>
                     ) : (
-                      <div className="flex h-full flex-col justify-between p-3">
+                      <div className="flex flex-1 flex-col justify-between gap-2 p-3 pr-[calc(1.125em+1em*var(--display-density,1)+var(--spacing)*2)]">
                         {file.kind === "pasted-text" ? (
-                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">
+                          <p className="line-clamp-2 text-12 text-muted-foreground">
                             {file.text}
                           </p>
                         ) : (
                           <FileText
                             aria-hidden="true"
-                            className="h-6 w-6 text-muted-foreground"
+                            className="size-[2em] text-muted-foreground"
                             strokeWidth={1.5}
                           />
                         )}
                         <div className="min-w-0">
                           <p className="truncate font-medium">
                             {file.kind === "pasted-text"
-                              ? "Pasted text"
+                              ? translateUi("Pasted text")
                               : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
-                            <p className="mt-0.5 text-[10px] text-muted-foreground">
+                            <p className="mt-0.5 text-12 text-muted-foreground">
                               {file.kind === "pasted-text"
-                                ? "TEXT"
+                                ? translateUi("TEXT")
                                 : file.name.includes(".")
                                   ? file.name.split(".").pop()?.toUpperCase()
-                                  : "FILE"}
+                                  : translateUi("FILE")}
                               {" · "}
                               {file.size < 1024
-                                ? `${file.size} B`
+                                ? translateUi("{{size}} B", { size: file.size })
                                 : file.size < 1024 * 1024
-                                  ? `${Math.ceil(file.size / 1024)} KB`
-                                  : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                                  ? translateUi("{{value1}} KB", { value1: Math.ceil(file.size / 1024) })
+                                  : translateUi("{{value1}} MB", { value1: (file.size / (1024 * 1024)).toFixed(1) })}
                             </p>
                           )}
                         </div>
@@ -457,7 +470,7 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
                       <p
                         role="alert"
                         title={file.error}
-                        className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive"
+                        className="line-clamp-2 bg-card/95 px-2 py-1 text-12 text-destructive"
                       >
                         {file.error}
                       </p>
@@ -467,20 +480,20 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
                         className={
                           file.item
                             ? "sr-only"
-                            : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"
+                            : "bg-card/95 px-2 py-1 text-12 text-muted-foreground"
                         }
                       >
                         {file.item
-                          ? "Ready"
+                          ? translateUi("Ready")
                           : file.progress >= 99
-                            ? "Checking file…"
-                            : `Uploading ${file.progress}%`}
+                            ? translateUi("Checking file…")
+                            : translateUi("Uploading {{value1}}%", { value1: file.progress })}
                       </p>
                     )}
-                    <button
+                    <button data-icon-button=""
                       type="button"
-                      className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                      aria-label={`Remove ${file.name}`}
+                      className="absolute right-1 top-1 flex items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      aria-label={translateUi("Remove {{value1}}", { value1: file.name })}
                       onClick={() => remove(file.key)}
                       disabled={props.sending}
                     >
@@ -502,7 +515,7 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
             </div>
           )}
           {notice && (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {notice}
             </p>
           )}
@@ -528,9 +541,7 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
               )}
               <DialogFooter>
                 <DialogClose asChild>
-                  <Button type="button" variant="secondary">
-                    Close preview
-                  </Button>
+                  <Button type="button" variant="secondary">{translateUi("Close preview")}</Button>
                 </DialogClose>
               </DialogFooter>
             </DialogContent>
@@ -548,7 +559,7 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
             multiple
             className="sr-only"
             tabIndex={-1}
-            aria-label="Choose attachments"
+            aria-label={translateUi("Choose attachments")}
             disabled={locked}
             onChange={(event) => {
               void add(Array.from(event.target.files ?? []));
@@ -559,14 +570,13 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button ref={attach} type="button" variant="ghost" size="icon"
-                  className="shrink-0 text-muted-foreground" aria-label="Add context" disabled={locked}>
+                  className="shrink-0 text-muted-foreground" aria-label={translateUi("Add context")} disabled={locked}>
                   <Plus aria-hidden className="size-4" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label="Add context">
+              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label={translateUi("Add context")}>
                 <DropdownMenuItem disabled={files.length >= 10} onSelect={() => input.current?.click()}>
-                  <Paperclip aria-hidden className="size-4" />Attach files
-                </DropdownMenuItem>
+                  <Paperclip aria-hidden className="size-4" />{translateUi("Attach files")}</DropdownMenuItem>
                 {attachmentMenuItems}
               </DropdownMenuContent>
             </DropdownMenu>
@@ -579,17 +589,14 @@ export function UploadComposer({ scope, onSend, onVoice, attachmentMenuItems, ..
                   size="icon"
                   className="shrink-0 text-muted-foreground"
                   ref={attach}
-                  aria-label="Attach files"
+                  aria-label={translateUi("Attach files")}
                   disabled={locked || files.length >= 10}
                   onClick={() => input.current?.click()}
                 >
                   <Paperclip className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent className="max-w-64">
-                PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON.
-                Up to 20 MB each, 10 files per message.
-              </TooltipContent>
+              <TooltipContent className="max-w-64">{translateUi("PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON. Up to 20 MB each, 10 files per message.")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>}
         </>

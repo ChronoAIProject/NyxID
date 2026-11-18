@@ -6,6 +6,8 @@
 //! Diagnostics are metadata only: codes, timestamps and counts. Never store
 //! message bodies, provider error prose with user content, or credentials.
 
+pub mod discord;
+
 use super::channel_platform::platform_name;
 use std::sync::{Arc, OnceLock};
 
@@ -58,8 +60,16 @@ pub mod codes {
     pub const SUBSCRIPTION_CHECK_FAILED: &str = "subscription_check_failed";
     /// An authenticated delivery arrived for a bot whose subscription is not recorded.
     pub const UNREGISTERED: &str = "unregistered";
+    /// Meta delivered a signed relay message while native WhatsApp owned intake.
+    pub const NATIVE_RELAY_CONFLICT: &str = "native_gateway_relay_conflict";
     /// Unexpected internal error.
     pub const INTERNAL: &str = "internal";
+    pub const NYXBOT_ORG_RESTORATION_PENDING: &str = "nyxbot_org_restoration_pending";
+    pub const NYXBOT_ORG_RESTORATION_WAITING_READINESS: &str =
+        "nyxbot_org_restoration_waiting_readiness";
+    pub const NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY: &str =
+        "nyxbot_org_restoration_retrying_gateway";
+    pub const NYXBOT_ORG_ACCESS_LOST: &str = "nyxbot_org_access_lost";
 }
 
 /// Stable code for an error surfaced by a channel-platform call.
@@ -67,6 +77,9 @@ pub fn failure_code(error: &AppError) -> &'static str {
     use crate::services::channel_adapters::x::{X_FORBIDDEN_ACCESS, X_FORBIDDEN_SCOPES};
     match error {
         AppError::ChannelPlatformError(message) => {
+            if message == super::telegram_formatting::REJECTED {
+                return "telegram_text_rejected";
+            }
             if message.contains(X_FORBIDDEN_SCOPES) {
                 return codes::SCOPES_MISSING;
             }
@@ -104,21 +117,31 @@ fn http_status(message: &str) -> Option<u16> {
 /// Facts the recommendation depends on. Build with [`HealthFacts::for_bot`].
 #[derive(Clone, Debug)]
 pub struct HealthFacts<'a> {
+    pub org_guest_billing: Option<&'a str>,
     pub platform: &'a str,
     pub status: &'a str,
     pub webhook_registered: bool,
     pub failure_reason: Option<&'a str>,
     pub outbound_reason: Option<&'a str>,
+    pub thread_reason: Option<&'a str>,
+    pub inbound_outcome: Option<&'a str>,
     pub subscription_registered: Option<bool>,
     pub backoff_active: bool,
     /// The bot is delivered through the Agent Event Gateway.
     pub gateway: bool,
+    pub discord_intake: Option<discord::Intake>,
 }
 
 impl<'a> HealthFacts<'a> {
     pub fn for_bot(bot: &'a ChannelBot, now: DateTime<Utc>, gateway: bool) -> Self {
         Self {
+            org_guest_billing: None,
             platform: &bot.platform,
+            inbound_outcome: bot
+                .diagnostics
+                .last_inbound_outcome
+                .as_ref()
+                .map(|o| o.code.as_str()),
             status: &bot.status,
             webhook_registered: bot.webhook_registered,
             failure_reason: bot.diagnostics.failure_reason.as_deref(),
@@ -127,6 +150,11 @@ impl<'a> HealthFacts<'a> {
                 .last_outbound_error
                 .as_ref()
                 .and_then(|error| error.reason.as_deref()),
+            thread_reason: bot
+                .diagnostics
+                .last_outbound_error
+                .as_ref()
+                .and_then(|error| error.thread_reason.as_deref()),
             subscription_registered: bot
                 .diagnostics
                 .subscription_state
@@ -134,6 +162,8 @@ impl<'a> HealthFacts<'a> {
                 .map(|state| state.registered),
             backoff_active: bot.poll_backoff_until.is_some_and(|until| until > now),
             gateway,
+            // Intake advice requires loaded flag, readiness and transport evidence.
+            discord_intake: None,
         }
     }
 
@@ -163,6 +193,63 @@ fn advice(action: &'static str, text: String) -> Recommendation {
     Recommendation { action, text }
 }
 
+pub(crate) async fn org_guest_billing(
+    db: &mongodb::Database,
+    org: &str,
+) -> AppResult<Option<&'static str>> {
+    match super::org_channel_service::budget::require_wallet(db, org).await {
+        Ok(()) => Ok(None),
+        Err(AppError::BillingNotConfigured(_)) => Ok(Some("org_wallet_not_provisioned")),
+        Err(AppError::WalletSuspended) => Ok(Some("org_wallet_suspended")),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn guest_billing_advice(reason: &str) -> Recommendation {
+    advice("enable_billing", match reason {
+        "org_wallet_suspended" => "Guest access is on, but guests cannot be served while the organization wallet is suspended.",
+        _ => "Guest access is on, but guests cannot be served until the organization's billing wallet and subscription are set up.",
+    }.into())
+}
+
+pub(crate) async fn load_org_guest_billing_many(
+    db: &mongodb::Database,
+    bindings: &[(String, String)],
+) -> AppResult<std::collections::BTreeMap<String, &'static str>> {
+    use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS};
+    let mut result = std::collections::BTreeMap::new();
+    if bindings.is_empty() {
+        return Ok(result);
+    }
+    let orgs: Vec<_> = bindings.iter().map(|(_, org)| org).collect();
+    let wallets: Vec<BillingWallet> = db
+        .collection(WALLETS)
+        .find(doc! {"owner_id":{"$in":orgs}})
+        .await?
+        .try_collect()
+        .await?;
+    for (id, org) in bindings {
+        let wallet = wallets.iter().find(|wallet| &wallet.owner_id == org);
+        let reason = match wallet {
+            None => Some("org_wallet_not_provisioned"),
+            Some(wallet)
+                if wallet
+                    .lago_subscription_id
+                    .as_deref()
+                    .is_none_or(str::is_empty) =>
+            {
+                Some("org_wallet_not_provisioned")
+            }
+            Some(wallet) if wallet.is_suspended() => Some("org_wallet_suspended"),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            result.insert(id.clone(), reason);
+        }
+    }
+    Ok(result)
+}
+
 fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recommendation> {
     let name = platform_name(facts.platform);
     let subscription_action = if is_x(facts.platform) {
@@ -171,6 +258,28 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         "verify"
     };
     Some(match code {
+        codes::NYXBOT_ORG_RESTORATION_PENDING => advice(
+            "none",
+            "NyxBot is restoring this organization connection automatically; it normally returns in under a minute. Members must verify their chat account again when it returns.".into(),
+        ),
+        codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS => advice(
+            "none",
+            "NyxBot is waiting for required safety checks to become available before restoring this organization connection. NyxID will retry automatically; no administrator rights were lost.".into(),
+        ),
+        codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY => advice(
+            "none",
+            "NyxBot is retrying the channel connection. The retry schedule can take hours; no administrator rights were lost.".into(),
+        ),
+        codes::NYXBOT_ORG_ACCESS_LOST => advice(
+            "reconnect",
+            "This organization connection lost live administrator authority. An organization admin must reconnect it after restoring access.".into(),
+        ),
+        "discord_event_webhooks_wrong_endpoint" => advice("verify", "Event Webhooks do not deliver ordinary bot chat messages. The Interactions Endpoint URL under General Information is optional and only needed for slash commands/components. Ordinary chat uses NyxBot's Discord gateway when enabled for your account; other relay bots need channel:discord-gateway. Enable Message Content Intent in Discord.".into()),
+        "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
+        "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),
+        "discord_gateway_capacity" => advice("contact_admin", "Discord ingress capacity is full on this replica. Another replica can claim this bot; add capacity if it keeps waiting.".into()),
+        "discord_gateway_sharding_required" => advice("contact_admin", "This Discord bot requires sharding, which this bounded single-session ingress does not support.".into()),
+        code if code.starts_with("discord_gateway_") => advice("verify", "Discord Gateway ingress is unavailable or reconnecting. NyxID retries automatically. Check the Gateway status, bot token, channel permissions and privileged Message Content Intent.".into()),
         codes::BILLING_SUSPENDED => advice(
             "enable_billing",
             "NyxID billing stopped this channel. Restore credits or the service's billing configuration, then select Verify.".into(),
@@ -199,6 +308,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             subscription_action,
             format!("The {name} webhook subscription is missing or incomplete. Register it again."),
         ),
+        codes::NATIVE_RELAY_CONFLICT => advice(
+            "verify",
+            "Meta delivered a relay callback while native WhatsApp gateway intake was active. NyxID kept native intake authoritative; verify the dedicated app callback and gateway status.".into(),
+        ),
         codes::RATE_LIMITED if outbound => advice(
             "wait_rate_limit",
             format!("{name} rate-limited the last reply. Later replies resume automatically."),
@@ -211,6 +324,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             "verify",
             format!("{name} is unavailable. NyxID retries automatically; select Verify once it recovers."),
         ),
+        "telegram_text_rejected" => advice(
+            "contact_admin",
+            "Telegram rejected a reply part. The reply is incomplete; later parts were not sent. Read the saved answer in NyxID and ask an administrator to inspect the delivery receipt before requesting another send.".into(),
+        ),
         codes::RECIPIENT_UNREACHABLE if outbound => advice(
             "none",
             "The last reply's recipient does not accept messages from this account.".into(),
@@ -221,17 +338,83 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
 
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
-    if facts.gateway {
-        return advice(
-            "gateway",
-            "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into(),
-        );
+    if let Some(code) = facts.failure_reason
+        && let Some(found) = for_code(code, facts, false)
+        && matches!(
+            code,
+            codes::NYXBOT_ORG_RESTORATION_PENDING
+                | codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+                | codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+                | codes::NYXBOT_ORG_ACCESS_LOST
+        )
+    {
+        return found;
+    }
+    if let Some(code) = facts
+        .failure_reason
+        .filter(|code| code.starts_with("discord_"))
+        && let Some(found) = for_code(code, facts, false)
+    {
+        return found;
+    }
+    if let Some(advice) = facts.discord_intake.as_ref().and_then(discord::advice) {
+        return advice;
+    }
+    if facts.failure_reason == Some(codes::NATIVE_RELAY_CONFLICT) {
+        return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
+    }
+    match facts.thread_reason {
+        Some("thread_target_rejected") => return advice("none",
+            "NyxID could not validate the thread or permission to reply, so this reply was not sent. There is no reply to retry here. If the next message has the same problem, report it to NyxID support.".into()),
+        Some("thread_reply_failed") => return advice("none",
+            "The last thread reply failed or its delivery could not be confirmed. Part of it may have arrived. No action is needed here; if a later reply has the same problem, report it to NyxID support.".into()),
+        Some("thread_delayed_reply_failed") => return advice("none",
+            "A delayed thread update failed or its delivery could not be confirmed. No action is needed here; if a later update has the same problem, report it to NyxID support.".into()),
+        Some("thread_reply_reference_expired") => return advice("none",
+            "A delayed thread update could not be sent because its gateway reply reference expired after 29 minutes. No owner action is needed; a new message starts a new reply window.".into()),
+        _ => {},
+    }
+    match facts.outbound_reason {
+        Some(reason @ ("gateway_reply_no_response" | "gateway_reply_no_response_pending"
+            | "gateway_reply_server_error" | "gateway_reply_server_error_pending"
+            | "gateway_reply_unreadable_response" | "gateway_reply_unreadable_response_pending"
+            | "gateway_reply_interrupted" | "gateway_reply_interrupted_pending")) => {
+            let observed = match reason {
+                "gateway_reply_no_response" | "gateway_reply_no_response_pending" => "No response came back from the gateway.",
+                "gateway_reply_server_error" | "gateway_reply_server_error_pending" => "The gateway returned a server error.",
+                "gateway_reply_unreadable_response" | "gateway_reply_unreadable_response_pending" => "The gateway response could not be read.",
+                _ => "NyxID stopped before recording the gateway response.",
+            };
+            let progress = match reason {
+                "gateway_reply_no_response_pending" | "gateway_reply_server_error_pending"
+                | "gateway_reply_unreadable_response_pending" | "gateway_reply_interrupted_pending" => "NyxBot is still trying with the same reply.",
+                _ => "Delivery could not be confirmed before checking stopped.",
+            };
+            return advice("none", format!("{observed} {progress} No action is needed unless a later reply has the same problem; if it does, report it to NyxID support."));
+        }
+        Some("gateway_reply_unconfirmed") => return advice("none", "The gateway accepted this reply, but delivery was not confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_unavailable") => return advice("none", "The gateway was temporarily unavailable. This reply has no confirmed delivery. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_rejected") => return advice("none", "The gateway refused this reply. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_unknown") => return advice("none", "Delivery of this reply could not be confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        _ => {}
+    }
+    // Preserve existing gateway advice when no org-guest billing fact was added.
+    if facts.gateway && facts.org_guest_billing.is_none() {
+        return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
+    }
+    if facts.failure_reason == Some(codes::BILLING_SUSPENDED) && is_x(facts.platform) {
+        return super::channel_inbound_diagnostics::recommendation("x_billing_refused")
+            .expect("mapped code");
     }
     if let Some(found) = facts
         .failure_reason
         .and_then(|code| for_code(code, facts, false))
     {
         return found;
+    }
+    if facts.inbound_outcome == Some("x_bot_inactive") {
+        return super::channel_inbound_diagnostics::recommendation("x_bot_inactive")
+            .expect("mapped code");
     }
     if facts.status == "failed" {
         return advice(
@@ -253,6 +436,27 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     }
     if facts.backoff_active {
         return for_code(codes::RATE_LIMITED, facts, false).expect("mapped code");
+    }
+    if let Some(found) = facts
+        .inbound_outcome
+        .and_then(super::channel_inbound_diagnostics::recommendation)
+    {
+        return found;
+    }
+    if let Some(reason) = facts.org_guest_billing {
+        return guest_billing_advice(reason);
+    }
+    if facts.gateway {
+        return advice(
+            "gateway",
+            "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into(),
+        );
+    }
+    if is_x(facts.platform) {
+        return advice(
+            "none",
+            super::channel_inbound_diagnostics::CAPABILITY.into(),
+        );
     }
     advice("none", "Healthy.".into())
 }
@@ -304,12 +508,42 @@ pub(crate) static TEST_NOTICES: std::sync::LazyLock<
 /// Best-effort failure notice to the bot owner, or to every admin of an
 /// org-owned bot. Called once per failure transition; never fails the caller.
 pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: &Recommendation) {
+    notify_bot(
+        db,
+        bot,
+        recommendation,
+        crate::services::notification_service::ChannelBotNoticeKind::Failure,
+    );
+}
+
+pub(crate) fn notify_guest_defaults(db: &mongodb::Database, bot: &ChannelBot, description: &str) {
+    notify_bot(
+        db,
+        bot,
+        &advice("review_guest_access", description.into()),
+        crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults,
+    );
+}
+
+fn notify_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    recommendation: &Recommendation,
+    kind: crate::services::notification_service::ChannelBotNoticeKind,
+) {
     let context = crate::services::notification_service::ChannelBotFailedNotificationContext {
         bot_id: bot.id.clone(),
         bot_label: bot.label.clone(),
         platform_name: platform_name(&bot.platform),
         recommended_action: recommendation.action.to_string(),
         recommended_action_text: recommendation.text.clone(),
+        notice_kind: kind.clone(),
+        notice_title: (kind
+            == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults)
+            .then(|| "Organization bot guest access".to_owned()),
+        notice_body: (kind
+            == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults)
+            .then(|| format!("{}: {}", bot.label, recommendation.text)),
     };
     #[cfg(test)]
     let recorder = TEST_NOTICES.lock().unwrap().get(&bot.id).cloned();
@@ -321,17 +555,32 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
     }
     let db = db.clone();
     let owner = bot.user_id.clone();
-    tokio::spawn(async move {
-        let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
-            .await
-        {
-            Ok(recipients) => recipients,
-            Err(error) => {
-                tracing::warn!(%error, "channel bot failure notice could not resolve org admins");
-                Vec::new()
-            }
-        };
-        if recipients.is_empty() {
+    crate::services::shutdown::process().spawn(async move {
+        let mut recipients =
+            match crate::services::org_service::list_admin_user_ids(&db, &owner).await {
+                Ok(recipients) => recipients,
+                Err(error) => {
+                    tracing::warn!(%error, "channel bot notice could not resolve org admins");
+                    Vec::new()
+                }
+            };
+        if kind == crate::services::notification_service::ChannelBotNoticeKind::GuestDefaults {
+            let active = db
+                .collection::<bson::Document>("users")
+                .find(doc! {"_id":{"$in":&recipients},"is_active":true})
+                .projection(doc! {"_id":1})
+                .await;
+            let Ok(active) = active else {
+                return;
+            };
+            let Ok(active): Result<Vec<bson::Document>, _> = active.try_collect().await else {
+                return;
+            };
+            recipients = active
+                .iter()
+                .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+                .collect();
+        } else if recipients.is_empty() {
             recipients.push(owner);
         }
         for recipient in recipients {
@@ -353,7 +602,86 @@ pub fn notify_failure(db: &mongodb::Database, bot: &ChannelBot, recommendation: 
                 )
                 .await
             {
-                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot failure notice failed");
+                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot notice failed");
+            }
+        }
+    });
+}
+
+/// One transition notice through the same channel-health notifier used for
+/// failures. The caller supplies the linking admin because an org bot's
+/// platform owner is a separate org account.
+pub fn notify_restored(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    linking_admin: &str,
+    guest_enabled: bool,
+) {
+    let guest = if guest_enabled { "on" } else { "off" };
+    let context = crate::services::notification_service::ChannelBotFailedNotificationContext {
+        bot_id: bot.id.clone(),
+        bot_label: bot.label.clone(),
+        platform_name: platform_name(&bot.platform),
+        recommended_action: "restored".into(),
+        recommended_action_text: "Members must verify their chat account again before chatting."
+            .into(),
+        notice_kind: crate::services::notification_service::ChannelBotNoticeKind::Restored,
+        notice_title: Some(format!(
+            "{} channel connected again",
+            platform_name(&bot.platform)
+        )),
+        notice_body: Some(format!(
+            "{} is connected again. Members must verify their chat account again in NyxID. Guest access is {guest} as before. Open the channel details for the current status.",
+            bot.label
+        )),
+    };
+    #[cfg(test)]
+    let recorder = TEST_NOTICES.lock().unwrap().get(&bot.id).cloned();
+    #[cfg(not(test))]
+    let recorder: Option<()> = None;
+    let notifier = NOTIFIER.get().cloned();
+    if recorder.is_none() && notifier.is_none() {
+        return;
+    }
+    let db = db.clone();
+    let linking_admin = linking_admin.to_owned();
+    let owner = bot.user_id.clone();
+    crate::services::shutdown::process().spawn(async move {
+        let mut recipients = match crate::services::org_service::list_admin_user_ids(&db, &owner)
+            .await
+        {
+            Ok(recipients) => recipients,
+            Err(error) => {
+                tracing::warn!(%error, "channel bot restoration notice could not resolve org admins");
+                Vec::new()
+            }
+        };
+        recipients.push(linking_admin);
+        if recipients.is_empty() {
+            recipients.push(owner);
+        }
+        recipients.sort();
+        recipients.dedup();
+        for recipient in recipients {
+            #[cfg(test)]
+            if let Some(recorder) = &recorder {
+                let _ = recorder.send((recipient.clone(), context.clone()));
+                continue;
+            }
+            let Some(notifier) = &notifier else { continue };
+            if let Err(error) =
+                crate::services::notification_service::send_channel_bot_failed_notification(
+                    &db,
+                    &notifier.config,
+                    &notifier.http_client,
+                    notifier.fcm_auth.as_deref(),
+                    notifier.apns_auth.as_deref(),
+                    &recipient,
+                    &context,
+                )
+                .await
+            {
+                tracing::warn!(%error, bot_id = %context.bot_id, "channel bot restoration notice failed");
             }
         }
     });
@@ -440,12 +768,22 @@ mod tests;
 
 /// Bounded read projection shared by NyxBot discovery and diagnostic surfaces.
 /// These are observed facts, not a provider probe or a setup-completion promise.
-pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
+pub async fn setup_evidence(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    gateway: bool,
+) -> AppResult<serde_json::Value> {
     use serde_json::json;
-    let facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    let mut facts = HealthFacts::for_bot(bot, Utc::now(), gateway);
+    if let Some(intake) = discord::load(db, std::slice::from_ref(bot))
+        .await?
+        .remove(&bot.id)
+    {
+        facts.discord_intake = Some(intake);
+    }
     let action = recommend(&facts);
     let d = &bot.diagnostics;
-    json!({
+    let mut value = json!({
         "contract_version": 1, "observed_at": Utc::now().to_rfc3339(),
         "bot_id": bot.id, "platform": bot.platform, "platform_bot_username": bot.platform_bot_username,
         "credential_source": bot.credential_source, "credential_connection_id": bot.connection_id,
@@ -458,10 +796,18 @@ pub fn setup_evidence(bot: &ChannelBot, gateway: bool) -> serde_json::Value {
         "last_authenticated_inbound_at": d.last_inbound_at.map(|t| t.to_rfc3339()),
         "last_authenticated_inbound_source": d.last_inbound_source,
         "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
-        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "thread_reason": e.thread_reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_notice": d.last_outbound_notice.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "thread_reason": e.thread_reason, "at": e.at.to_rfc3339()})),
         "failure_reason": d.failure_reason,
+        "last_inbound_outcome": d.last_inbound_outcome.as_ref().map(|o| json!({"code":o.code,"at":o.at.to_rfc3339()})),
+        "inbound_outcomes": d.inbound_outcomes.iter().map(|(code,c)| (code.clone(),json!({"count":c.count,"at":c.at.to_rfc3339()}))).collect::<serde_json::Map<_,_>>(),
+        "receive_limitations": if is_x(&bot.platform) {Some(super::channel_inbound_diagnostics::CAPABILITY)} else {None},
         "recommended_action": action.action, "recommended_action_text": action.text,
         "automatic_reply": "not_verified",
         "evidence_note": "Configured credentials, a registered subscription and historical traffic are separate evidence. No Verify, Resubscribe or test send was run. Gateway support and end-to-end automatic replies need their own evidence.",
-    })
+    });
+    if let Some(intake) = &facts.discord_intake {
+        value["discord_intake"] = json!(intake);
+    }
+    Ok(value)
 }

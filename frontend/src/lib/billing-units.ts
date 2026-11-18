@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { metricLabel } from "@/schemas/billing-metrics";
 import type { BillingMetric } from "@/schemas/billing";
 import type { AllowanceForm } from "@/schemas/billing-credits";
@@ -6,10 +8,10 @@ import type { DownstreamService } from "@/types/api";
 type AllowanceRecurrence = AllowanceForm["recurrence"];
 
 const RECURRENCE_PHRASES: Readonly<Record<AllowanceRecurrence, string>> = {
-  one_time: "once",
-  daily: "each day",
-  weekly: "each week",
-  monthly: "each month",
+  one_time: "{{quantity}} {{unit}}{{compact}} free once",
+  daily: "{{quantity}} {{unit}}{{compact}} free each day",
+  weekly: "{{quantity}} {{unit}}{{compact}} free each week",
+  monthly: "{{quantity}} {{unit}}{{compact}} free each month",
 };
 
 /**
@@ -34,24 +36,24 @@ export function formatAllowancePreview(
 ): string | null {
   if (!Number.isInteger(quantity) || quantity <= 0) return null;
 
-  const formatted = new Intl.NumberFormat(locale).format(quantity);
-  const compact = new Intl.NumberFormat(locale, {
+  const formatted = new Intl.NumberFormat(locale ?? getFormattingLocale()).format(quantity);
+  const compact = new Intl.NumberFormat(locale ?? getFormattingLocale(), {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(quantity);
   const compactSuffix = compact === formatted ? "" : ` (${compact})`;
 
-  return `${formatted} ${billingMetricLabel(metric, quantity)}${compactSuffix} free ${RECURRENCE_PHRASES[recurrence]}`;
+  return translateUi(RECURRENCE_PHRASES[recurrence], { quantity: formatted, unit: billingMetricLabel(metric, quantity), compact: compactSuffix });
 }
 
 /** Credential labels for platform-wide reporting; preserve future classes. */
 const CREDENTIAL_CLASS_LABELS: Readonly<Record<string, string>> = {
-  nyxid_managed_master: "NyxID platform key",
-  user_owned: "User's own key (BYOK)",
-  agent_override_user_owned: "Own key · agent override",
-  node_managed: "Own key · node-managed",
-  nyxid_platform_oauth_app: "Shared OAuth app",
-  no_auth: "No authentication",
+  get nyxid_managed_master() { return translateUi("NyxID platform key"); },
+  get user_owned() { return translateUi("User's own key (BYOK)"); },
+  get agent_override_user_owned() { return translateUi("Own key · agent override"); },
+  get node_managed() { return translateUi("Own key · node-managed"); },
+  get nyxid_platform_oauth_app() { return translateUi("Shared OAuth app"); },
+  get no_auth() { return translateUi("No authentication"); },
 };
 
 export function credentialClassLabel(credentialClass: string): string {

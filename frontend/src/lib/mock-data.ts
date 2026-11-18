@@ -478,6 +478,7 @@ const MOCK_KEYS = [
     openapi_spec_url: null,
     credential_source: {
       type: "org" as const,
+      org_id: "org-0001",
       org_name: "ChronoAI",
       role: "member",
       allowed: true,
@@ -3103,7 +3104,7 @@ const MOCK_HANDLERS: MockHandler[] = [
       ? new URLSearchParams(window.location.search).get("mock") === "hosted"
         ? {
             ...MOCK_PUBLIC_CONFIG,
-            mcp_url: "https://nyx-api.chrono-ai.fun/mcp",
+            mcp_url: "https://api.nyxid.ai/mcp",
           }
         : MOCK_PUBLIC_CONFIG
       : undefined,

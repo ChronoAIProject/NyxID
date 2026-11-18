@@ -1,8 +1,10 @@
 import { billingSearchSchema } from "@/schemas/billing";
 import { parseTab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT } from "@/lib/url-tabs";
+import { notificationFilter } from "@/schemas/assistant-notifications";
 
 export { ASSISTANT_SHELL_ROUTES, isAssistantShellRoute, type AssistantShellRoute } from "./shell-routes";
-export type AccountPanel = "settings" | "billing" | "nyxbot";
+/** `notifications` opens the feed sheet; its `panelTab` is the filter chip (all is implicit). */
+export type AccountPanel = "settings" | "billing" | "nyxbot" | "notifications";
 export interface AccountPanelSearch {
   panel?: AccountPanel;
   panelTab?: string;
@@ -10,10 +12,11 @@ export interface AccountPanelSearch {
   panelService?: string;
   panelServices?: string[];
   panelAction?: "topup";
+  panelOwnerId?: string;
 }
 export type AccountPanelParams = Omit<AccountPanelSearch, "panel">;
 export const ACCOUNT_PANEL_KEYS = [
-  "panel", "panelTab", "panelPeriod", "panelService", "panelServices", "panelAction",
+  "panel", "panelTab", "panelPeriod", "panelService", "panelServices", "panelAction", "panelOwnerId",
 ] as const;
 
 export const validateSettingsSearch = (search: Record<string, unknown>): { tab?: string } => ({
@@ -27,6 +30,7 @@ export function billingPanelSearch(search: AccountPanelSearch) {
     service: search.panelService,
     services: search.panelServices,
     action: search.panelAction,
+    ownerId: search.panelOwnerId,
   });
 }
 
@@ -38,13 +42,18 @@ export function parseAccountPanelSearch(search: Record<string, unknown>): Accoun
     } : {}) };
   }
   if (search.panel === "nyxbot") return { panel: "nyxbot" };
+  if (search.panel === "notifications") {
+    const filter = notificationFilter(search.panelTab);
+    return { panel: "notifications", ...(filter && filter !== "all" ? { panelTab: filter } : {}) };
+  }
   if (search.panel !== "billing") return {};
   const billing = billingSearchSchema.parse({
     tab: search.panelTab, period: search.panelPeriod,
-    service: search.panelService, services: search.panelServices, action: search.panelAction,
+    service: search.panelService, services: search.panelServices, action: search.panelAction, ownerId: search.panelOwnerId,
   });
   return {
     panel: "billing",
+    ...(billing.ownerId !== undefined ? { panelOwnerId: billing.ownerId } : {}),
     ...(billing.tab !== undefined ? { panelTab: billing.tab } : {}),
     ...(billing.period !== undefined ? { panelPeriod: billing.period } : {}),
     ...(billing.service !== undefined ? { panelService: billing.service } : {}),

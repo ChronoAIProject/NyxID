@@ -841,3 +841,9 @@ The node applies this metadata without catalog slug mappings. The server stores
 ID+slug declarations on the job and rejects every other service even when its
 chat key has wider grants. Both streaming hops preserve Content-Encoding and
 Content-Length; local SDK/git clients decode compression themselves.
+
+## Metadata-only credential target update
+
+A node may advertise `status_update.capabilities.credential_target_update_v1: true` together with `credential_ack_correlation: true`. Only such nodes receive `credential_update` with `injection_method: "target_url"`, an explicit string `target_url` (including `""` to clear), and a positive integer `target_revision`. `request_id` uses the existing correlated `credential_update_ack` contract. No `header_name`, `header_value`, `param_name`, or `param_value` is sent.
+
+This mode must preserve the installed credential, OAuth configuration and injection settings, update only target metadata, and reload the live credential store before acknowledging success. Missing target/revision, credential-bearing fields, nonexistent local credentials and older revisions are rejected without writing. Equal revisions are idempotent only for the same target. New servers gate delivery at both routing and live socket dispatch; old agents never see this mode. Other credential-update modes are unchanged.

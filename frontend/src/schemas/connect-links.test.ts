@@ -32,6 +32,9 @@ describe("connect link schemas", () => {
     });
     expect(parsed.service_slug).toBe("github");
     expect(parsed.scopes).toEqual(["public_repo", "read:org"]);
+    expect(parsed.assistant_intent_locked).toBe(false);
+    expect(connectLinkPreviewSchema.parse({ ...parsed, assistant_intent_locked: true,
+      use_platform_key: false }).assistant_intent_locked).toBe(true);
     expect(parsed.endpoint_url).toBe("https://gateway.example.test");
     expect(parsed).not.toHaveProperty("token");
     expect(parsed.callback_url).toContain("status=cancelled");

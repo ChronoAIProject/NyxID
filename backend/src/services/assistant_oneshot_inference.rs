@@ -940,7 +940,7 @@ impl Drop for MeterGuard {
             model: self.model.clone(),
             armed: false,
         };
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             let _ = Box::pin(guard.finish()).await;
         });
     }
@@ -1001,7 +1001,7 @@ async fn request_inner(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(actor, actor, route.class)
+        .resolve_for_ordinary_execution(actor, actor, route.class)
         .await
         .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     let ctx = billing::BillingRouteContext::new(

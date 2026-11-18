@@ -70,16 +70,20 @@ Then call `GET /api/v1/keys` again and verify that the entry with that same User
 `forward_access_token: true`. Matching only by slug is insufficient when more than one service
 instance exists. Do not use `PUT /api/v1/keys/{catalogServiceId}` for identity settings.
 
-Catalog defaults are platform-owned. An administrator may explicitly reapply a catalog
-definition's identity settings to its inherited UserServices with:
+Catalog defaults are platform-owned. An Admin, or the catalog service's creator, may explicitly
+reapply a catalog definition's identity settings to every UserService created from it, including
+customized ones, from a human account session (not an Agent Key):
 
 ```http
 POST /api/v1/services/{catalogServiceId}/resync-identity
-Authorization: Bearer <admin-token>
+Authorization: Bearer <human-session-token>
 ```
 
-That admin recovery operation is separate from owner self-service. It takes a catalog service ID;
-`PUT /api/v1/user-services/{userServiceId}` takes the account-owned UserService ID.
+The CLI form is `nyxid catalog resync-identity <catalog-service-id-or-slug>`. The response reports
+`matched_count` (connections checked) and `changed_count` (connections rewritten). It does not touch
+stored credentials or downstream sign-ins. That recovery operation is separate from owner
+self-service. It takes a catalog service ID; `PUT /api/v1/user-services/{userServiceId}` takes the
+account-owned UserService ID.
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
 > For org-owned node operations, the two-machine VM playbook, and transfer cleanup behavior, see [`nodes.md`](nodes.md#two-machine-org-node-setup).

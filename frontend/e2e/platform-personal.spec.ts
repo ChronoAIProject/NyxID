@@ -360,12 +360,12 @@ test("MFA must finish before personal review and retains original intent after a
     page.getByRole("heading", { name: "MFA verification" }),
   ).toBeVisible();
   expect(state.reviews).toBe(0);
-  await page.getByLabel("Enter 6-digit verification code").fill("111111");
+  await page.getByLabel("Authenticator code", { exact: true }).fill("111111");
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page.getByText("Invalid MFA code")).toBeVisible();
   expect(state.reviews).toBe(0);
   expect(state.signedIn).toBe(false);
-  await page.getByLabel("Enter 6-digit verification code").fill("123456");
+  await page.getByLabel("Authenticator code", { exact: true }).fill("123456");
   await page.getByRole("button", { name: "Verify", exact: true }).click();
   await expect(page).toHaveURL(/\/nyxbot\/link$/);
   expect(state.mfaVerified).toBe(true);
@@ -433,7 +433,14 @@ test("saved personal Telegram thread stays accessible after owner disconnect", a
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("Work already started may keep running");
   await dialog.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(page.getByText(/9007199254740993 · Disconnected/)).toBeVisible();
+  const personalLink = page.getByRole("region", {
+    name: "@PlatformBot",
+    exact: true,
+  });
+  await expect(personalLink).toContainText(sender.id);
+  await expect(
+    personalLink.getByText("Disconnected", { exact: true }),
+  ).toBeVisible();
   expect(
     state.writes.find((write) => write.path.endsWith("/revoke"))?.body,
   ).toEqual({ generation: 1 });

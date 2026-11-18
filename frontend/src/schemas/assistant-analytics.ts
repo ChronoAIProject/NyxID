@@ -1,10 +1,13 @@
 import { z } from "zod";
+import { weeklyRealWorkSchema } from "./assistant-real-work";
 
 const count = z.number().int().nonnegative();
 export const assistantAnalyticsSchema = z.object({
   from: z.iso.datetime({ offset: true }),
   to: z.iso.datetime({ offset: true }),
   generated_at: z.iso.datetime({ offset: true }),
+  real_work: weeklyRealWorkSchema.nullish(),
+  real_work_unavailable: z.boolean().optional(),
   active_sessions: count,
   active_accounts: count,
   running_now: count,

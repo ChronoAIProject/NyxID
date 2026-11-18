@@ -9,10 +9,18 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
 }
 
 async fn exercise_with_recovery(keep: bool, mfa: bool, app: bool, recovery: bool) {
-    exercise_identity(keep, mfa, app, recovery, false).await;
+    exercise_identity(keep, mfa, app, recovery, false, false).await;
 }
 
-async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, social: bool) {
+async fn exercise_identity(
+    keep: bool,
+    mfa: bool,
+    app: bool,
+    recovery: bool,
+    social: bool,
+    restricted: bool,
+) {
+    crate::test_utils::init_test_audit_chain_hmac_key();
     let Some(db) = connect_test_database("request_only_identity").await else {
         return;
     };
@@ -22,6 +30,7 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
         .unwrap();
     let actor_id = uuid::Uuid::new_v4().to_string();
     let mut actor = test_user(&actor_id, UserType::Person);
+    actor.profile_config.security.skip_mfa_for_approved_sign_ins = false;
     let password = format!("Test-1!{}", uuid::Uuid::new_v4());
     actor.password_hash = Some(crate::crypto::password::hash_password(&password).unwrap());
     let email = actor.email.clone();
@@ -174,7 +183,7 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
             .unwrap();
         assert_eq!(proof.status(), StatusCode::UNAUTHORIZED);
         let state = test_app_state(db.clone());
-        assert!(
+        assert!(matches!(
             device::approve(
                 &db,
                 &state.config,
@@ -187,11 +196,11 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
                     approver_ip: None,
                     approver_user_agent: None,
                 },
-                false,
+                crate::services::session_authority::DerivedMfaAuthority::new(mfa, false),
             )
-            .await
-            .is_err()
-        );
+            .await,
+            Err(AppError::MfaStepUpRequired)
+        ));
         device::approve(
             &db,
             &state.config,
@@ -204,7 +213,7 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
                 approver_ip: None,
                 approver_user_agent: None,
             },
-            true,
+            crate::services::session_authority::DerivedMfaAuthority::new(mfa, true),
         )
         .await
         .unwrap();
@@ -257,6 +266,31 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
         assert_eq!(unassured_delivery.status(), StatusCode::UNAUTHORIZED);
         app_codes
             .update_one(app_filter, doc! {"$set": {"mfa_assured": true}})
+            .await
+            .unwrap();
+        let another_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&another_id, UserType::Person))
+            .await
+            .unwrap();
+        let approvals = db.collection::<crate::models::login_approval::LoginApproval>(
+            crate::models::login_approval::COLLECTION_NAME,
+        );
+        approvals
+            .update_one(doc! {"_id": id}, doc! {"$set": {"user_id": &another_id}})
+            .await
+            .unwrap();
+        let cross_account = client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"device_code": app_request["device_code"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_account.status(), StatusCode::UNAUTHORIZED);
+        approvals
+            .update_one(doc! {"_id": id}, doc! {"$set": {"user_id": null}})
             .await
             .unwrap();
         assert_eq!(
@@ -376,6 +410,35 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
     assert_eq!(signed["verified"], true);
     assert_eq!(signed["mfa_required"], false);
     assert!(signed.get("access_token").is_none());
+    let expected_method = if app {
+        "app"
+    } else if mfa {
+        "password_mfa"
+    } else if social {
+        "social"
+    } else {
+        "password"
+    };
+    let mut audit = None;
+    for _ in 0..100 {
+        audit = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {"event_type": "login_request_identity_verified", "user_id": &actor_id})
+            .await
+            .unwrap();
+        if audit.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let metadata = audit
+        .expect("identity verification audit")
+        .event_data
+        .unwrap();
+    assert_eq!(metadata["method"], expected_method);
+    assert_eq!(metadata["mfa_verified"], app || mfa);
     assert_eq!(
         db.collection::<Session>("sessions")
             .count_documents(doc! {"user_id": &actor_id})
@@ -398,12 +461,16 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
             StatusCode::UNAUTHORIZED
         }
     );
-    if social {
+    if social || restricted {
         let approved = client
             .post(format!("{approval}/approve"))
             .header("Origin", &origin)
             .header("Cookie", &cookie)
-            .json(&json!({}))
+            .json(&if restricted {
+                json!({"selection": {"kind": "new", "name": "MFA proof key", "scopes": "proxy"}})
+            } else {
+                json!({})
+            })
             .send()
             .await
             .unwrap();
@@ -416,6 +483,30 @@ async fn exercise_identity(keep: bool, mfa: bool, app: bool, recovery: bool, soc
             .unwrap();
         assert_eq!(delivered.status(), StatusCode::OK);
         let tokens: Value = delivered.json().await.unwrap();
+        if restricted {
+            assert_eq!(tokens["auth_kind"], "agent_key");
+            assert!(tokens.get("access_token").is_none());
+            assert_eq!(
+                db.collection::<bson::Document>(
+                    crate::models::auth_device_code::V2_COLLECTION_NAME
+                )
+                .count_documents(
+                    doc! {"approved_user_id": &actor_id, "mfa_assured": true, "status": "delivered"}
+                )
+                .await
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.collection::<Session>("sessions")
+                    .count_documents(doc! {"user_id": &actor_id})
+                    .await
+                    .unwrap(),
+                u64::from(keep)
+            );
+            server.abort();
+            return;
+        }
         let account = client
             .get(format!("{base}/users/me"))
             .bearer_auth(tokens["access_token"].as_str().unwrap())
@@ -622,10 +713,20 @@ async fn recovery_continues_persistent_browser_approval() {
 
 #[tokio::test]
 async fn social_mfa_request_only_requires_second_factor_then_explicit_approval() {
-    exercise_identity(false, true, false, true, true).await;
+    exercise_identity(false, true, false, true, true, false).await;
 }
 
 #[tokio::test]
 async fn social_mfa_keep_signed_in_assures_browser_and_approved_session() {
-    exercise_identity(true, true, false, true, true).await;
+    exercise_identity(true, true, false, true, true, false).await;
+}
+
+#[tokio::test]
+async fn request_only_mfa_proof_authorizes_selected_device_agent_key() {
+    Box::pin(exercise_identity(false, true, false, true, false, true)).await;
+}
+
+#[tokio::test]
+async fn persistent_mfa_proof_authorizes_selected_device_agent_key() {
+    Box::pin(exercise_identity(true, true, false, true, false, true)).await;
 }

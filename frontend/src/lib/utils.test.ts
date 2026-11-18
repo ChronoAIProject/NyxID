@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { appI18n } from "@/i18n";
 import {
   cn,
   formatDate,
@@ -19,6 +20,18 @@ describe("cn", () => {
 
   it("deduplicates tailwind classes", () => {
     expect(cn("p-4", "p-2")).toBe("p-2");
+  });
+
+  it("replaces a semantic text role as a whole while preserving color", () => {
+    expect(cn("type-input text-foreground", "type-secondary"))
+      .toBe("text-foreground type-secondary");
+    expect(cn("text-14 font-medium leading-none", "type-field-label"))
+      .toBe("type-field-label");
+  });
+
+  it("keeps responsive and public text assignments scoped", () => {
+    expect(cn("type-body sm:type-card-title unthemed:text-12", "sm:type-section-heading"))
+      .toBe("type-body unthemed:text-12 sm:type-section-heading");
   });
 
   it("handles empty input", () => {
@@ -95,6 +108,31 @@ describe("formatRelativeTime", () => {
   it("returns N/A for invalid date", () => {
     expect(formatRelativeTime("garbage")).toBe("N/A");
   });
+});
+
+describe("localized date and relative time formatting", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-06-15T12:00:00Z"));
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await appI18n.changeLanguage("en");
+  });
+
+  it.each([
+    ["zh-CN", "2024年6月15日", "15 分钟前", "3 小时后"],
+    ["zh-TW", "2024年6月15日", "15 分鐘前", "3 小時後"],
+  ])(
+    "uses %s immediately after switching language",
+    async (language, date, past, future) => {
+      await appI18n.changeLanguage(language);
+      expect(formatDate("2024-06-15T12:00:00Z")).toBe(date);
+      expect(formatRelativeTime("2024-06-15T11:45:00Z")).toBe(past);
+      expect(formatTimeDistance("2024-06-15T15:00:00Z")).toBe(future);
+    },
+  );
 });
 
 describe("formatTimeDistance", () => {

@@ -1,10 +1,15 @@
-import type { ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { Fragment, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { AgentKeySummary } from "@/schemas/agent-key-login";
 import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   connectionCovers,
   connectionSlug,
+  connectionOwner,
+  connectionOwnerLabel,
   effectiveLoginConnections,
   permissionOptions,
   requestedGroups,
@@ -17,6 +22,9 @@ import {
   LoginConnectionChoices,
   type ConnectionSelection,
 } from "./login-connection-choices";
+
+/** Above this many service rows, only rows that still need a choice open. */
+export const AUTO_EXPAND_ROW_LIMIT = 5;
 
 export function LoginAccessRows({
   apiKey,
@@ -35,6 +43,10 @@ export function LoginAccessRows({
   scopes?: ReactNode;
   disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
+  // Rows the approver opened or closed (individually or via Collapse/Expand
+  // all) keep that choice; others follow their default.
+  const [openOverrides, setOpenOverrides] = useState<Record<string, boolean>>({});
   const required = requestedGroups(requested);
   const connections = effectiveLoginConnections(apiKey, inventory);
   const options = permissionOptions(inventory);
@@ -46,9 +58,7 @@ export function LoginAccessRows({
       ...comparison.extras.map((e) => e.group),
     ]),
   ];
-  return (
-    <div className="divide-y divide-border rounded-xl border border-border">
-      {groups.map((group) => {
+  const rows = groups.map((group) => {
         const matched = comparison.matched.filter((e) => e.group === group);
         const extras = comparison.extras.filter((e) => e.group === group);
         const accounts = connections.filter((c) => connectionSlug(c) === group);
@@ -82,11 +92,75 @@ export function LoginAccessRows({
             scope: o.value,
             description: o.description,
           }));
+        return {
+          group,
+          matched,
+          extras,
+          accounts,
+          name,
+          missing,
+          nyxidMissing,
+          requestedEntries,
+          // Short lists open fully; long lists open only rows awaiting a choice.
+          defaultOpen:
+            groups.length <= AUTO_EXPAND_ROW_LIMIT || missing || nyxidMissing,
+        };
+  });
+  const isOpen = (row: (typeof rows)[number]) =>
+    openOverrides[row.group] ?? row.defaultOpen;
+  const anyOpen = rows.some(isOpen);
+  const setAll = (open: boolean) =>
+    setOpenOverrides(Object.fromEntries(groups.map((g) => [g, open])));
+  return (
+    <div className="space-y-2">
+      <div className="sticky top-0 z-10 -mx-1 flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-card px-1 py-2 text-11">
+        <p className="font-medium">{t("Allow this device to access")}</p>
+        <span className="flex items-center gap-2">
+          <span
+            className={
+              comparison.extras.length ? "text-warning" : "text-muted-foreground"
+            }
+          >
+            {comparison.matches
+              ? comparison.exact
+                ? t("Exact match")
+                : t("Matched + {{count}} extra permissions", { count: comparison.extras.length })
+              : t("Selection needed")}
+          </span>
+          {rows.length > 1 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-expanded={anyOpen}
+              onClick={() => setAll(!anyOpen)}
+            >
+              {anyOpen ? (
+                <ChevronsDownUp aria-hidden="true" />
+              ) : (
+                <ChevronsUpDown aria-hidden="true" />
+              )}
+              {anyOpen ? t("Collapse all") : t("Expand all")}
+            </Button>
+          )}
+        </span>
+      </div>
+      <div className="divide-y divide-border rounded-xl border border-border">
+      {rows.map((row) => {
+        const { group, matched, extras, accounts, name, missing, nyxidMissing, requestedEntries } = row;
+        const open = isOpen(row);
         return (
           <details
             key={group}
+            open={open}
+            onToggle={(e) => {
+              const next = e.currentTarget.open;
+              if (next !== open) {
+                setOpenOverrides((prev) => ({ ...prev, [group]: next }));
+              }
+            }}
             className="group/row"
-            aria-label={`${name} access`}
+            aria-label={t("{{name}} access", { name: name })}
           >
             <summary className="flex cursor-pointer list-none items-center gap-3 p-3 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
               <PermissionIcon group={group} />
@@ -98,10 +172,28 @@ export function LoginAccessRows({
                   {group === "nyxid"
                     ? apiKey.scopes
                     : accounts.length
-                      ? accounts.map((c) => c.label).join(", ")
+                      ? accounts.map((c, index) => {
+                          const owner = connectionOwner(c, inventory, apiKey);
+                          const unavailable =
+                            owner.kind === "organization" && owner.unavailable;
+                          return (
+                            <Fragment key={c.id}>
+                              {index > 0 && ", "}
+                              {c.label} ({connectionOwnerLabel(owner, t)})
+                              {unavailable && (
+                                <>
+                                  {" "}
+                                  <Badge variant="secondary" className="align-middle">
+                                    {t("No longer available")}
+                                  </Badge>
+                                </>
+                              )}
+                            </Fragment>
+                          );
+                        })
                       : missing
-                        ? `${requestedEntries.length || 1} requested permission${requestedEntries.length === 1 ? "" : "s"}`
-                        : `${matched.length + extras.length} permissions`}
+                        ? t("{{count}} requested permissions", { count: requestedEntries.length || 1 })
+                        : t("{{value}} permissions", { value: matched.length + extras.length })}
                 </span>
               </span>
               <span
@@ -109,13 +201,13 @@ export function LoginAccessRows({
               >
                 {missing
                   ? accounts.length
-                    ? "Check access"
-                    : "Choose account"
+                    ? t("Check access")
+                    : t("Choose account")
                   : nyxidMissing
-                    ? "Choose permissions"
+                    ? t("Choose permissions")
                     : extras.length
-                      ? `${matched.length ? "Matched + " : "+ "}${extras.length} extra${extras.length === 1 ? "" : "s"}`
-                      : `${matched.length} selected`}
+                      ? t(matched.length ? "Matched + {{count}} extra permissions" : "+ {{count}} extra permissions", { count: extras.length })
+                      : t("{{length}} selected", { length: matched.length })}
               </span>
               <ChevronDown
                 aria-hidden="true"
@@ -124,7 +216,7 @@ export function LoginAccessRows({
             </summary>
             <div className="space-y-3 border-t border-border/50 p-3">
               {selection && requestedEntries.length > 0 && (
-                <AccessEntries label="Requested" entries={requestedEntries} />
+                <AccessEntries label={t("Requested")} entries={requestedEntries} />
               )}
               {group === "nyxid" && scopes}
               {selection &&
@@ -138,17 +230,16 @@ export function LoginAccessRows({
                     disabled={disabled}
                   />
                 )}
-              <AccessEntries label="Included permissions" entries={matched} />
-              <AccessEntries label="Extra access included" entries={extras} />
+              <AccessEntries label={t("Included permissions")} entries={matched} />
+              <AccessEntries label={t("Extra access included")} entries={extras} />
               {selection && group !== "nyxid" && accounts.length > 0 && (
-                <p className="text-11 text-muted-foreground">
-                  The selected accounts keep all their provider permissions.
-                </p>
+                <p className="text-11 text-muted-foreground">{t("The selected accounts keep all their provider permissions.")}</p>
               )}
             </div>
           </details>
         );
       })}
+      </div>
     </div>
   );
 }

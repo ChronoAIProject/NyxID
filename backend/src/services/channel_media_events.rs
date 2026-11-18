@@ -1,6 +1,7 @@
-//! Native media acceptance and crash disposition. Admission never downloads.
+//! Relay media acceptance and crash disposition. Admission never downloads.
 use super::{
     channel_media_authority::{self as authority, MediaRequest},
+    channel_platform::canonical_platform,
     feature_flag_service as flags,
 };
 use crate::{
@@ -25,8 +26,8 @@ use sha2::{Digest, Sha256};
 pub const INTERRUPTED_NOTE: &str = "A previous photo or file in this chat was interrupted before the assistant could process it. It was not processed; please resend it if it is still needed.";
 const BATCH: i64 = 50;
 
-/// Presence is independent of owner eligibility. Existing accepted media keeps
-/// draining after flag disable; guests only get presence, never a claim.
+/// Presence is independent of eligibility. Owner claims drain after flag disable;
+/// guest claims require the separate live guest flag at download and model read.
 pub async fn for_turn(
     db: &Database,
     channel: &crate::models::nyxbot_channel::NyxbotChannel,
@@ -86,7 +87,12 @@ pub async fn presence(
     request: &MediaRequest,
     missing_media: bool,
 ) -> AppResult<usize> {
-    if !matches!(request.channel.platform.as_str(), "lark" | "feishu")
+    if !(authority::supported_relay(canonical_platform(&request.channel.platform))
+        || (canonical_platform(&request.channel.platform) == "telegram"
+            && !request
+                .channel
+                .owner_sender_ids
+                .contains(&request.sender_id)))
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,
@@ -98,11 +104,7 @@ pub async fn presence(
     }
     match authority::source(db, request).await {
         Ok(source) => {
-            if source
-                .attachments
-                .iter()
-                .any(|a| !matches!(a.content_type.as_str(), "image" | "file"))
-            {
+            if !authority::supported_source(&source) {
                 return Ok(0);
             }
             Ok(source.attachments.len()
@@ -110,6 +112,12 @@ pub async fn presence(
                 + source.embedded_attachments_omitted)
         }
         Err(AppError::NotFound(_)) => {
+            // A text-only activity does not assert that a media source exists.
+            // Do not turn an unrelated or legacy source lookup miss into a
+            // media authorization failure for the whole turn.
+            if !missing_media {
+                return Ok(0);
+            }
             if db
                 .collection::<ChannelMessage>(MESSAGES)
                 .find_one(doc! {"_id":&request.source_message_id})
@@ -127,10 +135,16 @@ pub async fn presence(
     }
 }
 
-/// Source presence is computed for every sender. Only a verified owner with
-/// live authority can acquire a media claim. No gateway handles enter this API.
+/// Source presence is computed for every sender. Owner/member claims and opted-in
+/// personal guest claims bind live authority. No gateway handles enter this API.
 pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Option<EventMedia>> {
-    if !matches!(request.channel.platform.as_str(), "lark" | "feishu") {
+    if !(authority::supported_relay(canonical_platform(&request.channel.platform))
+        || (canonical_platform(&request.channel.platform) == "telegram"
+            && !request
+                .channel
+                .owner_sender_ids
+                .contains(&request.sender_id)))
+    {
         return Ok(None);
     }
     let source = match authority::source(db, request).await {
@@ -142,10 +156,6 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         + source.embedded_attachments.len()
         + source.embedded_attachments_omitted;
     if declared == 0
-        || !request
-            .channel
-            .owner_sender_ids
-            .contains(&request.sender_id)
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,
@@ -155,17 +165,14 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     {
         return Ok(None);
     }
-    // Audio/video retain their existing transcript path; no media ingestion.
-    if source
-        .attachments
-        .iter()
-        .any(|item| !matches!(item.content_type.as_str(), "image" | "file"))
-    {
+    if !authority::supported_source(&source) {
         return Ok(None);
     }
     let authorized = match Box::pin(authority::resolve(db, request)).await {
         Ok(authorized) => authorized,
-        Err(crate::errors::AppError::NotFound(_) | crate::errors::AppError::Forbidden(_)) => {
+        Err(
+            AppError::NotFound(_) | AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable,
+        ) => {
             return Ok(None);
         }
         Err(error) => return Err(error),
@@ -189,7 +196,10 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         Sha256::digest(
             format!(
                 "v1\0{}\0{}\0{}\0{}",
-                authorized.bot.id, request.channel.platform, request.chat_id, native
+                authorized.bot.id,
+                canonical_platform(&request.channel.platform),
+                request.chat_id,
+                native
             )
             .as_bytes()
         )
@@ -214,6 +224,7 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     .take(10)
     .collect();
     Ok(Some(EventMedia {
+        guest: authorized.guest,
         authority: Some(crate::models::nyxbot_channel::MediaAuthority {
             route_api_key_id: request.channel.route_api_key_id.clone(),
             route_id: request.channel.route_id.clone(),
@@ -225,7 +236,7 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         declared,
         items,
         channel_bot_id: authorized.bot.id,
-        platform: request.channel.platform.clone(),
+        platform: canonical_platform(&request.channel.platform).to_owned(),
         platform_chat_id: request.chat_id.clone(),
         interrupted: false,
         noted: false,
@@ -235,9 +246,24 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
 /// Media acceptance contends with the durable owner-erasure fence. A held
 /// callback cannot recreate a media source after local inventory has drained.
 pub async fn insert_event(db: &Database, event: &NyxbotEvent) -> mongodb::error::Result<()> {
+    insert_response_event(db, event, None).await
+}
+
+pub async fn insert_response_event(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::ResponseRead>,
+) -> mongodb::error::Result<()> {
+    let mut document = bson::to_document(event).map_err(mongodb::error::Error::custom)?;
+    if let Some(response) = response {
+        document.insert(
+            "response_read_pending",
+            bson::to_bson(response).map_err(mongodb::error::Error::custom)?,
+        );
+    }
     if event.media.is_none() {
-        db.collection::<NyxbotEvent>(EVENTS)
-            .insert_one(event)
+        db.collection::<bson::Document>(EVENTS)
+            .insert_one(&document)
             .await?;
         return Ok(());
     }
@@ -250,8 +276,8 @@ pub async fn insert_event(db: &Database, event: &NyxbotEvent) -> mongodb::error:
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
                 super::erasure_admission::fence_in_session(&db, &event.user_id, session).await?;
-                db.collection::<NyxbotEvent>(EVENTS)
-                    .insert_one(&event)
+                db.collection::<bson::Document>(EVENTS)
+                    .insert_one(&document)
                     .session(session)
                     .await?;
                 Ok(())
@@ -293,33 +319,66 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// A different relay UUID lost the native-media insert race. Store one bounded
-/// alias only on the exact scoped source row; same-ID provider replays continue
-/// through the old replay/resume contract.
+/// Register a duplicate against the native-media winner, including a new HTTP
+/// key for the same relay source. Only a different source needs a duplicate
+/// marker; matching event IDs continue through the existing replay/resume path.
 pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<bool> {
+    Ok(record_response_duplicate(db, event, None).await?.is_some())
+}
+
+pub async fn record_response_duplicate(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::Command>,
+) -> AppResult<Option<String>> {
     let Some(media) = &event.media else {
-        return Ok(false);
+        return Ok(None);
     };
     let winner = db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"media.key":&media.key})
         .await?;
     let Some(winner) = winner else {
-        return Ok(false);
+        return Ok(None);
     };
-    if winner.relay_message_id == event.relay_message_id {
-        return Ok(false);
+    if winner.relay_message_id == event.relay_message_id && winner.id == event.id {
+        return Ok(None);
     }
     let Some(source) = &event.relay_message_id else {
-        return Ok(false);
+        return Ok(None);
     };
-    db.collection::<ChannelMessage>(MESSAGES)
-        .update_one(
-            doc! {"_id":source,"direction":"inbound"},
-            doc! {"$set":{"duplicate_of_media_key":&media.key}},
+    if let Some(key) = event
+        .dispatch_identity
+        .as_ref()
+        .and_then(|d| d.keys.first())
+    {
+        match super::nyxbot_dispatch_identity::alias_response(
+            db,
+            &winner.id,
+            &winner.channel_id,
+            key,
+            response,
         )
-        .await?;
-    Ok(true)
+        .await?
+        {
+            super::nyxbot_dispatch_identity::AliasOutcome::Added => {}
+            super::nyxbot_dispatch_identity::AliasOutcome::Limit => {
+                return Err(AppError::Conflict("dispatch_alias_limit".into()));
+            }
+            super::nyxbot_dispatch_identity::AliasOutcome::Missing => {
+                return Err(AppError::Conflict("dispatch_identity_conflict".into()));
+            }
+        }
+    }
+    if winner.relay_message_id != event.relay_message_id {
+        db.collection::<ChannelMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id":source,"direction":"inbound"},
+                doc! {"$set":{"duplicate_of_media_key":&media.key}},
+            )
+            .await?;
+    }
+    Ok(Some(winner.id))
 }
 
 /// The conditional write conflicts with both transactional turn and queue
@@ -383,9 +442,9 @@ pub async fn note_in_session(
         // Native identity survives rebuilding a bot's channel. Keep the owner
         // fence while consuming interruptions from that same bot/platform/chat.
         let filter = doc! {"user_id":owner,
-        "media.key":{"$type":"string"},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
+        "media.key":{"$type":"string"},"media.guest":{"$ne":true},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
         "$and":[{"$or":[{"channel_id":&origin.nyxbot_channel_id},
-            {"media.channel_bot_id":&channel.channel_bot_id,"media.platform":&channel.platform}]},
+            {"media.channel_bot_id":&channel.channel_bot_id}]},
         {"$or":[{"media.interrupted":true},
             {"status":{"$in":["running","resuming","retryable"]},"conversation_id":bson::Bson::Null,
                 "turn_id":bson::Bson::Null,"created_at":{"$lte":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(5))}}]}]};
@@ -397,7 +456,15 @@ pub async fn note_in_session(
             .await?;
         let mut ids = Vec::new();
         while let Some(row) = cursor.next(&mut *session).await.transpose()? {
-            ids.push(row.get("_id").cloned());
+            let media_platform = row
+                .get_document("media")
+                .ok()
+                .and_then(|media| media.get_str("platform").ok());
+            if media_platform.is_none_or(|platform| {
+                canonical_platform(platform) == canonical_platform(&channel.platform)
+            }) {
+                ids.push(row.get("_id").cloned());
+            }
         }
         if !ids.is_empty() {
             let mut exact = filter;

@@ -54,6 +54,20 @@ pub enum CallbackRefusal {
     PlatformVerifierUnavailable,
 }
 
+/// Admission metadata only. No actor/role names, mentioned IDs, text or raw payloads.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyxbotAdmission {
+    pub disposition: String,
+    pub bot_mentioned: Option<bool>,
+    pub managed_role_mentioned: bool,
+    pub broadcast_roles: Option<u16>,
+    pub broadcast_everyone_or_here: bool,
+    pub address: super::channel_thread::ThreadAddress,
+    pub thread_follow_selection: Option<String>,
+    pub resolved_thread_id: Option<String>,
+    pub turn_id: Option<String>,
+}
+
 /// A metadata-only record of a message flowing through the channel bot
 /// relay pipeline.
 ///
@@ -67,6 +81,8 @@ pub enum CallbackRefusal {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nyxbot_admission: Option<NyxbotAdmission>,
     /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of_media_key: Option<String>,
@@ -182,6 +198,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -281,6 +298,7 @@ mod tests {
         doc.remove("updated_at");
         doc.remove("attachments");
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
+        assert!(restored.nyxbot_admission.is_none());
         assert_eq!(restored.platform_message_id, None);
         assert_eq!(restored.callback_status, None);
         assert_eq!(restored.updated_at, None);

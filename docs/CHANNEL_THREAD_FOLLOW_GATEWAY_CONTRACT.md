@@ -87,6 +87,34 @@ bindings fail closed with `thread_target_unavailable`; there is no parent-chat
 fallback. Delayed sends retain their original encrypted reference, expiry,
 authorization and dispatch barrier, never a newer event reference.
 
+Organization replies use the retained event's committed conversation and verified
+execution actor, independently of the transport admin. Readers also accept this
+committed identity on events admitted before the fix; they never select a newer
+conversation or rewrite the event. Exact child, source, route and live authority
+checks still apply. The reply token is consumed only after initial target checks
+and live eligibility, before creating delivery metadata. Target checks precede
+attachment downloads. Rejected preflight leaves it usable; once claimed, an
+uncertain platform effect never releases it. Concurrent uses share the existing
+unique token-use barrier; replay cannot alter receipts or Health.
+Closed target/authority rejections and send failures update bot outbound
+diagnostics/Health once and emit `nyxbot_thread_reply_failed` with a bounded
+reason and numeric error code. Pre-dispatch authorization refusals and inconclusive database/provider lookups
+do not set a thread failure. Failed sends retain the existing outbound reason,
+including platform rate limits and outages, with additive `thread_reason` metadata.
+Shared inbound resolution keeps its existing fallback on unavailable history.
+A delayed reference past 29 minutes has the separate
+`thread_reply_reference_expired` reason. The next confirmed bot outbound clears
+the thread error.
+A streamed answer still is not a platform receipt. Followed relay admissions
+now expose a metadata-only response lifecycle: the negotiated original prefix
+has `X-CMA-Response-ID`, SSE id/sequence 0 and queued status, retaining
+`thread_reply` in `response.created.response`. Reads stay nonterminal until the
+turn settles, then complete with empty output so the gateway releases its
+parent without sending another answer. NyxID's existing late sender retains the
+thread target. No-turn notices under that prefix retain encrypted output for the gateway parent
+to deliver, with the same `thread_reply` on the replayed created frame; NyxID
+never sends those notices locally. See [response lifecycle](CHANNEL_EVENT_GATEWAY.md#locally-delivered-response-lifecycle-2588).
+
 Deploy NyxID to **all** replicas first, then upgrade **all** gateway replicas
 before authoring opted-in definitions (old strict gateway readers cannot
 deserialize the new policy). Keep Lark/Feishu gateway platform flags off during
@@ -108,3 +136,47 @@ NyxID reuses existing bounded adapter history with metadata fallback,
 without new scopes. Slack, Discord, Telegram topics/chains, WhatsApp and Aurinko
 need the follow-ups listed in [the parity table](CHANNEL_EVENT_GATEWAY.md#agent-gateway-group-thread-parity).
 X public thread follow remains out of scope.
+
+
+## Discord relay facts
+
+NyxID relay ingress adds `thread_context.discord_gateway` version 1, derived
+from its authenticated Discord session. The facts include structured addressing,
+reply evidence and native thread/parent IDs. They grant no gateway capability
+and make no assumption about gateway-side Discord ingress. The CMA owner owns
+that implementation. See [Discord setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
+
+
+## Organization-specialist bindings
+
+With `nyxbot:org-specialist-channels` and fleet readiness enabled, follow
+partitions keep the transport admin on the channel row and bind an independent
+verified actor in `ChannelOrigin.org_execution`. A group/topic has one org-owned
+public transcript and separate hidden execution lanes per member or guest.
+Only a verified admin records owner presence; ordinary members cannot open the
+guest audience. Follow expiry, stop, exact source targeting and delivery fences
+remain mandatory. Guest exposure, exact daily budget and per-sender limits apply
+to followed turns too. Gateway sender IDs never establish NyxID membership.
+
+Discord addressing and diagnostics (#2185): an exact bot-user mention and a
+mention of that bot's own authenticated managed integration role both normalize
+to `address: mention`; other roles and @everyone/@here do not. Additive v1 facts
+include `managed_role_mentioned` and `broadcast_role_count` (other roles only).
+The existing `bot_mentioned` reflects either verified mention kind, preserving
+old-reader compatibility. Neither names nor model text establish role identity.
+
+NyxID native Discord intake verifies the original message/channel through the
+bot's token and uses the same bounded role cache/lookup before following or
+ordinary group admission. This requires CMA to deliver the event: native NyxID
+policies already request `groups: all`. A gateway that filters role mentions out
+upstream cannot be repaired by NyxID; the CMA owner must retain broad admission
+or equivalent managed-role addressing. If authenticated role lookup is
+unavailable, the role stays a broadcast and confers no new follow authority.
+No native acceptance claim follows from relay success.
+
+The existing owner Activity API exposes `nyxbot_admission` on received group
+messages: bounded disposition, mention/broadcast evidence, address, follow
+selection, resolved child and transaction-bound turn ID. `Quiet`/`Silent` carry a
+reason (`not_addressed`, `mentions_others`, or a bounded refusal); callback
+acceptance alone never proves the message started a turn. See the
+[Discord relay contract](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).

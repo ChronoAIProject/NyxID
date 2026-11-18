@@ -1,5 +1,9 @@
 pub mod access_denial;
+pub mod memory_write;
+pub mod refresh;
+mod refusal_throttle;
 pub mod skill_draft;
+pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -130,6 +134,10 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Additive fixed diagnostics for attached skill reads.
+    #[error("{0:?}")]
+    SkillRead(skill_read::SkillReadReason),
+
     /// Same forbidden / 1002 response with additive, fixed recovery metadata.
     #[error("Forbidden: {message}")]
     ForbiddenWithGuidance {
@@ -152,6 +160,36 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+    #[error(
+        "This operation requires approval, but this caller does not support approval requests. The operation was not executed. No approval request was created."
+    )]
+    ApprovalUnsupported,
+
+    #[error("Service monitoring is unavailable")]
+    MonitoringUnavailable,
+    #[error("Service monitoring is not configured")]
+    MonitoringNotConfigured,
+    #[error("The failed invocation is still releasing capacity; retry this diagnostic once.")]
+    DiagnosticNotReady,
+    /// A protocol wait tagged only inside one maintenance unit. Request callers
+    /// retain the original error; the batch consumes this before reporting.
+    #[error("{source}")]
+    BillingRecoveryWaiting { source: Box<AppError> },
+    /// A maintenance batch finished its independent units with some failures.
+    /// Preserve the first source's stable code; quantities never enter this error.
+    #[error("Billing recovery has {failed_units} failing units")]
+    BillingRecoveryFailed {
+        failed_units: u64,
+        #[source]
+        source: Box<AppError>,
+    },
+    /// Response metadata, preserving the underlying error through handler layers.
+    #[error("{source}")]
+    InvocationDiagnostic {
+        #[source]
+        source: Box<AppError>,
+        handle: crate::services::invocation_diagnostic_service::IssuedHandle,
+    },
     #[error("Tool operation is not published")]
     ToolOperationNotPublished,
     /// Adds safe startup context while preserving the underlying numeric code/status.
@@ -167,6 +205,11 @@ pub enum AppError {
     #[error("The selected model is not available. Choose another model in the model selector.")]
     AssistantModelUnavailable,
 
+    #[error(
+        "Your access settings or model connection changed during this task; review the completed actions and try again"
+    )]
+    AssistantModelAuthorityChanged,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -176,7 +219,7 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
-    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    /// A rate-limit refusal with a bounded retry delay; preserves 1005.
     #[error("Rate limited")]
     RateLimitedWithRetry { retry_after: u64 },
 
@@ -198,6 +241,16 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     ValidationError(String),
 
+    #[error("{0}")]
+    MemoryWrite(memory_write::MemoryWriteReason),
+
+    /// Owner selection diagnostics keep the validation_error / 1008 contract.
+    #[error("{reason}: {message}")]
+    ServiceSelectionInvalid {
+        reason: &'static str,
+        message: &'static str,
+    },
+
     /// Authored skill diagnostics retain the existing validation_error / 1008 contract.
     #[error(transparent)]
     SkillDraftValidation(Box<skill_draft::SkillDraftValidation>),
@@ -208,8 +261,20 @@ pub enum AppError {
     #[error("Token expired")]
     TokenExpired,
 
+    /// Additive /auth/refresh diagnostics, retaining the underlying contract.
+    #[error("{source}")]
+    RefreshRefused {
+        source: Box<AppError>,
+        reason: refresh::RefreshRefusalReason,
+    },
+
     #[error("MFA required")]
     MfaRequired { session_token: String },
+
+    #[error(
+        "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+    )]
+    MfaStepUpRequired,
 
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
@@ -442,6 +507,11 @@ pub enum AppError {
 
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
+
+    #[error(
+        "Guest model route is not authorized. Ask the owner to run this agent with its configured model first; guests cannot select or approve another model connection."
+    )]
+    GuestModelRouteRequired,
 
     #[error("API key scope inactive")]
     ApiKeyScopeInactive,
@@ -756,6 +826,14 @@ pub enum AppError {
     )]
     OraclePoolActiveWork,
 
+    /// NyxID's built-in oracle relay is retired for good. Every route under
+    /// `/api/v1/oracle` and every `nyx__oracle_*` MCP tool answers with this
+    /// so a caller, an AI agent above all, learns there is nothing to retry.
+    #[error(
+        "NyxID's built-in oracle is permanently deprecated and no longer serves requests. Do not retry this call."
+    )]
+    OracleRetired,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -816,6 +894,9 @@ impl AppError {
     /// Generic policy refusals, with or without additive recovery guidance.
     /// Specialized 403 errors retain their own control-flow semantics.
     pub fn is_forbidden(&self) -> bool {
+        if let Self::SkillRead(reason) = self {
+            return reason.legacy_error().is_forbidden();
+        }
         matches!(
             self,
             Self::Forbidden(_)
@@ -824,12 +905,19 @@ impl AppError {
         )
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.status_code(),
+            Self::SkillRead(reason) => reason.legacy_error().status_code(),
+            Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
+            Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
+            Self::InvocationDiagnostic { source, .. } => source.status_code(),
             Self::BadRequest(_)
             | Self::CredentialUnavailable(_)
             | Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
             | Self::SkillDraftValidation(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
@@ -839,19 +927,25 @@ impl AppError {
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
-            Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
+            Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
+                StatusCode::CONFLICT
+            }
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::ApprovalUnsupported => StatusCode::FORBIDDEN,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
+            Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
-            Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
+            Self::MfaRequired { .. } | Self::MfaStepUpRequired => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
             | Self::InvalidDpopProof(_)
             | Self::InvalidRedirectUri
@@ -923,7 +1017,7 @@ impl AppError {
             Self::PendingCredentialCiphertextTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PendingCredentialPubkeyAwaiting(_) => StatusCode::NOT_FOUND,
             Self::PendingCredentialQueueFull(_) => StatusCode::TOO_MANY_REQUESTS,
-            Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
             Self::ApiKeyScopePlanNotFound(_) => StatusCode::NOT_FOUND,
@@ -1033,6 +1127,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::OraclePoolActiveWork => StatusCode::CONFLICT,
+            Self::OracleRetired => StatusCode::GONE,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1058,7 +1153,14 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_code(),
+            Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
+            Self::SkillRead(reason) => reason.legacy_error().error_code(),
+            Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
+            Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
+            Self::InvocationDiagnostic { source, .. } => source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
@@ -1070,20 +1172,27 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::ApprovalUnsupported => 12502,
             Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
+            Self::MonitoringUnavailable => 13300,
+            Self::MonitoringNotConfigured => 13301,
+            Self::DiagnosticNotReady => 13302,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
+            Self::AssistantModelAuthorityChanged => 12104,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => 1008,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -1093,6 +1202,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
+            Self::MfaStepUpRequired => 2003,
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
@@ -1161,7 +1271,7 @@ impl AppError {
             }
             Self::PendingCredentialPubkeyAwaiting(_) => PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE,
             Self::PendingCredentialQueueFull(_) => PENDING_CREDENTIAL_QUEUE_FULL_CODE,
-            Self::ApiKeyScopeForbidden(_) => 9000,
+            Self::ApiKeyScopeForbidden(_) | Self::GuestModelRouteRequired => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
             Self::ApiKeyScopePlanNotFound(_) => 9003,
@@ -1272,6 +1382,7 @@ impl AppError {
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::OraclePoolActiveWork => 11017,
+            Self::OracleRetired => 11099,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1294,7 +1405,11 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_error_code(),
+            Self::RefreshRefused { source, .. } => source.oauth_error_code(),
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
@@ -1316,6 +1431,9 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_status(),
+            Self::RefreshRefused { source, .. } => source.oauth_status(),
             Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
@@ -1330,7 +1448,13 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_key(),
+            Self::SkillRead(reason) => reason.error_key(),
+            Self::MemoryWrite(reason) => reason.error_key(),
+            Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
+            Self::InvocationDiagnostic { source, .. } => source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
@@ -1342,18 +1466,25 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::ApprovalUnsupported => "approval_unsupported",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::MonitoringUnavailable => "monitoring_unavailable",
+            Self::MonitoringNotConfigured => "monitoring_not_configured",
+            Self::DiagnosticNotReady => "diagnostic_not_ready",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
+            Self::AssistantModelAuthorityChanged => "model_authority_changed",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
-            Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
+            Self::ValidationError(_)
+            | Self::ServiceSelectionInvalid { .. }
+            | Self::SkillDraftValidation(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -1365,6 +1496,7 @@ impl AppError {
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
+            Self::MfaStepUpRequired => "mfa_step_up_required",
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
@@ -1434,6 +1566,7 @@ impl AppError {
             Self::PendingCredentialPubkeyAwaiting(_) => "pending_credential_pubkey_awaiting",
             Self::PendingCredentialQueueFull(_) => "pending_credential_queue_full",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
+            Self::GuestModelRouteRequired => "guest_model_route_required",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
             Self::ApiKeyScopePlanNotFound(_) => "api_key_scope_plan_not_found",
@@ -1543,6 +1676,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
             Self::OraclePoolActiveWork => "oracle_pool_active_work",
+            Self::OracleRetired => "oracle_retired",
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
@@ -1570,9 +1704,28 @@ impl AppError {
 }
 
 impl AppError {
+    pub(crate) fn quiet_rate_limit_response(retry_after: u64) -> Response {
+        let error = Self::RateLimitedWithRetry { retry_after };
+        let mut response = (error.status_code(), axum::Json(error.response_body())).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(
+                &error
+                    .retry_after_seconds()
+                    .expect("rate limit delay")
+                    .to_string(),
+            )
+            .expect("bounded numeric retry delay"),
+        );
+        response
+    }
+
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
-            Self::RateLimited => Some(1),
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.retry_after_seconds(),
+            Self::InvocationDiagnostic { source, .. } => source.retry_after_seconds(),
+            Self::DiagnosticNotReady | Self::RateLimited => Some(1),
             Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
             _ => None,
         }
@@ -1580,6 +1733,24 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::BillingRecoveryFailed { source, .. }
+        | Self::BillingRecoveryWaiting { source } = self
+        {
+            return source.response_body();
+        }
+        if let Self::InvocationDiagnostic { source, .. } = self {
+            return source.response_body();
+        }
+        if let Self::SkillRead(reason) = self {
+            let mut response = reason.legacy_error().response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
+        }
+        if let Self::RefreshRefused { source, reason } = self {
+            let mut response = source.response_body();
+            response.details = Some(serde_json::json!({"reason": reason}));
+            return response;
+        }
         if let Self::VoiceStartFailed(failure) = self {
             return failure.response();
         }
@@ -1601,6 +1772,12 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::MemoryWrite(reason) => {
+                Some(serde_json::json!({"reason": reason, "category": reason.category()}))
+            }
+            AppError::ServiceSelectionInvalid { reason, .. } => {
+                Some(serde_json::json!({"reason": reason}))
+            }
             AppError::SkillDraftValidation(diagnostic) => {
                 Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
             }
@@ -1645,7 +1822,7 @@ impl AppError {
                     approve_url,
                     ..
                 } => {
-                    format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
+                    format!("Approval failed: {reason}. Review the approval request and its history at {approve_url}")
                 }
                 AppError::SkillDraftValidation(diagnostic)
                     if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
@@ -1665,6 +1842,12 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let Self::InvocationDiagnostic { source, handle } = self {
+            let mut response = source.into_response();
+            handle.decorate(&mut response);
+            return response;
+        }
+        let diagnostic_not_ready = matches!(self, Self::DiagnosticNotReady);
         // Log server errors at error level; client errors at warn level.
         match &self {
             // Already logged once with bounded structured fields by the startup boundary.
@@ -1692,6 +1875,12 @@ impl IntoResponse for AppError {
                     .expect("bounded numeric retry delay"),
             );
         }
+        if diagnostic_not_ready {
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
+        }
         response
     }
 }
@@ -1707,6 +1896,70 @@ impl From<crate::models::credits::CreditsError> for AppError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invocation_diagnostic_error_preserves_source_and_redacts_handle() {
+        let error = AppError::InvocationDiagnostic {
+            source: Box::new(AppError::Internal("private transport detail".into())),
+            handle: crate::services::invocation_diagnostic_service::IssuedHandle {
+                handle: "nyx_diag_do_not_log".into(),
+                expires_in: 60,
+            },
+        };
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.error_code(),
+            AppError::Internal(String::new()).error_code()
+        );
+        assert_eq!(error.error_key(), "internal_error");
+        assert_eq!(error.response_body().message, "An internal error occurred");
+        assert!(!format!("{error:?}").contains("nyx_diag_do_not_log"));
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<Box<AppError>>()
+            .expect("diagnostic source retains its declared boxed error type");
+        assert!(matches!(
+            source.as_ref(),
+            AppError::Internal(message) if message == "private transport detail"
+        ));
+    }
+
+    #[tokio::test]
+    async fn invocation_diagnostic_not_ready_uses_standard_error_contract() {
+        let response = AppError::DiagnosticNotReady.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()["retry-after"], "1");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["error"], "diagnostic_not_ready");
+        assert_eq!(body["error_code"], 13302);
+    }
+
+    #[tokio::test]
+    async fn mfa_step_up_error_preserves_typed_403_with_actionable_message() {
+        let response = AppError::MfaStepUpRequired.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::SET_COOKIE)
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error_code"], 2003);
+        assert_eq!(body["error"], "mfa_step_up_required");
+        assert_eq!(
+            body["message"],
+            "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."
+        );
+    }
+
     #[test]
     fn rate_refusal_preserves_bounded_retry_after_without_changing_the_error_contract() {
         use axum::response::IntoResponse;
@@ -1854,6 +2107,22 @@ mod tests {
         assert_eq!(payload["error_code"], 1000);
         assert_eq!(payload["error"], "bad_request");
         assert_eq!(payload["message"], "Bad request: API key is failed");
+    }
+
+    /// The retirement answer is a contract with callers that still have the
+    /// old routes or tools wired in: 410 Gone, a stable key, and a message
+    /// that says the feature is gone for good so nobody retries.
+    #[tokio::test]
+    async fn oracle_retired_is_a_permanent_410() {
+        let response = AppError::OracleRetired.into_response();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "oracle_retired");
+        assert_eq!(payload["error_code"], 11099);
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("permanently deprecated"), "{message}");
+        assert!(message.contains("Do not retry"), "{message}");
     }
 
     #[test]
@@ -2166,11 +2435,15 @@ mod tests {
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::MonitoringUnavailable.error_code(),
+            AppError::MonitoringNotConfigured.error_code(),
+            AppError::DiagnosticNotReady.error_code(),
             AppError::ManagedExecutionPending("".into()).error_code(),
             AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),
+            AppError::AssistantModelAuthorityChanged.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),
@@ -2303,6 +2576,7 @@ mod tests {
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::OracleWorkerCredentialRenewalRequired.error_code(),
+            AppError::OracleRetired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
@@ -3243,7 +3517,7 @@ mod tests {
         assert_eq!(json["approve_url"], "https://app.example.com/approvals");
         assert_eq!(
             json["message"],
-            "Approval failed: rejected. Review pending approvals at https://app.example.com/approvals"
+            "Approval failed: rejected. Review the approval request and its history at https://app.example.com/approvals"
         );
     }
 

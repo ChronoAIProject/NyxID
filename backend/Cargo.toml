@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.73.0"
+version = "0.78.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -35,6 +35,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 pulldown-cmark = "0.13"
+linkify = "0.10"
 uuid = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"
@@ -94,6 +95,8 @@ nyxid-permissions = { path = "../permissions" }
 nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"
+hyper = { version = "1", features = ["http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 httpdate = "1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
 # Feature unification picks up BOTH `ring` (via google-cloud-kms ->
@@ -123,6 +126,8 @@ tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
+# Lexer for the JWT verifier source inventory test (crypto/jwt_verifier_inventory_tests.rs).
+proc-macro2 = "1.0.106"
 
 [features]
 default = []

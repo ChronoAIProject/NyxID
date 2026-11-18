@@ -22,6 +22,7 @@ pub(crate) async fn approval_target_for_tool(
     db: &mongodb::Database,
     effective_approval_owner_user_id: &str,
     service: &mcp_service::McpToolService,
+    shared_access: Option<&super::shared_agent_service::RequestAccess>,
 ) -> AppResult<McpApprovalTarget> {
     let hint = match &service.source {
         mcp_service::McpToolSource::Internal => {
@@ -30,13 +31,22 @@ pub(crate) async fn approval_target_for_tool(
             ));
         }
         mcp_service::McpToolSource::UserManaged {
-            user_service_id, ..
+            user_service_id,
+            catalog_service_id,
+            ..
         } => proxy_service::find_approval_resolution_hint_by_user_service_id(
             db,
             effective_approval_owner_user_id,
             user_service_id,
-            Some(&service.service_slug),
-            None,
+            if shared_access.is_some() {
+                None
+            } else {
+                catalog_service_id
+                    .is_none()
+                    .then_some(service.service_slug.as_str())
+            },
+            catalog_service_id.as_deref(),
+            shared_access,
         )
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?,
@@ -203,7 +213,7 @@ mod tests {
             )
             .await;
             let service = loaded_user_service(&user_service_id, &owner_id, &slug);
-            let target = approval_target_for_tool(&db, &actor_id, &service)
+            let target = approval_target_for_tool(&db, &actor_id, &service, None)
                 .await
                 .unwrap();
             assert_eq!(target.service_id, catalog_id);
@@ -258,7 +268,7 @@ mod tests {
             .unwrap();
 
         let service = loaded_user_service(&user_service_id, &actor_id, slug);
-        let target = approval_target_for_tool(&db, &actor_id, &service)
+        let target = approval_target_for_tool(&db, &actor_id, &service, None)
             .await
             .unwrap();
 

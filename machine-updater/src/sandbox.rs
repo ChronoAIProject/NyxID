@@ -435,6 +435,9 @@ pub struct NodeLeaseObservation {
     pub uid: Option<String>,
     pub resource_version: Option<String>,
     pub owner_node_uid: Option<String>,
+    /// Explicit owner ambiguity/name conflict, distinct from incomplete metadata.
+    #[serde(default)]
+    pub owner_identity_conflict: bool,
     pub holder_identity: Option<String>,
     pub renew_time: Option<String>,
     pub lease_duration_seconds: Option<i64>,
@@ -770,9 +773,21 @@ impl NodeLeaseObservation {
             namespace: text_at(object, "/metadata/namespace").context("Lease namespace missing")?,
             uid: text_at(object, "/metadata/uid"),
             resource_version: text_at(object, "/metadata/resourceVersion"),
-            owner_node_uid: (node_owners.len() == 1)
-                .then(|| text_at(node_owners[0], "/uid"))
-                .flatten(),
+            owner_node_uid: (node_owners.len() == 1
+                && text_at(node_owners[0], "/name") == text_at(object, "/metadata/name"))
+            .then(|| text_at(node_owners[0], "/uid"))
+            .flatten(),
+            owner_identity_conflict: node_owners.len() > 1
+                || (node_owners.is_empty()
+                    && object
+                        .pointer("/metadata/ownerReferences")
+                        .and_then(Value::as_array)
+                        .is_some_and(|owners| !owners.is_empty()))
+                || node_owners.iter().any(|owner| {
+                    text_at(owner, "/name").is_some_and(|name| {
+                        text_at(object, "/metadata/name").is_some_and(|expected| name != expected)
+                    })
+                }),
             holder_identity: text_at(object, "/spec/holderIdentity"),
             renew_time: text_at(object, "/spec/renewTime"),
             lease_duration_seconds: object
@@ -5090,5 +5105,57 @@ mod tests {
             .await;
         let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
         assert!(api.health().await.is_err());
+    }
+    #[test]
+    fn pause_resume_health_lease_owner_requires_single_matching_node_name() {
+        let original = json!({"metadata":{"name":"node","namespace":"kube-node-lease",
+            "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":"node","uid":"node-uid"}]}});
+        assert_eq!(
+            NodeLeaseObservation::from_object(&original)
+                .unwrap()
+                .owner_node_uid
+                .as_deref(),
+            Some("node-uid")
+        );
+        for case in [
+            "name",
+            "duplicate",
+            "uid",
+            "kind",
+            "missing",
+            "malformed",
+            "name_missing",
+        ] {
+            let mut value = original.clone();
+            match case {
+                "name" => value["metadata"]["ownerReferences"][0]["name"] = json!("other"),
+                "duplicate" => value["metadata"]["ownerReferences"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(original["metadata"]["ownerReferences"][0].clone()),
+                "uid" => value["metadata"]["ownerReferences"][0]["uid"] = Value::Null,
+                "missing" => {
+                    value["metadata"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("ownerReferences");
+                }
+                "malformed" => value["metadata"]["ownerReferences"] = json!({}),
+                "name_missing" => {
+                    value["metadata"]["ownerReferences"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("name");
+                }
+                _ => value["metadata"]["ownerReferences"][0]["kind"] = json!("Pod"),
+            }
+            let observation = NodeLeaseObservation::from_object(&value).unwrap();
+            assert!(observation.owner_node_uid.is_none(), "{case}");
+            assert_eq!(
+                observation.owner_identity_conflict,
+                matches!(case, "name" | "duplicate" | "kind"),
+                "{case}"
+            );
+        }
     }
 }

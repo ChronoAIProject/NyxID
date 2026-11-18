@@ -63,6 +63,7 @@ vi.mock("@/hooks/use-services", () => ({
   useService: () => hooks.service,
   useDeleteService: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTestSshConnection: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useResyncServiceIdentity: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 vi.mock("@/hooks/use-anonymous-endpoints", () => ({
@@ -273,4 +274,26 @@ it("stages a public switch and blocks confirmation if its path changes", async (
   expect(
     screen.getByRole("button", { name: "Confirm changes" }),
   ).toBeDisabled();
+});
+
+describe("service detail identity resync", () => {
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])(
+    "shows the resync action only when can_resync_identity is %s",
+    (flag, visible) => {
+      hooks.service.data = makeService({ can_resync_identity: flag });
+      render(<ServiceDetailPage />);
+
+      expect(
+        screen.queryByRole("button", { name: "Resync connection identity" }) !==
+          null,
+      ).toBe(visible);
+      expect(
+        screen.queryByRole("heading", { name: "Connection identity" }) !== null,
+      ).toBe(visible);
+    },
+  );
 });

@@ -198,6 +198,59 @@ it("identifies personal and organization owners in the combined list", async () 
     .getByRole("cell", { name: "Support team" })).toBeInTheDocument();
 });
 
+it("shows Discord Gateway states in rows and cards while preserving webhook and polling labels", async () => {
+  const user = userEvent.setup();
+  const fallbackGet = get.getMockImplementation()!;
+  const states = ["connected", "connecting", "disconnected", "waiting_capacity", undefined];
+  const discordBots = states.map((gateway_state) => ({
+    id: `discord-${gateway_state ?? "unknown"}`, platform: "discord",
+    label: `Discord ${gateway_state ?? "unknown"} bot`, gateway_state,
+    webhook_registered: false,
+  }));
+  get.mockImplementation(async (path: string) => {
+    if (path === "/channel-platforms") return {
+      platforms: platformFixtures.map((platform) => platform.platform === "x" ? {
+        ...platform, registration: { ...platform.registration, webhook_ingestion: false },
+      } : platform),
+    };
+    if (path === "/channel-bots?scope=all") return {
+      bots: [
+        ...discordBots,
+        { id: "registered", platform: "telegram", label: "Registered Telegram bot", webhook_registered: true },
+        { id: "unregistered", platform: "telegram", label: "Unregistered Telegram bot", webhook_registered: false },
+        { id: "polling", platform: "x", label: "Polling X bot", webhook_registered: false },
+      ].map((bot) => ({
+        ...bot, user_id: "actor-1", platform_bot_username: "bot", status: "active",
+        is_active: true, created_at: "2026-09-16T10:00:00Z",
+      })), total: 8,
+    };
+    return fallbackGet(path);
+  });
+  await setup("/channel-bots");
+  await screen.findAllByText("Discord connected bot");
+  await user.click(screen.getByRole("button", { name: "Grid view" }));
+  for (const bot of discordBots) {
+    for (const label of screen.getAllByText(bot.label)) {
+      const card = within(label.closest('[role="button"]') as HTMLElement);
+      expect(card.getByText(bot.gateway_state ? `Gateway ${bot.gateway_state}` : "Gateway")).toBeInTheDocument();
+      expect(card.queryByText("No webhook")).not.toBeInTheDocument();
+    }
+  }
+  expect(screen.getAllByText("Webhook registered").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("No webhook").length).toBeGreaterThan(0);
+  await user.click(screen.getByRole("button", { name: "Table view" }));
+  expect(screen.getByRole("columnheader", { name: "Ingestion" })).toBeInTheDocument();
+  for (const bot of discordBots) {
+    const row = screen.getByRole("row", { name: new RegExp(bot.label) });
+    expect(within(row).getByText(bot.gateway_state ? `Gateway ${bot.gateway_state}` : "Gateway")).toBeInTheDocument();
+    expect(within(row).queryByText("Not registered")).not.toBeInTheDocument();
+    expect(Boolean(row.querySelector("svg.text-success"))).toBe(bot.gateway_state === "connected");
+  }
+  expect(within(screen.getByRole("row", { name: /Registered Telegram bot/ })).getByText("Registered")).toBeInTheDocument();
+  expect(within(screen.getByRole("row", { name: /Unregistered Telegram bot/ })).getByText("Not registered")).toBeInTheDocument();
+  expect(within(screen.getByRole("row", { name: /Polling X bot/ })).getByText("Polling")).toBeInTheDocument();
+});
+
 it("persists a draft from the shared modal fields with replacement navigation and restores it on remount", async () => {
   const user = userEvent.setup();
   const view = await setup();

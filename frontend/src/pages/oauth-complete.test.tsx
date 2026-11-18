@@ -260,6 +260,43 @@ describe("OAuth completion page", () => {
     });
   });
 
+  it("sends CLI connections back to the terminal without a nonce or channel", () => {
+    vi.useFakeTimers();
+    window.history.replaceState(
+      {},
+      "",
+      "/oauth-complete?status=complete&flow=wz",
+    );
+    render(<OAuthCompletePage />);
+    expect(
+      screen.getByText("Authorization response received"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/return to your terminal/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connected/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(MockBroadcastChannel.instances).toHaveLength(0);
+    expect(window.location.search).toBe("");
+    vi.advanceTimersByTime(3_500);
+    expect(window.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows CLI failures with terminal guidance and never auto-closes", () => {
+    vi.useFakeTimers();
+    window.history.replaceState(
+      {},
+      "",
+      "/oauth-complete?status=error&flow=wz&code=session_mismatch",
+    );
+    render(<OAuthCompletePage />);
+    expect(screen.getByText("Different NyxID account")).toBeInTheDocument();
+    expect(
+      screen.getByText(/return to your terminal for details/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    vi.advanceTimersByTime(30_000);
+    expect(window.close).not.toHaveBeenCalled();
+  });
+
   it("direct open does not broadcast", () => {
     window.history.replaceState({}, "", "/oauth-complete");
     render(<OAuthCompletePage />);

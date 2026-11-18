@@ -66,6 +66,7 @@ export function toAssistantApprovalEntry(
       type: "approval_card",
       block_id: request.id,
       approval_request_id: request.id,
+      ...(request.execution_proposal ? { execution_proposal: request.execution_proposal } : {}),
       body: primaryActionLabel(request),
       service_slug: request.service_slug,
       agent_key_prefix: request.requester_label ?? request.requester_type,

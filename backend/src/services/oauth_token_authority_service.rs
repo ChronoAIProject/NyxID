@@ -8,6 +8,7 @@ use mongodb::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use super::consent_service;
 use crate::{
@@ -37,6 +38,8 @@ pub(super) const AUTHORITY_READ_BUDGET: std::time::Duration = std::time::Duratio
 pub(super) struct AuthorityReads<'a> {
     db: &'a Database,
     rows: Vec<(&'static str, bson::Document, bson::Document)>,
+    route_class: &'static str,
+    rejection_keys: HashSet<String>,
 }
 
 impl<'a> AuthorityReads<'a> {
@@ -44,6 +47,29 @@ impl<'a> AuthorityReads<'a> {
         Self {
             db,
             rows: Vec::new(),
+            route_class: "access",
+            rejection_keys: HashSet::new(),
+        }
+    }
+
+    pub(super) fn for_route(db: &'a Database, route_class: &'static str) -> Self {
+        Self {
+            db,
+            rows: Vec::new(),
+            route_class,
+            rejection_keys: HashSet::new(),
+        }
+    }
+
+    pub(super) fn log_rejection(&mut self, client_id: &str, reason: &str) {
+        let key = format!("{}:{client_id}:{reason}", self.route_class);
+        if self.rejection_keys.insert(key) {
+            tracing::warn!(
+                client_id,
+                route_class = self.route_class,
+                reason,
+                "Protected OAuth authority rejected"
+            );
         }
     }
 
@@ -178,12 +204,19 @@ fn fingerprint(value: &impl Serialize) -> AppResult<String> {
 }
 
 async fn active_client(reads: &mut AuthorityReads<'_>, client_id: &str) -> AppResult<OauthClient> {
-    reads
-        .required(
+    match reads
+        .read(
             crate::models::oauth_client::COLLECTION_NAME,
             doc! {"_id":client_id,"is_active":true},
         )
-        .await
+        .await?
+    {
+        Some(client) => Ok(client),
+        None => {
+            reads.log_rejection(client_id, "client_inactive");
+            Err(denied())
+        }
+    }
 }
 
 async fn source_session(
@@ -297,11 +330,29 @@ pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<()> {
     validate_claims_with_user(db, claims).await.map(|_| ())
 }
 
+pub async fn validate_claims_for_route(
+    db: &Database,
+    claims: &Claims,
+    route_class: &'static str,
+) -> AppResult<()> {
+    validate_claims_with_user_for_route(db, claims, route_class)
+        .await
+        .map(|_| ())
+}
+
 /// Retain the active user loaded during authority validation so callers can
 /// apply account checks without another read. Service accounts and relay tokens
 /// keep their separate authority checks and return no human user.
 pub async fn validate_claims_with_user(db: &Database, claims: &Claims) -> AppResult<Option<User>> {
     validate_claims_with_reads(&mut AuthorityReads::new(db), claims).await
+}
+
+pub async fn validate_claims_with_user_for_route(
+    db: &Database,
+    claims: &Claims,
+    route_class: &'static str,
+) -> AppResult<Option<User>> {
+    validate_claims_with_reads(&mut AuthorityReads::for_route(db, route_class), claims).await
 }
 
 async fn validate_claims_with_reads(

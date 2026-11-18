@@ -23,6 +23,10 @@ fn state_name(state: WriteState) -> &'static str {
 }
 
 fn conflict(row: &LarkBaseWrite) -> AppError {
+    diagnostic::failure(Failure::Ledger(row.state), None, None);
+    if matches!(row.state, WriteState::Dispatching | WriteState::Uncertain) {
+        diagnostic::outcome(diagnostic::Outcome::Uncertain);
+    }
     match row.state {
         WriteState::Succeeded => AppError::Conflict(format!(
             "Photo already belongs to record {}; use bitable_record_update to change its fields",
@@ -69,8 +73,8 @@ pub(super) async fn claim(
                     // Commit the uncertainty before returning its refusal.
                     return Ok(Claim::Active(Box::new(LarkBaseWrite { state: WriteState::Uncertain, ..row.clone() })));
                 }
-                if !matches!(row.state, WriteState::FailedPreDispatch | WriteState::FailedDefinite)
-                    && !(row.state == WriteState::Uploading && row.deadline_at <= Utc::now() && same_authority) {
+                if !(matches!(row.state, WriteState::FailedPreDispatch | WriteState::FailedDefinite)
+                    || row.state == WriteState::Uploading && row.deadline_at <= Utc::now() && same_authority) {
                     return Err(conflict(row));
                 }
                 next.id = row.id.clone();

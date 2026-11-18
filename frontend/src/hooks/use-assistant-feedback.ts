@@ -31,7 +31,7 @@ export function useAssistantFeedback(
       setPending(true);
       try {
         const result = vote
-          ? await api.put<AssistantFeedback>(path, { vote, comment })
+          ? await api.put<AssistantFeedback>(path, { vote, ...(comment === undefined ? {} : { comment }) })
           : await api.delete<void>(path);
         if (queryClient) {
           const queryKey =
@@ -51,5 +51,88 @@ export function useAssistantFeedback(
     mutateAsync,
     isPending,
     cacheKey: [scope, parentId, messageId] as const,
+  };
+}
+
+export interface ReplyFeedback {
+  readonly vote: AssistantFeedbackVote | undefined;
+  readonly comment: string;
+  readonly edit: () => void;
+  readonly pending: boolean;
+  readonly formOpen: boolean;
+  /** The vote itself failed to save. */
+  readonly error: boolean;
+  readonly toggle: (next: AssistantFeedbackVote) => Promise<void>;
+  /** Saves the optional details and closes the form; false when saving failed. */
+  readonly send: (comment: string) => Promise<boolean>;
+  readonly close: () => void;
+}
+
+/**
+ * One reply's vote. Choosing a vote saves it at once and opens the optional
+ * reasons and details form; choosing it again withdraws it.
+ */
+export function useReplyFeedback({
+  scope,
+  parentId,
+  messageId,
+  initialVote,
+  initialComment = "",
+  onVoted,
+}: {
+  readonly scope: "conversation" | "group";
+  readonly parentId: string;
+  readonly messageId: string;
+  readonly initialVote: AssistantFeedbackVote | undefined;
+  readonly initialComment?: string | null;
+  readonly onVoted?: (vote: AssistantFeedbackVote) => void;
+}): ReplyFeedback {
+  const feedback = useAssistantFeedback(scope, parentId, messageId);
+  const [vote, setVote] = useState(initialVote);
+  const [savedComment, setComment] = useState(initialComment ?? "");
+  const [formOpen, setFormOpen] = useState(false);
+  const [error, setError] = useState(false);
+  const toggle = async (next: AssistantFeedbackVote) => {
+    const previous = vote;
+    const previousComment = savedComment;
+    const selected = previous === next ? undefined : next;
+    setVote(selected);
+    setFormOpen(Boolean(selected));
+    if (!selected) setComment("");
+    try {
+      await feedback.mutateAsync(selected ? { vote: selected } : {});
+      setError(false);
+    } catch {
+      setVote(previous);
+      if (!selected) setComment(previousComment);
+      setFormOpen(false);
+      setError(true);
+      return;
+    }
+    if (selected) onVoted?.(selected);
+  };
+  const send = async (comment: string) => {
+    if (!vote) return false;
+    if (comment !== savedComment) {
+      try {
+        await feedback.mutateAsync({ vote, comment });
+        setComment(comment);
+      } catch {
+        return false;
+      }
+    }
+    setFormOpen(false);
+    return true;
+  };
+  return {
+    vote,
+    comment: savedComment,
+    edit: () => { if (vote) setFormOpen(true); },
+    pending: feedback.isPending,
+    formOpen,
+    error,
+    toggle,
+    send,
+    close: () => setFormOpen(false),
   };
 }

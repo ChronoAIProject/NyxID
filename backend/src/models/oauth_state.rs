@@ -55,6 +55,9 @@ pub struct OAuthState {
     /// e.g., "/admin/service-accounts/{sa_id}" for admin flows.
     #[serde(default)]
     pub redirect_path: Option<String>,
+    /// Mobile destination for a service authorization result; never contains credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_return_uri: Option<String>,
     /// NyxID-owned wire token for the surface that initiated this flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_kind: Option<String>,
@@ -102,6 +105,7 @@ mod tests {
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
+            app_return_uri: None,
             flow_kind: Some("cc".to_string()),
             attempt_nonce: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: None,
@@ -142,6 +146,7 @@ mod tests {
             target_user_id: None,
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
+            app_return_uri: None,
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,
@@ -175,6 +180,7 @@ mod tests {
             target_user_id: Some(sa_id.clone()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),
+            app_return_uri: None,
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,

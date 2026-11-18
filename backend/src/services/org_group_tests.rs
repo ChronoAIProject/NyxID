@@ -42,6 +42,8 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        execution_task: None,
+        collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
         user_id: f.org.clone(),
@@ -354,7 +356,7 @@ async fn org_group_threads_keys_billing_uploads_and_single_auth_resolution() {
             assert!(uploads::for_chat(&f.state.db, &chat, other).await.is_err());
         }
         let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 actor,
                 &f.org,
                 crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
@@ -2086,6 +2088,8 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        execution_task: None,
+        collaboration: None,
         id: id.into(),
         group_id: access.group.id.clone(),
         user_id: f.org.clone(),
@@ -2152,5 +2156,222 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
             .unwrap(),
         2
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_group_global_candidacy_uses_the_existing_person_read() {
+    let f = Fixture::new("org_group_broad_enrollment").await;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    assert!(!access(&f, &f.member, &group.id).await.execution_enrolled);
+    super::execution_permission_dispatch::phase_b_tests::enroll_global(&f.state.db, &f.member)
+        .await;
+    assert!(access(&f, &f.member, &group.id).await.execution_enrolled);
+    // A cached user-level deny removes candidacy without a marker or extra lookup.
+    super::feature_flag_admin_service::mutate(
+        &f.state.db,
+        super::execution_permission_enrollment::FLAG,
+        super::feature_flag_admin_service::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(f.member.clone()),
+            enabled: Some(false),
+        },
+        &super::audit_service::AuditActor {
+            user_id: f.admin.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .execution_enrollment
+        .refresh(&f.state.db)
+        .await
+        .unwrap();
+    assert!(!access(&f, &f.member, &group.id).await.execution_enrolled);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notifications_follow_org_group_participant_and_transcript_purge() {
+    let f = Fixture::new("notifications_org_group_purge").await;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let member_access = access(&f, &f.member, &group.id).await;
+    let request = enqueue(&f, &member_access, &agent, &[]).await;
+    let thread = start(&f, &member_access, &agent, &request).await;
+    finish(&f, &thread).await;
+    let direct =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"conversation_id":&thread.id})
+            .await;
+    let departing =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"group_id":&group.id}).await;
+    let remaining =
+        seed_notification_purge_probe(&f.state.db, &f.admin, doc! {"group_id":&group.id}).await;
+    let unrelated =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"group_id":"another-group"})
+            .await;
+    groups::update(
+        &f.state.db,
+        access(&f, &f.admin, &group.id).await,
+        None,
+        None,
+        Some(std::slice::from_ref(&f.admin)),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_notification_probe(&f.state.db, &direct, false).await;
+    assert_notification_probe(&f.state.db, &departing, false).await;
+    assert_notification_probe(&f.state.db, &remaining, true).await;
+    groups::delete(&f.state.db, &access(&f, &f.admin, &group.id).await)
+        .await
+        .unwrap();
+    assert_notification_probe(&f.state.db, &remaining, false).await;
+    assert_notification_probe(&f.state.db, &unrelated, true).await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notifications_are_published_by_org_group_settlement_only_for_the_acting_member() {
+    use super::assistant_notification_service as feed;
+    use crate::models::assistant_notification::{
+        AssistantNotification, NotificationKind, SourceType,
+    };
+
+    async fn publish(
+        f: &Fixture,
+        group_id: &str,
+        agent: &AssistantAgent,
+        text: &str,
+        failed: bool,
+    ) {
+        let rows = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_notifications");
+        let before = rows.count_documents(doc! {}).await.unwrap();
+        let member = access(f, &f.member, group_id).await;
+        let request = enqueue(f, &member, agent, &[]).await;
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), before);
+        let row = start(f, &member, agent, &request).await;
+        let credential = key(f, &row).await;
+        engine::finish_turn(
+            &f.state.db,
+            &row,
+            &credential.id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: text.into(),
+                session_id: None,
+                response_id: None,
+                error: failed.then(|| engine::TurnError::internal("turn_lost", "settlement")),
+            },
+        )
+        .await
+        .unwrap();
+        // Hidden member-thread settlement is silent; the public post is authoritative.
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), before);
+        f.state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .update_one(
+                doc! {"_id": &request},
+                doc! {"$set": {"pending_agent_ids": []}},
+            )
+            .await
+            .unwrap();
+        crate::handlers::org_group::member_settled(
+            &f.state,
+            member,
+            &row,
+            text,
+            failed.then_some("turn_lost"),
+        )
+        .await;
+    }
+
+    let f = Fixture::new("notifications_org_group_replies").await;
+    engine_flag(&f).await;
+    feed::ensure_indexes(&f.state.db).await.unwrap();
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let notifications = f
+        .state
+        .db
+        .collection::<AssistantNotification>("assistant_notifications");
+    publish(&f, &group.id, &agent, "Flag-off reply", false).await;
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 0);
+    for person in [&f.member, &f.admin] {
+        flags::set_platform_override(
+            &f.state.db,
+            flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+            &flags::FlagTarget::User(person.clone()),
+            true,
+            &f.admin,
+        )
+        .await
+        .unwrap();
+    }
+    feed::reset_flag_cache(&f.state.db);
+    publish(&f, &group.id, &agent, "# First member result", false).await;
+    let first = notifications.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(first.user_id, f.member);
+    assert_eq!(first.kind, NotificationKind::AgentUpdate);
+    assert_eq!(first.source.source_type, SourceType::Group);
+    assert_eq!(first.source.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(first.count, 1);
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    let query = feed::ListQuery {
+        limit: 20,
+        ..Default::default()
+    };
+    let page = feed::list(&f.state, &f.member, &query).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].preview, "First member result");
+    assert!(page.items[0].url.contains(&group.id));
+    assert!(
+        feed::list(&f.state, &f.admin, &query)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        feed::list(&f.state, &f.org, &query)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let summary = feed::summary(&f.state.db, &f.member).await.unwrap();
+    assert_eq!(summary.unread_count, 1);
+    assert_eq!(summary.by_source[0].id, group.id);
+    publish(&f, &group.id, &agent, "Second member result", false).await;
+    publish(&f, &group.id, &agent, "Unfinished work", true).await;
+    let latest = notifications.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(latest.id, first.id);
+    assert_eq!(latest.count, 3);
+    assert_eq!(latest.outcome.as_deref(), Some("failed"));
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    let page = feed::list(&f.state, &f.member, &query).await.unwrap();
+    assert!(page.items[0].preview.contains("could not finish"));
+    groups::update(
+        &f.state.db,
+        access(&f, &f.admin, &group.id).await,
+        None,
+        None,
+        Some(std::slice::from_ref(&f.admin)),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 0);
     f.state.db.drop().await.unwrap();
 }

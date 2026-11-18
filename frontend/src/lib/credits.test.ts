@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   decimalCredits,
   exactCredits,
+  formatCreditAmount,
   formatExactCredits,
   legacyCredits,
   parseCredits,
@@ -24,6 +25,14 @@ const row = (amount: string) =>
   });
 
 describe("exact credits", () => {
+  it("labels singular displayed credits without converting exact money to numbers", () => {
+    expect(formatCreditAmount("1")).toBe("1 credit");
+    expect(formatCreditAmount("-1")).toBe("-1 credit");
+    expect(formatCreditAmount("1.000000000001")).toBe("1 credit");
+    expect(formatCreditAmount("1.000001")).toBe("1.000001 credits");
+    expect(formatCreditAmount("0")).toBe("0 credits");
+    expect(formatCreditAmount("2")).toBe("2 credits");
+  });
   it("preserves fractions and large values without floating point", () => {
     const amount = "9999999999999999999999.999999999999";
     expect(decimalCredits(parseCredits(amount))).toBe(amount);

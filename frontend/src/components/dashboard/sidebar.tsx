@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
@@ -39,7 +42,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
@@ -55,6 +57,7 @@ import {
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/models", icon: Sparkles, label: "Platform Models" },
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/tools", icon: Sparkles, label: "Tools" },
   { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
@@ -84,6 +87,7 @@ export const DEVELOPER_NAV = [
 const ADMIN_USAGE_PATH = "/admin/usage";
 
 export const ADMIN_NAV = [
+  { to: "/admin/platform-models", icon: Sparkles, label: "Platform Models" },
   { to: "/admin/platform-bots", icon: Bot, label: "Platform BotFather" },
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
@@ -120,7 +124,7 @@ export function getVisibleMainNav(
   user: Parameters<typeof isBillingAvailable>[0],
 ): readonly NavItemDef[] {
   return MAIN_NAV.filter(
-    (item) => item.to !== "/billing" || isBillingAvailable(user),
+    (item) => (item.to !== "/billing" || isBillingAvailable(user)) && (item.to !== "/models" || userHasFeature(user, FEATURE_FLAG.INFERENCE_PLATFORM_MODELS)),
   );
 }
 
@@ -178,13 +182,16 @@ function NavItem({
   readonly collapsed: boolean;
   readonly onClick?: () => void;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={item.to}
       onClick={onClick}
       title={collapsed ? item.label : undefined}
+      data-nav-collapsed={collapsed}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
+        "shell-nav-item group/nav flex items-center rounded-lg py-2 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
@@ -194,7 +201,7 @@ function NavItem({
     >
       <item.icon
         className={cn(
-          "h-[16px] w-[16px] shrink-0",
+          "size-[1.125em] shrink-0",
           active ? "text-nyx-secondary-400" : "text-text-tertiary",
         )}
       />
@@ -204,7 +211,7 @@ function NavItem({
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
-        {item.label}
+        {translateUi(item.label)}
       </span>
     </Link>
   );
@@ -219,6 +226,7 @@ export function AssistantNavEntry({
   readonly mobile?: boolean;
   readonly onClick?: () => void;
 }) {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AI_ASSISTANT);
 
   if (!enabled) return null;
@@ -227,11 +235,12 @@ export function AssistantNavEntry({
     <Link
       to="/assistant"
       onClick={onClick}
-      title={collapsed ? "Assistant" : undefined}
+      title={collapsed ? translateUi("Assistant") : undefined}
+      data-nav-collapsed={collapsed}
       className={cn(
-        "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
+        "shell-nav-item group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
-        mobile ? "gap-3 px-4 py-3 text-14" : "py-[7px] text-12",
+        mobile ? "gap-3 px-4 py-3" : "py-[7px]",
         !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
       )}
     >
@@ -246,17 +255,13 @@ export function AssistantNavEntry({
           "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
-      >
-        Assistant
-      </span>
+      >{translateUi("Assistant")}</span>
       <span
         className={cn(
-          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 type-table-header text-nyx-secondary-400",
           collapsed && "hidden",
         )}
-      >
-        NEW
-      </span>
+      >{translateUi("NEW")}</span>
     </Link>
   );
 }
@@ -265,6 +270,7 @@ export function Sidebar({
   onNavigate,
   mobile = false,
 }: { readonly onNavigate?: () => void; readonly mobile?: boolean } = {}) {
+  useUiTranslation();
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
@@ -315,7 +321,7 @@ export function Sidebar({
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
         <AssistantNavEntry collapsed={isCollapsed} onClick={onNavigate} />
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {mainNav.map((item) => (
             <NavItem
               key={item.to}
@@ -327,16 +333,14 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-              Approvals
-            </span>
+            <span className="shell-group-label">{translateUi("Approvals")}</span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {APPROVALS_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -348,16 +352,14 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-              Developer
-            </span>
+            <span className="shell-group-label">{translateUi("Developer")}</span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {DEVELOPER_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -371,16 +373,14 @@ export function Sidebar({
 
         {adminNav.length > 0 && (
           <>
-            <div className="px-3 my-2 flex items-center">
+            <div className="flex items-center">
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                  Admin
-                </span>
+                <span className="shell-group-label">{translateUi("Admin")}</span>
               )}
             </div>
-            <div className="flex flex-col gap-[2px]">
+            <div className="shell-nav-stack">
               {adminNav.map((item) => (
                 <NavItem
                   key={item.to}
@@ -401,7 +401,7 @@ export function Sidebar({
             <PopoverTrigger asChild>
               <button
                 className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-hairline bg-overlay-strong text-text-tertiary transition-colors duration-200 hover:border-hairline-strong hover:text-foreground"
-                title="Sidebar control"
+                title={translateUi("Sidebar control")}
               >
                 {isCollapsed ? (
                   <PanelLeft className="h-[14px] w-[14px]" />
@@ -417,23 +417,21 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-13 font-medium text-foreground">
-                  Sidebar control
-                </p>
+                <p className="type-card-title text-foreground">{translateUi("Sidebar control")}</p>
               </div>
               <div className="p-1.5">
                 <SidebarModeOption
-                  label="Expanded"
+                  label={translateUi("Expanded")}
                   active={mode === "expanded"}
                   onClick={() => changeMode("expanded")}
                 />
                 <SidebarModeOption
-                  label="Collapsed"
+                  label={translateUi("Collapsed")}
                   active={mode === "collapsed"}
                   onClick={() => changeMode("collapsed")}
                 />
                 <SidebarModeOption
-                  label="Expand on hover"
+                  label={translateUi("Expand on hover")}
                   active={mode === "hover"}
                   onClick={() => changeMode("hover")}
                 />
@@ -490,7 +488,7 @@ export function Sidebar({
       {mode === "expanded" && (
         <SidebarResizeHandle
           sidebar="dashboard"
-          label="Resize sidebar"
+          label={translateUi("Resize sidebar")}
           onPreview={setPreviewWidth}
         />
       )}
@@ -507,12 +505,13 @@ function SidebarModeOption({
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  useUiTranslation();
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-13 transition-colors duration-200 hover:bg-overlay-strong",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-15 transition-colors duration-200 hover:bg-overlay-strong",
         active
           ? "text-foreground"
           : "text-muted-foreground hover:text-foreground",
@@ -526,7 +525,7 @@ function SidebarModeOption({
             : "fill-transparent text-muted-foreground/30",
         )}
       />
-      {label}
+      {translateUi(label)}
     </button>
   );
 }

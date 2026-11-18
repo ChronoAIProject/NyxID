@@ -359,15 +359,38 @@ pub(crate) async fn prepare_uploads_from(
     if attachments.is_empty() {
         return PreparedInput::default();
     }
-    if !flags::personal_flag_enabled(&state.db, user, flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY)
-        .await
-        .unwrap_or(false)
+    let gate_note = match flags::personal_flag_enabled(
+        &state.db,
+        user,
+        flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+    )
+    .await
     {
+        Ok(true) => None,
+        Ok(false) => Some(
+            "The platform-managed channel-media capability is not enabled for this owner. Ask a NyxID platform administrator to review the assistant:channel-media rollout for this owner.",
+        ),
+        Err(_) => {
+            // Keep internal lookup details out of the conversation and logs.
+            tracing::warn!(
+                "Telegram attachment preparation blocked: channel-media capability lookup failed"
+            );
+            Some(
+                "NyxID could not verify the platform-managed channel-media capability because its configuration lookup failed. Whether it is enabled is unknown. Ask a NyxID platform administrator to investigate the lookup failure before retrying.",
+            )
+        }
+    };
+    if let Some(gate_note) = gate_note {
+        let count = attachments.len();
+        let subject = if count == 1 {
+            "1 attachment is".to_owned()
+        } else {
+            format!("{count} attachments are")
+        };
         return PreparedInput {
             uploads: Vec::new(),
             note: format!(
-                "{} attachments are not shared with the assistant because channel file sharing is disabled for this owner.",
-                attachments.len()
+                "{subject} not shared with the assistant. {gate_note} This is not an owner Privacy setting or a service-permission denial; changing Usage Analytics, Full access, or broader file permissions will not resolve this gate. No attachment was downloaded or read, and file-format support has not been checked. Keep the original task pending; do not automatically resend files or claim completion. Verify capability availability and support for the file before asking the owner to resend it once."
             ),
         };
     }

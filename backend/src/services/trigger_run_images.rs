@@ -24,6 +24,8 @@ struct RunImages {
     #[serde(default)]
     image_refs: Vec<RunImageRef>,
     #[serde(default)]
+    delegated_image_refs: Vec<crate::models::assistant_delegated_image::DeliveryReference>,
+    #[serde(default)]
     image_refs_truncated: u32,
 }
 
@@ -107,14 +109,14 @@ pub async fn accumulate_in_session(
         .iter()
         .filter(|item| engine::chat_tool_image(item))
         .collect();
-    if attachments.is_empty() {
+    if attachments.is_empty() && turn.delegated_images.references.is_empty() {
         return Ok(());
     }
     let filter = doc! {"_id":run_id,"user_id":&conversation.user_id,"thread_id":&conversation.id,"turn_id":&turn.turn_id};
     let Some(document) = db
         .collection::<Document>(RUNS)
         .find_one(filter.clone())
-        .projection(doc! {"user_id":1,"deliver_to":1,"image_refs":1,"image_refs_truncated":1})
+        .projection(doc! {"user_id":1,"deliver_to":1,"image_refs":1,"delegated_image_refs":1,"image_refs_truncated":1})
         .session(&mut *session)
         .await?
     else {
@@ -160,7 +162,22 @@ pub async fn accumulate_in_session(
             attachment: attachment.clone(),
         });
     }
+    for reference in &turn.delegated_images.references {
+        if run
+            .delegated_image_refs
+            .iter()
+            .any(|r| r.attachment.id == reference.attachment.id)
+        {
+            continue;
+        }
+        if run.delegated_image_refs.len() >= MAX_RUN_IMAGES {
+            run.image_refs_truncated = run.image_refs_truncated.saturating_add(1);
+        } else {
+            run.delegated_image_refs.push(reference.clone());
+        }
+    }
     db.collection::<Document>(RUNS).update_one(filter,doc! {"$set":{
+        "delegated_image_refs":bson::to_bson(&run.delegated_image_refs).map_err(|_|crate::errors::AppError::Internal("Automation image metadata unavailable".into()))?,
         "image_refs":bson::to_bson(&run.image_refs).map_err(|_|crate::errors::AppError::Internal("Automation image metadata unavailable".into()))?,"image_refs_truncated":i64::from(run.image_refs_truncated),
     }}).session(&mut *session).await?;
     Ok(())

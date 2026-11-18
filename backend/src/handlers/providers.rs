@@ -896,6 +896,7 @@ pub async fn link_service(
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: true,
         admin_required: authority == CatalogAuthority::Admin,
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
     };
     Box::pin(crate::services::provider_link_service::link_with_authority(

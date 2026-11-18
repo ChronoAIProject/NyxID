@@ -517,6 +517,18 @@ pub async fn fetch_exchange_token(
     config: &TokenExchangeConfig,
     credential: &serde_json::Map<String, serde_json::Value>,
 ) -> AppResult<CachedToken> {
+    fetch_exchange_token_with_response_check(http, base_url, config, credential, |_| Ok(())).await
+}
+
+/// Registration can classify rejected caller credentials before JSON parsing;
+/// runtime exchanges retain their existing provider diagnostic contract.
+pub(crate) async fn fetch_exchange_token_with_response_check(
+    http: &reqwest::Client,
+    base_url: &str,
+    config: &TokenExchangeConfig,
+    credential: &serde_json::Map<String, serde_json::Value>,
+    check: impl FnOnce(&reqwest::Response) -> AppResult<()> + Send,
+) -> AppResult<CachedToken> {
     let url = resolve_endpoint(&config.endpoint, base_url);
     let body = substitute_template(&config.request_template, credential)?;
 
@@ -548,6 +560,7 @@ pub async fn fetch_exchange_token(
         .send()
         .await
         .map_err(|_| AppError::ChannelPlatformError("token_exchange transport failed".into()))?;
+    check(&response)?;
     let status = response.status();
     let response: serde_json::Value = response.json().await.map_err(|_| {
         AppError::ChannelPlatformError("Invalid token_exchange JSON response".into())

@@ -92,12 +92,10 @@ describe("NyxBot conversation schema", () => {
     expect(chat.channel?.bot_label).toBe("Office bot");
     expect(row).not.toHaveProperty("team_id");
     expect(row).not.toHaveProperty("members");
-    expect(() =>
-      nyxAgentConversationSchema.parse({
-        ...legacyConversation,
-        agent: { id: "a", kind: "robot", name: "x", destroyed: false },
-      }),
-    ).toThrow();
+    expect(nyxAgentConversationSchema.parse({
+      ...legacyConversation,
+      agent: { id: "a", kind: "robot", name: "x", destroyed: false },
+    }).agent?.kind).toBe("unknown");
   });
 });
 
@@ -116,8 +114,9 @@ describe("NyxBot message and card schemas", () => {
     expect(nyxAgentMessageSchema.parse({ ...message, role }).role).toBe(role);
   });
 
-  it("rejects unknown roles", () => {
-    expect(() => nyxAgentMessageSchema.parse({ ...message, role: "system" })).toThrow();
+  it("keeps future roles neutral while rejecting malformed roles", () => {
+    expect(nyxAgentMessageSchema.parse({ ...message, role: "system" }).role).toBe("unknown");
+    expect(() => nyxAgentMessageSchema.parse({ ...message, role: 42 })).toThrow();
   });
 
   it("defaults acknowledgements to the user as decider and reads orchestrator routing", () => {
@@ -154,6 +153,22 @@ describe("NyxBot message and card schemas", () => {
     expect(nyxAgentAcknowledgementSchema.parse(row)).toMatchObject({ decided_by: "access_mode", confirmation: { reason: "approval" } });
     expect(nyxAgentAcknowledgementSchema.parse({ ...row, decided_by: "future", confirmation: { ...row.confirmation, reason: "future" } })).toMatchObject({ decided_by: "future", confirmation: { reason: "access_mode" } });
     expect(nyxAgentMessageSchema.parse({ ...message, role: "user", continuation_of: row.id }).continuation_of).toBe(row.id);
+  });
+
+  it("preserves protected org reasons and supported or unsupported personal setup offers", () => {
+    const card = { id: "12345678-1234-4123-8123-123456789012", kind: "action", status: "pending",
+      summary: "Read the organization connection", service_slug: "github", service_name: "GitHub",
+      tool_name: "nyxid.service_execution", created_at: at, decided_at: null, expires_at: at,
+      confirmation: { risk: "read", access_mode: "autopilot", reason: "org_connection" } };
+    for (const connect_own of [
+      { supported: true, catalog_service_id: "catalog", service_slug: "github" },
+      { supported: false, reason: "ssh_requires_advanced_setup" },
+    ]) {
+      expect(nyxAgentAcknowledgementSchema.parse({ ...card, connect_own })).toMatchObject({
+        confirmation: { reason: "org_connection" }, connect_own,
+      });
+    }
+    expect(nyxAgentAcknowledgementSchema.parse(card).connect_own).toBeUndefined();
   });
 
   it("parses a history with team members", () => {
@@ -234,6 +249,12 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(list.agents[0]?.pending_requests[0]?.conversation_id).toBe(specialistThread);
     expect(list.agents[0]?.channels[0]?.platform).toBe("telegram");
     expect(list.limits.max_live_subagents_limit).toBe(32);
+    expect(list.destroyed_truncated).toBeUndefined(); // Older servers omit the field.
+  });
+
+  it("retains additive destroyed archive truncation metadata", () => {
+    const list = assistantAgentListSchema.parse({ agents: [agent], limits, destroyed_truncated: true });
+    expect(list.destroyed_truncated).toBe(true);
   });
 
   it("parses one agent with memory and threads", () => {
@@ -356,6 +377,20 @@ describe("NyxBot team, settings and channel schemas", () => {
       .follow_readiness).toBe("ready");
   });
 
+  it("defaults private chat posting off for older channel responses", () => {
+    const channel = {
+      id: "c", channel_bot_id: "bot", platform: "telegram", bot_label: "Bot",
+      transport: "gateway", status: "active", owner_linked: true, created_at: at,
+    };
+    expect(nyxAgentChannelAgentSchema.parse(channel).private_chat_posts).toBe(false);
+    for (const enabled of [false, true]) {
+      expect(nyxAgentChannelAgentSchema.parse({ ...channel, private_chat_posts: enabled })
+        .private_chat_posts).toBe(enabled);
+    }
+    expect(nyxAgentChannelAgentSchema.safeParse({ ...channel, private_chat_posts: "true" })
+      .success).toBe(false);
+  });
+
   it("keeps only https owner links", () => {
     const channel_agent = {
       id: "c",
@@ -432,6 +467,14 @@ describe("group schemas", () => {
     ).toThrow();
   });
 
+  it("retains server member names and unavailable reasons without a viewer agent inventory", () => {
+    const agent = { ...group.members[1], display_name: "Office Agent", unavailable: true, unavailable_reason: "not_shared_with_you", owner_name: "Share Ops" };
+    const page = assistantGroupMessagesSchema.parse({ group: { ...group, members: [agent] }, messages: [{ id: "m", seq: 1, role: "notice", agent, text: "Ask the owner", created_at: at }] });
+    expect(page.group.members[0]).toMatchObject(agent);
+    expect(page.messages[0]?.agent?.display_name).toBe("Office Agent");
+    expect(assistantGroupPostedSchema.parse({ message: { id: "p", seq: 2, role: "user", text: "People only", created_at: at, recipient_agent_ids: [] }, addressed_agent_ids: [], request_id: null }).addressed_agent_ids).toEqual([]);
+  });
+
   it("parses the accepted post response", () => {
     expect(
       assistantGroupPostedSchema.parse({
@@ -496,6 +539,8 @@ describe("agent display name and persona", () => {
       persona: "",
     };
     expect(assistantAgentCreateSchema.safeParse(create).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "Read live device state." }).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "x".repeat(2001) }).success).toBe(false);
     expect(
       assistantAgentCreateSchema.safeParse({ ...create, display_name: "x".repeat(41) }).success,
     ).toBe(false);

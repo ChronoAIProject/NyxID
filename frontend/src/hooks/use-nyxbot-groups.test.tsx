@@ -125,3 +125,14 @@ describe("useNyxBotGroupMessages", () => {
     unmount();
   });
 });
+
+it("preserves explicit people-only recipients on the wire while omitted targeting stays omitted", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ init }) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ message: { id: "message", seq: 1, role: "user", text: "Hello people", created_at: "2026-11-02T00:00:00Z", recipient_agent_ids: [] }, addressed_agent_ids: [], request_id: null }));
+  };
+  await nyxBotApi.postGroupMessage("group", "Hello people", [], []);
+  await nyxBotApi.postGroupMessage("group", "Default targeting");
+  expect(bodies).toEqual([{ text: "Hello people", recipient_agent_ids: [] }, { text: "Default targeting" }]);
+});

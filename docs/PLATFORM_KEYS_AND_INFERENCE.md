@@ -101,7 +101,7 @@ They never create org-owned auto-connected rows, even when the person is an acti
 Member/Admin with `can_proxy()`. Restricted services provision a personal row only
 when the person is in `allowed_owner_ids`, and an org row only when that org is in
 `allowed_owner_ids` and is reached through an active `can_proxy()` membership.
-Human and delegated key listing, Agent Key login delivery (login options), and
+Human grant inventory, human and delegated key listing, Agent Key login delivery (login options), and
 device-code approval/onboarding for the acting person's own account invoke this
 shared provisioning. The 0.19.0 guarantee remains: org-targeted device
 approval/onboarding resolves existing org services and never provisions rows for
@@ -200,12 +200,17 @@ lane cards. Legacy billing is labeled superseded while lanes are configured.
 
 ## Billing lanes and durable accounting
 
-Platform-key usage is billed to the requesting person regardless of the granting audience.
-An organization grant authorizes its members to use NyxID's key; it never charges that
-organization's wallet for the master credential. `BillingOwnerResolver::resolve_for_execution`
-uses the final credential class: `NyxidManagedMaster` selects the person's wallet and billing
-rollout flag, while org BYOK and agent override credentials retain org-wallet billing.
-Resource authorization, approval ownership, and rate limiting are unchanged.
+Ordinary platform-key execution preserves the requesting billing principal and
+`PaysFrom::Personal` classification without an owner-type lookup. Org-member
+execution bills the member; an org-owned API key retains its org principal and
+the same `Personal` classification. The new `OrgWallet` lane is the server-constructed typed
+`ExecutionLane::OrgChannelGuest`: a live org-specialist channel binding with
+admin-enabled guest exposure, delegated services intersected with agent grants
+and guest operation policy, a provisioned org wallet and exact daily budget.
+That lane bills the org for the guest's model and tools, including platform keys.
+The transport admin is not a sponsor. Ordinary org API keys, personal guests,
+shared agents and org members cannot claim this exception. Resource ACLs and
+platform-key grant checks still run before credential decryption.
 
 `ServiceBilling.byok_pricing` and `platform_key_pricing` are optional `LanePricing`
 blocks. Existing `metric`, decimal `credits_per_unit`, `lago_metric_code`, `sync_status`
@@ -312,6 +317,50 @@ reconcile interval handle all charges. Price/metric/code fences prevent stale ad
 sync completions from activating obsolete prices; stale writes after removal restore
 cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.
 
+All NyxID plan writers share a renewable `billing:plan:<code>` lease from before
+reading Lago through the cache write and publication. An admin save that finds
+it busy returns its saved pending price; reconciliation retries it. A writer
+verifies the complete target charge after PUT before publishing synced state.
+Plan synchronization retains a dirty generation and charge/removal intents.
+The audit maintains synced source prices, retained published immutable tariffs,
+and removal markers. Pending and failed prices remain with their normal
+publication retry; an attempted intent alone does not publish a price or cache
+row. Catalog reads select billing-bearing services and recorded intent owners.
+Unrelated Lago charges and existing charge IDs are preserved; plan updates
+never send tax assignments back to Lago.
+
+Periodic rate-cache refresh captures a singleton generation before reading Lago.
+Each bounded publication transaction advances that exact generation before
+changing diagnostics, rejected rates or cached values. Explicit cache writers
+advance the same generation in their cache transaction. An intervening write
+discards the remaining fetched snapshot; the next scheduled pass fetches again.
+Periodic refresh preserves retired historical rows, including when Lago still
+lists the charge; only explicit re-sync clears retirement. The epoch is separate
+coordination metadata, with no price-row or admission-reader changes. Complete
+ordering requires every cache writer to be upgraded; old writers ignore it.
+
+Clean matching audits perform only reads, including no tax invalidation. Charge
+comparison uses numeric amount and economic flags, tolerating absent defaults
+and presentation metadata. Per-code failures do not block other repairs. Each
+failure retains one Integrity diagnostic and a retry delay starting at five
+minutes, doubling to a one-day cap. An explicit price write resets that delay;
+a verified recovery clears the diagnostic. Already-completed dirty generations
+with only deferred failures do not repeat tax invalidation or cache writes.
+
+A provider PUT can still arrive after its client or lease expires: Lago does not
+accept a NyxID fencing token. Every attempt marks the plan dirty before tax
+invalidation, including explicit resyncs of already-synced service and machine
+prices. Recovery repeats tax invalidation and cache publication even when no
+price is pending, and clears dirty only after those steps and full-set readback
+complete for the same generation. A late overwrite lasts until
+the next successful eligible plan check (normally the existing reconciliation
+interval plus pass and provider latency; a repeatedly failing code also waits
+for its backoff). Registered plans are checked even when clean,
+so an old replica's uncoordinated writes during rollout can also be detected.
+The lease covers only upgraded writers; rollback leaves additive recovery
+metadata unused and restores the old concurrency behavior. No migration or new
+setting is required; keep billing reconciliation enabled.
+
 Older admin payloads omitting lanes or nested `components` preserve them. A null lane
 clears the entire lane; `components: null` or `[]` clears only additional components.
 Lane-only edits preserve omitted legacy fallback and resale fields. Legacy-only edits
@@ -405,8 +454,16 @@ xAI measures duration on the server and records `response.done` tokens separatel
 
 Existing inference blocks receive a separate null-guarded update of only
 `inference.voice`; every seed/backfill checks `inference_admin_modified`.
-Admin null clears survive restart. No unknown-field denial was added, so old
-replicas ignore voice metadata. The compatibility `realtime` response is true
+Admin null clears survive restart. Seeded voice lists are append-only: a voice
+ID once seeded is never removed, because call admission, live revalidation,
+recovery and dictation all recheck the saved voice against the live catalog.
+Startup therefore appends new seeded choices (currently `shida`) only to an
+`llm-openai` row whose voice list still exactly equals the original 32-choice
+seed (IDs, labels and order) and whose `inference_admin_modified` is
+absent/false; the atomic predicate leaves admin-edited, reordered or custom
+lists and all sibling metadata untouched, and reruns are no-ops. Retiring a
+voice is an explicit admin catalog edit. No unknown-field denial was added, so
+old replicas ignore voice metadata. The compatibility `realtime` response is true
 when voice exists. Response-only `supports_realtime_voice` uses the same voice
 presence and is never independently persisted. Unrecognized future voice
 protocols remain readable but cannot execute.

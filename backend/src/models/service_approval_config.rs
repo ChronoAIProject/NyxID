@@ -76,6 +76,10 @@ fn default_rule_effect() -> ApprovalEffect {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRule {
+    /// Reader-first marker for separately authored org per-operation review.
+    /// Existing rules retain their current Full-access semantics.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mandatory_review: bool,
     /// Match methods case-insensitively. Empty or ["*"] means any method.
     #[serde(default)]
     pub methods: Vec<String>,
@@ -96,6 +100,10 @@ pub struct ApprovalRule {
     /// Approval mode when `effect = require_approval`.
     #[serde(default)]
     pub mode: ApprovalMode,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Per-service approval override for a user.
@@ -258,6 +266,7 @@ mod tests {
     fn approval_rule_roundtrips() {
         let cfg = ServiceApprovalConfig {
             rules: vec![ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["POST".to_string()],
                 resource_pattern: "*".to_string(),
                 verbs: vec![ApprovalVerb::Write],

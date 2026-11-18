@@ -1,4 +1,7 @@
-import { isContentPath } from "./features/public-site/routes";
+import "./lib/zod-csp";
+import { appLanguageReady } from "./i18n";
+import "./lib/platform-personal-handoff";
+import "./lib/platform-onboarding-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -12,12 +15,15 @@ import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
+import { isContentPath } from "./features/public-site/routes";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
+import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
 
-// Public content has its own hydration router. Crossing this application boundary
-// loads that entry so title, locale and rendering contracts stay identical.
+installNyxbotErrorFallback();
+
+// Public content uses a separate hydration router and entry point.
 router.subscribe("onBeforeLoad", ({ toLocation }) => {
   if (isContentPath(toLocation.pathname)) window.location.assign(toLocation.href);
 });
@@ -34,6 +40,7 @@ const queryClient = new QueryClient({
 subscribeAssistantIdentity(() => {
   queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
   queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
+  queryClient.removeQueries({ queryKey: ["cma-session"] });
 });
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
@@ -41,17 +48,20 @@ subscribeAssistantIdentity(() => {
 // Stripped from production builds with the rest of the DEV branch.
 if (import.meta.env.DEV) {
   (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
+  // Use the instances mounted below, not a fresh module import: Vite's HMR
+  // timestamps can otherwise give browser drivers a second, idle router/store.
+  (window as { __nyxApp?: { router: typeof router; authStore: typeof useAuthStore } }).__nyxApp = { router, authStore: useAuthStore };
 }
 
 function isLoginApprovalPage() {
-  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(
+    window.location.pathname,
+  );
 }
 
 function Root() {
   const [ready, setReady] = useState(false);
-  const [agentKeyLogin, setAgentKeyLogin] = useState(
-    isLoginApprovalPage,
-  );
+  const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
       router.subscribe("onResolved", () => {
@@ -137,7 +147,9 @@ function Root() {
         preserveTelegramClaimForLogin();
         router.navigate({
           to: "/login",
-          search: { return_to: window.location.origin + path + window.location.search },
+          search: {
+            return_to: window.location.origin + path + window.location.search,
+          },
         });
       }
     }
@@ -166,10 +178,10 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <Root />
     </QueryClientProvider>
   </StrictMode>,
-);
+));

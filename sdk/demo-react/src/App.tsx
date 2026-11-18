@@ -20,6 +20,7 @@ export function App() {
     handleRedirectCallback,
     clearSession,
     getUserInfo,
+    getAccessToken,
   } = useNyxID();
 
   const [prompt, setPrompt] = useState<PromptValue>("");
@@ -54,7 +55,7 @@ export function App() {
   async function loadUserInfo() {
     setUserInfoError("");
     try {
-      const profile = await getUserInfo();
+      const profile = await getUserInfo(await getAccessToken());
       setUserInfo(profile);
     } catch (error: unknown) {
       setUserInfoError(error instanceof Error ? error.message : "Failed to load userinfo");
@@ -75,7 +76,7 @@ export function App() {
         <h1>NyxID OAuth React Demo</h1>
         <p className="muted">
           Demo flow: redirect login, callback token exchange, userinfo fetch, local
-          session clear.
+          session clear. Access tokens refresh automatically while this page is mounted.
         </p>
 
         {isCallbackPath && (

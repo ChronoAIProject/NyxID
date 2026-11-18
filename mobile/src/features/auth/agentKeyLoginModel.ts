@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  classifyLoginError,
+  LoginRequestError,
+  loginErrorCopy,
+} from "./loginRequestErrors";
+import { MOBILE_MFA_STEP_UP_MESSAGE } from "../../lib/api/errorMessages";
 import type {
   AgentKeyOptions,
   AgentKeySummary,
@@ -115,6 +121,7 @@ export function agentKeyLoginError(error: unknown): string {
     return error.issues[0]?.message ?? "Check the login details.";
   }
   const code = (error as { errorCode?: number } | null)?.errorCode;
+  if (code === 2003) return MOBILE_MFA_STEP_UP_MESSAGE;
   const messages: Record<number, string> = {
     11900: "This request is no longer available.",
     11901: "This request has expired.",
@@ -133,4 +140,16 @@ export function agentKeyLoginError(error: unknown): string {
       ? error.message
       : "Could not reach NyxID. Try again.")
   );
+}
+
+/** Select resolver copy for request failures and key-specific copy for local actions. */
+export function agentKeyActionErrorCopy(failure: unknown, step: string): string {
+  const response = failure as { statusCode?: number } | null;
+  const kind = classifyLoginError(failure);
+  const useRequestCopy =
+    step === "code" ||
+    failure instanceof LoginRequestError ||
+    ["rate_limited", "network"].includes(kind) ||
+    (response?.statusCode !== undefined && kind !== "rejected");
+  return useRequestCopy ? loginErrorCopy(failure) : agentKeyLoginError(failure);
 }

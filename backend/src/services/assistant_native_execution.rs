@@ -12,6 +12,7 @@ pub struct ResourceAdmission {
     id: String,
     binding: String,
     key_binding: String,
+    mode_independent: bool,
     chat: acks::ChatAuthority,
     automatic: Option<acks::AutoAllowed>,
     tool: String,
@@ -41,7 +42,7 @@ impl ResourceAdmission {
         let live =
             execution::personal_authority(db, &self.chat, "assistant.native_egress", None, false)
                 .await?;
-        if key_binding(db, &live).await? != self.key_binding {
+        if key_binding(db, &live, self.mode_independent).await? != self.key_binding {
             return Err(AppError::Conflict(
                 "Native execution authority changed; confirm again".into(),
             ));
@@ -95,24 +96,23 @@ impl ResourceAdmission {
     }
 }
 
-async fn key_binding(db: &mongodb::Database, chat: &acks::ChatAuthority) -> AppResult<String> {
+async fn key_binding(
+    db: &mongodb::Database,
+    chat: &acks::ChatAuthority,
+    mode_independent: bool,
+) -> AppResult<String> {
     let key = super::key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
     if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
         return Err(AppError::Forbidden("Assistant credential expired".into()));
     }
-    let access = super::org_agent_service::resolve_key_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let access = super::org_agent_service::resolve_credential_access(db, &key).await?;
     let allowed =
         super::key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
             .await?;
     Ok(super::mcp_service::canonical_sha256(
         json!({"key":key.id,"expires":key.expires_at,
         "scopes":key.assistant_operation_scopes,"services":allowed,"all":key.allow_all_services,
-        "mode":acks::effective_access_mode(db, chat).await?}),
+        "mode":if mode_independent { None } else { Some(acks::effective_access_mode(db, chat).await?) }}),
     ))
 }
 pub struct NativeResource<'a> {
@@ -162,16 +162,6 @@ pub async fn resource(
         return Err(AppError::Forbidden("Native resource owner changed".into()));
     }
     let binding = binding(collection, &row);
-    let key_binding = key_binding(db, chat).await?;
-    let mut semantic = arguments.clone();
-    let ack = semantic
-        .as_object_mut()
-        .and_then(|args| args.remove("acknowledgement_id"));
-    let mut exact = json!({"resource_id":id,"owner_id":owner,"authority":binding,"key_authority":key_binding,
-        "operation":super::mcp_service::canonical_sha256(semantic)});
-    if let Some(ack) = ack {
-        exact["acknowledgement_id"] = ack;
-    }
     let owner_row = db
         .collection::<crate::models::user::User>("users")
         .find_one(doc! {"_id":owner,"is_active":true})
@@ -197,7 +187,31 @@ pub async fn resource(
     } else {
         summary.to_owned()
     };
-    let gate = acks::confirmation_needed(db, chat, facts, org).await?;
+    let instruction_rule = org
+        && execution::instruction::active(db, &chat.user_id).await?
+        && execution::instruction::personal_agent(db, chat).await?;
+    let key_binding = key_binding(db, chat, instruction_rule).await?;
+    let mut semantic = arguments.clone();
+    let ack = semantic
+        .as_object_mut()
+        .and_then(|args| args.remove("acknowledgement_id"));
+    let mut exact = json!({"resource_id":id,"owner_id":owner,"authority":binding,"key_authority":key_binding,
+        "operation":super::mcp_service::canonical_sha256(semantic)});
+    if let Some(ack) = ack {
+        exact["acknowledgement_id"] = ack;
+    }
+    let gate = acks::confirmation_needed_with_org(
+        db,
+        chat,
+        facts,
+        org && !instruction_rule,
+        if instruction_rule {
+            acks::OrgInstructionRequirement::Required
+        } else {
+            acks::OrgInstructionRequirement::None
+        },
+    )
+    .await?;
     if gate.ask().is_some() {
         chat.turn_fence().require_live()?;
     }
@@ -211,6 +225,7 @@ pub async fn resource(
         id: id.to_owned(),
         binding,
         key_binding,
+        mode_independent: instruction_rule,
         chat: chat.clone(),
         automatic: gate.auto_allowed(),
         tool: tool.to_owned(),
@@ -362,12 +377,7 @@ pub async fn verify_ssh_node(
         .await?
         .ok_or_else(|| AppError::NotFound("SSH connection unavailable".into()))?;
     let key = super::key_service::get_api_key(&state.db, &live.user_id, &live.api_key_id).await?;
-    let access = super::org_agent_service::resolve_key_access(
-        &state.db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-    )
-    .await?;
+    let access = super::org_agent_service::resolve_credential_access(&state.db, &key).await?;
     let (all, nodes) =
         super::org_agent_service::key_nodes(&state.db, &key, access.as_deref()).await?;
     let mut configured = super::node_routing_service::list_configured_binding_node_ids(

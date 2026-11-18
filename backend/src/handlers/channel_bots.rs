@@ -4,6 +4,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::TryStreamExt;
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -193,6 +195,8 @@ pub struct ChannelBotItem {
     pub label: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub created_at: String,
@@ -227,6 +231,8 @@ pub struct ChannelBotDetailResponse {
     pub platform_bot_id: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub app_secret_configured: bool,
@@ -299,11 +305,38 @@ pub struct ChannelBotSubscriptionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DiscordGatewayStatusResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelInboundOutcomeResponse {
+    pub code: String,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelInboundCounterResponse {
+    pub count: i64,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    pub last_inbound_outcome: Option<ChannelInboundOutcomeResponse>,
+    pub inbound_outcomes: std::collections::BTreeMap<String, ChannelInboundCounterResponse>,
+    pub last_callback_challenge_at: Option<String>,
+    pub last_route_at: Option<String>,
+    pub last_route_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<DiscordGatewayStatusResponse>,
     pub last_inbound_at: Option<String>,
     pub last_inbound_source: Option<String>,
     pub last_outbound_at: Option<String>,
     pub last_outbound_error: Option<ChannelBotErrorResponse>,
+    pub last_outbound_notice: Option<ChannelBotErrorResponse>,
     pub last_webhook_at: Option<String>,
     pub last_webhook_error: Option<ChannelBotErrorResponse>,
     pub subscription_state: Option<ChannelBotSubscriptionResponse>,
@@ -313,6 +346,8 @@ pub struct ChannelBotDiagnosticsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
     pub id: String,
     pub platform: String,
@@ -330,6 +365,12 @@ pub struct ChannelBotHealthResponse {
     pub recommended_action_text: String,
     /// Whether the caller may run the recovery action (owner write access).
     pub can_write: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_restore_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -357,9 +398,28 @@ pub async fn admin_list(
     .await?;
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
+    let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, &ids).await?;
+    let billing = org_guest_billing_for_rows(&state.db, &bots, &nyxbot_rows).await?;
+    let mut nyxbot_states = std::collections::HashMap::new();
+    for row in nyxbot_rows.values() {
+        if let Some(code) = nyxbot_health_state(&state, row).await {
+            nyxbot_states.insert(row.channel_bot_id.clone(), code);
+        }
+    }
     Ok(Json(
         bots.iter()
-            .map(|bot| health_for(bot, gateway.contains(&bot.id), false))
+            .map(|bot| {
+                health_with_nyxbot(
+                    bot,
+                    gateway.contains(&bot.id),
+                    false,
+                    intake.get(&bot.id).cloned(),
+                    nyxbot_rows.get(&bot.id),
+                    nyxbot_states.get(&bot.id).map(String::as_str),
+                    billing.get(&bot.id).copied(),
+                )
+            })
             .collect(),
     ))
 }
@@ -373,7 +433,7 @@ pub async fn admin_health(
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, false)))
+    Ok(Json(health_loaded(&state, &bot, gateway, false).await?))
 }
 
 /// GET /api/v1/admin/channel-bots/webhook-rejections
@@ -399,10 +459,41 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        last_inbound_outcome: d.last_inbound_outcome.as_ref().map(|o| {
+            ChannelInboundOutcomeResponse {
+                code: o.code.clone(),
+                at: o.at.to_rfc3339(),
+            }
+        }),
+        inbound_outcomes: d
+            .inbound_outcomes
+            .iter()
+            .map(|(code, c)| {
+                (
+                    code.clone(),
+                    ChannelInboundCounterResponse {
+                        count: c.count,
+                        at: c.at.to_rfc3339(),
+                    },
+                )
+            })
+            .collect(),
+        last_callback_challenge_at: d.last_callback_challenge_at.map(|v| v.to_rfc3339()),
+        last_route_at: d.last_route_at.map(|v| v.to_rfc3339()),
+        last_route_result: d.last_route_result.clone(),
+        discord_gateway: d
+            .discord_gateway
+            .as_ref()
+            .map(|gateway| DiscordGatewayStatusResponse {
+                state: gateway.state.clone(),
+                reason: gateway.reason.clone(),
+                updated_at: gateway.updated_at.to_rfc3339(),
+            }),
         last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
         last_inbound_source: d.last_inbound_source.clone(),
         last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
         last_outbound_error: d.last_outbound_error.as_ref().map(error),
+        last_outbound_notice: d.last_outbound_notice.as_ref().map(error),
         last_webhook_at: d.last_webhook_at.map(|v| v.to_rfc3339()),
         last_webhook_error: d.last_webhook_error.as_ref().map(error),
         subscription_state: d
@@ -418,15 +509,155 @@ fn diagnostics_response(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
     can_write: bool,
 ) -> ChannelBotHealthResponse {
-    let facts =
+    health_with_intake(bot, gateway, can_write, None)
+}
+
+pub(crate) async fn health_loaded(
+    state: &AppState,
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+) -> AppResult<ChannelBotHealthResponse> {
+    let mut intake =
+        crate::services::channel_bot_health::discord::load(&state.db, std::slice::from_ref(bot))
+            .await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(&bot.id)).await?;
+    let billing =
+        org_guest_billing_for_rows(&state.db, std::slice::from_ref(bot), &nyxbot_rows).await?;
+    let nyxbot_state = if let Some(row) = nyxbot_rows.get(&bot.id) {
+        nyxbot_health_state(state, row).await
+    } else {
+        None
+    };
+    Ok(health_with_nyxbot(
+        bot,
+        gateway,
+        can_write,
+        intake.remove(&bot.id),
+        nyxbot_rows.get(&bot.id),
+        nyxbot_state.as_deref(),
+        billing.get(&bot.id).copied(),
+    ))
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct NyxbotHealthRow {
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    channel_bot_id: String,
+    #[serde(default)]
+    bot_owner_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    org_specialist: Option<crate::models::org_channel::Binding>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    org_restore_last_reason: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    org_restore_next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    org_restore_claim_id: Option<String>,
+    #[serde(default)]
+    org_restore_attempts: i32,
+}
+
+async fn latest_nyxbot_rows(
+    db: &mongodb::Database,
+    bot_ids: &[String],
+) -> AppResult<std::collections::HashMap<String, NyxbotHealthRow>> {
+    if bot_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    // `nyxbot_health_latest` supplies the indexed sort. Project before the
+    // group so encrypted gateway material and sender data never enter the
+    // aggregation; the final limit is bounded by the requested page.
+    let documents: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .aggregate([
+            doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1,
+            }},
+            doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
+            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"}}},
+            doc! {"$replaceWith": "$row"},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1,
+            }},
+            doc! {"$limit": bot_ids.len() as i64},
+        ])
+        .hint(mongodb::options::Hint::Name(
+            "nyxbot_health_latest".to_owned(),
+        ))
+        .await?
+        .try_collect()
+        .await?;
+    let rows: Vec<NyxbotHealthRow> = documents
+        .into_iter()
+        .map(|document| {
+            mongodb::bson::from_document(document)
+                .map_err(|error| AppError::Internal(format!("invalid NyxBot health row: {error}")))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut latest = std::collections::HashMap::new();
+    for row in rows {
+        latest.entry(row.channel_bot_id.clone()).or_insert(row);
+    }
+    Ok(latest)
+}
+
+async fn org_guest_billing_for_rows(
+    db: &mongodb::Database,
+    bots: &[crate::models::channel_bot::ChannelBot],
+    rows: &std::collections::HashMap<String, NyxbotHealthRow>,
+) -> AppResult<std::collections::BTreeMap<String, &'static str>> {
+    let bindings: Vec<_> = bots
+        .iter()
+        .filter_map(|bot| {
+            let row = rows.get(&bot.id)?;
+            let binding = row.org_specialist.as_ref()?;
+            (matches!(row.status.as_str(), "active" | "pending")
+                && binding.version == 1
+                && binding.guests.enabled
+                && binding.org_id == bot.user_id)
+                .then(|| (bot.id.clone(), binding.org_id.clone()))
+        })
+        .collect();
+    crate::services::channel_bot_health::load_org_guest_billing_many(db, &bindings).await
+}
+
+fn health_with_intake(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
         crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
         label: bot.label.clone(),
@@ -443,6 +674,150 @@ pub(crate) fn health_for(
         recommended_action: recommendation.action,
         recommended_action_text: recommendation.text,
         can_write,
+        nyxbot_status: None,
+        nyxbot_last_error: None,
+        nyxbot_restore_state: None,
+    }
+}
+
+fn health_with_nyxbot(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+    nyxbot: Option<&NyxbotHealthRow>,
+    nyxbot_state: Option<&str>,
+    org_guest_billing: Option<&str>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
+        crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    facts.org_guest_billing = org_guest_billing;
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
+    let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
+    if let Some(row) = nyxbot {
+        if row.status == "failed" && row.last_error.as_deref() == Some("org_access_lost") {
+            facts.failure_reason = nyxbot_state.or(Some(
+                crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+            ));
+        }
+        response.nyxbot_status = Some(row.status.clone());
+        response.nyxbot_last_error = row.last_error.clone();
+        response.nyxbot_restore_state = row
+            .org_restore_claim_id
+            .as_ref()
+            .map(|_| "in_flight".to_owned())
+            .or_else(|| row.org_restore_last_reason.clone());
+    }
+    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+    response.recommended_action = recommendation.action;
+    response.recommended_action_text = recommendation.text;
+    response
+}
+
+async fn nyxbot_health_state_for_db(
+    db: &mongodb::Database,
+    row: &NyxbotHealthRow,
+) -> Option<String> {
+    if row.status != "failed" || row.last_error.as_deref() != Some("org_access_lost") {
+        return None;
+    }
+    if !crate::services::nyxbot_gateway_release_service::has_old_org_restore_proof(db, &row.id)
+        .await
+        .ok()?
+    {
+        return Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned());
+    }
+    let code = match row.org_restore_last_reason.as_deref() {
+        Some("readiness_unavailable") => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+        }
+        Some(_)
+            if row
+                .org_restore_next_attempt_at
+                .is_some_and(|next| next > chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some(reason) if reason != "readiness_unavailable" && reason != "restored" => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some("restored") => crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+        None if row.org_restore_attempts == 0
+            && row
+                .org_restore_next_attempt_at
+                .is_none_or(|next| next <= chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_PENDING
+        }
+        _ => crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY,
+    };
+    Some(code.to_owned())
+}
+
+async fn nyxbot_health_state(state: &AppState, row: &NyxbotHealthRow) -> Option<String> {
+    let proof = nyxbot_health_state_for_db(&state.db, row).await?;
+    if proof == crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST {
+        return Some(proof);
+    }
+    match nyxbot_health_org_access(state, row).await.ok()? {
+        crate::services::org_channel_service::OrgAccess::Holds => Some(proof),
+        crate::services::org_channel_service::OrgAccess::Unavailable => Some(
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+                .to_owned(),
+        ),
+        crate::services::org_channel_service::OrgAccess::Lost => {
+            Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned())
+        }
+    }
+}
+
+async fn nyxbot_health_org_access(
+    state: &AppState,
+    row: &NyxbotHealthRow,
+) -> AppResult<crate::services::org_channel_service::OrgAccess> {
+    if !crate::services::platform_bot_authority::permits_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !crate::handlers::nyxbot::manages_bot_owner(state, &row.user_id, org).await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let Some(binding) = row.org_specialist.as_ref() else {
+        return Ok(crate::services::org_channel_service::OrgAccess::Holds);
+    };
+    if binding.version != 1 || row.bot_owner_id.as_ref() != Some(&binding.org_id) {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let specialist_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id, "user_id": &binding.org_id, "kind":"specialist", "destroyed_at": null})
+        .await?
+        .is_some();
+    let bot_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.channel_bot_id, "user_id": &binding.org_id, "is_active": true, "status": "active"})
+        .await?
+        .is_some();
+    if !specialist_live || !bot_live {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    match crate::services::org_channel_service::enabled(&state.db, &row.user_id).await {
+        Ok(()) => Ok(crate::services::org_channel_service::OrgAccess::Holds),
+        Err(
+            crate::errors::AppError::Forbidden(_)
+            | crate::errors::AppError::SecurityReadinessUnavailable,
+        ) => Ok(crate::services::org_channel_service::OrgAccess::Unavailable),
+        Err(error) => Err(error),
     }
 }
 
@@ -689,18 +1064,21 @@ pub(crate) async fn resolve_create_owner(
     }
 }
 
-/// Resolve the owner id for a list operation. If `org_id` is set, the
-/// caller must be an admin of that org; otherwise lists personal bots.
+/// Resolve a list owner, preserving admin access and admitting first-party human Members.
 async fn resolve_list_owner(
     state: &AppState,
-    actor: &str,
+    auth: &AuthUser,
     org_id: Option<&str>,
 ) -> AppResult<String> {
+    let actor = auth.user_id.to_string();
     if let Some(org_id) = org_id {
-        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
-        if !access.can_write() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, org_id).await?;
+        if !access.can_write()
+            && !(crate::services::org_agent_service::can_use(&access)
+                && super::login_client_context::require_first_party_human(auth).is_ok())
+        {
             return Err(AppError::OrgRoleInsufficient(
-                "admin access to the target org is required to list its channel bots".to_string(),
+                "member access to the target org is required to list its channel bots".to_string(),
             ));
         }
         Ok(org_id.to_string())
@@ -731,6 +1109,16 @@ fn lark_permission_payload(
     (Some(url), Some(scope_strings))
 }
 
+fn discord_gateway_state(bot: &crate::models::channel_bot::ChannelBot) -> Option<String> {
+    if bot.platform != "discord" {
+        return None;
+    }
+    bot.diagnostics
+        .discord_gateway
+        .as_ref()
+        .map(|gateway| gateway.state.clone())
+}
+
 fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
     ChannelBotItem {
         credential_source: bot.credential_source.clone(),
@@ -739,6 +1127,7 @@ fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
         label: bot.label.clone(),
         platform_bot_username: bot.platform_bot_username.clone(),
         webhook_registered: bot.webhook_registered,
+        gateway_state: discord_gateway_state(bot),
         status: bot.status.clone(),
         is_active: bot.is_active,
         created_at: bot.created_at.to_rfc3339(),
@@ -869,7 +1258,7 @@ pub(crate) async fn create_bot_with_link(
             adapter,
             &bot_id,
             &owner_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await
         .map(|_| ())
@@ -882,6 +1271,7 @@ pub(crate) async fn create_bot_with_link(
             &body.bot_token,
             &webhook_url,
             &webhook_secret,
+            &state.config,
         )
         .await
     };
@@ -1119,6 +1509,7 @@ pub async fn update_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&updated),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1174,13 +1565,17 @@ pub async fn list_bots(
     }
     let mut bots = match query.scope {
         Some(ChannelBotListScope::All) => {
-            channel_bot_service::list_all_bots(&state.db, &actor).await?
+            if super::login_client_context::require_first_party_human(&auth_user).is_ok() {
+                channel_bot_service::list_accessible_bots(&state.db, &actor).await?
+            } else {
+                channel_bot_service::list_all_bots(&state.db, &actor).await?
+            }
         }
         Some(ChannelBotListScope::User) => {
             channel_bot_service::list_bots(&state.db, &actor).await?
         }
         None => {
-            let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
+            let owner_id = resolve_list_owner(&state, &auth_user, query.org_id.as_deref()).await?;
             channel_bot_service::list_bots(&state.db, &owner_id).await?
         }
     };
@@ -1218,6 +1613,7 @@ pub async fn get_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&bot),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1346,7 +1742,7 @@ pub async fn health(
         .await?
         .can_write();
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, can_write)))
+    Ok(Json(health_loaded(&state, &bot, gateway, can_write).await?))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
@@ -1383,7 +1779,7 @@ pub async fn resubscribe(
     outcome?;
     let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&updated, gateway, true)))
+    Ok(Json(health_loaded(&state, &updated, gateway, true).await?))
 }
 
 pub(crate) async fn resubscribe_with_adapter(
@@ -1449,7 +1845,7 @@ pub(crate) async fn verify_bot_with_adapter(
             adapter,
             &bot.id,
             &bot.user_id,
-            &state.config.base_url,
+            &state.config,
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
@@ -1643,6 +2039,7 @@ pub(crate) async fn verify_bot_with_adapter(
         &bot_token,
         &webhook_url,
         &raw_secret,
+        &state.config,
     )
     .await;
 
@@ -1679,6 +2076,98 @@ pub(crate) async fn verify_bot_with_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_without_loaded_intake_preserves_legacy_recommendations() {
+        let mut bot = make_telegram_bot();
+        for platform in ["telegram", "discord"] {
+            bot.platform = platform.into();
+            let unloaded = serde_json::to_value(health_for(&bot, false, true)).unwrap();
+            assert!(unloaded.get("discord_intake").is_none());
+            assert_eq!(unloaded["recommended_action"], "none");
+            assert_eq!(unloaded["recommended_action_text"], "Healthy.");
+        }
+        let gateway = serde_json::to_value(health_for(&bot, true, false)).unwrap();
+        assert!(gateway.get("discord_intake").is_none());
+        assert_eq!(gateway["recommended_action"], "gateway");
+        assert_eq!(gateway["can_write"], false);
+    }
+
+    #[test]
+    fn list_gateway_state_is_discord_only_and_legacy_rows_omit_it() {
+        let mut bot = make_telegram_bot();
+        for platform in ["discord", "telegram", "x"] {
+            bot.platform = platform.into();
+            for state in [
+                "connected",
+                "connecting",
+                "disconnected",
+                "waiting_capacity",
+            ] {
+                bot.diagnostics.discord_gateway =
+                    Some(crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    });
+                let value = serde_json::to_value(bot_to_item(&bot)).unwrap();
+                if platform == "discord" {
+                    assert_eq!(value["gateway_state"], state);
+                } else {
+                    assert!(value.get("gateway_state").is_none());
+                }
+                assert_eq!(value["webhook_registered"], false);
+            }
+            let mut legacy = bson::to_document(&bot).unwrap();
+            legacy.remove("diagnostics");
+            let legacy = bson::from_document(legacy).unwrap();
+            let value = serde_json::to_value(bot_to_item(&legacy)).unwrap();
+            assert!(value.get("gateway_state").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_gateway_state_matches_list_without_claiming_a_webhook() {
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        let db = connect_test_database("channel_bot_gateway_state")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (platform, gateway) in [
+            ("discord", Some("connected")),
+            ("discord", None),
+            ("telegram", Some("connected")),
+        ] {
+            let mut bot = make_telegram_bot();
+            bot.platform = platform.into();
+            bot.diagnostics.discord_gateway =
+                gateway.map(
+                    |state| crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    },
+                );
+            db.collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .insert_one(&bot)
+            .await
+            .unwrap();
+            let Json(response) = get_bot(
+                State(state.clone()),
+                test_auth_user(&bot.user_id),
+                Path(bot.id.clone()),
+            )
+            .await
+            .unwrap();
+            let detail = serde_json::to_value(response).unwrap();
+            let item = serde_json::to_value(bot_to_item(&bot)).unwrap();
+            assert_eq!(detail.get("gateway_state"), item.get("gateway_state"));
+            assert_eq!(detail["webhook_registered"], false);
+        }
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn list_scope_query_accepts_all_and_user_and_rejects_unknown_scopes() {
@@ -1780,20 +2269,21 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(response.total, 3);
+        assert_eq!(response.total, 4);
         assert_eq!(
             response
                 .bots
                 .iter()
                 .map(|bot| bot.user_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["admin-b", "admin-a", actor.as_str()]
+            vec!["member", "admin-b", "admin-a", actor.as_str()]
         );
 
         for (scope, org_id) in [
             (None, None),
             (Some(ChannelBotListScope::User), None),
             (None, Some("admin-a")),
+            (None, Some("member")),
         ] {
             let Json(response) = list_bots(
                 State(state.clone()),
@@ -1814,7 +2304,7 @@ mod tests {
                 test_auth_user(&actor),
                 Query(ChannelBotListQuery {
                     scope: None,
-                    org_id: Some("member".to_string())
+                    org_id: Some("viewer".to_string())
                 }),
             )
             .await,

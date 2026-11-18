@@ -84,8 +84,8 @@ it.each(["en", "zh"] as const)(
   async (locale) => {
     language = locale;
     let complete!: (response: Response) => void;
-    const fetcher = vi.fn(
-      (_url: string, _options: RequestInit) =>
+    const fetcher = vi.fn<(url: string, options: RequestInit) => Promise<Response>>(
+      () =>
         new Promise<Response>((resolve) => {
           complete = resolve;
         }),

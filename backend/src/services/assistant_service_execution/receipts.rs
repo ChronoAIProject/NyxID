@@ -30,20 +30,28 @@ enum HttpReceipt {
     Service(Box<Admission>, acks::AutoAllowed),
 }
 impl HttpReceipt {
-    async fn record(self, db: &Database, chat: &acks::ChatAuthority) {
+    /// `activity` is captured while the tool call is still in scope; a
+    /// streamed body reaches EOF after that scope has ended.
+    async fn record(self, db: &Database, chat: &acks::ChatAuthority, activity: Option<String>) {
         match self {
             Self::Approval(receipt) => {
-                acks::record_auto_allowed(
+                acks::record_auto_allowed_for_activity(
                     db,
                     chat,
                     "service_approval",
                     &receipt.arguments,
                     &receipt.auto,
                     &receipt.summary,
+                    None,
+                    activity,
                 )
                 .await
             }
-            Self::Service(admission, auto) => admission.receipt(db, chat, Some(auto)).await,
+            Self::Service(admission, auto) => {
+                admission
+                    .receipt_for_activity(db, chat, Some(auto), activity)
+                    .await
+            }
         }
     }
 }
@@ -55,10 +63,21 @@ impl Admission {
         chat: &acks::ChatAuthority,
         auto: Option<acks::AutoAllowed>,
     ) {
+        let activity = crate::services::machine_activity_service::activity_id();
+        self.receipt_for_activity(db, chat, auto, activity).await;
+    }
+
+    async fn receipt_for_activity(
+        &self,
+        db: &Database,
+        chat: &acks::ChatAuthority,
+        auto: Option<acks::AutoAllowed>,
+        activity: Option<String>,
+    ) {
         if let Some(auto) = auto {
-            acks::record_auto_allowed(db, chat, "nyxid.service_execution", &json!({
+            acks::record_auto_allowed_for_activity(db, chat, "nyxid.service_execution", &json!({
                 "connection_id": self.connection, "execution_binding": self.binding, "operation_digest": self.operation,
-            }), &auto, &self.summary).await;
+            }), &auto, &self.summary, None, activity).await;
         }
     }
 }
@@ -77,6 +96,9 @@ impl Decision {
     ) -> futures::future::BoxFuture<'static, axum::response::Response> {
         let head = method == "HEAD";
         Box::pin(async move {
+            // Read on first poll, which runs inside the tool call's activity
+            // scope; the body's EOF (and the receipt) come after it has ended.
+            let activity = crate::services::machine_activity_service::activity_id();
             let Some(chat) = chat else {
                 return response;
             };
@@ -95,7 +117,7 @@ impl Decision {
                 || matches!(response.status().as_u16(), 204 | 205)
                 || response.body().is_end_stream()
             {
-                receipt.record(&db, &chat).await;
+                receipt.record(&db, &chat, activity).await;
                 return response;
             }
             use futures::StreamExt;
@@ -112,7 +134,7 @@ impl Decision {
                         Err(error) => { yield Err(error); return; }
                     }
                 }
-                receipt.record(&db, &chat).await;
+                receipt.record(&db, &chat, activity).await;
             };
             axum::response::Response::from_parts(parts, axum::body::Body::from_stream(stream))
         })

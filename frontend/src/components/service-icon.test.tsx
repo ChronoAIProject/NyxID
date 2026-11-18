@@ -52,6 +52,16 @@ describe("ServiceIcon", () => {
     expect(image).toHaveAttribute("referrerpolicy", "no-referrer");
   });
 
+  it("keeps the slug glyph visible while an uploaded image loads", () => {
+    const { container } = render(<ServiceIcon slug="api-zoho-mail" iconUrl="https://example.com/slow-zoho.svg" />);
+    expect(container.querySelector('[data-slug="api-zoho-mail"]')).toBeVisible();
+    const image = container.querySelector("img")!;
+    expect(image).not.toBeVisible();
+    fireEvent.load(image);
+    expect(image).toBeVisible();
+    expect(container.querySelector('[data-slug="api-zoho-mail"]')).toBeNull();
+  });
+
   it("falls back to the generic glyph when an uploaded image fails for an unknown slug", () => {
     const { container } = render(
       <ServiceIcon slug="custom-vendor" iconUrl="https://example.com/unknown.svg" />,
@@ -114,7 +124,8 @@ describe("ServiceIcon", () => {
       expect(mask).not.toBeNull();
       expect(mask).toHaveClass("bg-current", "text-muted-foreground", "!h-5", "!w-5");
       expect(mask).toHaveAttribute("aria-hidden", "true");
-      expect(container.querySelector("img")).toBeNull();
+      expect(container.querySelector('[data-icon-mode="image"]')).toBeNull();
+      expect(container.querySelector('[data-icon-monitor]')).not.toBeNull();
       const style = mask?.getAttribute("style") ?? "";
       if (style.includes("mask")) expect(style).toContain(`url("${url}")`);
     });
@@ -138,6 +149,19 @@ describe("ServiceIcon", () => {
       await act(async () => probes[0]?.onload?.());
       const again = render(<ServiceIcon slug="api-zoho-mail" iconUrl={url} />);
       expect(again.container.querySelector('[data-icon-mode="mask"]')).not.toBeNull();
+    });
+
+    it("falls back when a previously readable masked image fails on a later mount", async () => {
+      stubImage();
+      const url = "https://nyx.example/catalog-icons/removed";
+      const first = render(<ServiceIcon slug="api-zoho-mail" iconUrl={url} />);
+      await act(async () => probes[0]?.onload?.());
+      first.unmount();
+      const next = render(<ServiceIcon slug="api-zoho-mail" iconUrl={url} />);
+      expect(next.container.querySelector('[data-slug="api-zoho-mail"]')).toBeVisible();
+      fireEvent.error(next.container.querySelector('[data-icon-monitor]')!);
+      expect(next.container.querySelector('[data-icon-mode="mask"]')).toBeNull();
+      expect(next.container.querySelector('[data-slug="api-zoho-mail"]')).toBeVisible();
     });
 
     it("keeps the greyscale image when the host does not allow CORS", async () => {

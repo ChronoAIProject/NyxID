@@ -55,6 +55,7 @@ async fn serve(server: &MockServer, id: &str, bytes: &[u8], gets: u64) {
 
 #[tokio::test]
 async fn owner_flag_blocks_all_downloads_until_that_person_is_enabled() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     let files = [file("private", None)];
     let other = uuid::Uuid::new_v4().to_string();
@@ -82,7 +83,18 @@ async fn owner_flag_blocks_all_downloads_until_that_person_is_enabled() {
             assert!(input.note.is_empty());
         } else {
             assert!(input.uploads.is_empty());
-            assert!(input.note.contains("1 attachments are not shared"));
+            assert!(input.note.contains("1 attachment is not shared"));
+            assert!(input.note.contains("not enabled for this owner"));
+            assert!(input.note.contains("NyxID platform administrator"));
+            assert!(input.note.contains("assistant:channel-media"));
+            assert!(
+                input
+                    .note
+                    .contains("file-format support has not been checked")
+            );
+            assert!(input.note.contains("Keep the original task pending"));
+            assert!(!input.note.contains("lookup failed"));
+            assert!(!input.note.contains("panelTab=privacy"));
             assert_eq!(server.received_requests().await.unwrap().len(), before);
         }
     }
@@ -90,7 +102,65 @@ async fn owner_flag_blocks_all_downloads_until_that_person_is_enabled() {
 }
 
 #[tokio::test]
+async fn flag_lookup_failure_is_unknown_and_blocks_downloads_and_upload_admission() {
+    use mongodb::bson::{Document, doc};
+    let (state, owner, server, bot) = fixture().await;
+    flag(&state, &owner, true).await;
+    // A real resolver failure, without a global fault hook or breaking the
+    // database used to prove that no upload admission/write took place.
+    state
+        .db
+        .collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .update_one(
+            doc! {"flag_key": flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY, "target_key": &owner},
+            doc! {"$set": {"enabled": "invalid private configuration detail"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        flags::personal_flag_enabled(&state.db, &owner, flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY)
+            .await
+            .is_err()
+    );
+    let before = server.received_requests().await.unwrap().len();
+    let input = prepare_uploads_from(
+        &state,
+        &bot,
+        &owner,
+        &[file("private", None)],
+        &server.uri(),
+    )
+    .await;
+    assert!(input.uploads.is_empty());
+    assert!(input.note.contains("configuration lookup failed"));
+    assert!(input.note.contains("Whether it is enabled is unknown"));
+    assert!(input.note.contains("administrator to investigate"));
+    assert!(input.note.contains("No attachment was downloaded or read"));
+    assert!(
+        input
+            .note
+            .contains("file-format support has not been checked")
+    );
+    assert!(!input.note.contains("not enabled for this owner"));
+    assert!(!input.note.contains("invalid private configuration detail"));
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    for collection in ["assistant_upload_limits", "assistant_attachments"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn each_failed_file_degrades_without_discarding_successful_siblings_or_retry() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
     serve(&server, "first", b"First file", 1).await;
@@ -125,6 +195,7 @@ async fn each_failed_file_degrades_without_discarding_successful_siblings_or_ret
 
 #[tokio::test]
 async fn oversize_rate_limit_and_attachment_cap_produce_bounded_failure_notes() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use mongodb::bson::doc;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
@@ -186,6 +257,7 @@ async fn oversize_rate_limit_and_attachment_cap_produce_bounded_failure_notes() 
 
 #[tokio::test]
 async fn telegram_shares_browser_byte_budget_and_releases_on_cancellation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let (state, owner, server, bot) = fixture().await;
     flag(&state, &owner, true).await;
     let all = budget::reserve(budget::CAPACITY / 2).await.unwrap();

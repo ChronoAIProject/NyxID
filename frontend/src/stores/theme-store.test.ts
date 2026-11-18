@@ -57,6 +57,36 @@ describe("useThemeStore", () => {
     expect(useThemeStore.getState().sidebarWidths).toEqual({ dashboard: 360, assistant: 180 });
   });
 
+  it("persists and validates chat width and includes it in display reset", async () => {
+    useThemeStore.getState().setChatContentWidth(1050);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).state.chatContentWidth).toBe(1050);
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().chatContentWidth).toBe(1050);
+    for (const [value, expected] of [[10, 520], [9999, 1600], ["wide", 758], [null, 758]] as const) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { chatContentWidth: value }, version: 1 }));
+      await useThemeStore.persist.rehydrate();
+      expect(useThemeStore.getState().chatContentWidth).toBe(expected);
+    }
+    useThemeStore.getState().setChatContentWidth(1200);
+    useThemeStore.getState().resetDisplay();
+    expect(useThemeStore.getState().chatContentWidth).toBe(758);
+  });
+
+  it("restores a shared composer maximum and bounds invalid saved heights", async () => {
+    useThemeStore.getState().setComposerMaxHeight(280);
+    const saved = localStorage.getItem(STORAGE_KEY)!;
+    useThemeStore.getState().resetDisplay();
+    expect(useThemeStore.getState().composerMaxHeight).toBe(92);
+    localStorage.setItem(STORAGE_KEY, saved);
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().composerMaxHeight).toBe(280);
+    for (const [value, expected] of [[10, 64], [9999, 1600], ["tall", 92], [null, 92]] as const) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { composerMaxHeight: value }, version: 1 }));
+      await useThemeStore.persist.rehydrate();
+      expect(useThemeStore.getState().composerMaxHeight).toBe(expected);
+    }
+  });
+
   it("keeps a sidebar mode chosen before it moved into display settings", async () => {
     // A user from before this change: theme persisted, sidebar mode in its old key.
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark" }, version: 1 }));
@@ -103,9 +133,27 @@ describe("useThemeStore", () => {
   });
 
   it.each([0.5, 1.17, 1.83, 2])("restores granular display multipliers of %s", async (scale) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark", textScale: scale, density: scale }, version: 1 }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { mode: "dark", textScale: scale, density: scale }, version: 2 }));
     await useThemeStore.persist.rehydrate();
     expect(useThemeStore.getState()).toMatchObject({ textScale: scale, density: scale });
+  });
+
+  it.each([undefined, 1])("adopts the smaller default for an old default preference (%s)", async (textScale) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { textScale, density: 1.37 }, version: 1 }));
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState()).toMatchObject({ textScale: 1, density: 1.37 });
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).version).toBe(2);
+  });
+
+  it.each([0.5, 0.85, 1.17, 1.5, 2])("migrates old custom %s once, preserving its rendered size within bounds", async (old) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: { textScale: old, density: 0.83 }, version: 1 }));
+    await useThemeStore.persist.rehydrate();
+    const migrated = Math.min(2, Math.max(0.5, old / 0.85));
+    expect(useThemeStore.getState()).toMatchObject({ textScale: migrated, density: 0.83 });
+    if (old <= 1.7) expect(migrated * 0.85).toBeCloseTo(old, 14);
+    await useThemeStore.persist.rehydrate();
+    expect(useThemeStore.getState().textScale).toBe(migrated);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).state.textScale).toBe(migrated);
   });
 
   it("rounds old density presets to the nearest slider step", async () => {

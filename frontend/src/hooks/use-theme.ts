@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo } from "react";
 import { buildCustomColorCss } from "@/lib/theme-colors";
 import {
   useThemeStore,
+  DISPLAY_TEXT_BASE,
   resolveTheme,
   type ResolvedTheme,
 } from "@/stores/theme-store";
@@ -26,7 +27,7 @@ export function useResolvedTheme(): ResolvedTheme {
  * before first paint (no flash); the cleanup strips it on unmount so leaving
  * the themed surface reverts to dark.
  */
-export function useApplyTheme(): void {
+export function useApplyTheme(surface?: "assistant"): void {
   const resolved = useResolvedTheme();
   const textScale = useThemeStore((s) => s.textScale);
   useLayoutEffect(() => {
@@ -37,16 +38,22 @@ export function useApplyTheme(): void {
       root.classList.remove("theme-light", "theme-dark");
     };
   }, [resolved]);
+  useLayoutEffect(() => {
+    if (surface !== "assistant") return;
+    const root = document.documentElement;
+    root.classList.add("assistant-display");
+    return () => root.classList.remove("assistant-display");
+  }, [surface]);
   const density = useThemeStore((s) => s.density);
   const motion = useThemeStore((s) => s.motion);
   const customColors = useThemeStore((s) => s.customColors);
   const customCss = useMemo(() => buildCustomColorCss(customColors), [customColors]);
 
   // Text size: a percentage root font size keeps the user's browser default
-  // as the 100% baseline. Only rem text follows it; spacing is px.
+  // as the baseline, rebased to 85%. Only rem text follows it; spacing is px.
   useLayoutEffect(() => {
     const root = document.documentElement;
-    root.style.fontSize = textScale === 1 ? "" : `${textScale * 100}%`;
+    root.style.fontSize = `${textScale * DISPLAY_TEXT_BASE * 100}%`;
     return () => {
       root.style.fontSize = "";
     };
@@ -57,8 +64,10 @@ export function useApplyTheme(): void {
     const root = document.documentElement;
     if (density === 1) root.style.removeProperty("--spacing");
     else root.style.setProperty("--spacing", `${4 * density}px`);
+    root.style.setProperty("--display-density", String(density));
     return () => {
       root.style.removeProperty("--spacing");
+      root.style.removeProperty("--display-density");
     };
   }, [density]);
 

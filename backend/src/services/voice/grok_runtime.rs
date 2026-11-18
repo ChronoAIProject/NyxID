@@ -12,6 +12,7 @@ use crate::{
 use mongodb::bson::{self, doc};
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     state: &AppState,
     user: &str,
@@ -19,22 +20,45 @@ pub async fn prepare(
     request: &str,
     preferences: VoicePreferences,
     identity: String,
+    execution_enrolled: bool,
+    client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<runtime::Started> {
-    let row = session::admit(
-        &state.db,
-        user,
-        conversation,
-        request,
-        preferences,
-        identity,
-        &state.replica_identity.generation_id,
-    )
-    .await?;
-    let row = session::write(&state.db, &row, doc! {"protocol":"xai_realtime"}).await?;
-    Ok(runtime::Started {
-        session: row,
-        sdp: String::new(),
+    // Admission and protocol enrollment must finish even if the POST disappears.
+    let state = state.clone();
+    let user = user.to_owned();
+    let conversation = conversation.to_owned();
+    let request = request.to_owned();
+    runtime::deliver_start(state.clone(), Stage::Thread, async move {
+        let row = session::admit_for_client_key(
+            &state.db,
+            &user,
+            &conversation,
+            &request,
+            preferences,
+            identity,
+            &state.replica_identity.generation_id,
+            client_key,
+        )
+        .await?;
+        let updated = session::write(
+            &state.db,
+            &row,
+            doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled && row.client_key.is_none()},
+        )
+        .await;
+        match updated {
+            Ok(row) => Ok(runtime::Started {
+                session: row,
+                sdp: String::new(),
+            }),
+            Err(error) => {
+                // No provider was contacted: setup failure has no unknown audio cost.
+                let _ = session::close(&state.db, &row, "start_failed", true).await;
+                Err(error)
+            }
+        }
     })
+    .await
 }
 
 pub async fn serve(
@@ -44,7 +68,7 @@ pub async fn serve(
     input: mpsc::Receiver<grok::ClientInput>,
     output: mpsc::Sender<grok::Output>,
 ) {
-    let errors = output.clone();
+    let updates = output.clone();
     let setup = async {
         // A control stream can land on another replica. Its single-stream claim
         // transfers only an unstarted relay, never an established provider call.
@@ -54,6 +78,7 @@ pub async fn serve(
             doc! {"$set":{"lease_owner":&state.replica_identity.generation_id}})
             .return_document(mongodb::options::ReturnDocument::After).await?
             .ok_or_else(||AppError::Conflict("Voice relay already started".into()))?;
+        Box::pin(super::client_key::revalidate(&state.db, &call)).await?;
         let resolved = Box::pin(credentials::resolve(
             &state,
             &call.user_id,
@@ -94,11 +119,12 @@ pub async fn serve(
             &call.user_id,
         )
         .await?;
+        super::shared::before_start(&state, &call).await?;
         let (socket, started) = grok::connect(
             &resolved.key,
             &call.preferences.model,
             &resolved.voice,
-            &instructions,
+            &instructions.live,
         )
         .await?;
         let transport = Transport::Grok(Box::new(grok::Handle::spawn(
@@ -113,6 +139,9 @@ pub async fn serve(
             .started_at(started),
         )));
         call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
+        updates
+            .try_send(grok::Output::Ready)
+            .map_err(|_| AppError::ClientDisconnected)?;
         Ok::<_, AppError>((transport, resolved.billing, concurrency))
     };
     match tokio::time::timeout(std::time::Duration::from_secs(12), Box::pin(setup)).await {
@@ -132,7 +161,7 @@ pub async fn serve(
             )
             .await
             .unwrap_err();
-            let _ = errors.try_send(grok::Output::StartFailed(error.response_body()));
+            let _ = updates.try_send(grok::Output::StartFailed(error.response_body()));
             // Failed setup drops the sole provider socket; no invented duration.
             if runtime::settle_windows(&state, &call, false).await.is_ok()
                 && let Ok(updated) =

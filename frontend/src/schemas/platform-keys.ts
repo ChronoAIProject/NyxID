@@ -27,6 +27,7 @@ const voiceLabel = z
 export const voiceMetadataSchema = z
   .object({
     protocol: z.enum(["openai_live", "xai_realtime"]),
+    delegation_model: voiceId.nullish(),
     models: z
       .array(
         z.object({
@@ -45,6 +46,12 @@ export const voiceMetadataSchema = z
     billing_metrics: z.array(z.enum(VOICE_BILLING_METRICS)).min(1).max(6),
   })
   .superRefine((voice, ctx) => {
+    if (voice.protocol !== "openai_live" && voice.delegation_model)
+      ctx.addIssue({
+        code: "custom",
+        path: ["delegation_model"],
+        message: "Responses delegation requires OpenAI Live",
+      });
     for (const field of ["models", "voices"] as const) {
       if (new Set(voice[field].map((v) => v.id)).size !== voice[field].length)
         ctx.addIssue({

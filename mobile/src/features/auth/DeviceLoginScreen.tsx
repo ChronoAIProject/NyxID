@@ -1,4 +1,33 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
+import { useUncertainLoginPreview } from "./useUncertainLoginPreview";
+import { useLoginRequestResume } from "./useLoginRequestResume";
+import { useLoginPreviewCooldown } from "./useLoginPreviewCooldown";
+import { useLoginRequestHandoff } from "./useLoginRequestHandoff";
+import {
+  takeLoginRequest,
+  resolveLoginRequest,
+  previewLoginRequest,
+  previewCooldownMs,
+  deviceLoginErrorCopy,
+  classifyLoginError,
+  isLoginDecisionUncertain,
+  loginServerHost,
+  terminalFromError,
+  terminalFromPreview,
+  type LoginTerminal,
+} from "./loginRequestResolver";
+import { AuthSubmitButton } from "./AuthSubmitButton";
+import { useMfaStepUp } from "./useMfaStepUp";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -10,7 +39,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ChevronDown,
@@ -21,16 +49,16 @@ import {
   X,
 } from "lucide-react-native";
 
-import type { RootStackParamList } from "../../app/AppNavigator";
+import type { SheetScreenProps } from "../../app/navigationTypes";
+import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { MagicKeyIllustration } from "../../components/icons/empty-state/MagicKeyIllustration";
-import { RoadBarrierIllustration } from "../../components/icons/empty-state/RoadBarrierIllustration";
-import { resolveAuthDeviceErrorMessage } from "../../lib/api/errorMessages";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
 import { spacing } from "../../theme/designTokens";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
+import { AuthTextInput } from "./AuthTextInput";
 import { DeviceCodeScanner } from "./DeviceCodeScanner";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
@@ -47,14 +75,10 @@ import {
 } from "./deviceUserCode";
 import { useAuthSession } from "./AuthSessionContext";
 
-type Props = NativeStackScreenProps<RootStackParamList, "DeviceLogin">;
-type TerminalState = "approved" | "denied" | null;
+type Props = SheetScreenProps<"DeviceLogin">;
+type TerminalState = LoginTerminal | null;
 
 const ACTION_THROTTLE_MS = 750;
-const COMPLETION_MARK_SIZE = spacing.huge * 7;
-// Design-selected so completion marks stay clear without overpowering the title.
-const COMPLETION_MARK_OPACITY = 0.85;
-
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime())
@@ -199,6 +223,7 @@ function ManualCodeModal({
   value,
   errorMessage,
   isPending,
+  coolingDown,
   colors,
   styles,
   onChange,
@@ -209,14 +234,17 @@ function ManualCodeModal({
   value: string;
   errorMessage: string | null;
   isPending: boolean;
+  coolingDown: boolean;
   colors: ReturnType<typeof useTheme>["colors"];
   styles: ReturnType<typeof createDeviceLoginStyles>;
   onChange: (value: string) => void;
   onDismiss: () => void;
   onSubmit: () => void;
 }) {
+  const { t } = useAppLanguage();
   const inputRef = useRef<TextInput>(null);
   const insets = useSafeAreaInsets();
+  const reducedMotion = useReducedMotion();
   const normalizedCode = normalizeAuthDeviceUserCode(value);
 
   useEffect(() => {
@@ -229,7 +257,7 @@ function ManualCodeModal({
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType={reducedMotion ? "none" : "slide"}
       statusBarTranslucent
       onRequestClose={onDismiss}
     >
@@ -254,8 +282,9 @@ function ManualCodeModal({
             <View style={styles.modalHeaderCopy}>
               <Text style={styles.modalTitle}>Enter login code</Text>
               <Text style={styles.modalDescription}>
-                Enter the eight-character code shown on the device requesting
-                access.
+                {t(
+                  "Enter a device login or Agent Key login code from the requesting device.",
+                )}
               </Text>
             </View>
             <Pressable
@@ -275,8 +304,9 @@ function ManualCodeModal({
 
           <View style={styles.modalField}>
             <Text style={styles.inputLabel}>Login code</Text>
-            <TextInput
+            <AuthTextInput
               ref={inputRef}
+              invalid={!!errorMessage}
               accessibilityLabel="Login code"
               accessibilityHint="Eight-character code shown on the requesting device"
               value={value}
@@ -304,9 +334,10 @@ function ManualCodeModal({
             ) : null}
           </View>
 
-          <PrimaryButton
+          <AuthSubmitButton
+            loading={isPending}
             label={isPending ? "Checking..." : "Continue"}
-            disabled={isPending || !normalizedCode}
+            disabled={isPending || coolingDown || !normalizedCode}
             onPress={onSubmit}
           />
         </View>
@@ -316,6 +347,10 @@ function ManualCodeModal({
 }
 
 export function DeviceLoginScreen({ navigation, route }: Props) {
+  const { t } = useAppLanguage();
+  const cooldown = useLoginPreviewCooldown();
+  const handoffLoginRequest = useLoginRequestHandoff(navigation);
+  const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
   const { isAuthenticated } = useAuthSession();
@@ -325,6 +360,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
   const [terminal, setTerminal] = useState<TerminalState>(null);
+  const stepUp = useMfaStepUp(
+    `${confirmedCode}:${isAuthenticated}:${terminal}`,
+  );
   const [isScanning, setIsScanning] = useState(
     () => route.params?.start_scanner === true && !route.params?.user_code,
   );
@@ -336,8 +374,31 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(Date.now());
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
+  const currentDeadline = useRef<number | null>(null);
   const [rawUserAgentExpanded, setRawUserAgentExpanded] = useState(false);
   const lastActionAt = useRef(0);
+  const generation = useRef(0);
+  const actionBusy = useRef(false);
+  const decisionOperation = useRef<symbol | null>(null);
+  const deferredRoute = useRef(false);
+  const [routeRevision, setRouteRevision] = useState(0);
+  const [decisionUncertain, setDecisionUncertain] = useState<
+    "approve" | "deny" | null
+  >(null);
+  const uncertainDecision = useRef(decisionUncertain);
+  function updateDecisionUncertain(value: typeof decisionUncertain) {
+    uncertainDecision.current = value;
+    setDecisionUncertain(value);
+  }
+  const currentCode = useRef(confirmedCode);
+  currentCode.current = confirmedCode;
+  useWorkspaceBack({
+    active: inWorkspaceSheet && isScanning,
+    defaultRole: "back",
+    disabled: !!decisionPending || stepUp.busy,
+    options: { headerShown: inWorkspaceSheet },
+    onBack: () => setIsScanning(false),
+  });
   const localTimezone = useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
@@ -346,11 +407,23 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     }
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (
+      decisionOperation.current ||
+      uncertainDecision.current ||
+      (terminal && deferredRoute.current)
+    ) {
+      if (route.params?.user_code !== undefined) deferredRoute.current = true;
+      return;
+    }
     if (route.params?.user_code === undefined) {
       if (route.params?.start_scanner === true) setIsScanning(true);
       return;
     }
+    generation.current += 1;
+    actionBusy.current = false;
+    setDecisionPending(null);
+    setIsPreviewing(false);
     setUserCode(formatAuthDeviceUserCode(route.params.user_code));
     setConfirmedCode(null);
     setPreview(null);
@@ -359,18 +432,149 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setManualEntryVisible(false);
     setIsScanning(false);
     setDeadlineMs(null);
+    currentDeadline.current = null;
     setRawUserAgentExpanded(false);
-  }, [route.params?.start_scanner, route.params?.user_code]);
+    updateDecisionUncertain(null);
+    const handoff = takeLoginRequest(route.params.user_code, "device");
+    if (handoff?.result.kind === "device") {
+      lastActionAt.current = handoff.at;
+      acceptPreview(handoff.code, handoff.result.preview);
+    }
+  }, [route.params?.start_scanner, route.params?.user_code, routeRevision]);
+  useEffect(() => {
+    // Commit the decision or verification prompt before applying the newest link.
+    if (
+      decisionOperation.current ||
+      terminal ||
+      decisionUncertain ||
+      !deferredRoute.current
+    )
+      return;
+    deferredRoute.current = false;
+    setRouteRevision((revision) => revision + 1);
+  }, [decisionPending, terminal, decisionUncertain]);
+
+  function applyDeferredRoute() {
+    if (!deferredRoute.current) return false;
+    deferredRoute.current = false;
+    const incoming = route.params?.user_code;
+    if (
+      incoming === undefined ||
+      (terminal &&
+        normalizeAuthDeviceUserCode(incoming) ===
+          normalizeAuthDeviceUserCode(confirmedCode ?? userCode))
+    )
+      return false;
+    updateDecisionUncertain(null);
+    setRouteRevision((revision) => revision + 1);
+    return true;
+  }
+
+  useEffect(
+    () => () => {
+      generation.current += 1;
+      decisionOperation.current = null;
+    },
+    [],
+  );
+
+  function acceptPreview(code: string, result: AuthDevicePreview) {
+    setConfirmedCode(code);
+    refreshPreview(result);
+    setRawUserAgentExpanded(false);
+  }
+
+  function refreshPreview(result: AuthDevicePreview) {
+    updateDecisionUncertain(null);
+    setErrorMessage(null);
+    setPreview(result);
+    const now = Date.now();
+    const deadline = resolveDeviceLoginDeadlineMs(
+      result.expires_at,
+      result.seconds_remaining,
+      now,
+    );
+    setDeadlineMs(deadline);
+    currentDeadline.current = deadline;
+    setClockMs(now);
+    setTerminal(
+      terminalFromPreview(result, decisionUncertain) ??
+        (deadline <= now ? "expired" : null),
+    );
+  }
+
+  function refreshRequest(automatic = false): number | Promise<void> {
+    if (!confirmedCode || actionBusy.current) return 750;
+    if (deadlineMs !== null && Date.now() >= deadlineMs && !decisionUncertain) {
+      setTerminal("expired");
+      return Promise.resolve();
+    }
+    const delay = Math.max(
+      ACTION_THROTTLE_MS - (Date.now() - lastActionAt.current),
+      automatic ? previewCooldownMs() : 0,
+    );
+    if (delay > 0) return delay;
+    if (!automatic) uncertainPreview.reset();
+    lastActionAt.current = Date.now();
+    actionBusy.current = true;
+    setIsPreviewing(true);
+    const current = generation.current;
+    const requestCode = confirmedCode;
+    return previewLoginRequest(requestCode, "device")
+      .then(
+        (result) => {
+          if (
+            current === generation.current &&
+            currentCode.current === requestCode
+          )
+            refreshPreview(result);
+        },
+        (error: unknown) => {
+          if (current !== generation.current) return;
+          setTerminal((previous) => terminalFromError(error) ?? previous);
+          if (!automatic)
+            setErrorMessage(
+              t(deviceLoginErrorCopy(error), { host: loginServerHost() }),
+            );
+          cooldown.sync();
+        },
+      )
+      .finally(() => {
+        if (current === generation.current) {
+          setIsPreviewing(false);
+          actionBusy.current = false;
+        }
+      });
+  }
+
+  const uncertainPreview = useUncertainLoginPreview(
+    Boolean(decisionUncertain && preview && !terminal && !decisionPending),
+    `${generation.current}:${confirmedCode}`,
+    () => refreshRequest(true),
+  );
+  useLoginRequestResume(Boolean(preview && !terminal), () => {
+    if (actionBusy.current) return;
+    const result = refreshRequest();
+    if (typeof result === "number") return result;
+  });
 
   useEffect(() => {
     if (!preview || terminal || deadlineMs === null) return;
     const interval = setInterval(() => {
       const now = Date.now();
       setClockMs(now);
-      if (now >= deadlineMs) clearInterval(interval);
+      if (
+        currentDeadline.current !== null &&
+        now >= currentDeadline.current &&
+        !decisionOperation.current &&
+        !uncertainDecision.current
+      ) {
+        setTerminal((previous) => previous ?? "expired");
+        clearInterval(interval);
+      }
     }, 1000);
     return () => clearInterval(interval);
-  }, [deadlineMs, preview, terminal]);
+  }, [deadlineMs, preview, terminal, decisionUncertain]);
 
   const claimAction = useCallback(() => {
     const now = Date.now();
@@ -381,58 +585,54 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
   const runPreview = useCallback(
     async (candidate: string): Promise<boolean> => {
-      if (!claimAction()) {
-        setErrorMessage("Please wait a moment before trying again.");
+      if (cooldown.coolingDown) return false;
+      if (actionBusy.current || !claimAction()) {
+        setErrorMessage(t("Please wait a moment before trying again."));
         return false;
       }
-
-      const normalized = normalizeAuthDeviceUserCode(candidate);
-      if (!normalized) {
-        setErrorMessage("Enter a valid eight-character login code.");
-        return false;
-      }
-
+      actionBusy.current = true;
       setIsPreviewing(true);
       setErrorMessage(null);
+      const current = generation.current;
       try {
-        const result = await mobileApi.previewAuthDevice(normalized);
-        if (result.status === "denied") {
-          setTerminal("denied");
-          return true;
-        }
-        if (result.status !== "pending") {
-          setErrorMessage(
-            result.status === "expired"
-              ? "This login request has expired."
-              : "This login request was already completed.",
-          );
-          return false;
-        }
-
-        setConfirmedCode(normalized);
-        setPreview(result);
-        const now = Date.now();
-        setDeadlineMs(
-          resolveDeviceLoginDeadlineMs(
-            result.expires_at,
-            result.seconds_remaining,
-            now,
-          ),
-        );
-        setClockMs(now);
-        setRawUserAgentExpanded(false);
+        const result = await resolveLoginRequest(candidate, "device");
+        if (current !== generation.current) return false;
+        const normalized = normalizeAuthDeviceUserCode(candidate)!;
+        if (result.kind === "agent-key") {
+          if (handoffLoginRequest(normalized, result))
+            navigation.navigate("AgentKeyLogin", { user_code: normalized });
+        } else acceptPreview(normalized, result.preview);
+        setManualEntryVisible(false);
+        setIsScanning(false);
         return true;
       } catch (error) {
-        setErrorMessage(resolveAuthDeviceErrorMessage(error));
+        if (current === generation.current) {
+          const state = terminalFromError(error);
+          if (state && state !== "unavailable") {
+            setTerminal(state);
+            setIsScanning(false);
+            setManualEntryVisible(false);
+          }
+          setErrorMessage(
+            t(deviceLoginErrorCopy(error), { host: loginServerHost() }),
+          );
+          cooldown.sync();
+        }
         return false;
       } finally {
-        setIsPreviewing(false);
+        if (current === generation.current) {
+          actionBusy.current = false;
+          setIsPreviewing(false);
+        }
       }
     },
-    [claimAction],
+    [claimAction, cooldown.coolingDown, navigation, t],
   );
 
-  const handleScannedCode = (normalized: string, kind: "device" | "agent-key") => {
+  const handleScannedCode = (
+    normalized: string,
+    kind: "device" | "agent-key",
+  ) => {
     if (kind === "agent-key") {
       setIsScanning(false);
       navigation.navigate("AgentKeyLogin", { user_code: normalized });
@@ -452,52 +652,108 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setIsScanning(false);
   };
 
-  const handleDecision = async (decision: "approve" | "deny") => {
-    if (!confirmedCode || !preview) return;
-    if (!claimAction()) {
-      setErrorMessage("Please wait a moment before trying again.");
+  const handleDecision = async (
+    decision: "approve" | "deny",
+    verifiedRetry = false,
+  ) => {
+    if (!confirmedCode || !preview || terminal || actionBusy.current) return;
+    if (
+      deadlineMs === null ||
+      (deadlineMs <= Date.now() && !decisionUncertain)
+    ) {
+      setTerminal("expired");
+      return;
+    }
+    if (!verifiedRetry && !claimAction()) {
+      setErrorMessage(t("Please wait a moment before trying again."));
       return;
     }
 
-    if (deadlineMs === null || deadlineMs <= Date.now()) {
-      setErrorMessage("This login request has expired.");
-      return;
-    }
-
+    uncertainPreview.reset();
+    actionBusy.current = true;
+    const owner = Symbol("login-decision");
+    decisionOperation.current = owner;
+    const current = generation.current;
     setDecisionPending(decision);
     setErrorMessage(null);
+    let dispatched = false;
     try {
       if (decision === "approve") {
+        dispatched = true;
         await mobileApi.approveAuthDevice(confirmedCode);
-        setTerminal("approved");
+        if (current === generation.current) setTerminal("approved");
       } else {
+        dispatched = true;
         await mobileApi.denyAuthDevice(confirmedCode);
-        setTerminal("denied");
+        if (current === generation.current) setTerminal("denied");
       }
     } catch (error) {
-      setErrorMessage(resolveAuthDeviceErrorMessage(error));
+      if (current !== generation.current) return;
+      actionBusy.current = false;
+      if (dispatched && isLoginDecisionUncertain(error))
+        updateDecisionUncertain(decision);
+      if (
+        classifyLoginError(error) === "mfa_step_up" &&
+        (await stepUp.handle(error, () => handleDecision(decision, true)))
+      )
+        return;
+      setTerminal(
+        (previous) => terminalFromError(error, decisionUncertain) ?? previous,
+      );
+      setErrorMessage(t(deviceLoginErrorCopy(error), { host: loginServerHost() }));
     } finally {
-      setDecisionPending(null);
+      if (decisionOperation.current === owner) {
+        decisionOperation.current = null;
+        actionBusy.current = false;
+        setDecisionPending(null);
+      }
     }
   };
 
   const handleBack = () => {
+    if (decisionOperation.current) return;
+    if ((terminal || uncertainDecision.current) && applyDeferredRoute()) return;
     if (navigation.canGoBack()) {
       navigation.goBack();
+    } else if (isAuthenticated) {
+      navigation.dispatch(workspaceNavigateAction("Activity"));
     } else {
-      navigation.navigate(isAuthenticated ? "Activity" : "Auth");
+      navigation.navigate("Auth");
     }
+  };
+
+  const handleRestart = () => {
+    if (decisionOperation.current) return;
+    if (applyDeferredRoute()) return;
+    updateDecisionUncertain(null);
+    generation.current += 1;
+    actionBusy.current = false;
+    setDecisionPending(null);
+    setIsPreviewing(false);
+    setTerminal(null);
+    setPreview(null);
+    setConfirmedCode(null);
+    setUserCode("");
+    setDeadlineMs(null);
+    currentDeadline.current = null;
+    setErrorMessage(null);
+    setIsScanning(false);
+    navigation.setParams({
+      user_code: undefined,
+      start_scanner: undefined,
+    });
   };
 
   if (isScanning) {
     return (
       <>
         <DeviceCodeScanner
+          showHeader={!inWorkspaceSheet}
           paused={manualEntryVisible || isPreviewing}
           onCancel={handleBack}
           onCode={handleScannedCode}
           onManualEntry={() => {
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
             setManualEntryVisible(true);
           }}
         />
@@ -506,15 +762,16 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           value={userCode}
           errorMessage={errorMessage}
           isPending={isPreviewing}
+          coolingDown={cooldown.coolingDown}
           colors={colors}
           styles={styles}
           onChange={(value) => {
             setUserCode(formatAuthDeviceUserCode(value));
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
           }}
           onDismiss={() => {
             setManualEntryVisible(false);
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
           }}
           onSubmit={() => void handleManualSubmit()}
         />
@@ -526,7 +783,14 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     deadlineMs === null
       ? 0
       : secondsUntilDeviceLoginDeadline(deadlineMs, clockMs);
-  const isExpired = Boolean(preview) && secondsRemaining === 0;
+  const isExpired =
+    Boolean(preview) &&
+    secondsRemaining === 0 &&
+    !decisionUncertain &&
+    !decisionPending;
+  const waitingForDecision = Boolean(
+    decisionUncertain || (decisionPending && secondsRemaining === 0),
+  );
   const isPending = isPreviewing || decisionPending !== null;
   const loginCode = formatAuthDeviceUserCode(confirmedCode ?? userCode);
   const originValue = preview
@@ -553,32 +817,37 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   );
 
   if (terminal) {
-    const approved = terminal === "approved";
     return (
-      <ScreenContainer>
-        <View style={styles.terminalScreen}>
-          {approved ? (
-            <MagicKeyIllustration
-              size={COMPLETION_MARK_SIZE}
-              color={colors.success}
-              opacity={COMPLETION_MARK_OPACITY}
-            />
-          ) : (
-            <RoadBarrierIllustration
-              size={COMPLETION_MARK_SIZE}
-              color={colors.danger}
-              opacity={COMPLETION_MARK_OPACITY}
-            />
-          )}
-          <Text style={styles.terminalTitle}>
-            {approved ? "Login approved" : "Request denied"}
-          </Text>
-          <PrimaryButton label="Done" onPress={handleBack} />
-        </View>
-      </ScreenContainer>
+      <LoginRequestTerminalView
+        state={terminal}
+        inSheet={inWorkspaceSheet}
+        disabled={decisionPending !== null}
+        onDone={handleBack}
+        onRestart={handleRestart}
+      />
     );
   }
 
+  if (stepUp.prompt) {
+    return (
+      <ScreenContainer>
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <ScrollView
+            contentContainerStyle={[
+              styles.content,
+              !inWorkspaceSheet && styles.rootContent,
+            ]}
+            keyboardShouldPersistTaps="handled"
+          >
+            {stepUp.prompt}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </ScreenContainer>
+    );
+  }
   return (
     <ScreenContainer>
       <KeyboardAvoidingView
@@ -586,36 +855,54 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            !inWorkspaceSheet && styles.rootContent,
+          ]}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.screenHeader}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Back"
-              hitSlop={4}
-              onPress={handleBack}
-              style={({ pressed }) => [
-                styles.headerBackButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <ChevronLeft size={24} color={colors.textPrimary} />
-            </Pressable>
-            <Text style={styles.title}>Approve device login</Text>
-          </View>
-          <Text style={styles.subtitle}>Review the request details.</Text>
-          {!preview && <PrimaryButton label="Agent Key login" kind="ghost" onPress={() => navigation.navigate("AgentKeyLogin")} />}
+          {!inWorkspaceSheet && (
+            <View style={styles.screenHeader}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back"
+                hitSlop={4}
+                onPress={handleBack}
+                style={({ pressed }) => [
+                  styles.headerBackButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <ChevronLeft size={24} color={colors.textPrimary} />
+              </Pressable>
+              <Text style={styles.title}>Approve device login</Text>
+            </View>
+          )}
+          <Text style={styles.subtitle}>
+            {t(
+              preview
+                ? "Review the request details."
+                : "Enter a device login or Agent Key login code from the requesting device.",
+            )}
+          </Text>
+          {!preview && (
+            <PrimaryButton
+              label="Agent Key login"
+              kind="ghost"
+              onPress={() => navigation.navigate("AgentKeyLogin")}
+            />
+          )}
 
           {!preview ? (
             <View style={styles.inputSection}>
               <Text style={styles.inputLabel}>Login code</Text>
-              <TextInput
+              <AuthTextInput
+                invalid={!!errorMessage}
                 accessibilityLabel="Login code"
                 value={userCode}
                 onChangeText={(value) => {
                   setUserCode(formatAuthDeviceUserCode(value));
-                  setErrorMessage(null);
+                  if (!cooldown.coolingDown) setErrorMessage(null);
                 }}
                 editable={!isPending}
                 autoCapitalize="characters"
@@ -624,8 +911,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 maxLength={11}
                 returnKeyType="done"
                 onSubmitEditing={() => {
-                  if (normalizeAuthDeviceUserCode(userCode))
-                    void runPreview(userCode);
+                  void runPreview(userCode);
                 }}
                 selectionColor={colors.primary}
                 placeholder="ABCD-EFGH"
@@ -640,10 +926,15 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   {errorMessage}
                 </Text>
               ) : null}
-              <PrimaryButton
+              <AuthSubmitButton
+                loading={isPreviewing}
                 label={isPreviewing ? "Checking request..." : "Continue"}
                 onPress={() => void runPreview(userCode)}
-                disabled={isPending || !normalizeAuthDeviceUserCode(userCode)}
+                disabled={
+                  isPending ||
+                  cooldown.coolingDown ||
+                  !normalizeAuthDeviceUserCode(userCode)
+                }
               />
               <Pressable
                 accessibilityRole="button"
@@ -803,9 +1094,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 <DetailRow
                   label="Expires in"
                   value={
-                    isExpired ? "Expired" : formatRemaining(secondsRemaining)
+                    waitingForDecision
+                      ? t("Waiting for NyxID…")
+                      : isExpired
+                        ? "Expired"
+                        : formatRemaining(secondsRemaining)
                   }
-                  tone={valueTones.expiry}
+                  tone={waitingForDecision ? "default" : valueTones.expiry}
                   styles={styles}
                 />
               </View>
@@ -818,7 +1113,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 />
                 <Text style={styles.cautionText}>
                   {"Only approve if you started this sign-in. "}
-                  {"Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "}
+                  {
+                    "Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "
+                  }
                   <Text style={styles.cautionDanger}>
                     If anything looks unfamiliar, reject it.
                   </Text>
@@ -827,15 +1124,24 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
               {isAuthenticated ? (
                 <View style={{ gap: spacing.md }}>
-                  {preview.supports_grant_choice && <PrimaryButton label="Restricted Agent Key" kind="ghost"
-                    disabled={isPending || isExpired}
-                    onPress={() => navigation.navigate("AgentKeyLogin", {
-                      user_code: confirmedCode ?? userCode, flow: "device",
-                    })} />}
+                  {preview.supports_grant_choice && (
+                    <PrimaryButton
+                      label="Restricted Agent Key"
+                      kind="ghost"
+                      disabled={isPending || isExpired}
+                      onPress={() =>
+                        navigation.navigate("AgentKeyLogin", {
+                          user_code: confirmedCode ?? userCode,
+                          flow: "device",
+                        })
+                      }
+                    />
+                  )}
                   <Text style={styles.cautionText}>
-                    A full account session grants this machine your account, service,
-                    credential, and organization access. A restricted Agent Key grants
-                    only the permissions and resources you confirm next.
+                    A full account session grants this machine your account,
+                    service, credential, and organization access. A restricted
+                    Agent Key grants only the permissions and resources you
+                    confirm next.
                   </Text>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
@@ -848,7 +1154,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                     />
                   </View>
                   <View style={styles.decisionButton}>
-                    <PrimaryButton
+                    <AuthSubmitButton
+                      loading={decisionPending === "approve"}
                       label={
                         decisionPending === "approve"
                           ? "Approving..."
@@ -864,7 +1171,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   <Text style={styles.signInText}>
                     Sign in to approve or reject this request.
                   </Text>
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Sign in"
                     onPress={() => navigation.navigate("Auth")}
                   />
@@ -877,6 +1184,22 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             <Text accessibilityRole="alert" style={styles.errorText}>
               {errorMessage}
             </Text>
+          ) : null}
+          {decisionUncertain ? (
+            <View style={{ gap: spacing.md }}>
+              <PrimaryButton
+                label={t("Done")}
+                kind="ghost"
+                disabled={decisionPending !== null}
+                onPress={handleBack}
+              />
+              <PrimaryButton
+                label={t("Scan or enter another code")}
+                kind="ghost"
+                disabled={decisionPending !== null}
+                onPress={handleRestart}
+              />
+            </View>
           ) : null}
           {isPending ? <ActivityIndicator color={colors.primary} /> : null}
         </ScrollView>

@@ -3,15 +3,17 @@
  * the draft @mentions plus those picked by hand, minus those removed by hand;
  * with neither, the group's default (the sender's sticky last recipients,
  * else the lead). Mentioning a removed agent again brings it back. The
- * selection is sent explicitly only after a hand edit, so unedited messages
- * route on the server exactly as previewed.
+ * selection is sent as explicit IDs so a stale preview cannot silently route
+ * to another member. Ambiguous bare handles still require server validation.
  */
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 
 export interface RecipientMember {
   readonly id: string;
   readonly name: string;
+  readonly mention_handle?: string;
   readonly destroyed?: boolean;
+  readonly unavailable?: boolean;
 }
 
 export interface RecipientSelection {
@@ -28,7 +30,7 @@ export const NO_RECIPIENT_EDITS: RecipientSelection = {
 };
 
 function live(members: readonly RecipientMember[]): RecipientMember[] {
-  return members.filter((member) => !member.destroyed);
+  return members.filter((member) => !member.destroyed && !member.unavailable);
 }
 
 function unique(ids: readonly string[]): string[] {
@@ -43,11 +45,21 @@ export function mentionedIds(
   const candidates = live(members);
   return mentionedNames(
     text,
-    candidates.map((member) => member.name),
+    [...members.map((member) => member.id), ...members.map((member) => member.name), ...members.flatMap((member) => member.mention_handle ? [member.mention_handle] : [])],
   ).flatMap((name) => {
-    const member = candidates.find((row) => row.name === name);
-    return member ? [member.id] : [];
+    const exact = members.find((row) => row.id.toLowerCase() === name.toLowerCase() || row.mention_handle?.toLowerCase() === name.toLowerCase());
+    const named = members.filter((row) => row.name.toLowerCase() === name.toLowerCase());
+    const member = exact ?? (named.length === 1 ? named[0] : undefined);
+    return member && candidates.includes(member) ? [member.id] : [];
   });
+}
+
+/** Use an exact ID in the draft when a handle is ambiguous, including unavailable namesakes. */
+export function memberMention(member: RecipientMember, members: readonly RecipientMember[]): string {
+  if (member.mention_handle) return member.mention_handle;
+  return members.filter((row) => row.name.toLowerCase() === member.name.toLowerCase()).length > 1
+    || members.some((row) => row.id.toLowerCase() === member.name.toLowerCase())
+    ? member.id : member.name;
 }
 
 /** The draft changed: a newly typed mention undoes that agent's removal. */
@@ -90,7 +102,7 @@ export function withRemoved(
 export interface ResolvedRecipients {
   /** Who the message goes to, as the pills show it. */
   readonly ids: string[];
-  /** Whether the pills were edited by hand (then `ids` are sent explicitly). */
+  /** Whether a hand edit overrides mentions in the text. */
   readonly edited: boolean;
 }
 

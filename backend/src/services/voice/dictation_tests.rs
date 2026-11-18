@@ -480,3 +480,40 @@ async fn dictation_get_permission_is_independent_of_live_post_permission() {
 async fn dictation_loopback_irrelevant_provider_flood_cannot_starve_stop() {
     loopback(false, false, true).await;
 }
+
+#[tokio::test]
+async fn dictation_2138_provider_close_emits_safe_terminal_event_and_settles() {
+    Box::pin(async {
+        let (f,service)=super::super::credential_tests::fixture("dictation_2138_provider_close").await;
+        let preferences=super::super::credential_tests::platform(&service);
+        let human=uuid::Uuid::new_v4().to_string();
+        f.state.db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME).insert_one(doc!{"_id":&human,"user_id":&f.owner,"revoked":false,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(5))}).await.unwrap();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url=format!("ws://{}",listener.local_addr().unwrap());
+        let provider=tokio::spawn(async move {
+            let (stream,_)=listener.accept().await.unwrap();
+            let mut socket=tokio_tungstenite::accept_async(stream).await.unwrap();
+            let frame=socket.next().await.unwrap().unwrap();
+            let mut response:Value=serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            response["type"]=json!("session.updated");
+            socket.send(Message::Text(response.to_string().into())).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            socket.close(None).await.unwrap();
+        });
+        let (socket,_)=tokio_tungstenite::connect_async(url).await.unwrap();
+        let (_input,receive)=mpsc::channel(100);
+        let (output,mut events)=mpsc::channel(8);
+        let task=tokio::spawn(serve_with_provider(f.state.clone(),f.owner.clone(),f.row.id.clone(),human,
+            uuid::Uuid::new_v4().to_string(),preferences,receive,output,Provider::Fixture(Box::new(socket))));
+        assert_eq!(events.recv().await.unwrap()["type"],"ready");
+        let failure=tokio::time::timeout(std::time::Duration::from_secs(20),events.recv()).await.unwrap().unwrap();
+        assert_eq!(failure["type"],"error");
+        assert_eq!(failure["code"],"dictation_provider_failed");
+        assert_eq!(failure["stage"],"provider");
+        assert_eq!(failure["error"]["error_code"],12501);
+        task.await.unwrap(); provider.await.unwrap();
+        let call=f.state.db.collection::<VoiceSession>(COLLECTION_NAME).find_one(doc!{"user_id":&f.owner,"dictation":true}).await.unwrap().unwrap();
+        assert!(!call.live_slot && call.billing_finalized);
+        assert!(!call.final_usage_confirmed);
+    }).await;
+}

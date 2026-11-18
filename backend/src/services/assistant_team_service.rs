@@ -26,7 +26,7 @@ use crate::{
         assistant_agent::{
             AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS, GuestAccess,
             MAX_DISPLAY_NAME_CHARS, MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MAX_PERSONA_CHARS,
-            MemoryNote,
+            MAX_VOICE_INSTRUCTIONS_CHARS, MemoryNote,
         },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
@@ -48,6 +48,8 @@ pub const NYXBOT_NAME: &str = "NyxBot";
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
+/// Archive discovery is bounded separately from the complete live roster.
+pub const DESTROYED_AGENT_LIMIT: usize = 200;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
 /// Channel turns run at once for one owner, across all their bots and chats,
@@ -74,14 +76,21 @@ pub fn valid_name(name: &str) -> bool {
         && name.as_bytes()[0].is_ascii_alphanumeric()
 }
 
-/// What the agent's other threads are answering right now (title, question
-/// excerpt, question key), so it does not do the same work twice. Bounded.
+pub struct OtherThreadExcerpt {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub title: String,
+    pub question: Option<String>,
+    pub question_key: Option<String>,
+}
+
+/// Bounded duplicate-work discovery, not proof of execution progress.
 pub async fn in_progress(
     db: &Database,
     owner: &str,
     agent_id: &str,
     exclude: &str,
-) -> AppResult<Vec<(String, Option<String>, Option<String>)>> {
+) -> AppResult<Vec<OtherThreadExcerpt>> {
     let fresh = bson::DateTime::from_chrono(
         Utc::now() - chrono::Duration::seconds(super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS),
     );
@@ -89,9 +98,12 @@ pub async fn in_progress(
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
-            "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+            "channel": bson::Bson::Null,
+            "$or": [{"guest_turn": false}, {"guest_turn": {"$exists": false}}],
+            "active_turn.started_at": {"$gt": fresh}},
         )
-        .projection(doc! {"title": 1, "active_turn.question": 1, "active_turn.question_key": 1})
+        .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)
         .await?
         .try_collect()
@@ -100,13 +112,20 @@ pub async fn in_progress(
         .iter()
         .map(|row| {
             let turn = row.get_document("active_turn").ok();
-            (
-                row.get_str("title").unwrap_or_default().to_owned(),
-                turn.and_then(|turn| turn.get_str("question").ok())
+            OtherThreadExcerpt {
+                thread_id: row.get_str("_id").unwrap_or_default().to_owned(),
+                turn_id: turn
+                    .and_then(|turn| turn.get_str("turn_id").ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+                title: row.get_str("title").unwrap_or_default().to_owned(),
+                question: turn
+                    .and_then(|turn| turn.get_str("question").ok())
                     .map(str::to_owned),
-                turn.and_then(|turn| turn.get_str("question_key").ok())
+                question_key: turn
+                    .and_then(|turn| turn.get_str("question_key").ok())
                     .map(str::to_owned),
-            )
+            }
         })
         .collect())
 }
@@ -114,6 +133,11 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        wake: None,
+        automation_work: None,
+        execution_task: None,
+        channel_contexts: Vec::new(),
+        delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,
         media_sent_at: None,
@@ -174,35 +198,10 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
             "Organizations cannot own NyxBot".into(),
         ));
     }
-    let now = Utc::now();
-    let agent = AssistantAgent {
-        skills: Vec::new(),
-        skills_revision: 0,
-        skill_metadata: BTreeMap::new(),
-        machine_access: Some(Box::default()),
-        machine_node_ids: Vec::new(),
-        saved_login_ids: Vec::new(),
-        id: Uuid::new_v4().to_string(),
-        user_id: owner.into(),
-        kind: AgentKind::Nyxbot,
-        name: NYXBOT_NAME.into(),
-        description: String::new(),
-        specialty: None,
-        grants: AgentGrants::default(),
-        guest_access: BTreeMap::new(),
-        operation_scopes: Default::default(),
-        operation_scope_revisions: Default::default(),
-        created_by: "user".into(),
-        model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
-        access_mode_override: None,
-        home_conversation_id: None,
-        memory: Vec::new(),
-        display_name: None,
-        persona: None,
-        destroyed_at: None,
-        created_at: now,
-        updated_at: now,
-    };
+    let agent = nyxbot_profile(
+        owner,
+        routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
+    );
     let context = (db.clone(), owner.to_owned(), agent);
     super::transaction_service::run_db_only(db, &context, |session, (db, owner, agent)| {
         Box::pin(async move {
@@ -222,6 +221,79 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     .await
 }
 
+fn nyxbot_profile(owner: &str, model: String) -> AssistantAgent {
+    let now = Utc::now();
+    AssistantAgent {
+        channel_checking_notice: false,
+        skills: Vec::new(),
+        skills_revision: 0,
+        skill_metadata: BTreeMap::new(),
+        machine_access: Some(Box::default()),
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
+        id: Uuid::new_v4().to_string(),
+        user_id: owner.into(),
+        kind: AgentKind::Nyxbot,
+        name: NYXBOT_NAME.into(),
+        description: String::new(),
+        specialty: None,
+        grants: AgentGrants::default(),
+        guest_access: BTreeMap::new(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
+        operation_scopes: Default::default(),
+        operation_scope_revisions: Default::default(),
+        created_by: "user".into(),
+        model,
+        owner_model_route: None,
+        guest_model_notices: Default::default(),
+        access_mode_override: None,
+        home_conversation_id: None,
+        memory: Vec::new(),
+        display_name: None,
+        persona: None,
+        voice_instructions: None,
+        destroyed_at: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+/// Group admission already holds this owner's fence. Creating a missing
+/// NyxBot must share that transaction instead of waiting on a nested writer.
+pub(crate) async fn ensure_nyxbot_in_session(
+    db: &Database,
+    owner: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<AssistantAgent> {
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    if let Some(agent) = collection
+        .find_one(doc! {"user_id": owner, "kind": "nyxbot"})
+        .session(&mut *session)
+        .await?
+    {
+        return Ok(agent);
+    }
+    if db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": owner, "user_type": "org"})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Organizations cannot own NyxBot".into(),
+        ));
+    }
+    super::erasure_admission::fence_in_session(db, owner, session).await?;
+    let model =
+        routing::model_for_in_session(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL, session)
+            .await;
+    let agent = nyxbot_profile(owner, model);
+    collection.insert_one(&agent).session(session).await?;
+    Ok(agent)
+}
+
 /// An agent of the owner by ID.
 pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantAgent> {
     if Uuid::parse_str(id).is_err() {
@@ -232,12 +304,27 @@ pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantA
         .find_one(doc! {"_id": id})
         .await?
         .ok_or_else(not_found)?;
-    if !super::org_agent_service::access(db, owner, &agent.user_id)
-        .await?
-        .can_read()
-        || (owner != agent.user_id && agent.is_nyxbot())
-    {
-        return Err(not_found());
+    if owner != agent.user_id {
+        if agent.is_nyxbot() {
+            return Err(not_found());
+        }
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        if !acl.can_read() {
+            // Organization agents are visible only through the organization's
+            // live read ACL.  Do not run the personal sharing evaluator for an
+            // organization owner: besides doing unnecessary sharing reads, it
+            // changes the established not-found contract for outsiders to the
+            // personal "Shared agent not found" error.
+            let owner_is_org = db
+                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id": &agent.user_id, "user_type": "org"})
+                .await?
+                .is_some();
+            if owner_is_org {
+                return Err(not_found());
+            }
+            super::shared_agent_service::require(db, owner, &agent).await?;
+        }
     }
     Ok(agent)
 }
@@ -301,8 +388,11 @@ pub async fn delegable_specialist(
     match specialist(db, actor, selector).await {
         Ok(agent) => {
             if agent.user_id != actor {
-                super::org_agent_service::require_creation_enabled(db, actor).await?;
-                super::org_agent_service::require_use(db, actor, &agent).await?;
+                let access =
+                    super::org_agent_service::resolve_agent_access(db, actor, &agent).await?;
+                if access.as_ref().is_none_or(|a| a.shared().is_none()) {
+                    super::org_agent_service::require_creation_enabled(db, actor).await?;
+                }
             }
             return Ok(agent);
         }
@@ -310,11 +400,92 @@ pub async fn delegable_specialist(
         Err(error) => return Err(error),
     }
 
+    let mut usable =
+        admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Use).await?;
+    let shared = super::shared_agent_service::load(db, actor, None).await?;
+    usable.extend(
+        shared
+            .agents
+            .into_values()
+            .filter(|a| {
+                selector == a.agent().name
+                    || selector == format!("{}/{}", a.owner(), a.agent().name)
+            })
+            .map(|a| a.agent().clone()),
+    );
+    match usable.len() {
+        0 => Err(not_found()),
+        1 => Ok(usable.pop().expect("one candidate")),
+        _ => {
+            let mut choices = Vec::with_capacity(usable.len());
+            for agent in &usable {
+                choices.push(qualified_name(db, agent).await?);
+            }
+            choices.sort();
+            Err(AppError::ValidationError(format!(
+                "Agent name is ambiguous; use one of: {}",
+                choices.join(", ")
+            )))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OrgAgentAdmission {
+    Use,
+    Read,
+}
+
+impl OrgAgentAdmission {
+    async fn require_enabled(self, db: &Database, actor: &str) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_creation_enabled(db, actor).await,
+            Self::Read => Ok(()),
+        }
+    }
+
+    async fn admit(self, db: &Database, actor: &str, agent: &AssistantAgent) -> AppResult<()> {
+        match self {
+            Self::Use => super::org_agent_service::require_use(db, actor, agent).await,
+            Self::Read => {
+                if super::org_agent_service::access(db, actor, &agent.user_id)
+                    .await?
+                    .can_read()
+                {
+                    Ok(())
+                } else {
+                    Err(not_found())
+                }
+            }
+        }
+    }
+}
+
+/// Whether a bare or qualified name matches any readable organization specialist.
+/// Channel targets need no ambiguity selection because every match is refused.
+pub async fn names_readable_organization_specialist(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+) -> AppResult<bool> {
+    match admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Read).await {
+        Ok(agents) => Ok(!agents.is_empty()),
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn admitted_organization_specialists(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+    admission: OrgAgentAdmission,
+) -> AppResult<Vec<AssistantAgent>> {
     if let Some((org_selector, agent_selector)) = selector.split_once('/') {
         if org_selector.is_empty() || agent_selector.is_empty() {
             return Err(not_found());
         }
-        super::org_agent_service::require_creation_enabled(db, actor).await?;
+        admission.require_enabled(db, actor).await?;
         let owner = super::org_agent_service::resolve_org_selector(db, actor, org_selector).await?;
         let agent = db
             .collection::<AssistantAgent>(AGENTS)
@@ -326,8 +497,8 @@ pub async fn delegable_specialist(
             })
             .await?
             .ok_or_else(not_found)?;
-        super::org_agent_service::require_use(db, actor, &agent).await?;
-        return Ok(agent);
+        admission.admit(db, actor, &agent).await?;
+        return Ok(vec![agent]);
     }
 
     if !valid_name(selector) {
@@ -351,31 +522,20 @@ pub async fn delegable_specialist(
     if candidates.is_empty() {
         return Err(not_found());
     }
-    super::org_agent_service::require_creation_enabled(db, actor).await?;
+    admission.require_enabled(db, actor).await?;
 
     let mut usable = Vec::with_capacity(candidates.len());
     for agent in candidates {
-        match super::org_agent_service::require_use(db, actor, &agent).await {
+        match admission.admit(db, actor, &agent).await {
             Ok(()) => usable.push(agent),
-            Err(error) if error.is_forbidden() => {}
+            Err(error)
+                if error.is_forbidden()
+                    || (matches!(admission, OrgAgentAdmission::Read)
+                        && matches!(error, AppError::NotFound(_))) => {}
             Err(error) => return Err(error),
         }
     }
-    match usable.len() {
-        0 => Err(not_found()),
-        1 => Ok(usable.pop().expect("one candidate")),
-        _ => {
-            let mut choices = Vec::with_capacity(usable.len());
-            for agent in &usable {
-                choices.push(qualified_name(db, agent).await?);
-            }
-            choices.sort();
-            Err(AppError::ValidationError(format!(
-                "Agent name is ambiguous; use one of: {}",
-                choices.join(", ")
-            )))
-        }
-    }
+    Ok(usable)
 }
 
 async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<String> {
@@ -390,28 +550,56 @@ async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<Stri
     Ok(format!("{prefix}/{}", agent.name))
 }
 
-/// The owner's agents: NyxBot first, then specialists oldest first.
+/// All visible live agents (NyxBot first, then oldest first), followed by the
+/// most recently destroyed agents. Archives never consume live roster slots.
 pub async fn agents(
     db: &Database,
     owner: &str,
     include_destroyed: bool,
 ) -> AppResult<Vec<AssistantAgent>> {
+    Ok(agent_roster(db, owner, include_destroyed).await?.0)
+}
+
+async fn agent_roster(
+    db: &Database,
+    owner: &str,
+    include_destroyed: bool,
+) -> AppResult<(Vec<AssistantAgent>, bool)> {
     let owners = super::org_agent_service::visible_owners(db, owner).await?;
-    let mut filter =
+    let scope =
         doc! {"user_id": {"$in": owners}, "$or": [{"user_id": owner}, {"kind": "specialist"}]};
-    if !include_destroyed {
-        filter.insert("destroyed_at", bson::Bson::Null);
-    }
-    let mut rows: Vec<AssistantAgent> = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find(filter)
-        .sort(doc! {"created_at": 1})
-        .limit(200)
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let mut live_filter = scope.clone();
+    live_filter.insert("destroyed_at", bson::Bson::Null);
+    let mut rows: Vec<AssistantAgent> = collection
+        .find(live_filter)
+        .sort(doc! {"created_at": 1, "_id": 1})
         .await?
         .try_collect()
         .await?;
     rows.sort_by_key(|agent| !agent.is_nyxbot());
-    Ok(rows)
+    if !include_destroyed {
+        return Ok((rows, false));
+    }
+    let mut archive_filter = scope;
+    archive_filter.insert("destroyed_at", doc! {"$ne": bson::Bson::Null});
+    let mut archive: Vec<AssistantAgent> = collection
+        .find(archive_filter)
+        .sort(doc! {"destroyed_at": -1, "_id": -1})
+        .limit((DESTROYED_AGENT_LIMIT + 1) as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let truncated = archive.len() > DESTROYED_AGENT_LIMIT;
+    archive.truncate(DESTROYED_AGENT_LIMIT);
+    // A live row destroyed between the two reads must not appear twice.
+    let live_ids: HashSet<_> = rows.iter().map(|row| row.id.clone()).collect();
+    rows.extend(
+        archive
+            .into_iter()
+            .filter(|row| !live_ids.contains(&row.id)),
+    );
+    Ok((rows, truncated))
 }
 
 /// The agent a thread belongs to; legacy rows belong to the owner's NyxBot.
@@ -419,10 +607,54 @@ pub async fn agent_for_conversation(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
+    if let Some(access) = super::org_channel_service::conversation_access(db, row).await? {
+        let mut agent = access
+            .channel()
+            .ok_or_else(super::org_channel_service::denied)?
+            .agent()
+            .clone();
+        if row.guest_turn {
+            agent.memory.clear();
+            agent.machine_node_ids.clear();
+            agent.saved_login_ids.clear();
+            agent.machine_access = None;
+            agent.home_conversation_id = None;
+            agent.grants.account_read = false;
+        }
+        return Ok(agent);
+    }
+
+    if row.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::agent_for_thread(db, row))
+            .await;
+    }
     match row.agent_id.as_deref() {
         Some(id) => {
-            let agent = agent(db, &row.user_id, id).await?;
-            super::org_agent_service::require_use(db, &row.user_id, &agent).await?;
+            let mut agent = agent(db, &row.user_id, id).await?;
+            let access =
+                super::org_agent_service::resolve_agent_access(db, &row.user_id, &agent).await?;
+            if let Some(shared) = access.as_ref().and_then(|a| a.shared()) {
+                super::assistant_group_service::check_shared_surface(row)?;
+                if row.group_id.is_some() {
+                    super::org_group_service::check_thread_participation(
+                        db,
+                        row,
+                        access.as_ref().expect("shared access"),
+                    )
+                    .await?;
+                }
+                agent.memory = shared.team_memory().to_vec();
+                agent.memory.extend(
+                    super::shared_agent_service::private_notes(db, &row.user_id, id).await?,
+                );
+                agent.machine_node_ids.clear();
+                agent.machine_access = None;
+                agent.saved_login_ids.clear();
+                agent.guest_access.clear();
+                agent.grants.account_read = false;
+                agent.home_conversation_id = None;
+                agent.access_mode_override = None;
+            }
             if agent.user_id != row.user_id && (row.guest_turn || row.channel.is_some()) {
                 return Err(AppError::Forbidden(
                     "Organization agents require a private member thread".into(),
@@ -438,13 +670,13 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "group_id": bson::Bson::Null,
-            "voice_parent_conversation_id": bson::Bson::Null, "$or": [
+        doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+            "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,
-        "voice_parent_conversation_id": bson::Bson::Null}
+        doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+        "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null}
     }
 }
 
@@ -521,6 +753,7 @@ pub(crate) async fn create_thread_for_with_access(
         session,
         snapshot,
         learning_epoch,
+        None,
     ))
     .await
 }
@@ -533,7 +766,33 @@ pub(crate) async fn create_automation_thread(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
+    create_thread_with_kind(
+        db, keys, actor, agent, title, true, session, None, None, None,
+    )
+    .await
+}
+
+pub(crate) async fn create_collaboration_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    binding: crate::models::assistant_group_collaboration::ExecutionBinding,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    Box::pin(create_thread_with_kind(
+        db,
+        keys,
+        actor,
+        agent,
+        "Group execution",
+        false,
+        session,
+        None,
+        None,
+        Some(binding),
+    ))
+    .await
 }
 
 /// Create a private voice execution context linked to its visible call thread.
@@ -546,7 +805,16 @@ pub(crate) async fn create_voice_task_thread(
     parent_conversation_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, agent).await?;
+    // A shared voice task is a private child, never automation authority. The
+    // parent marker hides it from ordinary lists; no group admission is changed.
+    let mut row = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+        super::shared_agent_transport::require_ready(db).await?;
+        create_thread_for_with_access(db, keys, actor, agent, title, session, access.as_ref())
+            .await?
+    } else {
+        create_automation_thread(db, keys, actor, agent, title, session).await?
+    };
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": actor},
@@ -569,10 +837,16 @@ async fn create_thread_with_kind(
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     learning_epoch: Option<i64>,
+    collaboration: Option<crate::models::assistant_group_collaboration::ExecutionBinding>,
 ) -> AppResult<AssistantConversation> {
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        title_language: None,
+        automation_v2: false,
+        artifact_head: None,
+        collaboration: collaboration.clone(),
+        owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
         platform_thread: None,
@@ -607,6 +881,8 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        guest_model_setup: false,
+        shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
         report_to: None,
@@ -616,16 +892,24 @@ async fn create_thread_with_kind(
         group_id: None,
         group_request_id: None,
         group_seen_seq: 0,
-        guest_turn: false,
+        guest_turn: collaboration.as_ref().is_some_and(|b| {
+            b.authority.lane == crate::models::assistant_group_collaboration::Lane::Guest
+        }),
         reply_channel: None,
         deliver_also: Vec::new(),
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
+    if let Some(binding) = &row.collaboration {
+        super::collaboration_group_service::runtime::attach_slot(db, binding, &row.id, session)
+            .await?;
+    }
     let authority = Box::pin(credentials::authority_with_access(
         db, &row, session, snapshot,
     ))
     .await?;
+    row.shared_agent_thread = authority.is_shared();
+
     let credential = credentials::load_or_provision_in_session(
         db,
         keys,
@@ -636,14 +920,21 @@ async fn create_thread_with_kind(
     )
     .await?;
     row.credential_api_key_id = credential.api_key_id.clone();
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::bind_key(db, &row, session).await?;
+    }
     collection
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id}},
+            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id, "shared_agent_thread": row.shared_agent_thread}},
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread && row.platform_thread.is_none() && actor == agent.user_id {
+    if row.collaboration.is_none()
+        && !automation_thread
+        && row.platform_thread.is_none()
+        && actor == agent.user_id
+    {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -745,6 +1036,7 @@ pub async fn home_thread_for(
                 session,
                 None,
                 learning_epoch,
+                None,
             )
             .await;
             transactions::transaction_result(operation)
@@ -756,6 +1048,31 @@ pub async fn home_thread_for(
 // ---------------------------------------------------------------------------
 // Grants
 // ---------------------------------------------------------------------------
+
+/// One authorization inventory for grant editors and all grant writers. Tool
+/// publication affects discovery, not whether an HTTP connection can be granted.
+pub async fn grant_catalog(
+    db: &Database,
+    nodes: &NodeWsManager,
+    actor: &str,
+    scope: mcp_service::ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<Vec<mcp_service::McpToolService>> {
+    let catalog = mcp_service::load_authorization_catalog(db, nodes, actor, scope, targets).await?;
+    Ok(catalog
+        .services
+        .into_iter()
+        .chain(catalog.unpublished_services)
+        .filter(|service| {
+            !matches!(service.source, mcp_service::McpToolSource::Internal)
+                && !is_engine(&service.service_slug)
+        })
+        .collect())
+}
+
+fn is_engine(target: &str) -> bool {
+    target.eq_ignore_ascii_case(engine::SERVICE_SLUG) || target.eq_ignore_ascii_case("nyxagent")
+}
 
 /// Services resolved from slugs or IDs exactly as MCP enforces them: user
 /// services by `UserService` ID, platform services by catalog ID.
@@ -771,10 +1088,11 @@ pub struct GrantTargets {
 pub async fn resolve_targets(
     db: &Database,
     node_manager: &NodeWsManager,
+    actor: &str,
     owner: &str,
     targets: &[String],
 ) -> AppResult<GrantTargets> {
-    let (resolved, refused) = resolve_each_target(db, node_manager, owner, targets).await?;
+    let (resolved, refused) = resolve_each_target(db, node_manager, actor, owner, targets).await?;
     match refused.into_iter().next() {
         Some(refused) => Err(AppError::ValidationError(refused.reason)),
         None => Ok(resolved),
@@ -793,6 +1111,7 @@ pub struct Refused {
 pub async fn resolve_each_target(
     db: &Database,
     node_manager: &NodeWsManager,
+    actor: &str,
     owner: &str,
     targets: &[String],
 ) -> AppResult<(GrantTargets, Vec<Refused>)> {
@@ -810,14 +1129,14 @@ pub async fn resolve_each_target(
         .iter()
         .map(|target| target.trim().to_string())
         .collect();
-    let catalog = mcp_service::load_operation_catalog(
-        db,
-        node_manager,
-        owner,
-        mcp_service::NodeScope::Unrestricted,
-        mcp_service::ServiceScope::Preferring(&trimmed_targets),
-    )
-    .await?;
+    // Scope the authorization view to the actual maintaining person before
+    // diagnosing any resource. The transactional write still rechecks these ACLs.
+    let access = super::org_agent_service::resolve_key_access(db, actor, Some(owner)).await?;
+    let scope = match access.as_deref() {
+        Some(access) => mcp_service::ServiceScope::Organization { access },
+        None => mcp_service::ServiceScope::Preferring(&trimmed_targets),
+    };
+    let catalog = grant_catalog(db, node_manager, actor, scope, &trimmed_targets).await?;
     for target in &trimmed_targets {
         let target = target.as_str();
         let refuse = |reason: String| Refused {
@@ -826,9 +1145,7 @@ pub async fn resolve_each_target(
         };
         // Every agent runs on NyxAgent and thinks with NyxID's model
         // services; the engine itself is not a service an agent calls.
-        if target.eq_ignore_ascii_case(crate::services::assistant_nyxagent::SERVICE_SLUG)
-            || target.eq_ignore_ascii_case("nyxagent")
-        {
+        if is_engine(target) {
             refused.push(refuse(
                 "NyxAgent is the assistant engine every agent already runs on; it is not \
                 granted as a service"
@@ -836,16 +1153,30 @@ pub async fn resolve_each_target(
             ));
             continue;
         }
+        // Logical model grants use public IDs, never private provider routes.
+        // Selection does not create these grants implicitly.
+        if target.starts_with("nyxid/") {
+            super::assistant_platform_model::require_ready(db).await?;
+            let model = super::platform_model_service::authorized_model(db, actor, target).await?;
+            let id = model
+                .billing_service_id
+                .ok_or_else(super::assistant_platform_model::unavailable)?;
+            resolved
+                .ids_by_request
+                .insert(target.to_owned(), id.clone());
+            if !resolved.platform_service_ids.contains(&id) {
+                resolved.platform_service_ids.push(id);
+                resolved.slugs.push(target.to_owned());
+            }
+            continue;
+        }
         let Some(service) = catalog
-            .services
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
         else {
-            refused.push(refuse(format!(
-                "Unknown or unavailable service: {}. Use a slug or ID from \
-                nyx__list_connected_services",
-                identifier(target)
-            )));
+            refused.push(refuse(
+                grant_target_refusal(db, actor, owner, target, access.as_deref()).await?,
+            ));
             continue;
         };
         let (list, id) = match &service.source {
@@ -874,6 +1205,61 @@ pub async fn resolve_each_target(
     Ok((resolved, refused))
 }
 
+/// Missing and inaccessible IDs deliberately share a refusal. Diagnose disabled
+/// rows only after the same ownership, role-scope and admin-only checks.
+async fn grant_target_refusal(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    target: &str,
+    org_access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<String> {
+    use crate::models::user_service::{COLLECTION_NAME, UserService};
+    // Keep slug diagnostics within the actor's owner set; a common slug must
+    // never scan every user's connections just to explain a failed grant.
+    let owners = if org_access.is_some() {
+        vec![owner.to_string()]
+    } else {
+        let mut owners = vec![actor.to_string()];
+        owners.extend(
+            super::org_service::list_memberships_for_member(db, actor, false)
+                .await?
+                .into_iter()
+                .filter(|membership| membership.role.can_proxy())
+                .map(|membership| membership.org_user_id),
+        );
+        owners
+    };
+    let rows: Vec<UserService> = super::service_history::collection(db, COLLECTION_NAME)
+        .find(doc! {"user_id": {"$in": owners}, "$or": [{"_id": target}, {"slug": target}]})
+        .await?
+        .try_collect()
+        .await?;
+    for row in rows {
+        if row.deleted_at.is_some() {
+            continue;
+        }
+        let allowed = if let Some(access) = org_access {
+            row.user_id == owner && access.allows_service(&row)
+        } else {
+            let access = super::org_service::resolve_owner_access(db, actor, &row.user_id).await?;
+            super::org_agent_service::can_use(&access)
+                && access.allows_resource(&row.id)
+                && (!row.admin_only || access.can_write())
+        };
+        if allowed && !row.is_active {
+            return Ok(format!(
+                "Service disabled: {}. Enable it before granting access",
+                identifier(target)
+            ));
+        }
+    }
+    Ok(format!(
+        "Unknown service or no access: {}",
+        identifier(target)
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Specialists
 // ---------------------------------------------------------------------------
@@ -887,6 +1273,7 @@ pub struct CreateRequest {
     /// Optional friendly name and persona (tone, personality).
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub targets: GrantTargets,
     pub account_read: bool,
     pub specialty: Option<String>,
@@ -1072,6 +1459,7 @@ async fn create_specialist_inner(
     };
     let now = Utc::now();
     let agent = AssistantAgent {
+        channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
@@ -1102,10 +1490,14 @@ async fn create_specialist_inner(
             account_read: request.account_read,
         },
         guest_access: BTreeMap::new(),
+        guest_operation_scopes: Default::default(),
+        guest_operation_scope_revisions: Default::default(),
         operation_scopes: Default::default(),
         operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
         model,
+        owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -1119,6 +1511,12 @@ async fn create_specialist_inner(
             request.persona.as_deref().unwrap_or_default(),
             MAX_PERSONA_CHARS,
             "A persona",
+            true,
+        )?,
+        voice_instructions: style_value(
+            request.voice_instructions.as_deref().unwrap_or_default(),
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
             true,
         )?,
         destroyed_at: None,
@@ -1193,6 +1591,7 @@ async fn create_specialist_inner(
                     session,
                     None,
                     None,
+                    None,
                 )
                 .await?;
                 let mut agent = agent;
@@ -1230,6 +1629,7 @@ async fn create_specialist_inner(
 pub struct AgentStyle<'a> {
     pub display_name: Option<&'a str>,
     pub persona: Option<&'a str>,
+    pub voice_instructions: Option<&'a str>,
 }
 
 /// A bounded, credential-free display name or persona; empty clears it.
@@ -1264,7 +1664,21 @@ pub async fn update_agent(
     description: Option<&str>,
     style: AgentStyle<'_>,
 ) -> AppResult<AssistantAgent> {
-    let current = maintained_agent(db, owner, id).await?;
+    let current = agent(db, owner, id).await?;
+    let manager = if super::org_agent_service::require_maintain(db, owner, &current)
+        .await
+        .is_err()
+    {
+        let access = super::shared_agent_service::require(db, owner, &current).await?;
+        if access.role() != crate::models::assistant_sharing::ShareRole::Manager || name.is_some() {
+            return Err(AppError::Forbidden(
+                "Only the owner can change this agent setting".into(),
+            ));
+        }
+        Some(access)
+    } else {
+        None
+    };
     let actor = owner;
     let owner = current.user_id.as_str();
     if current.destroyed_at.is_some() {
@@ -1317,6 +1731,13 @@ pub async fn update_agent(
             "A persona",
             true,
         ),
+        (
+            "voice_instructions",
+            style.voice_instructions,
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
+            true,
+        ),
     ] {
         match value.map(|value| style_value(value, max, what, multiline)) {
             Some(Ok(Some(value))) => {
@@ -1333,13 +1754,56 @@ pub async fn update_agent(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    let updated = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(not_found)?;
-    super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    let shared_manager = manager.is_some();
+    let updated = if let Some(manager) = manager {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        super::shared_agent_service::fence(db, &manager, &mut session).await?;
+        let updated = db
+            .collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(
+                doc! {"_id": id, "user_id": owner, "destroyed_at": null,
+                "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut session)
+            .await?
+            .ok_or_else(not_found)?;
+        session.commit_transaction().await?;
+        super::shared_agent_service::audit(db, actor, &updated, "profile").await;
+        updated
+    } else {
+        db.collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
+            .return_document(ReturnDocument::After)
+            .await?
+            .ok_or_else(not_found)?
+    };
+    if !shared_manager {
+        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
+        super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    }
+    Ok(updated)
+}
+
+/// Human-maintained preference, independent of prompt text and execution grants.
+pub async fn set_channel_checking_notice(
+    db: &Database,
+    actor: &str,
+    id: &str,
+    enabled: bool,
+) -> AppResult<AssistantAgent> {
+    let current = maintained_agent(db, actor, id).await?;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let updated = db.collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(
+            doc! {"_id": &current.id, "user_id": &current.user_id, "destroyed_at": bson::Bson::Null},
+            doc! {"$set": {"channel_checking_notice": enabled, "updated_at": bson::DateTime::now()}},
+        ).return_document(ReturnDocument::After).await?.ok_or_else(not_found)?;
+    super::org_agent_service::audit_change(db, actor, &updated, "channel_checking_notice").await;
     Ok(updated)
 }
 
@@ -1371,6 +1835,16 @@ pub async fn set_agent_policy(
     if let Some(model) = policy.model {
         if !super::assistant_nyxagent::valid_model(model) {
             return Err(AppError::AssistantModelUnavailable);
+        }
+        if model.starts_with("nyxid/") {
+            super::assistant_platform_model::validate_selection(
+                db,
+                &actor.user_id,
+                &current,
+                model,
+                false,
+            )
+            .await?;
         }
         set.insert("model", model);
     }
@@ -1419,6 +1893,7 @@ pub async fn set_agent_policy(
         updated.access_mode_override,
     )
     .await;
+    super::assistant_guest_model_setup::backoff::reset(db, &actor.user_id, id, None).await?;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
     if current.access_mode_override != updated.access_mode_override {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
@@ -1437,6 +1912,12 @@ pub async fn set_agent_policy(
 /// change keeps levels only for granted services, and none for the default.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
+    /// Atomic guest levels plus guest-only catalog selections. The latter
+    /// live beside grants and are ignored by old model readers.
+    GuestOperations {
+        base: Box<GrantChange>,
+        selections: BTreeMap<String, crate::models::agent_operation_scope::OperationSelection>,
+    },
     Machine {
         base: Box<GrantChange>,
         machines: Option<Vec<String>>,
@@ -1465,13 +1946,28 @@ pub enum MachineGrantMode {
 }
 
 impl GrantChange {
+    fn changes_guest_policy(&self, current: &AssistantAgent) -> bool {
+        match self {
+            Self::GuestOperations { base, selections } => {
+                !selections.is_empty() || base.changes_guest_policy(current)
+            }
+            Self::Machine { base, .. } => base.changes_guest_policy(current),
+            Self::Replace { guests, .. } | Self::Guests(guests) => {
+                guests.iter().any(|(id, level)| {
+                    current.guest_access.get(id).copied().unwrap_or_default() != *level
+                })
+            }
+            Self::Add(_) | Self::Remove(_) => false,
+        }
+    }
+
     /// The grants and guest access levels after this change.
     pub fn apply(
         &self,
         current: &AgentGrants,
         current_guests: &BTreeMap<String, GuestAccess>,
     ) -> (AgentGrants, BTreeMap<String, GuestAccess>) {
-        if let Self::Machine { base, .. } = self {
+        if let Self::Machine { base, .. } | Self::GuestOperations { base, .. } = self {
             return base.apply(current, current_guests);
         }
         let mut grants = current.clone();
@@ -1507,7 +2003,7 @@ impl GrantChange {
                 grants.account_read &= !remove.account_read;
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
-            Self::Machine { .. } => unreachable!("handled above"),
+            Self::Machine { .. } | Self::GuestOperations { .. } => unreachable!("handled above"),
         }
         // A service granted anew starts at the default level, whatever an
         // earlier grant of it left behind (a writer that predates levels
@@ -1520,7 +2016,7 @@ impl GrantChange {
         let named: HashSet<&String> = match self {
             Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
             Self::Add(_) | Self::Remove(_) => HashSet::new(),
-            Self::Machine { .. } => unreachable!("handled above"),
+            Self::Machine { .. } | Self::GuestOperations { .. } => unreachable!("handled above"),
         };
         guests.retain(|id, _| before.contains(id) || named.contains(id));
         let granted: HashSet<&String> = grants
@@ -1569,8 +2065,68 @@ pub(crate) async fn sync_thread_authority(
     rows: &[AssistantConversation],
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    let authority = KeyAuthority::for_agent(agent);
+    let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
+        let authority = if row.guest_model_setup {
+            KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if let Some(origin) = super::org_channel_service::origin(row)
+            && origin.org_execution.as_ref().is_some_and(|e| e.guest)
+        {
+            // Grant maintenance must not expand a guest key to the specialist's
+            // full service/node authority. A retired binding yields no grants.
+            let execution = origin.org_execution.as_ref().expect("guest execution");
+            let channel = db
+                .collection::<crate::models::nyxbot_channel::NyxbotChannel>("nyxbot_channels")
+                .find_one(doc! {"_id":&origin.nyxbot_channel_id,"status":"active",
+                "org_specialist.revision":&execution.revision,
+                "org_specialist.guests.revision":&execution.guest_revision,
+                "org_specialist.guests.enabled":true})
+                .session(&mut *session)
+                .await?;
+            let policy = channel
+                .as_ref()
+                .and_then(|c| c.org_specialist.as_ref())
+                .map(|b| &b.guests);
+            let ready = super::org_channel_service::guest_grants_ready(db).await?;
+            let grants = AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| {
+                        policy.is_some_and(|p| {
+                            super::org_channel_service::guest_service_selected(agent, p, ready, id)
+                        })
+                    })
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            KeyAuthority::OrgChannelGuest(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
+        } else if row.shared_agent_thread {
+            let grants = crate::models::assistant_agent::AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| policy.shared_access.contains_key(*id))
+                    .cloned()
+                    .collect(),
+                platform_service_ids: Vec::new(),
+                account_read: false,
+            };
+            KeyAuthority::Shared(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
+        } else {
+            KeyAuthority::for_agent(agent)
+        };
         for key in thread_key_ids(db, &row.user_id, std::slice::from_ref(row), session).await? {
             match credentials::apply_authority(db, &row.user_id, &key, &authority, session).await {
                 Ok(()) | Err(AppError::NotFound(_)) => {}
@@ -1600,6 +2156,9 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if change.changes_guest_policy(&agent) {
+        super::org_agent_service::authorize_guest_change(db, owner, &agent, session).await?;
+    }
     let previous_machines = agent.machine_node_ids.clone();
     let previous_logins = agent.saved_login_ids.clone();
     if let GrantChange::Machine {
@@ -1655,14 +2214,40 @@ pub async fn apply_grants_in_session(
         .cloned()
         .collect();
     let lost_account = agent.grants.account_read && !grants.account_read;
+    super::shared_agent_service::remove_grants_in_session(db, &agent.id, &removed, session).await?;
     agent.grants = grants;
     agent.guest_access = guest_access;
+    if let GrantChange::GuestOperations { selections, .. } = change {
+        for (service, selection) in selections {
+            Box::pin(super::agent_operation_scope_service::apply_guest_selection(
+                db, owner, &mut agent, service, selection, session,
+            ))
+            .await?;
+        }
+    }
+    for id in &removed {
+        agent.guest_operation_scopes.remove(id);
+        // Retain the revision tombstone to reject stale requests after regrant.
+        if let Some(revision) = agent.guest_operation_scope_revisions.get_mut(id) {
+            *revision = revision
+                .checked_add(1)
+                .ok_or_else(|| AppError::Conflict("Guest scope revision exhausted".into()))?;
+        }
+    }
     Box::pin(super::org_agent_service::validate_grants(db, owner, &agent)).await?;
     let encode = |value: bson::ser::Result<bson::Bson>| {
         value.map_err(|_| AppError::Internal("Grant encoding failed".into()))
     };
     let mut set = doc! {"grants": encode(bson::to_bson(&agent.grants))?,
     "guest_access": encode(bson::to_bson(&agent.guest_access))?, "updated_at": bson::DateTime::now()};
+    set.insert(
+        "guest_operation_scopes",
+        encode(bson::to_bson(&agent.guest_operation_scopes))?,
+    );
+    set.insert(
+        "guest_operation_scope_revisions",
+        encode(bson::to_bson(&agent.guest_operation_scope_revisions))?,
+    );
     if matches!(change, GrantChange::Machine { .. }) {
         set.insert(
             "machine_access",
@@ -1776,6 +2361,8 @@ pub async fn set_grants_as(
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
             "guest_access": &agent.guest_access,
+            "guest_scoped_service_ids": agent.guest_operation_scopes.keys().collect::<Vec<_>>(),
+            "guest_operation_count": agent.guest_operation_scopes.values().map(|scope| scope.operations.len()).sum::<usize>(),
             "machines": &agent.machine_node_ids,
             "logins": &agent.saved_login_ids,
         }),
@@ -1792,7 +2379,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
     let agent_id = agent_id.to_owned();
-    let (agent, children) = session
+    let (agent, _children) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db_owned;
@@ -1814,6 +2401,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .ok_or_else(not_found)?;
                 db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS).update_many(doc!{"agent_id":&agent.id,"enabled":true},doc!{"$set":{"enabled":false},"$inc":{"revision":1}}).session(&mut *session).await?;
                 super::assistant_agent_learning::destroyed_in_session(db, &agent.id, session)
+                    .await?;
+                db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+                    .delete_many(doc! {"source.agent_id": &agent.id})
+                    .session(&mut *session)
                     .await?;
                 Box::pin(super::machine_access_service::destroyed_in_session(
                     db, &mut agent, session,
@@ -1883,6 +2474,13 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         )
                         .session(&mut *session)
                         .await?;
+                    super::assistant_notification_service::resolve_cards_in_session(
+                        db,
+                        session,
+                        super::assistant_notification_service::CardScope::Conversation(&row.id),
+                        "superseded",
+                    )
+                    .await?;
                 }
                 Ok((agent, children))
             }
@@ -1891,11 +2489,6 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    super::api_key_credential_service::audit_revocations(
-        db,
-        &children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     audit(
         db,
         owner,
@@ -1906,7 +2499,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
     Ok(agent)
 }
 
-/// Permanently delete a destroyed specialist and all of its threads.
+/// Delete a destroyed specialist while preserving recipients' private history.
 pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let agent = maintained_agent(db, owner, agent_id).await?;
     if agent.destroyed_at.is_none() {
@@ -1917,14 +2510,17 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     // Remove membership from every person's private groups without reading their transcripts.
     let group_owners = db
         .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME)
-        .distinct("user_id", doc! {"member_agent_ids": &agent.id})
+        .distinct(
+            "user_id",
+            doc! {"member_agent_ids": &agent.id, "collaboration":null},
+        )
         .await?;
     for person in group_owners.iter().filter_map(bson::Bson::as_str) {
         super::assistant_group_service::remove_agent(db, person, &agent.id).await?;
     }
     let rows: Vec<AssistantConversation> = db
         .collection(CONVERSATIONS)
-        .find(doc! {"agent_id": &agent.id})
+        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}, "collaboration":null})
         .await?
         .try_collect()
         .await?;
@@ -1936,11 +2532,27 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     }
     // Clean derived authoring claims before the parent so a failed cleanup
     // remains retryable through the existing destroyed-agent purge endpoint.
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.agent_id": &agent.id})
+        .await?;
     db.collection::<bson::Document>(
         crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
     )
     .delete_many(doc! {"agent_id": &agent.id})
     .await?;
+    // Recipients retain their own transcripts and private notes. Publication
+    // policy and unusable connection consents are owned by the deleted agent.
+    for collection in [
+        crate::models::assistant_sharing::SHARES_COLLECTION_NAME,
+        crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! {"agent_id": &agent.id})
+            .await?;
+    }
+    db.collection::<bson::Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &agent.id})
+        .await?;
     db.collection::<AssistantAgent>(AGENTS)
         .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
         .await?;
@@ -1990,6 +2602,25 @@ pub(crate) fn looks_secret(text: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Shared by the native schema boundary and both memory stores; never echo input.
+pub(crate) fn validate_memory_text(text: &str) -> AppResult<&str> {
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    let text = text.trim();
+    let reason = if text.is_empty() {
+        Some(Reason::NoteEmpty)
+    } else if text.chars().count() > MAX_MEMORY_NOTE_CHARS {
+        Some(Reason::NoteTooLong)
+    } else if looks_secret(text) {
+        Some(Reason::SecretDetected)
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(AppError::MemoryWrite(reason));
+    }
+    Ok(text)
+}
+
 /// Remember a note, or replace one by ID. Bounded; never secrets.
 pub async fn remember(
     db: &Database,
@@ -2001,37 +2632,38 @@ pub async fn remember(
     let current = maintained_agent(db, owner, agent_id).await?;
     let actor = owner;
     let owner = current.user_id.as_str();
-    let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_MEMORY_NOTE_CHARS {
-        return Err(AppError::ValidationError(format!(
-            "A memory note must contain 1 to {MAX_MEMORY_NOTE_CHARS} characters"
-        )));
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::MemoryWrite(Reason::MemoryConflict));
     }
-    if looks_secret(text) {
-        return Err(AppError::ValidationError(
-            "Memory never stores credentials or secrets".into(),
-        ));
-    }
+    let text = validate_memory_text(text)?;
     let now = Utc::now();
     let collection = db.collection::<AssistantAgent>(AGENTS);
     if let Some(replace_id) = replace_id {
+        // Return the exact post-write snapshot. A later delete/replace must not
+        // turn a committed save into an apparent failure or another write's receipt.
         let updated = collection
-            .update_one(
-                doc! {"_id": agent_id, "user_id": owner, "memory.id": replace_id},
+            .find_one_and_update(
+                doc! {"_id": agent_id, "user_id": owner, "destroyed_at": bson::Bson::Null, "memory.id": replace_id},
                 doc! {"$set": {"memory.$.text": text,
                 "memory.$.updated_at": bson::DateTime::from_chrono(now)}},
             )
+            .return_document(ReturnDocument::After)
             .await?;
-        if updated.matched_count != 1 {
-            return Err(AppError::NotFound("Memory note not found".into()));
-        }
+        let Some(updated) = updated else {
+            let current = maintained_agent(db, actor, agent_id).await?;
+            return Err(AppError::MemoryWrite(if current.destroyed_at.is_some() {
+                Reason::MemoryConflict
+            } else {
+                Reason::ReplaceTargetNotFound
+            }));
+        };
         super::org_agent_service::audit_change(db, actor, &current, "memory").await;
-        let agent = agent(db, actor, agent_id).await?;
-        return agent
+        return updated
             .memory
             .into_iter()
             .find(|note| note.id == replace_id)
-            .ok_or_else(|| AppError::NotFound("Memory note not found".into()));
+            .ok_or(AppError::MemoryWrite(Reason::MemoryInternalError));
     }
     let note = MemoryNote {
         id: Uuid::new_v4().to_string(),
@@ -2052,10 +2684,14 @@ pub async fn remember(
         )
         .await?;
     if pushed.matched_count != 1 {
-        agent(db, owner, agent_id).await?;
-        return Err(AppError::Conflict(format!(
-            "Memory holds at most {MAX_MEMORY_NOTES} notes; forget or replace one first"
-        )));
+        let current = maintained_agent(db, actor, agent_id).await?;
+        return Err(AppError::MemoryWrite(
+            if current.destroyed_at.is_none() && current.memory.len() >= MAX_MEMORY_NOTES {
+                Reason::MemoryFull
+            } else {
+                Reason::MemoryConflict
+            },
+        ));
     }
     super::org_agent_service::audit_change(db, actor, &current, "memory").await;
     Ok(note)
@@ -2076,6 +2712,53 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
         return Err(AppError::NotFound("Memory note not found".into()));
     }
     super::org_agent_service::audit_change(db, actor, &current, "memory").await;
+    Ok(())
+}
+
+/// Write, replace or (with `None`) remove one NyxID-authored note on the
+/// owner's NyxBot, under a fixed ID. The owner sees and can delete it like any
+/// note. A memory that is full without it keeps its notes and skips the write.
+pub async fn set_nyxbot_fixed_note(
+    db: &Database,
+    owner: &str,
+    note_id: &str,
+    text: Option<&str>,
+) -> AppResult<()> {
+    let nyxbot = ensure_nyxbot(db, owner).await?;
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": &nyxbot.id, "user_id": owner};
+    // Remove any current copy. A replacement is pushed to the end: instructions
+    // keep the newest notes within their budget, so a fresh answer must not
+    // age out first.
+    let mut pull = filter.clone();
+    pull.insert("memory.id", note_id);
+    collection
+        .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
+        .await?;
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    let note = MemoryNote {
+        id: note_id.into(),
+        text: text.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut push = filter;
+    push.insert("destroyed_at", bson::Bson::Null);
+    push.insert("memory.id", doc! {"$ne": note_id});
+    push.insert(
+        format!("memory.{}", MAX_MEMORY_NOTES - 1),
+        doc! {"$exists": false},
+    );
+    collection
+        .update_one(
+            push,
+            doc! {"$push": {"memory": bson::to_bson(&note)
+            .map_err(|_| AppError::Internal("Memory encoding failed".into()))?}},
+        )
+        .await?;
     Ok(())
 }
 
@@ -2120,6 +2803,7 @@ pub struct ReplySummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
+    pub share_role: Option<crate::models::assistant_sharing::ShareRole>,
     pub owner_id: String,
     pub owner_name: Option<String>,
     pub owner_slug: Option<String>,
@@ -2134,13 +2818,16 @@ pub struct AgentSummary {
     pub name: String,
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub description: String,
     pub specialty: Option<String>,
     pub created_by: String,
     /// NyxAgent model for new threads.
     pub model: String,
+    pub model_unavailable: bool,
     /// The agent's own access mode; absent follows the owner's workspace mode.
     pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
+    pub channel_checking_notice: bool,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
     pub services: Vec<String>,
@@ -2159,7 +2846,7 @@ pub struct AgentSummary {
 
 impl AgentSummary {
     pub fn delegation_name(&self) -> String {
-        if self.owner_kind == "org" {
+        if self.owner_kind == "org" || self.share_role.is_some() {
             format!(
                 "{}/{}",
                 self.owner_slug.as_deref().unwrap_or(&self.owner_id),
@@ -2173,6 +2860,9 @@ impl AgentSummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestSummary {
+    pub status: String,
+    pub code: String,
+    pub review_path: String,
     pub request_id: String,
     pub agent: String,
     pub agent_id: Option<String>,
@@ -2190,7 +2880,21 @@ pub fn request_summary(
     row: &AssistantAcknowledgement,
     agent: Option<&AssistantAgent>,
 ) -> RequestSummary {
+    let presentation = super::assistant_acknowledgement_service::refusal(row);
     RequestSummary {
+        status: presentation["status"]
+            .as_str()
+            .unwrap_or("unavailable")
+            .into(),
+        code: presentation["code"]
+            .as_str()
+            .unwrap_or("acknowledgement_unavailable")
+            .into(),
+        review_path: super::assistant_links::AssistantPage::ReviewCard {
+            conversation: &row.conversation_id,
+            card: &row.id,
+        }
+        .path(),
         request_id: row.id.clone(),
         agent: agent.map(|agent| agent.name.clone()).unwrap_or_default(),
         agent_id: agent.map(|agent| agent.id.clone()),
@@ -2267,6 +2971,7 @@ pub async fn request_summaries(
 async fn slug_names(
     db: &Database,
     agents: &[AssistantAgent],
+    viewer: &str,
 ) -> AppResult<HashMap<String, String>> {
     let user_services: Vec<String> = agents
         .iter()
@@ -2280,6 +2985,7 @@ async fn slug_names(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    let mut platform_ids = Vec::new();
     let mut names = HashMap::new();
     for (collection, ids) in [
         (crate::models::user_service::COLLECTION_NAME, user_services),
@@ -2291,41 +2997,72 @@ async fn slug_names(
         let mut cursor = db
             .collection::<bson::Document>(collection)
             .find(doc! {"_id": {"$in": &ids}})
-            .projection(doc! {"slug": 1})
+            .projection(doc! {"slug": 1, "platform_key.purpose":1})
             .await?;
         while let Some(row) = cursor.try_next().await? {
             if let (Ok(id), Ok(slug)) = (row.get_str("_id"), row.get_str("slug")) {
                 names.insert(id.to_owned(), slug.to_owned());
+                if row
+                    .get_document("platform_key")
+                    .ok()
+                    .and_then(|p| p.get_str("purpose").ok())
+                    == Some("model_offering")
+                {
+                    // An absent/deleted model must not fall back to its internal offering slug.
+                    names.insert(id.to_owned(), String::new());
+                    platform_ids.push(id.to_owned());
+                }
+            }
+        }
+    }
+    if !platform_ids.is_empty() {
+        let mut models = db
+            .collection::<crate::models::platform_model::PlatformModel>(
+                crate::models::platform_model::COLLECTION_NAME,
+            )
+            .find(doc! {"billing_service_id":{"$in":platform_ids}})
+            .await?;
+        while let Some(model) = models.try_next().await? {
+            if let Some(id) = model.billing_service_id {
+                names.insert(
+                    id,
+                    super::assistant_platform_model::public_selection(db, viewer, &model.public_id)
+                        .await?,
+                );
             }
         }
     }
     Ok(names)
 }
 
-async fn last_reply(
+pub(crate) async fn last_reply(
     db: &Database,
     owner: &str,
     id: &str,
     chars: usize,
 ) -> AppResult<Option<ReplySummary>> {
-    Ok(db
+    let Some(message) = db
         .collection::<AssistantMessage>(MESSAGES)
-        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant"})
-        .sort(doc! {"seq": -1})
-        .await?
-        .map(|message| ReplySummary {
-            seq: message.seq,
-            status: message.status,
-            text: excerpt(&message.text, chars),
-            created_at: message.created_at,
-        }))
+        .find_one(doc! {"conversation_id": id, "user_id": owner, "role": "assistant", "turn_metadata.voice_link_publication":{"$exists":false}})
+        .sort(doc! {"seq": -1}).await? else { return Ok(None); };
+    let mut text = super::voice::links::message_text(&message, &message.text).into_owned();
+    if text != super::voice::links::redact_tokens(&text) {
+        let hidden = super::voice::links::hidden_voice_thread(db, owner, id).await;
+        text = super::voice::links::thread_text(hidden, text);
+    }
+    Ok(Some(ReplySummary {
+        seq: message.seq,
+        status: message.status,
+        text: excerpt(&text, chars),
+        created_at: message.created_at,
+    }))
 }
 
 /// Agents with a live turn in any of their threads.
 pub async fn running_agents(db: &Database, owner: &str) -> AppResult<HashSet<String>> {
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "active_turn.turn_id": {"$exists": true}})
+        .find(doc! {"collaboration": null, "user_id": owner, "active_turn.turn_id": {"$exists": true}})
         .limit(200)
         .await?
         .try_collect()
@@ -2347,12 +3084,41 @@ pub async fn summaries(
     include_destroyed: bool,
     reply_chars: usize,
 ) -> AppResult<Vec<AgentSummary>> {
+    Ok(
+        summaries_with_archive(db, owner, include_nyxbot, include_destroyed, reply_chars)
+            .await?
+            .0,
+    )
+}
+
+/// Archive metadata comes from the same bounded query as the returned rows.
+pub async fn summaries_with_archive(
+    db: &Database,
+    owner: &str,
+    include_nyxbot: bool,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<(Vec<AgentSummary>, bool)> {
     ensure_nyxbot(db, owner).await?;
-    let mut rows = agents(db, owner, include_destroyed).await?;
+    let (mut rows, truncated) = agent_roster(db, owner, include_destroyed).await?;
     if !include_nyxbot {
         rows.retain(|agent| !agent.is_nyxbot());
     }
-    let names = slug_names(db, &rows).await?;
+    Ok((
+        summaries_for_agents(db, owner, rows, reply_chars).await?,
+        truncated,
+    ))
+}
+
+/// Summarize already resolved own/org agents, including an exact archived
+/// agent requested through its details route rather than roster discovery.
+pub(crate) async fn summaries_for_agents(
+    db: &Database,
+    owner: &str,
+    rows: Vec<AssistantAgent>,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let names = slug_names(db, &rows, owner).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
@@ -2389,7 +3155,7 @@ pub async fn summaries(
             db.collection::<AssistantConversation>(CONVERSATIONS)
                 .find_one(
                     doc! {"user_id": owner, "agent_id": &agent.id, "channel": bson::Bson::Null,
-                    "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
+                    "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
                 )
                 .sort(doc! {"created_at": 1})
                 .await?
@@ -2408,7 +3174,10 @@ pub async fn summaries(
             (0, _) | (_, None) => None,
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
+        let public_model =
+            super::assistant_platform_model::public_selection(db, owner, &agent.model).await?;
         out.push(AgentSummary {
+            share_role: None,
             owner_id: agent.user_id.clone(),
             owner_name,
             owner_slug,
@@ -2423,8 +3192,9 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
+                .filter(|id| names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
-                    if org_owned {
+                    if org_owned && !names.get(id).is_some_and(|s| s.starts_with("nyxid/")) {
                         id.clone()
                     } else {
                         names.get(id).cloned().unwrap_or_else(|| id.clone())
@@ -2437,7 +3207,7 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
-                .filter(|_| !org_owned)
+                .filter(|id| !org_owned && names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
                     let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
                     let level = agent.guest_access.get(id).copied().unwrap_or_default();
@@ -2459,11 +3229,14 @@ pub async fn summaries(
             name: agent.name.clone(),
             display_name: agent.display_name.clone(),
             persona: agent.persona.clone(),
+            voice_instructions: agent.voice_instructions.clone(),
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),
-            model: agent.model.clone(),
+            model: public_model.clone(),
+            model_unavailable: agent.model.starts_with("nyxid/") && public_model.is_empty(),
             access_mode_override: agent.access_mode_override,
+            channel_checking_notice: agent.channel_checking_notice,
             home_conversation_id: home_id,
             memory_count: if super::org_agent_service::can_maintain(&acl) {
                 agent.memory.len()
@@ -2492,7 +3265,7 @@ pub async fn read(
     } else {
         db.collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(
-                doc! {"user_id": owner, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+                doc! {"user_id": owner, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null,
                 "channel": bson::Bson::Null, "automation_thread": {"$ne": true}},
             )
             .sort(doc! {"created_at": 1})
@@ -2545,7 +3318,7 @@ pub async fn direct_chats_note(
     let ids: Vec<&str> = names.keys().copied().collect();
     let threads: Vec<bson::Document> = db
         .collection::<bson::Document>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "agent_id": {"$in": &ids}})
+        .find(doc! {"collaboration": null, "user_id": owner, "agent_id": {"$in": &ids}})
         .projection(doc! {"agent_id": 1})
         .limit(500)
         .await?
@@ -2665,35 +3438,40 @@ pub async fn delegation_summaries(
         .collect())
 }
 
-/// Remove settled-report events for the given agents from a NyxBot thread's
-/// queue once `wait_for_subagents` has delivered them in-turn.
-pub async fn consume_settled_events(
+/// Explicit discovery/wait tools include shared specialists. Keep this out of
+/// ordinary turn roster construction so unshared turn paths add no reads.
+pub async fn tool_delegation_summaries(
     db: &Database,
-    owner: &str,
-    conversation_id: &str,
-    agent_ids: &[String],
-) -> AppResult<()> {
-    if agent_ids.is_empty() {
-        return Ok(());
+    actor: &str,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let mut rows = delegation_summaries(db, actor, include_destroyed, reply_chars).await?;
+    for mut shared in super::shared_agent_service::summaries(db, actor).await? {
+        if !shared.can_use {
+            continue;
+        }
+        if reply_chars > 0
+            && let Some(home) = shared.home_conversation_id.as_deref()
+        {
+            shared.last_reply = last_reply(db, actor, home, reply_chars).await?;
+        }
+        rows.push(shared);
     }
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": conversation_id, "user_id": owner},
-            doc! {"$pull": {"pending_events": {
-                "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
-            }}},
-        )
-        .await?;
-    Ok(())
+    Ok(rows)
 }
 
 /// Idle threads with queued events whose wake-up was deferred (full pool or
 /// a replica restart), oldest first. Bounded; loop guards still apply at wake time.
 pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<AssistantConversation>> {
-    // NyxBot threads parked at the streak cap wait for a user message; they
-    // never crowd out threads that can still wake.
+    // Provider approvals obey the same autonomous loop guard as other events.
     let mut filter = doc! {
+        "collaboration": null,
         "pending_events.created_at": {"$exists": true},
+        "$expr":{"$anyElementTrue":[{"$map":{"input":{"$ifNull":["$pending_events",[]]},"as":"event","in":{"$or":[
+            {"$ne":[{"$ifNull":["$$event.wake.kind",""]},"watch"]},
+            {"$lte":["$$event.wake.ready_at","$$NOW"]}
+        ]}}}]},
         "$or": [
             {"role": "subagent"},
             {"event_streak": {"$not": {"$gte": MAX_EVENT_STREAK}}},

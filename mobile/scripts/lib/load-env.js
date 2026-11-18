@@ -38,11 +38,17 @@ function fatal(message) {
 }
 
 function readProfile(env, prefix) {
+  const googleServicesKey = `${prefix}_GOOGLE_SERVICES_FILE`;
+  const googleServicesFile =
+    String(env[googleServicesKey] ?? "").trim() ||
+    (prefix === "PROD" ? "./google-services.json" : "");
+
   return {
     apiBaseUrl: env[`${prefix}_API_BASE_URL`] || "",
     frontendUrl: env[`${prefix}_FRONTEND_URL`] || "",
     iosBundleId: env[`${prefix}_IOS_BUNDLE_ID`] || "",
     androidPackage: env[`${prefix}_ANDROID_PACKAGE`] || "",
+    androidGoogleServicesFile: googleServicesFile,
     appleAscAppId: env[`${prefix}_APPLE_ASC_APP_ID`] || "",
     iosBuildNumber: env[`${prefix}_IOS_BUILD_NUMBER`] || "",
     androidVersionCode: env[`${prefix}_ANDROID_VERSION_CODE`] || "",
@@ -56,13 +62,106 @@ function readProfile(env, prefix) {
   };
 }
 
+function validateAndroidGoogleServicesFile(file, androidPackage) {
+  const absolutePath = path.isAbsolute(file)
+    ? file
+    : path.join(MOBILE_ROOT, file);
+  if (!fs.existsSync(absolutePath)) {
+    fatal(
+      `Android Google Services file not found at ${file}. ` +
+        `Set the matching ${androidPackage} Firebase config path in the active profile.`,
+    );
+  }
+
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(absolutePath, "utf8"));
+  } catch {
+    fatal(`Android Google Services file ${file} is not valid JSON.`);
+  }
+
+  const packages = (config && Array.isArray(config.client) ? config.client : [])
+    .map((client) => client?.client_info?.android_client_info?.package_name)
+    .filter((packageName) => typeof packageName === "string");
+  if (!packages.includes(androidPackage)) {
+    fatal(
+      `Android Google Services file ${file} does not contain a client for ` +
+        `${androidPackage}. Found: ${packages.join(", ") || "none"}. ` +
+        `Register that Android package in Firebase and set the profile-specific ` +
+        `GOOGLE_SERVICES_FILE path.`,
+    );
+  }
+}
+
+function matchingDefaultGoogleServicesFile(androidPackage) {
+  const file = "./google-services.json";
+  try {
+    validateAndroidGoogleServicesFile(file, androidPackage);
+    return file;
+  } catch {
+    return "";
+  }
+}
+
+const NEW_DOMAIN_URLS = [
+  ["apiBaseUrl", "PROD_NEW_API_BASE_URL"],
+  ["frontendUrl", "PROD_NEW_FRONTEND_URL"],
+  ["legalBaseUrl", "PROD_NEW_LEGAL_BASE_URL"],
+];
+
+// Production builds embed this second URL set when all three are configured;
+// the NyxID admin flag `mobile:new-domains` selects between the sets at launch.
+function readNewProductionDomains(env) {
+  const values = NEW_DOMAIN_URLS.map(([, variable]) =>
+    (env[variable] || "").trim(),
+  );
+  if (values.every((value) => !value)) return null;
+
+  const domains = {};
+  NEW_DOMAIN_URLS.forEach(([field, variable], index) => {
+    const value = values[index];
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      fatal(
+        `${variable} must be an absolute HTTPS URL. Set all three PROD_NEW_* URLs, or none.`,
+      );
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      fatal(
+        `${variable} must be an HTTPS URL without credentials, a query, or a fragment.`,
+      );
+    }
+    domains[field] = value;
+  });
+  return domains;
+}
+
 function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
   }
 
+  const linkOptIn =
+    env[`${appEnv.toUpperCase()}_ANDROID_HTTPS_APP_LINKS`] || "false";
+  if (!["true", "false"].includes(linkOptIn))
+    fatal("ANDROID_HTTPS_APP_LINKS must be true or false");
   const dev = readProfile(env, "DEV");
   const prod = readProfile(env, "PROD");
+  if (env.PROD_USE_NEW_DOMAINS !== undefined) {
+    console.warn(
+      "[load-env] PROD_USE_NEW_DOMAINS is no longer read. The NyxID admin flag " +
+        "mobile:new-domains selects the production domains at app launch.",
+    );
+  }
+  const newDomains = appEnv === "prod" ? readNewProductionDomains(env) : null;
 
   if (!dev.apiBaseUrl && !prod.apiBaseUrl) {
     fatal(
@@ -83,17 +182,29 @@ function resolveProfile(appEnv, env, options = {}) {
   }
 
   const pick = (k) => primary[k] || fallback[k] || "";
+  const androidPackage = pick("androidPackage");
   const explicitFrontendUrl = pick("frontendUrl");
   const legalBaseUrl = pick("legalBaseUrl");
 
   const resolved = {
     apiBaseUrl: pick("apiBaseUrl"),
     frontendUrl: explicitFrontendUrl || legalBaseUrl,
+    newApiBaseUrl: newDomains?.apiBaseUrl ?? "",
+    newFrontendUrl: newDomains?.frontendUrl ?? "",
+    newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
     iosBundleId: pick("iosBundleId"),
-    androidPackage: pick("androidPackage"),
+    androidPackage,
+    // Preserve working dev profiles that predate the per-profile Firebase path.
+    // An explicit empty path disables FCM; a mismatched default is never reused.
+    androidGoogleServicesFile:
+      appEnv === "dev" &&
+      !Object.prototype.hasOwnProperty.call(env, "DEV_GOOGLE_SERVICES_FILE")
+        ? matchingDefaultGoogleServicesFile(androidPackage)
+        : primary.androidGoogleServicesFile,
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
+    androidHttpsAppLinks: linkOptIn === "true",
     universalLinkHost: pick("universalLinkHost"),
     universalLinkPathPrefix: pick("universalLinkPathPrefix"),
     legalBaseUrl,
@@ -113,6 +224,15 @@ function resolveProfile(appEnv, env, options = {}) {
     fatal(
       "FATAL: no ANDROID_PACKAGE set in either DEV or PROD profile.\n" +
         "Set DEV_ANDROID_PACKAGE and/or PROD_ANDROID_PACKAGE in mobile/.env.{dev,prod}.",
+    );
+  }
+  if (
+    resolved.androidGoogleServicesFile &&
+    options.validateAndroidGoogleServices
+  ) {
+    validateAndroidGoogleServicesFile(
+      resolved.androidGoogleServicesFile,
+      resolved.androidPackage,
     );
   }
 
@@ -141,13 +261,14 @@ function appIdentity(env) {
     name: env.APP_NAME || "NyxID Mobile",
     slug: env.APP_SLUG || "nyxid-mobile",
     scheme: env.APP_SCHEME || "nyxid",
-    version: env.APP_VERSION || "1.0.1",
+    version: env.APP_VERSION || "1.0.4",
   };
 }
 
 module.exports = {
   loadEnv,
   resolveProfile,
+  validateAndroidGoogleServicesFile,
   appIdentity,
   fatal,
   MOBILE_ROOT,

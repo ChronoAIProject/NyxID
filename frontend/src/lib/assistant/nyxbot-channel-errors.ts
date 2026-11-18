@@ -1,10 +1,20 @@
 const channelErrors: Record<string, string> = {
+  native_gateway_retry_rate_limited: "Wait ten minutes after the last gateway attempt before retrying.",
+  native_gateway_retry_busy: "A gateway attempt is already in progress or this channel changed. Refresh its status before retrying.",
+  native_gateway_retry_not_available: "Native retry is available only for an active Discord bot currently on NyxID relay.",
+  owner_verification_required: "Link your own Discord account to this bot before retrying native activation.",
+  answering: "The bot is answering a message. Retry after it finishes.",
+  flag_changed: "The native gateway flag is not enabled for the linking owner. Ask an administrator to check it.",
   gateway_not_authenticated:
     "The channel gateway could not authenticate NyxBot. Try reconnecting. If this continues, contact an administrator.",
   gateway_permission_required:
     "The channel gateway has not authorized NyxBot to manage this connection. An administrator needs to check the gateway configuration.",
+  gateway_configuration_required:
+    "The channel gateway needs administrator configuration. Ask an administrator to check the active cmaeg service and its URL.",
   gateway_unavailable:
     "The channel gateway is temporarily unavailable. Try again shortly.",
+  setup_interrupted:
+    "This connection changed while it was being set up. Reconnect to try again.",
   gateway_provider_not_registered:
     "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is.",
   gateway_rejected_request:
@@ -29,10 +39,29 @@ const channelErrors: Record<string, string> = {
     "NyxBot could not create this bot's message route. Try again shortly.",
   org_access_lost:
     "You no longer administer the organization that owns this bot, so NyxBot stopped answering through it.",
+  org_access_restoration_pending:
+    "This organization channel is being restored automatically; it normally returns in under a minute. Members must verify their chat account again.",
+  org_access_restoration_waiting_readiness:
+    "This organization channel is waiting for required safety checks to become available. NyxID will retry automatically; no administrator rights were lost.",
+  org_access_restoration_retrying_gateway:
+    "The channel connection is retrying restoration. The retry schedule can take hours; no administrator rights were lost.",
+  org_access_restored:
+    "This organization channel was restored. Members must verify their chat account again. Guest access is preserved as before.",
 };
 
 export function nyxBotChannelError(code: string): string {
   return Object.hasOwn(channelErrors, code)
     ? channelErrors[code]!
     : "This connection failed.";
+}
+
+/** Mutation responses may contain a stable gateway code or ordinary NyxID guidance. */
+export function nyxBotChannelMutationError(message: string): string {
+  message = message.replace(/^Conflict: /, "");
+  const gatewayCode = /^(?:Validation error: )?(gateway_[a-z_]+)$/.exec(message)?.[1];
+  if (gatewayCode) return nyxBotChannelError(gatewayCode);
+  if (Object.hasOwn(channelErrors, message)) {
+    return nyxBotChannelError(message);
+  }
+  return message;
 }

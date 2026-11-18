@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import * as React from "react";
 import * as SeparatorPrimitive from "@radix-ui/react-separator";
 import { cn } from "@/lib/utils";
@@ -9,7 +10,9 @@ const Separator = React.forwardRef<
   (
     { className, orientation = "horizontal", decorative = true, ...props },
     ref,
-  ) => (
+  ) => {
+  useUiTranslation();
+return (
     <SeparatorPrimitive.Root
       ref={ref}
       decorative={decorative}
@@ -21,7 +24,8 @@ const Separator = React.forwardRef<
       )}
       {...props}
     />
-  ),
+  );
+},
 );
 Separator.displayName = SeparatorPrimitive.Root.displayName;
 

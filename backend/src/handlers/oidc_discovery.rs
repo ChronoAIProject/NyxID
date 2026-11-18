@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::State,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -37,6 +37,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
 
     Json(serde_json::json!({
         "issuer": state.config.jwt_issuer,
+        "nyxid_api_origins": state.config.accepted_base_urls().collect::<Vec<_>>(),
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "pushed_authorization_request_endpoint": format!("{base}/oauth/par"),
@@ -120,12 +121,29 @@ pub async fn oauth_authorization_server_metadata(
 ///
 /// RFC 9728 Protected Resource Metadata. MCP clients use this to discover
 /// where to authenticate (NyxID's OAuth endpoints) before connecting.
-pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn oauth_protected_resource(
+    State(state): State<AppState>,
+    request_origin: Option<Extension<crate::mw::cookie_domain::McpResourceOrigin>>,
+) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
+    // RFC 9728 §3.3: `resource` must be the identifier the client used. A
+    // client still configured with an API alias keeps that origin's `/mcp`;
+    // every other request keeps the canonical base.
+    let resource_base = request_origin
+        .as_ref()
+        .map_or(base.as_str(), |Extension(origin)| origin.0.as_str());
+    // An issuer pinned to a configured API alias must still be the discovery
+    // identity (RFC 8414), whichever API origin names the resource.
+    // Preserve the existing base for unrelated/custom issuers and unset aliases.
+    let authorization_server = state
+        .config
+        .accepted_base_urls()
+        .find(|origin| *origin == state.config.jwt_issuer)
+        .unwrap_or(base);
 
     Json(serde_json::json!({
-        "resource": format!("{base}/mcp"),
-        "authorization_servers": [base],
+        "resource": format!("{}/mcp", resource_base.trim_end_matches('/')),
+        "authorization_servers": [authorization_server],
         // Aligned with DEFAULT_MCP_ALLOWED_SCOPES (NyxID#1222/#1226): clients
         // use this list to decide which scopes to request.
         "scopes_supported": ["openid", "profile", "email", "roles", "groups", "proxy", "machine", "offline_access"],
@@ -158,15 +176,90 @@ pub async fn openai_apps_challenge(State(state): State<AppState>) -> Response {
     }
 }
 
+fn native_app_link_paths() -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct ClaimedPaths {
+        paths: Vec<String>,
+    }
+    serde_json::from_str::<ClaimedPaths>(include_str!("../../../shared/native-app-links.json"))
+        .expect("checked native app link manifest")
+        .paths
+}
+
+/// Public Digital Asset Links. Identity is deployment configuration; serving
+/// hosts use the same app and the mobile build attaches the shared path list.
+pub async fn android_asset_links(State(state): State<AppState>) -> Response {
+    let Some(package) = state.config.android_app_package.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if state.config.android_app_sha256_cert_fingerprints.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        Json(serde_json::json!([{
+            "relation": ["delegate_permission/common.handle_all_urls"],
+            "target": { "namespace": "android_app", "package_name": package,
+                "sha256_cert_fingerprints": state.config.android_app_sha256_cert_fingerprints }
+        }])),
+    )
+        .into_response()
+}
+
+/// GET /.well-known/apple-app-site-association
+///
+/// Apple fetches this file without authentication. Keep the response
+/// independent of the request host so both API origins in a migration overlap
+/// advertise the same released mobile application. The app identity comes
+/// from the existing APNs configuration; without it, claiming links would be
+/// worse than returning a cacheable 404.
+pub async fn apple_app_site_association(State(state): State<AppState>) -> Response {
+    let team_id = state
+        .config
+        .apns_team_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let bundle_id = state
+        .config
+        .apns_topic
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let (Some(team_id), Some(bundle_id)) = (team_id, bundle_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let app_id = format!("{team_id}.{bundle_id}");
+    let body = serde_json::json!({
+        "applinks": {
+            "details": [{
+                "appID": app_id,
+                "paths": native_app_link_paths()
+            }]
+        }
+    });
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        Json(body),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED, OPENID_CONFIGURATION_SCOPES_SUPPORTED,
-        oauth_authorization_server_metadata, oauth_protected_resource, openai_apps_challenge,
-        openid_configuration,
+        apple_app_site_association, oauth_authorization_server_metadata, oauth_protected_resource,
+        openai_apps_challenge, openid_configuration,
     };
     use crate::services::oauth_broker_service::{BROKER_BINDING_SCOPE, BROKER_SUBJECT_TOKEN_TYPE};
-    use axum::extract::State;
+    use axum::{extract::State, http::header};
 
     #[tokio::test]
     async fn jwks_http_handler_publishes_active_and_retained_spki_keys_then_retires() {
@@ -265,13 +358,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apple_app_site_association_uses_apns_identity_and_is_host_independent() {
+        use axum::{Router, body::Body, http::Request, routing::get};
+        use tower::ServiceExt;
+
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.apns_team_id = Some("TEAM123".into());
+        state.config.apns_topic = Some("fun.chrono-ai.nyxid".into());
+        let app = Router::new()
+            .route(
+                "/.well-known/apple-app-site-association",
+                get(apple_app_site_association),
+            )
+            .with_state(state);
+
+        let mut bodies = Vec::new();
+        for host in ["api.nyxid.ai", "nyx-api.chrono-ai.fun"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/.well-known/apple-app-site-association")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=300"
+            );
+            bodies.push(
+                axum::body::to_bytes(response.into_body(), 16_384)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        let value: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+        assert_eq!(
+            value["applinks"]["details"][0]["appID"],
+            "TEAM123.fun.chrono-ai.nyxid"
+        );
+        assert!(
+            value["applinks"]["details"][0]["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path == "/login/device")
+        );
+    }
+
+    #[tokio::test]
+    async fn apple_app_site_association_is_not_found_without_apns_identity() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let response = apple_app_site_association(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn protected_resource_metadata_advertises_mcp_default_scopes() {
         // NyxID#1226: clients pick their requested scopes from this list, so
         // it must cover everything a defaulted MCP DCR client is granted.
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://id.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
         assert_eq!(value["resource"], "https://id.example.test/mcp");
         let scopes: Vec<&str> = value["scopes_supported"]
             .as_array()
@@ -287,6 +442,34 @@ mod tests {
                 "protected-resource metadata missing MCP default scope: {scope}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn domain_alias_discovery_keeps_pinned_issuer_and_advertises_api_origins() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.base_url = "https://new.example".into();
+        state.config.jwt_issuer = "https://old.example".into();
+        state.config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        state.config.domain_aliases.frontend_urls = vec!["https://old-app.example".into()];
+        let axum::Json(value) = openid_configuration(State(state.clone())).await;
+        assert_eq!(value["issuer"], "https://old.example");
+        assert_eq!(value["token_endpoint"], "https://new.example/oauth/token");
+        assert_eq!(
+            value["nyxid_api_origins"],
+            serde_json::json!(["https://new.example", "https://old.example"])
+        );
+        let axum::Json(resource) = oauth_protected_resource(State(state.clone()), None).await;
+        assert_eq!(resource["resource"], "https://new.example/mcp");
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://old.example"])
+        );
+        state.config.domain_aliases.base_urls.clear();
+        let axum::Json(resource) = oauth_protected_resource(State(state), None).await;
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["https://new.example"])
+        );
     }
 
     #[tokio::test]
@@ -412,7 +595,7 @@ mod tests {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.base_url = "https://api.example.test".to_string();
 
-        let axum::Json(value) = oauth_protected_resource(State(state)).await;
+        let axum::Json(value) = oauth_protected_resource(State(state), None).await;
 
         assert_eq!(value["resource"], "https://api.example.test/mcp");
         assert_eq!(
@@ -435,6 +618,49 @@ mod tests {
         assert_eq!(
             value["bearer_methods_supported"],
             serde_json::json!(["header"])
+        );
+    }
+    #[tokio::test]
+    async fn android_assetlinks_identity_cache_and_unconfigured() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        assert_eq!(
+            super::android_asset_links(State(state.clone()))
+                .await
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        state.config.android_app_package = Some("fun.chronoai.nyxid".into());
+        assert_eq!(
+            super::android_asset_links(State(state.clone()))
+                .await
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        state.config.android_app_sha256_cert_fingerprints =
+            vec![["AB"; 32].join(":"), ["CD"; 32].join(":")];
+        let response = super::android_asset_links(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value[0]["relation"],
+            serde_json::json!(["delegate_permission/common.handle_all_urls"])
+        );
+        assert_eq!(value[0]["target"]["namespace"], "android_app");
+        assert_eq!(value[0]["target"]["package_name"], "fun.chronoai.nyxid");
+        assert_eq!(
+            value[0]["target"]["sha256_cert_fingerprints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
     }
 }

@@ -2,6 +2,9 @@
 
 NyxID's optional product analytics uses authenticated account UUIDs. It is separate from security audit, billing, essential operational records and push delivery. Those records do not depend on product-analytics consent. Implemented controls and outstanding erasure work are described in [the implemented controls document](SECURITY_REMEDIATION_W1_W4.md); this document describes the current source contract.
 
+Nyxbot failures use `nyxbot.error` through the same authenticated relay. See
+[Nyxbot error telemetry](NYXBOT_ERROR_TELEMETRY.md) for codes and coverage.
+
 ## Permission and dispatch
 
 An account's `profile_config.analytics` is default off. An authenticated first-party human can read or change it with `GET` or `PUT /api/v1/users/me/preferences/analytics`. A mutation includes its expected `account_id`; the server checks it against the authenticated subject before writing. Each explicit choice stores the server's policy version (`"1"`) and a database-generated change time, and receives a new random revision even when the boolean is unchanged. Older records without a policy version retain an unknown version; the server does not invent a historical acknowledgement. Responses are `no-store`.
@@ -32,6 +35,13 @@ The server maintains the authoritative runtime taxonomy in `backend/src/telemetr
 
 Backend typed event properties use `backend/src/telemetry/schema.rs`, then the egress scrubber. Surface, application version, environment and optional client version are added centrally. Raw credentials, authorization headers, MFA/recovery codes, request bodies, form contents, messages, search terms and raw exceptions must not be added to events. Scrubbing is defense in depth, not permission or an anonymity guarantee. Backend event callers remain subject to inventory and review as features change.
 
+Mobile social MFA exemptions emit the typed `auth.mobile_mfa_exempted` event
+with only `mfa: skipped_mobile_rollout`. It uses the existing account permission
+and pre-authentication gates; this rollout does not grant analytics permission.
+Redirect login records a metadata-only `social_login` audit independently.
+
+Social token exchange emits `auth.token_exchanged` with the short canonical `subject_token_type` (`id_token` or `access_token`) and `exchange_provider` after successful provider verification, using the exchanged person as the subject. A rollout exemption also emits `auth.mobile_mfa_exempted`. Both use the existing device/account consent gates: pre-auth protocols and missing/disabled consent do not dispatch account-linked events. The native exchange writes one `social_token_exchange` audit with provider, client, session and MFA outcome; redirect login retains its `social_login` audit.
+
 The backend's `telemetry::dispatch_inventory_tests` enumerates direct `track` calls, durable dispatch admission, queue-job construction and vendor capture endpoints across Rust source, including test callers. A new call site fails the inventory test until its consent boundary has been reviewed. Runtime regressions separately exercise the live database and vendor boundary, including withdrawal across independent app states sharing a database, database failure and device restrictions. Product-analytics denial does not suppress security audit writes.
 
 ## Server configuration
@@ -57,3 +67,11 @@ Audit/billing evidence is retained under its integrity contract. No account-eras
 Dispatch reconciliation retains at most 32 unresolved requests per account. At that limit new product capture fails closed until existing requests settle or an operator records evidence; uncertainty is never discarded on lease expiry. Confirmed transport acceptance removes the per-event row and retains one account generation checkpoint. This bounds event-row growth while preserving provider-processing uncertainty.
 
 A provider deletion status outside its documented `pending`/`completed` states, including an explicit failure, marks the destination job `operator_action` with a stable error code. The worker never reports that as accepted or complete. After investigating the provider, `telemetry-erasure bind-person` with the verified UUID, operator identity and evidence reference records reconciliation and starts a fresh request with a fresh status baseline. `attest-no-data` is reserved for independently evidenced absence, not a workaround for failure.
+
+`monitoring.invocation_diagnostic` counts bounded secondary evidence returned by
+explicit short-lived invocation-diagnostic handle redemption after eligible
+failed service invocations. Its only event properties are the finite
+`outcome`, `observation` and `assessment` enums described in
+[SERVICE_MONITORING.md](SERVICE_MONITORING.md#automatic-failure-diagnostics).
+It uses the same account/device consent gates as other product events; the
+separate operational log counter and security audit do not depend on consent.

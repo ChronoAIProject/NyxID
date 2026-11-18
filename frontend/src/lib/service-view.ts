@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { KeyInfo } from "@/types/keys";
 import type { ServiceViewFilters } from "@/schemas/service-view";
 import type { ServiceConnectionGroup } from "@/lib/service-groups";
@@ -15,11 +16,11 @@ export function connectionSource(
 
 export function connectionSourceLabel(key: KeyInfo): string {
   if (connectionSource(key) === "platform") {
-    return key.auth_method === "none" ? "Platform managed" : "NyxID platform";
+    return translateUi(key.auth_method === "none" ? "Platform managed" : "NyxID platform");
   }
   return key.credential_source?.type === "org"
     ? key.credential_source.org_name
-    : "Personal";
+    : translateUi("Personal");
 }
 
 export function matchingConnections(

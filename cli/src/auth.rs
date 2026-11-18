@@ -550,15 +550,17 @@ pub(crate) enum RefreshExchange {
     Network(anyhow::Error),
 }
 
-/// Why the server refused to renew the session. Distinguishable so automation
-/// can react: `Expired` and `NotFound` mean a human must `nyxid login`;
-/// `Revoked` means reuse detection fired (a stale copy of the refresh token was
-/// presented, or the session was logged out elsewhere) -- also a re-login, but
-/// worth surfacing because it points at a token-sharing problem.
+/// Structured refresh diagnostics distinguish the token's rolling TTL from
+/// the parent session's absolute lifetime, revocation and reuse. Older replicas
+/// may provide only ambiguous prose; that must not become a confirmed expiry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshRejectionReason {
     Expired,
     Revoked,
+    Reused,
+    SessionExpired,
+    SessionRevoked,
+    SessionUnavailable,
     NotFound,
     Other,
 }
@@ -582,6 +584,10 @@ impl RefreshRejection {
         match self.reason {
             RefreshRejectionReason::Expired => "refresh_token_expired",
             RefreshRejectionReason::Revoked => "refresh_token_revoked",
+            RefreshRejectionReason::Reused => "refresh_token_reused",
+            RefreshRejectionReason::SessionExpired => "session_expired",
+            RefreshRejectionReason::SessionRevoked => "session_revoked",
+            RefreshRejectionReason::SessionUnavailable => "session_unavailable",
             RefreshRejectionReason::NotFound => "refresh_token_not_found",
             RefreshRejectionReason::Other => "refresh_rejected",
         }
@@ -590,14 +596,15 @@ impl RefreshRejection {
     pub fn headline(&self) -> String {
         match self.reason {
             RefreshRejectionReason::Expired => {
-                "Your session has expired (the refresh token reached its lifetime).".to_string()
+                "Your refresh token has expired (it reached its lifetime).".to_string()
             }
-            RefreshRejectionReason::Revoked => "Your session was revoked: the refresh token was \
-                 reused after rotation (a stale copy in another tool or profile) or the session \
-                 was logged out elsewhere."
-                .to_string(),
+            RefreshRejectionReason::Revoked => "Your refresh token was revoked; this session can no longer be renewed.".into(),
+            RefreshRejectionReason::Reused => "The refresh token was reused after rotation; this session can no longer be renewed.".into(),
+            RefreshRejectionReason::SessionExpired => "Your account session reached its absolute lifetime. Refreshing tokens does not extend that deadline.".into(),
+            RefreshRejectionReason::SessionRevoked => "Your account session was revoked.".into(),
+            RefreshRejectionReason::SessionUnavailable => "Your account session is no longer available; its expiry or revocation cannot be determined.".into(),
             RefreshRejectionReason::NotFound => {
-                "Your session has expired and no usable refresh token is saved.".to_string()
+                "No usable refresh token is available; the session cannot be renewed.".to_string()
             }
             RefreshRejectionReason::Other => {
                 format!("Your session could not be renewed ({}).", self.message)
@@ -605,7 +612,7 @@ impl RefreshRejection {
         }
     }
 
-    /// Classify a 4xx `/auth/refresh` response from its error envelope.
+    /// Prefer stable details.reason; tolerate old replicas and future reasons.
     pub(crate) fn classify(body: Option<&serde_json::Value>) -> Self {
         let error_key = body
             .and_then(|b| b.get("error"))
@@ -617,8 +624,27 @@ impl RefreshRejection {
             .and_then(|v| v.as_str())
             .unwrap_or("refresh rejected")
             .to_string();
+        let structured = body
+            .and_then(|body| body.pointer("/details/reason"))
+            .and_then(|v| v.as_str());
+        let known = match structured {
+            Some("refresh_expired") => Some(RefreshRejectionReason::Expired),
+            Some("refresh_reused") => Some(RefreshRejectionReason::Reused),
+            Some("refresh_revoked") => Some(RefreshRejectionReason::Revoked),
+            Some("refresh_not_found") => Some(RefreshRejectionReason::NotFound),
+            Some("session_expired") => Some(RefreshRejectionReason::SessionExpired),
+            Some("session_revoked") => Some(RefreshRejectionReason::SessionRevoked),
+            Some("session_unavailable") => Some(RefreshRejectionReason::SessionUnavailable),
+            _ => None,
+        };
+        if let Some(reason) = known {
+            return Self { reason, message };
+        }
         let lower = message.to_ascii_lowercase();
-        let reason = if error_key == "token_expired" || lower.contains("expired") {
+        let reason = if lower.contains("expired") && lower.contains("revoked") {
+            // Older replicas conflate the causes. Do not assert a token lifetime.
+            RefreshRejectionReason::Other
+        } else if error_key == "token_expired" || lower.contains("expired") {
             RefreshRejectionReason::Expired
         } else if lower.contains("revoked") {
             RefreshRejectionReason::Revoked
@@ -1784,7 +1810,7 @@ mod tests {
             "error": "unauthorized", "message": "Refresh token not found"
         })));
         assert_eq!(missing.reason, RefreshRejectionReason::NotFound);
-        assert!(missing.headline().contains("session has expired"));
+        assert!(missing.headline().contains("No usable refresh token"));
         assert_eq!(
             RefreshRejection::classify(None).reason,
             RefreshRejectionReason::Other
@@ -2513,7 +2539,7 @@ mod tests {
             .expect_err("expired token with no refresh must error");
         let msg = format!("{err}");
         assert!(
-            msg.contains("session has expired"),
+            msg.contains("No usable refresh token"),
             "unexpected message: {msg}"
         );
         assert!(msg.contains("nyxid login"), "should point at login: {msg}");
@@ -2767,5 +2793,52 @@ mod tests {
         );
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod refresh_reason_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn structured_refresh_reasons_override_ambiguous_or_contradictory_prose() {
+        for (wire, code) in [
+            ("refresh_expired", "refresh_token_expired"),
+            ("refresh_reused", "refresh_token_reused"),
+            ("refresh_revoked", "refresh_token_revoked"),
+            ("refresh_not_found", "refresh_token_not_found"),
+            ("session_expired", "session_expired"),
+            ("session_revoked", "session_revoked"),
+            ("session_unavailable", "session_unavailable"),
+        ] {
+            let rejection = RefreshRejection::classify(Some(
+                &json!({"error":"unauthorized", "message":"Refresh token has expired or been revoked", "details":{"reason":wire}}),
+            ));
+            assert_eq!(rejection.code(), code);
+            assert_eq!(
+                rejection.headline().contains("refresh token has expired"),
+                wire == "refresh_expired"
+            );
+        }
+    }
+    #[test]
+    fn legacy_and_unknown_reasons_keep_fallback_without_claiming_ambiguous_expiry() {
+        for reason in [None, Some("future_reason"), Some("authentication_failed")] {
+            for (message, code) in [
+                ("Token expired", "refresh_token_expired"),
+                ("Refresh token has been revoked", "refresh_token_revoked"),
+                ("Refresh token not found", "refresh_token_not_found"),
+                ("Session expired or revoked", "refresh_rejected"),
+                (
+                    "Refresh token has expired or been revoked",
+                    "refresh_rejected",
+                ),
+            ] {
+                let rejection = RefreshRejection::classify(Some(
+                    &json!({"message":message, "details":{"reason":reason}}),
+                ));
+                assert_eq!(rejection.code(), code);
+            }
+        }
     }
 }

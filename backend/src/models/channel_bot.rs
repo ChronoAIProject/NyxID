@@ -21,6 +21,9 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotError {
+    /// Additive thread outcome; the ordinary provider reason remains intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_reason: Option<String>,
     /// Numeric `AppError` code, kept for compatibility with earlier rows.
     #[serde(deserialize_with = "deserialize_error_code")]
     pub code: String,
@@ -42,6 +45,19 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inbound_outcome: Option<ChannelInboundOutcome>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub inbound_outcomes: std::collections::BTreeMap<String, ChannelInboundCounter>,
+    /// Authenticated URL challenge only; never message receipt or activation.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_callback_challenge_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_route_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_route_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_gateway: Option<super::discord_gateway::DiscordGatewayStatus>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_inbound_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -50,6 +66,8 @@ pub struct ChannelBotDiagnostics {
     pub last_outbound_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_outbound_error: Option<ChannelBotError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outbound_notice: Option<ChannelBotError>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_webhook_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -60,6 +78,20 @@ pub struct ChannelBotDiagnostics {
     pub consecutive_errors: u32,
     #[serde(default)]
     pub failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelInboundOutcome {
+    pub code: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelInboundCounter {
+    pub count: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -10,10 +10,11 @@ for (const width of [1280, 320]) {
     await openAssistant(page, { faults: { nyxagentEnabled: true } });
     await page.getByRole("region", { name: "What NyxBot remembers" }).getByRole("button", { name: "Manage" }).click();
     const sheet = page.getByRole("dialog", { name: "Agent details" });
-    const connections = sheet.getByRole("region", { name: "Connections" });
+    await sheet.getByRole("tab", { name: "Access", exact: true }).click();
+    const connections = sheet.getByRole("region", { name: "Connections", exact: true })
+      .filter({ has: page.getByRole("list", { name: "OpenAI connections", exact: true }) });
     await connections.scrollIntoViewIfNeeded();
     await expect(connections).toContainText("Your saved connection order applies across your agents");
-    await connections.locator("summary").filter({ hasText: /^OpenAI/ }).click();
     const accounts = connections.getByRole("list", { name: "OpenAI connections" });
     await expect(accounts).toContainText("Shared GPT-4o");
     await expect(accounts).toContainText("ChronoAI");

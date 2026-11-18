@@ -533,3 +533,54 @@ mod tests {
         assert!(json.contains("\"can_manage\":false"));
     }
 }
+
+#[cfg(test)]
+mod retirement_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::handlers::curation_tests::{fixture, token};
+
+    /// The consumer routes sit behind the JWT layer, so a signed-in service
+    /// account proves the retirement layer answers once authentication is
+    /// through: 410 `oracle_retired` for pools, tasks and sessions alike.
+    #[tokio::test]
+    async fn builtin_oracle_consumer_routes_answer_410_oracle_retired() {
+        let f = fixture("oracle_retired_consumer_routes", false).await;
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let app = private.with_state(f.state.clone());
+        let bearer = token(&f, None).await;
+        for (method, path) in [
+            ("GET", "/api/v1/oracle/pools"),
+            ("POST", "/api/v1/oracle/pools"),
+            ("GET", "/api/v1/oracle/pools/chatgpt-pro"),
+            ("DELETE", "/api/v1/oracle/pools/chatgpt-pro"),
+            ("POST", "/api/v1/oracle/pools/chatgpt-pro/tasks"),
+            ("GET", "/api/v1/oracle/pools/chatgpt-pro/status"),
+            ("GET", "/api/v1/oracle/tasks/t1"),
+            ("GET", "/api/v1/oracle/sessions"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("authorization", format!("Bearer {bearer}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["error"], "oracle_retired", "{method} {path}");
+            assert_eq!(payload["error_code"], 11099, "{method} {path}");
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}

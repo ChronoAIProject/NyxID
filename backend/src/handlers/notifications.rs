@@ -31,6 +31,7 @@ pub struct NotificationSettingsResponse {
     pub approval_timeout_secs: u32,
     pub grant_expiry_days: u32,
     pub push_enabled: bool,
+    pub group_mentions_enabled: bool,
     pub push_device_count: usize,
     pub updated_at: String,
 }
@@ -50,6 +51,7 @@ pub struct NotificationSettingsAuthorizationEvidenceResponse {
     pub approval_timeout_secs: u32,
     pub grant_expiry_days: u32,
     pub push_enabled: bool,
+    pub group_mentions_enabled: bool,
     pub push_device_count: usize,
     pub updated_at: String,
 }
@@ -66,6 +68,7 @@ impl NotificationSettingsAuthorizationEvidenceResponse {
             approval_timeout_secs: response.approval_timeout_secs,
             grant_expiry_days: response.grant_expiry_days,
             push_enabled: response.push_enabled,
+            group_mentions_enabled: response.group_mentions_enabled,
             push_device_count: response.push_device_count,
             updated_at: response.updated_at.clone(),
         }
@@ -80,6 +83,7 @@ pub struct UpdateNotificationSettingsRequest {
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
     pub push_enabled: Option<bool>,
+    pub group_mentions_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +189,9 @@ pub async fn update_settings(
         debug_assert!(v <= i32::MAX as u32, "grant_expiry_days exceeds i32::MAX");
         update_doc.insert("grant_expiry_days", v as i32);
     }
+    if let Some(v) = body.group_mentions_enabled {
+        update_doc.insert("group_mentions_enabled", v);
+    }
     if let Some(v) = body.push_enabled {
         update_doc.insert("push_enabled", v);
     }
@@ -214,6 +221,7 @@ pub async fn update_settings(
             "approval_timeout_secs": updated.approval_timeout_secs,
             "grant_expiry_days": updated.grant_expiry_days,
             "push_enabled": updated.push_enabled,
+            "group_mentions_enabled": updated.group_mentions_enabled,
         })),
     );
 
@@ -390,6 +398,7 @@ fn to_settings_response(
         approval_timeout_secs: channel.approval_timeout_secs,
         grant_expiry_days: channel.grant_expiry_days,
         push_enabled: channel.push_enabled,
+        group_mentions_enabled: channel.group_mentions_enabled,
         push_device_count: channel.push_devices.len(),
         updated_at: channel.updated_at.to_rfc3339(),
     }
@@ -398,6 +407,52 @@ fn to_settings_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn group_mentions_setting_defaults_on_and_partial_updates_preserve_it() {
+        let db = crate::test_utils::connect_test_database("group_mentions_settings")
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let auth = || crate::test_utils::test_auth_user(&owner);
+        assert!(
+            get_settings(State(state.clone()), auth())
+                .await
+                .unwrap()
+                .0
+                .group_mentions_enabled
+        );
+        for input in [
+            serde_json::json!({"group_mentions_enabled":false}),
+            serde_json::json!({"approval_timeout_secs":60}),
+        ] {
+            let response = update_settings(
+                State(state.clone()),
+                auth(),
+                Json(serde_json::from_value(input).unwrap()),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert!(!response.group_mentions_enabled);
+        }
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"user_id":&owner},
+                doc! {"$unset":{"group_mentions_enabled":""}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            get_settings(State(state), auth())
+                .await
+                .unwrap()
+                .0
+                .group_mentions_enabled
+        );
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn unrelated_settings_preserve_unset_mode_and_conflicting_choices_do_not_create_rows() {
@@ -468,6 +523,7 @@ mod tests {
                 State(state.clone()),
                 crate::test_utils::test_auth_user(&owner),
                 Json(UpdateNotificationSettingsRequest {
+                    group_mentions_enabled: None,
                     telegram_enabled: Some(false),
                     push_enabled: Some(false),
                     approval_required: Some(required),
@@ -545,6 +601,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(false),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -658,6 +715,7 @@ mod tests {
             approval_web_available: true,
             approval_timeout_secs: 60,
             grant_expiry_days: 14,
+            group_mentions_enabled: true,
             push_enabled: true,
             push_device_count: 2,
             updated_at: "2024-01-01T00:00:00Z".to_string(),
@@ -690,6 +748,7 @@ mod tests {
             approval_web_available: true,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
+            group_mentions_enabled: true,
             push_enabled: false,
             push_device_count: 0,
             updated_at: "2024-01-01T00:00:00Z".to_string(),

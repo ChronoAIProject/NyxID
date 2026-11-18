@@ -324,6 +324,14 @@ async fn fixture_http(label: &str) -> Journey {
     let kube_state = kube.clone();
     Mock::given(method("GET")).respond_with(move|request:&wiremock::Request| {
         let path=request.url.path();
+        if path == "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/local-node" {
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "kind":"Lease","apiVersion":"coordination.k8s.io/v1",
+                "metadata":{"name":"local-node","namespace":"kube-node-lease","uid":"local-node-lease","resourceVersion":"10",
+                    "ownerReferences":[{"apiVersion":"v1","kind":"Node","name":"local-node","uid":kube_state.node_uid}]},
+                "spec":{"holderIdentity":"local-node","renewTime":Utc::now().to_rfc3339(),"leaseDurationSeconds":40}
+            }));
+        }
         if path.ends_with("/nodes/local-node") {
             return ResponseTemplate::new(200).set_body_json(json!({"kind":"Node","apiVersion":"v1","metadata":{"name":"local-node","uid":kube_state.node_uid,"resourceVersion":"9"},
                 "status":{"nodeInfo":{"containerRuntimeVersion":"containerd://fixture-unverified"},"conditions":[{"type":"Ready","status":"True","lastHeartbeatTime":Utc::now().to_rfc3339()}]}}));

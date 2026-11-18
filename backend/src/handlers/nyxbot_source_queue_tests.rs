@@ -60,6 +60,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         OWNER,
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
+        None,
     )
     .await
     .unwrap()
@@ -191,7 +192,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&event, "question")
+            work(&event, "question"),
+            None
         )
         .await
         .is_err()
@@ -316,7 +318,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&invalid, "another question")
+            work(&invalid, "another question"),
+            None
         )
         .await
         .is_err()
@@ -409,6 +412,49 @@ async fn owner_gateway_home(f: &Fixture) -> AssistantConversation {
     row(f).await
 }
 
+async fn queued_provider_response(response: Response, replay: bool) {
+    use http_body_util::BodyExt;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    if !replay {
+        let body = body_text(response).await;
+        assert!(body.contains("response.completed"), "{body}");
+        assert!(!body.contains("response.output_text"), "{body}");
+        assert!(!body.contains("Got it"));
+        assert!(!body.contains("working on"));
+        return;
+    }
+
+    let mut body = response.into_body();
+    for (sequence, kind) in ["response.created", "response.in_progress"]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let frame = std::str::from_utf8(&bytes).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let frame: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(frame["type"], kind);
+        assert_eq!(frame["sequence_number"], sequence);
+        assert_eq!(frame["response"]["output"], json!([]));
+    }
+    // The queued source has no settled answer. Recovery cannot release its parent yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), body.frame())
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_output() {
     let f = fixture("source_gateway_queue_handler").await;
@@ -432,14 +478,9 @@ async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_ou
     .await
     .unwrap();
     let request = super::super::event("next queued question", "7", "queued-handler");
-    for _ in 0..2 {
+    for replay in [false, true] {
         let response = respond(&f.state, &f.key, &request, "queued-handler").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_text(response).await;
-        assert!(body.contains("response.completed"), "{body}");
-        assert!(!body.contains("response.output_text"), "{body}");
-        assert!(!body.contains("Got it"));
-        assert!(!body.contains("working on"));
+        queued_provider_response(response, replay).await;
     }
     let queued = row(&f).await;
     assert_eq!(queued.pending_events.len(), 1);
@@ -465,6 +506,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
             description: "Support".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -499,6 +541,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         OWNER,
         &home.id,
         work(&event, "specialist question"),
+        None,
     )
     .await
     .unwrap();
@@ -711,12 +754,9 @@ async fn post_admission_reply_preference_failure_preserves_queued_and_bound_sour
         };
         let mut incoming = super::super::event(question, "7", "preference-failed");
         incoming["event_context"]["event_ref"] = json!("cmaeg1.ev.original");
-        for _ in 0..2 {
+        for replay in [false, true] {
             let response = respond(&f.state, &f.key, &incoming, "preference-failed").await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = body_text(response).await;
-            assert!(body.contains("response.completed"), "{body}");
-            assert!(!body.contains("response.output_text"), "{body}");
+            queued_provider_response(response, replay).await;
         }
         let saved = f
             .state
@@ -797,13 +837,52 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
     .await
     .unwrap();
     let a = source(&f, "app-repeat").await;
-    assert!(queue(&f, &a, "same app question").await);
+    let ingress = crate::turn_trace::Ingress::new();
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id": &a.id},
+            doc! {"$set": {"trace_request_id": ingress.request_id.to_string()}},
+        )
+        .await
+        .unwrap();
+    let mut repeat = work(&a, "same app question");
+    repeat.channel_contexts = vec![verified_context(&f.channel, &a)];
+    let (accepted, trace) = crate::turn_trace::capture(ingress.scope(delivery::enqueue(
+        &f.state.db,
+        OWNER,
+        &home.id,
+        repeat,
+        None,
+    )))
+    .await;
+    assert!(accepted.unwrap());
+    let original_turn = &prior.active_turn.as_ref().unwrap().turn_id;
+    assert_eq!(ingress.admitted().unwrap().turn_id(), *original_turn);
+    assert!(trace.iter().any(|record| record["phase"] == "link"
+        && record["turn_id"] == *original_turn
+        && record["ingress_request_id"] == ingress.request_id.to_string()));
+    // Joining a committed turn links the source without minting another admission.
+    assert!(
+        !trace
+            .iter()
+            .any(|record| record["stage"] == "admission" && record["phase"] == "start")
+    );
     let current = row(&f).await;
     assert!(current.pending_events.is_empty());
     let active = current.active_turn.as_ref().unwrap();
     assert_eq!(active.turn_id, prior.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(active.origin, TurnOrigin::User);
     assert!(active.channel_event_id.is_none());
+    assert!(active.channel_context.is_none());
+    assert!(active.events.iter().all(|e| e.channel_contexts.is_empty()));
+    assert!(
+        crate::services::channel_turn_context::turn_notes(&f.state.db, &current)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(matches!(
         engine::answer_routing(&current, active).primary,
         engine::PrimaryDestination::App
@@ -965,6 +1044,7 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
+                None
             )
             .await
             .unwrap()
@@ -1162,6 +1242,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     let f = fixture("media_committed_sources").await;
     let mut queued = source(&f, "media-queued").await;
     queued.media = Some(EventMedia {
+        guest: false,
         authority: None,
         key: "a".repeat(64),
         declared: 1,
@@ -1183,6 +1264,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     assert!(queue(&f, &queued, "media question").await);
     let mut bound = source(&f, "media-bound").await;
     bound.media = Some(EventMedia {
+        guest: false,
         authority: None,
         key: "b".repeat(64),
         declared: 1,
@@ -1222,4 +1304,281 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     );
     assert!(!record(&f, &queued.id).await.media.unwrap().interrupted);
     assert!(!record(&f, &bound.id).await.media.unwrap().interrupted);
+}
+
+#[tokio::test]
+async fn guest_setup_2092_queue_admission_rechecks_audience_and_source_transactionally() {
+    let f = fixture("guest_setup_queue_authority").await;
+    let event = source(&f, "waiting-visitor").await;
+    let origin = event.delivery.as_ref().unwrap().origin.clone();
+    let mut guest = row(&f).await;
+    guest.guest_turn = true;
+    guest.channel = Some(origin);
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"everyone"}},
+        )
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(EVENTS).update_one(
+        doc!{"_id":&event.id},doc!{"$set":{"delivery.guest":true,"delivery.sender_id":"visitor","delivery.addressed":true,
+            "guest_setup_payload":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]}}}
+    ).await.unwrap();
+    let check = || {
+        let context = (f.state.db.clone(), event.id.clone(), guest.clone());
+        async move {
+            crate::services::transaction_service::run_db_only(
+                &context.0,
+                &context,
+                |session, (db, id, guest)| {
+                    Box::pin(async move {
+                        delivery::validate_guest_setup_in_session(db, session, id, guest).await
+                    })
+                },
+            )
+            .await
+        }
+    };
+    check().await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"owner"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(
+            doc! {"_id":&f.channel.id},
+            doc! {"$set":{"private_chats":"everyone","route_api_key_id":"replaced"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    f.state.db.collection::<bson::Document>(CHANNELS).update_one(
+        doc!{"_id":&f.channel.id},doc!{"$set":{"private_chats":"everyone","route_api_key_id":&f.channel.route_api_key_id}}
+    ).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("api_keys")
+        .update_one(
+            doc! {"_id":&f.channel.route_api_key_id},
+            doc! {"$set":{"is_active":false}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(check().await, Err(AppError::Forbidden(_))));
+    let saved = record(&f, &event.id).await;
+    assert!(
+        saved.turn_id.is_none(),
+        "revoked waits never bind or execute a turn"
+    );
+    assert_eq!(saved.status, "running");
+}
+
+fn verified_context(
+    channel: &NyxbotChannel,
+    event: &NyxbotEvent,
+) -> crate::models::assistant_conversation::ChannelTurnContext {
+    crate::models::assistant_conversation::ChannelTurnContext {
+        org_origin: None,
+        source_event_id: event.id.clone(),
+        channel_id: channel.id.clone(),
+        channel_bot_id: channel.channel_bot_id.clone(),
+        conversation_kind: "private".into(),
+        sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        guest: false,
+        original_message: true,
+        display_name: None,
+        conversation_label: None,
+        followed: false,
+    }
+}
+
+#[tokio::test]
+async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtime() {
+    let f = fixture("identity_2187_coalesced").await;
+    let (mut second, _) = channel(&f.state, "gateway").await;
+    second.owner_sender_ids = vec!["8".into()];
+    f.state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&second.id}, &second)
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"channel_id":&second.id,"user_id":OWNER,"partition":PARTITION,
+        "conversation_id":&f.event.conversation_id,"kind":"private","owner_chat":true,"platform_chat_id":"second-chat",
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let a = source(&f, "context-a").await;
+    let mut b = source(&f, "context-b").await;
+    b.channel_id = second.id.clone();
+    b.delivery.as_mut().unwrap().origin.nyxbot_channel_id = second.id.clone();
+    b.delivery.as_mut().unwrap().sender_id = "8".into();
+    b.delivery.as_mut().unwrap().source_route_id = second.route_id.clone();
+    b.delivery.as_mut().unwrap().source_route_api_key_id = Some(second.route_api_key_id.clone());
+    f.state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .replace_one(doc! {"_id":&b.id}, &b)
+        .await
+        .unwrap();
+    for (channel, source) in [(&f.channel, &a), (&second, &b)] {
+        let mut event = work(source, "same question");
+        event.channel_contexts = vec![verified_context(channel, source)];
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                f.event.conversation_id.as_deref().unwrap(),
+                event,
+                None
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let queued = row(&f).await;
+    assert_eq!(queued.pending_events.len(), 1);
+    assert_eq!(queued.pending_events[0].channel_contexts.len(), 2);
+    assert_eq!(
+        queued.pending_events[0].channel_contexts[1].source_event_id,
+        b.id
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id":&a.id},
+            doc! {"$set":{"delivery.sender_id":"revoked-owner"}},
+        )
+        .await
+        .unwrap();
+    follow::prune_queue(&f.state.db, OWNER, &queued.id)
+        .await
+        .unwrap();
+    let pruned = row(&f).await;
+    assert_eq!(pruned.pending_events[0].channel_contexts.len(), 1);
+    assert_eq!(
+        pruned.pending_events[0].channel_contexts[0].channel_bot_id,
+        second.channel_bot_id
+    );
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(queued.id.clone()),
+        agent_id: None,
+        text: String::new(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = TurnOrigin::Event;
+    let Started::Turn { receiver, .. } = start_server_turn(
+        &f.state,
+        OWNER,
+        start,
+        Pool::Team {
+            owner: OWNER,
+            limit: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("event turn must start")
+    };
+    final_reply(receiver).await.unwrap();
+    let observed = f.calls.lock().await;
+    assert_eq!(observed.len(), 1);
+    let contexts = turn_context_tests::contexts(&observed[0]);
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0]["identity"]["channel_bot_id"],
+        second.channel_bot_id
+    );
+    assert_eq!(contexts[0]["source_event_id"], b.id);
+    assert_eq!(contexts[0]["event_id"], pruned.pending_events[0].id);
+    assert!(
+        !observed[0]["input"]
+            .as_str()
+            .unwrap()
+            .contains(&f.channel.channel_bot_id)
+    );
+}
+
+#[tokio::test]
+async fn identity_2187_later_queued_source_lookup_error_fails_before_model_input() {
+    let f = fixture("identity_2187_lookup_failure").await;
+    for i in 0..2 {
+        let source = source(&f, &format!("lookup-{i}")).await;
+        let mut event = work(&source, "same coalesced question");
+        let mut context = verified_context(&f.channel, &source);
+        if i == 1 {
+            // A later required read fails BSON decoding after the earlier
+            // source rendered successfully. No partial notes may be used.
+            context.channel_id = "broken-source-channel".into();
+            let mut broken = bson::to_document(&f.channel).unwrap();
+            broken.insert("_id", &context.channel_id);
+            broken.insert("created_at", "invalid database datetime");
+            f.state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .insert_one(broken)
+                .await
+                .unwrap();
+        }
+        event.channel_contexts = vec![context];
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                f.event.conversation_id.as_deref().unwrap(),
+                event,
+                None
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let queued = row(&f).await;
+    assert_eq!(queued.pending_events.len(), 1);
+    assert_eq!(queued.pending_events[0].source_event_ids.len(), 2);
+    assert_eq!(queued.pending_events[0].channel_contexts.len(), 2);
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(queued.id.clone()),
+        agent_id: None,
+        text: String::new(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = TurnOrigin::Event;
+    let Started::Turn { receiver, .. } = start_server_turn(
+        &f.state,
+        OWNER,
+        start,
+        Pool::Team {
+            owner: OWNER,
+            limit: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("event turn must start")
+    };
+    assert!(final_reply(receiver).await.is_err());
+    assert!(
+        f.calls.lock().await.is_empty(),
+        "neither an incomplete context nor a bare question reaches the model"
+    );
 }

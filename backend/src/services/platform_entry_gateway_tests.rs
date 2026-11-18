@@ -47,6 +47,7 @@ struct Fixture {
     request: Value,
     transport: Arc<NativeTestTransport>,
     router: Router,
+    admission: NativeAdmission,
 }
 
 impl Fixture {
@@ -207,6 +208,7 @@ impl Fixture {
                 discord_base: base,
             }),
             router,
+            admission,
         }
     }
 
@@ -516,3 +518,387 @@ async fn authenticated_gateway_allows_benign_touches_but_fences_rotation_revocat
 
 #[path = "platform_entry_gateway_setup_tests.rs"]
 pub(crate) mod setup;
+
+#[tokio::test]
+async fn retired_native_primary_acknowledges_only_exact_delete_without_restoring_authority() {
+    use axum::extract::{Path, State};
+    let server = MockServer::start().await;
+    let (state, bot, receipt) =
+        crate::services::platform_native_reply_service::tests::discord_fixture(&server.uri()).await;
+    ensure_indexes(&state.db).await.unwrap();
+    let (mut provider, raw) = transport_key(&bot.user_id);
+    provider.is_active = false;
+    crate::services::api_key_mutation_service::insert_one(&state.db, &provider, None)
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut configuration = receipt.configuration;
+    configuration.transport = EntryTransport::NyxagentGateway {
+        channel_id: id.clone(),
+        gateway_channel_id: "cmaeg1.ch.retired-native".into(),
+        gateway_version: 1,
+    };
+    let now = Utc::now();
+    let row = PlatformEntryGateway {
+        id,
+        profile_id: receipt.profile_id,
+        configuration,
+        configured_by: bot.user_id.clone(),
+        credential_owner_id: bot.user_id,
+        route_api_key_id: uuid::Uuid::new_v4().to_string(),
+        route_id: uuid::Uuid::new_v4().to_string(),
+        provider_api_key_id: provider.id,
+        callback_url: format!("{}/callback", server.uri()),
+        binding_id: Some("native-binding".into()),
+        gateway_base: server.uri(),
+        setup_state: "observed".into(),
+        setup_attempt_id: uuid::Uuid::new_v4().to_string(),
+        setup_dispatch_deadline: None,
+        request_policy: json!({}),
+        request_hash: "retired-captured-request".into(),
+        creation_fingerprint: "retired-captured-identity".into(),
+        request_ciphertext: vec![],
+        state: "retired".into(),
+        revision: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .insert_one(&row)
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", raw.as_str()).parse().unwrap(),
+    );
+    assert_eq!(
+        nyxbot::delete_binding(
+            State(state.clone()),
+            Path("native-binding".into()),
+            headers.clone()
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_ne!(
+        nyxbot::delete_binding(
+            State(state.clone()),
+            Path("wrong-binding".into()),
+            headers.clone()
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(authenticate(&state, &headers).await.is_err());
+    assert_ne!(
+        nyxbot::put_binding(
+            State(state.clone()),
+            Path("native-binding".into()),
+            headers,
+            axum::Json(json!({}))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<PlatformEntryGateway>(GATEWAYS)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "retired"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_move_updates_entry_and_key_atomically_then_native_dispatch_passes() {
+    use crate::services::nyxbot_gateway_host_move::Reconciler;
+    let server = MockServer::start().await;
+    let fixture = Fixture::new(&server).await;
+    let EntryTransport::NyxagentGateway {
+        gateway_channel_id: remote,
+        ..
+    } = &fixture.row.configuration.transport
+    else {
+        panic!("gateway fixture");
+    };
+    let state = &fixture.state;
+    let old_base = "https://bot-gateway.chrono-ai.fun/v1";
+    let old_callback = format!("{old_base}/callbacks/{remote}");
+    let next = format!("{}/callbacks/{remote}", server.uri());
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = uuid::Uuid::new_v4().to_string();
+    service.slug = "cmaeg".into();
+    service.base_url = server.uri();
+    service.requires_user_credential = false;
+    state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(GATEWAYS)
+        .update_one(
+            doc! {"_id":&fixture.row.id},
+            doc! {"$set":{"gateway_base":old_base,"callback_url":&old_callback}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(KEYS)
+        .update_one(
+            doc! {"_id":&fixture.row.route_api_key_id},
+            doc! {"$set":{"callback_url":&old_callback}},
+        )
+        .await
+        .unwrap();
+    let profile = state
+        .db
+        .collection::<PlatformBotConfig>(crate::models::platform_bot_config::COLLECTION_NAME)
+        .find_one(doc! {"_id":&fixture.row.profile_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt = fixture.admission.receipt();
+    // The native ingress owns this pending dispatch record. No text is stored.
+    state
+        .db
+        .collection::<Document>(MESSAGES)
+        .insert_one(doc! {
+            "_id":&receipt.id,"channel_bot_id":&receipt.configuration.identity.channel_bot_id,
+            "conversation_id":&profile.id,"callback_status":"pending",
+        })
+        .await
+        .unwrap();
+    assert!(
+        forward_native(state, &profile, &fixture.admission)
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let count = Reconciler::default().tick(state).await.unwrap().unwrap();
+    assert_eq!(count.platform_entries, 1);
+    let row = state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .find_one(doc! {"_id":&fixture.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let key = state
+        .db
+        .collection::<ApiKey>(KEYS)
+        .find_one(doc! {"_id":&fixture.row.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.gateway_base, server.uri());
+    assert_eq!(row.callback_url, next);
+    assert_eq!(key.callback_url.as_deref(), Some(next.as_str()));
+    assert_eq!(row.configuration, fixture.row.configuration);
+    assert_eq!(row.request_policy, fixture.row.request_policy);
+    assert_eq!(row.request_hash, fixture.row.request_hash);
+    Mock::given(method("POST"))
+        .and(path(format!("/callbacks/{remote}")))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+    forward_native(state, &profile, &fixture.admission)
+        .await
+        .unwrap();
+    forward_native(state, &profile, &fixture.admission)
+        .await
+        .unwrap();
+    assert_eq!(
+        Reconciler::default()
+            .tick(state)
+            .await
+            .unwrap()
+            .unwrap()
+            .platform_entries,
+        0
+    );
+    server.verify().await;
+    // A partial manual repair may already have moved the callback/key while
+    // leaving the platform entry's base fence stale. Heal that too and audit
+    // the host that actually changed.
+    state
+        .db
+        .collection::<Document>(GATEWAYS)
+        .update_one(
+            doc! {"_id": &fixture.row.id},
+            doc! {"$set": {"gateway_base": old_base}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Reconciler::default()
+            .tick(state)
+            .await
+            .unwrap()
+            .unwrap()
+            .platform_entries,
+        1
+    );
+    assert_eq!(state.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc! {
+        "event_type":"nyxbot_gateway_callback_rebased", "event_data.row_id": &fixture.row.id,
+        "event_data.old_host":"bot-gateway.chrono-ai.fun", "event_data.new_host":"127.0.0.1",
+    }).await.unwrap(), 2);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_move_platform_entry_keeps_row_and_key_on_mismatch_or_fence_refusal() {
+    use crate::services::nyxbot_gateway_host_move::Reconciler;
+    let server = MockServer::start().await;
+    let fixture = Fixture::new(&server).await;
+    let EntryTransport::NyxagentGateway {
+        gateway_channel_id: remote,
+        ..
+    } = &fixture.row.configuration.transport
+    else {
+        panic!("gateway fixture");
+    };
+    let state = &fixture.state;
+    let old_base = "https://bot.chrono-ai.fun/event-gateway/v1";
+    let old_callback = format!("{old_base}/callbacks/{remote}");
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = uuid::Uuid::new_v4().to_string();
+    service.slug = "cmaeg".into();
+    service.base_url = server.uri();
+    service.requires_user_credential = false;
+    state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(GATEWAYS)
+        .update_one(
+            doc! {"_id":&fixture.row.id},
+            doc! {"$set":{"gateway_base":old_base,"callback_url":&old_callback}},
+        )
+        .await
+        .unwrap();
+    // A concurrently replaced callback is never overwritten.
+    let mut worker = Reconciler::default();
+    assert_eq!(
+        worker.tick(state).await.unwrap().unwrap().platform_entries,
+        0
+    );
+    let unchanged = state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .find_one(doc! {"_id":&fixture.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.gateway_base, old_base);
+    let key = state
+        .db
+        .collection::<ApiKey>(KEYS)
+        .find_one(doc! {"_id":&fixture.row.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.callback_url, Some(fixture.row.callback_url.clone()));
+    // A key that expires between preparation and repair fails the existing
+    // dispatch fence; the transaction rolls back both destination changes.
+    state.db.collection::<Document>(KEYS).update_one(doc! {"_id":&fixture.row.route_api_key_id},doc! {"$set":{"callback_url":&old_callback,"expires_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+    assert_eq!(
+        Reconciler::default()
+            .tick(state)
+            .await
+            .unwrap()
+            .unwrap()
+            .deferred,
+        1
+    );
+    let unchanged = state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .find_one(doc! {"_id":&fixture.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.gateway_base, old_base);
+    assert_eq!(unchanged.callback_url, old_callback);
+    let key = state
+        .db
+        .collection::<ApiKey>(KEYS)
+        .find_one(doc! {"_id":&fixture.row.route_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.callback_url, Some(old_callback.clone()));
+    // A callback must still name exactly the configured remote channel.
+    state
+        .db
+        .collection::<Document>(KEYS)
+        .update_one(
+            doc! {"_id":&fixture.row.route_api_key_id},
+            doc! {"$set":{"expires_at":bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    state.db.collection::<Document>(GATEWAYS).update_one(
+        doc! {"_id":&fixture.row.id}, doc! {"$set":{"configuration.transport.gateway_channel_id":"cmaeg1.ch.1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+    ).await.unwrap();
+    assert_eq!(
+        Reconciler::default()
+            .tick(state)
+            .await
+            .unwrap()
+            .unwrap()
+            .platform_entries,
+        0
+    );
+    let unchanged = state
+        .db
+        .collection::<PlatformEntryGateway>(GATEWAYS)
+        .find_one(doc! {"_id":&fixture.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.callback_url, old_callback);
+    assert_eq!(unchanged.gateway_base, old_base);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type":"nyxbot_gateway_callback_rebased"})
+            .await
+            .unwrap(),
+        0
+    );
+    state.db.drop().await.unwrap();
+}

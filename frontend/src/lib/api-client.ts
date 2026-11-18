@@ -1,3 +1,4 @@
+import { ApiError, apiErrorBody, responseApiError, networkApiError } from "./api-error";
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
@@ -11,21 +12,11 @@ export function apiUrl(endpoint: string, apiBaseUrl = ""): string {
   return `${apiBaseUrl.replace(/\/+$/, "")}/api/v1${endpoint}`;
 }
 
-export class ApiError extends Error {
-  readonly status: number;
-  readonly errorCode: number;
-  readonly errorResponse: ApiErrorResponse;
-
-  constructor(status: number, response: ApiErrorResponse) {
-    super(response.message);
-    this.name = "ApiError";
-    this.status = status;
-    this.errorCode = response.error_code;
-    this.errorResponse = response;
-  }
-}
+export { ApiError } from "./api-error";
 
 interface RequestOptions {
+  /** CMA adapters alone opt into CMA problem/Responses error documents. */
+  readonly errorFormat?: "cma";
   /** Opt-in fence for requests bound to a captured account or local CLI session. */
   readonly authorityGuard?: () => void;
   readonly apiBaseUrl?: string;
@@ -66,6 +57,36 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/mfa/cancel",
 ]);
 
+let sessionConfirmation: Promise<boolean> | null = null;
+let lastSessionConfirmation: { at: number; valid: boolean; user: unknown } | null = null;
+
+async function confirmSessionStillValid(): Promise<boolean> {
+  const now = Date.now();
+  const user = useAuthStore.getState().user;
+  if (lastSessionConfirmation && lastSessionConfirmation.user === user && now - lastSessionConfirmation.at < 500) {
+    return lastSessionConfirmation.valid;
+  }
+  if (!sessionConfirmation) {
+    sessionConfirmation = fetch(apiUrl("/users/me"), {
+      ...buildFetchConfig({ preserveSessionOn401: true }),
+      method: "GET",
+    })
+      // Only a confirmed identity 401 proves that the NyxID session is gone.
+      // A 2xx, another HTTP status, or a transient network failure must keep
+      // the browser session intact.
+      .then((response) => response.status !== 401 || useAuthStore.getState().user !== user)
+      .catch(() => true)
+      .then((valid) => {
+        lastSessionConfirmation = { at: Date.now(), valid, user };
+        return valid;
+      })
+      .finally(() => {
+        sessionConfirmation = null;
+      });
+  }
+  return sessionConfirmation;
+}
+
 export function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
@@ -91,20 +112,6 @@ export function buildFetchConfig(options: RequestOptions): RequestInit {
   }
 
   return config;
-}
-
-async function parseErrorResponse(
-  response: Response,
-): Promise<ApiErrorResponse> {
-  try {
-    return (await response.json()) as ApiErrorResponse;
-  } catch {
-    return {
-      error: "unknown_error",
-      error_code: -1,
-      message: `Request failed with status ${String(response.status)}`,
-    };
-  }
 }
 
 function redirectToConsentIfRequired(error: ApiErrorResponse): void {
@@ -138,7 +145,10 @@ export async function apiClient<T>(
   const response = await apiFetch(endpoint, options);
   options.authorityGuard?.();
   if (response.status === 204) return undefined as T;
-  const body = (await response.json()) as T;
+  const body = (await response.json().catch(() => {
+    options.authorityGuard?.();
+    throw new ApiError(response.status, apiErrorBody(null, response.status), response.headers);
+  })) as T;
   options.authorityGuard?.();
   return body;
 }
@@ -148,12 +158,13 @@ export async function apiFetch(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<Response> {
+  const userAtRequest = useAuthStore.getState().user;
   const actorId = options.creditsDenial ? currentCreditsActor() : null;
   options.authorityGuard?.();
   const response = await fetch(
     apiUrl(endpoint, options.apiBaseUrl),
     buildFetchConfig(options),
-  );
+  ).catch((cause: unknown) => { throw networkApiError(cause); });
   // A late response belongs to its original authority, including any 401.
   options.authorityGuard?.();
   try {
@@ -167,11 +178,26 @@ export async function apiFetch(
     !options.preserveSessionOn401 &&
     !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)
   ) {
-    useAuthStore.getState().setUser(null);
+    // The identity endpoint is authoritative and can clear immediately. A
+    // downstream/provider endpoint gets one debounced, single-flight session
+    // check so an unrelated 401 cannot make the SPA appear logged out.
+    if (endpoint === "/users/me") {
+      useAuthStore.getState().setUser(null);
+    } else {
+      const sessionStillValid = await confirmSessionStillValid();
+      // The original request may have crossed an account switch while the
+      // identity check was in flight. Re-run the caller's fence immediately
+      // before mutating global auth state.
+      options.authorityGuard?.();
+      if (!sessionStillValid && useAuthStore.getState().user === userAtRequest) {
+        useAuthStore.getState().setUser(null);
+      }
+    }
   }
 
   if (!response.ok) {
-    const errorBody = await parseErrorResponse(response);
+    const error = await responseApiError(response, options.errorFormat);
+    const errorBody = error.errorResponse;
     options.authorityGuard?.();
     redirectToConsentIfRequired(errorBody);
     reportCreditsDenialHttp(
@@ -180,10 +206,21 @@ export async function apiFetch(
       errorBody,
       actorId,
     );
-    throw new ApiError(response.status, errorBody);
+    throw error;
   }
 
   return response;
+}
+
+/** Authenticated binary response helper used by attachment-style downloads. */
+export async function apiBlobClient(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<{ blob: Blob; filename?: string }> {
+  const response = await apiFetch(endpoint, options);
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = disposition.match(/filename="([^"]+)"/i);
+  return { blob: await response.blob(), filename: match?.[1] };
 }
 
 export const api = {

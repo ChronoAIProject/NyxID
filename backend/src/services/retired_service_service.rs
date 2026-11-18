@@ -126,6 +126,7 @@ mod tests {
         ordinary.slug = "platform-test".into();
         ordinary.service_category = "connection".into();
         ordinary.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],

@@ -1,9 +1,13 @@
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AgentLearningReview } from "./agent-learning-review";
+import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
+import { GroupedFormScope, GroupedFormBar } from "@/components/ui/grouped-form";
+import { confirmChanges } from "@/test-helpers/confirm-changes";
+import { GroupedDetailContext } from "@/lib/grouped-detail";
 
 // The real hooks, schemas and request path (assistantJson -> fetch -> ApiError);
 // only fetch, the feature flag, routing and the signed-in user are stubbed.
@@ -64,9 +68,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function show() {
+function show(drawer = false) {
+  function Drawer() {
+    const [container, setContainer] = useState<HTMLDivElement | null>(null);
+    return <DrawerSectionInfoContext value={true}><GroupedFormScope viewport><div ref={setContainer}><GroupedDetailContext value={{ container, visible: true }}><AgentLearningReview agentId="agent" /></GroupedDetailContext></div><GroupedFormBar viewport /></GroupedFormScope></DrawerSectionInfoContext>;
+  }
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}>
-    <AgentLearningReview agentId="agent" />
+    {drawer ? <Drawer /> : <AgentLearningReview agentId="agent" />}
   </QueryClientProvider>);
 }
 
@@ -98,6 +106,21 @@ it("saves the complete draft, including an unchanged SKILL.md", async () => {
     revision: 2,
     draft: { ...draft, name: "weekly-summary" },
   });
+});
+
+it("registers a drawer draft with the viewport bar and reviews it before its revision-fenced save", async () => {
+  const user = userEvent.setup();
+  show(true);
+  await user.click(await screen.findByRole("button", { name: "Review draft" }));
+  await user.type(screen.getByRole("textbox", { name: "Skill description" }), " updated");
+  expect(screen.getByRole("region", { name: "Unsaved changes" })).toHaveTextContent("skill draft · weekly-review");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("A reusable procedure → A reusable procedure updated");
+  expect(sentDrafts()).toHaveLength(0);
+  await confirmChanges();
+  await waitFor(() => expect(sentDrafts()).toHaveLength(1));
+  expect(sentDrafts()[0]).toMatchObject({ revision: 2 });
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull());
 });
 
 it("renders each server diagnostic beside the input it names, with its remediation", async () => {

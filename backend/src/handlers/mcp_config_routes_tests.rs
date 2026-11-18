@@ -254,6 +254,9 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
     {
         definitions.push(crate::services::assistant_resource_service::definition());
+        if super::retained_results::chat(&auth).is_some() {
+            definitions.push(crate::services::assistant_tool_result_service::definition());
+        }
     }
     let expected: Vec<Value> = definitions
         .iter()
@@ -605,7 +608,7 @@ async fn service_account_purpose_scope_and_revocation_match_mcp() {
         .update_one(doc! {"_id": &sa.id}, doc! {"$set": {"purpose": "general"}})
         .await
         .unwrap();
-    accounts::rotate_secret(&f.state.db, &sa.id, true)
+    accounts::rotate_secret(&f.state.db, &sa.id, true, None)
         .await
         .unwrap();
     assert_eq!(
@@ -681,6 +684,10 @@ async fn chat_catalog_matches_mcp_before_and_after_acknowledgement() {
         let (status, _, body) = request(&f.state, "GET", CONFIG, &headers, None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["total_services"], 2, "{body}");
+        assert!(
+            !body.to_string().contains("nyxid__read_tool_result"),
+            "The turn-bound native reader must not alter /mcp/config"
+        );
         assert_parity(&f.state, &headers, &body).await;
         if acknowledged {
             assert_eq!(body["catalog_digest"], previous_digest);

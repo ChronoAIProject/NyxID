@@ -307,6 +307,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = Some(handler);
+    crate::pool_starvation_tests::configure(&mut options);
     let keepalive = fixture.clone();
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_| {
         let _ = keepalive.name();
@@ -343,6 +344,47 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
         .expect("MongoDB required");
     assert_transaction_test_topology(&db).await;
     db
+}
+
+/// Wait, within the shared readiness budget, until majority-acknowledged
+/// writes and linearizable reads on this database answer within 100 ms.
+///
+/// Tests that exercise production admission gates (the 250 ms analytics
+/// dispatch transaction, the 200 ms linearizable consent read) assert those
+/// deadlines as written. A CI runner can start such a test while MongoDB is
+/// still stalled on its own journal flushes and the per-test database drop
+/// backlog, which no nextest slot reservation prevents. This establishes the
+/// healthy-server precondition first; the measured call still runs once
+/// against the unchanged production bounds.
+pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
+    const BUDGET: Duration = Duration::from_secs(90);
+    const RESPONSIVE: Duration = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let probes = db.collection::<Document>("__readiness");
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let probe = std::time::Instant::now();
+        let write = probes
+            .insert_one(doc! {"_id": &id})
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await;
+        let read = probes
+            .find_one(doc! {"_id": &id})
+            .read_concern(mongodb::options::ReadConcern::linearizable())
+            .await;
+        let elapsed = probe.elapsed();
+        if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
+            return;
+        }
+        assert!(
+            started.elapsed() < BUDGET,
+            "MongoDB majority write + linearizable read were not responsive within \
+             {RESPONSIVE:?} for {BUDGET:?} (last probe took {elapsed:?}; write ok={}, read ok={})",
+            write.is_ok(),
+            read.is_ok()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn assert_transaction_test_topology(db: &mongodb::Database) {
@@ -541,6 +583,7 @@ async fn probe_test_mongo_uri(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = command_event_handler;
+    crate::pool_starvation_tests::configure(&mut options);
     let drop_guard = Arc::new(TestDbDropGuard::new(uri, db_name));
     let guard_keepalive = Arc::clone(&drop_guard);
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_event| {
@@ -1330,6 +1373,17 @@ async fn sweep_stale_test_databases_under_lease(client: &mongodb::Client, now_se
     let _ = tokio::time::timeout_at(deadline, prune_metadata).await;
 }
 
+/// Drop while the fixture runtime can still finish background transactions.
+/// A drop on the application pool can occupy its last socket waiting for a
+/// transaction whose COMMIT needs that socket.
+pub(crate) async fn drop_test_database(db: &mongodb::Database) {
+    let uri = TEST_DB_PINNED_URI.get().expect("connected test database");
+    let client = test_db_cleanup_client(uri)
+        .await
+        .expect("test database cleanup client");
+    client.database(db.name()).drop().await.unwrap();
+}
+
 async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
     let parse = async { mongodb::options::ClientOptions::parse(uri).await };
     let Some(Ok(mut options)) =
@@ -1816,9 +1870,12 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
+        shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,
         resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
+        chrono_probe_url: None,
+        invocation_diagnostics_enabled: false,
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
@@ -1828,6 +1885,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         jwt_private_key_path: "keys/private.pem".to_string(),
         jwt_public_key_path: "keys/public.pem".to_string(),
         jwt_retained_public_key_paths: Vec::new(),
+        domain_aliases: Default::default(),
         jwt_issuer: "nyxid".to_string(),
         jwt_access_ttl_secs: 900,
         jwt_relay_reply_ttl_secs: 1800,
@@ -1888,6 +1946,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         apns_key_id: None,
         apns_team_id: None,
         apns_topic: None,
+        android_app_package: None,
+        android_app_sha256_cert_fingerprints: Vec::new(),
+        mobile_app_return_schemes: Vec::new(),
         apns_sandbox: true,
         key_provider: "local".to_string(),
         aws_kms_key_arn: None,
@@ -1895,6 +1956,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        automation_continuation_v2_enabled: false,
         security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -2100,7 +2162,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 
 /// Build an `AppState` with a caller-provided config for pure handler tests.
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .redirect(crate::services::telegram_new_api::app_redirect_policy())
+        .build()
+        .unwrap();
     let jwt_keys = cached_test_jwt_keys();
     let billing = Arc::new(crate::services::billing::BillingService::new(
         db.clone(),
@@ -2150,7 +2215,11 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         std::time::Duration::from_secs(config.cluster_slot_renew_secs),
     );
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
+        shutdown: crate::services::shutdown::Runtime::default(),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
@@ -2187,6 +2256,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             db.clone(),
             "agent",
         )),
+        account_export_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
@@ -2208,6 +2284,18 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_device_request",
+            5,
+            60,
+        ),
+        password_change_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "password_change_ip",
+            20,
+            60,
+        ),
+        password_change_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "password_change_user",
             5,
             60,
         ),
@@ -2295,7 +2383,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
-        broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
+        broker_policy: Arc::new(std::sync::RwLock::new(
+            BrokerPolicy::from_config(&config).into(),
+        )),
         upload_retention: Default::default(),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
@@ -2351,6 +2441,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
         telemetry: None,
     }
 }
@@ -2390,10 +2481,13 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
-/// Build a permissive session-auth `AuthUser` for handler tests.
+/// Build a session-shaped `AuthUser` without a validated derivation policy.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        execution_enrolled: false,
+        execution_permission: None,
         mfa_assured: false,
+        mfa_enabled: None,
         org_agent_access: None,
         assistant_group_id: None,
         assistant_agent_owner_id: None,
@@ -2574,6 +2668,7 @@ pub(crate) fn assert_rci_audit_row(
 pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
     let now = chrono::Utc::now();
     User {
+        execution_permission_enrollment: None,
         id: user_id.to_string(),
         email: format!("{user_id}@example.com"),
         password_hash: None,
@@ -2735,6 +2830,7 @@ pub(crate) fn test_user_service(
         updated_at: chrono::Utc::now(),
         state_version: 1,
         rotation_predecessor_id: None,
+        credential_verification: None,
     }
 }
 
@@ -2856,6 +2952,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing: None,
         auth_notes: None,
         known_limitations: None,
@@ -2922,6 +3020,7 @@ pub async fn scoped_specialist_auth(
             description: "Exercise member operation permissions".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: team::GrantTargets {
                 service_ids: selections.iter().map(|(id, _)| id.clone()).collect(),
                 ..Default::default()
@@ -3140,6 +3239,98 @@ pub(crate) async fn create_api_key_with_id(
     .insert_one(&api_key)
     .await?;
     Ok(api_key)
+}
+
+/// One-shot, per-database admission gate for cancellation-safety regression tests.
+#[derive(Clone)]
+pub struct AdmissionPause {
+    pub entered: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+fn admission_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>
+{
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+pub fn install_admission_pause(db: &mongodb::Database) -> AdmissionPause {
+    let pause = AdmissionPause {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    admission_pauses()
+        .lock()
+        .unwrap()
+        .insert(db.name().into(), pause.clone());
+    pause
+}
+
+pub async fn pause_committed_admission(db: &mongodb::Database) {
+    let pause = { admission_pauses().lock().unwrap().remove(db.name()) };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.resume.notified().await;
+    }
+}
+
+/// A typed content-free row for lifecycle tests. Each test chooses the exact
+/// source references, which must round-trip through the production model.
+pub(crate) async fn seed_notification_purge_probe(
+    db: &mongodb::Database,
+    user_id: &str,
+    references: Document,
+) -> String {
+    use crate::models::assistant_notification::{
+        AssistantNotification, COLLECTION_NAME, NotificationKind, NotificationSource,
+    };
+    let id = Uuid::new_v4().to_string();
+    let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
+    source.extend(references.clone());
+    let source: NotificationSource = bson::from_document(source).unwrap();
+    let stored_source = bson::to_document(&source).unwrap();
+    for (key, value) in references {
+        assert_eq!(stored_source.get(&key), Some(&value), "source field {key}");
+    }
+    let now = chrono::Utc::now();
+    db.collection::<AssistantNotification>(COLLECTION_NAME)
+        .insert_one(AssistantNotification {
+            id: id.clone(),
+            user_id: user_id.into(),
+            kind: NotificationKind::AgentUpdate,
+            source,
+            source_key: id.clone(),
+            coalesced: false,
+            unread: true,
+            count: 1,
+            read_at: None,
+            resolved_at: None,
+            resolution: None,
+            card_expires_at: None,
+            outcome: None,
+            reason: None,
+            push: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, present: bool) {
+    assert_eq!(
+        db.collection::<Document>("assistant_notifications")
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .is_some(),
+        present,
+        "notification {id} presence after source transition"
+    );
 }
 
 #[cfg(test)]

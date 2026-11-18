@@ -17,6 +17,9 @@ use super::scrub;
 /// `docs/TELEMETRY.md` §5.1.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
+    ServiceInvocationDiagnostic {
+        diagnostic: crate::services::invocation_diagnostic_service::Diagnostic,
+    },
     /// Explicit client event admitted under a revision captured before enqueue.
     ClientOriginated {
         event: super::client_event::ClientEvent,
@@ -60,6 +63,7 @@ pub enum TelemetryEvent {
         method: String,
         mfa_required: bool,
     },
+    AuthMobileMfaExempted,
     AuthLoggedOut,
     AuthPasswordResetRequested,
     AuthPasswordResetCompleted,
@@ -381,6 +385,7 @@ impl TelemetryEvent {
             Self::UserSignedUp { .. } => "user.signed_up",
             Self::UserEmailVerified => "user.email_verified",
             Self::AuthLoggedIn { .. } => "auth.logged_in",
+            Self::AuthMobileMfaExempted => "auth.mobile_mfa_exempted",
             Self::AuthLoggedOut => "auth.logged_out",
             Self::AuthPasswordResetRequested => "auth.password_reset_requested",
             Self::AuthPasswordResetCompleted => "auth.password_reset_completed",
@@ -451,6 +456,7 @@ impl TelemetryEvent {
             Self::AdminNodeDeleted { .. } => "admin.node_deleted",
             Self::AdminServiceCreated { .. } => "admin.service_created",
             Self::AdminServiceUpdated { .. } => "admin.service_updated",
+            Self::ServiceInvocationDiagnostic { .. } => "monitoring.invocation_diagnostic",
             Self::ProxyError { .. } => "proxy.error",
             Self::ProxySuccess { .. } => "proxy.success",
             Self::ApiRateLimited { .. } => "api.rate_limited",
@@ -500,6 +506,7 @@ impl TelemetryEvent {
                 "method": method,
                 "mfa_required": mfa_required,
             }),
+            Self::AuthMobileMfaExempted => json!({"mfa": "skipped_mobile_rollout"}),
             Self::AuthLoggedOut => json!({}),
             Self::AuthPasswordResetRequested => json!({}),
             Self::AuthPasswordResetCompleted => json!({}),
@@ -760,6 +767,9 @@ impl TelemetryEvent {
             Self::AdminNodeDeleted { node_id } => json!({ "node_id": node_id }),
             Self::AdminServiceCreated { slug } => json!({ "slug": slug }),
             Self::AdminServiceUpdated { slug } => json!({ "slug": slug }),
+            Self::ServiceInvocationDiagnostic { diagnostic } => {
+                serde_json::to_value(diagnostic).expect("enum projection")
+            }
             Self::ProxyError {
                 service_slug,
                 error_code,
@@ -911,6 +921,11 @@ mod tests {
                 json!({"method": "email", "mfa_required": true}),
             ),
             (TelemetryEvent::AuthLoggedOut, "auth.logged_out", json!({})),
+            (
+                TelemetryEvent::AuthMobileMfaExempted,
+                "auth.mobile_mfa_exempted",
+                json!({"mfa": "skipped_mobile_rollout"}),
+            ),
             (
                 TelemetryEvent::AuthPasswordResetRequested,
                 "auth.password_reset_requested",

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, getVisibleAdminNav, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
@@ -41,6 +43,7 @@ export function useRightPanel() {
 }
 
 export function DashboardLayout() {
+  useUiTranslation();
   // Keep an active /users/me observer for every dashboard session: its
   // queryFn syncs the auth store, so server-side capability changes (feature
   // flags flipped by an admin, mutation-triggered ["user"] invalidations)
@@ -124,7 +127,7 @@ export function DashboardLayout() {
           </div>
 
           <main
-            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
+            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain shell-page-content"
             style={{ paddingBottom: "max(2rem, var(--sab))" }}
           >
             <div className="w-full">
@@ -182,6 +185,7 @@ function sectionTitleFor(pathname: string): string {
 }
 
 function TopBarBreadcrumbs() {
+  useUiTranslation();
   const { pathname, labels, sections } = useContext(BreadcrumbLabelContext);
   const search = useRouterState({ select: (s) => s.location.search });
   const crumbs = buildStudioBreadcrumbs(pathname, labels, search, sections?.[pathname]);
@@ -195,6 +199,7 @@ function TopBar({
   readonly onSearch: () => void;
   readonly onMobileMenu?: () => void;
 }) {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -217,15 +222,16 @@ function TopBar({
   const showBack = !ROOT_PATHS.has(pathname);
 
   return (
-    <header className="flex items-center shrink-0 h-[52px] border-b border-border/60">
+    <header className="flex items-center shrink-0 min-h-[52px] border-b border-border/60">
       {/* Mobile: back + logo left */}
       <div className="flex items-center pl-2 gap-1 md:hidden">
         {showBack ? (
           <button
+            data-icon-button=""
             type="button"
             onClick={() => window.history.back()}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-            aria-label="Go back"
+            aria-label={translateUi("Go back")}
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
@@ -251,7 +257,7 @@ function TopBar({
         <div className="flex-1" />
 
         {/* Right actions */}
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
         {/* Theme toggle — light/dark, all breakpoints */}
         <ThemeToggle />
 
@@ -259,41 +265,38 @@ function TopBar({
         <button
           type="button"
           onClick={onSearch}
-          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 type-row-title text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <Search className="h-[14px] w-[14px]" />
-          <span>Search...</span>
-          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-10 text-text-tertiary">/</kbd>
+          <span>{translateUi("Search...")}</span>
+          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-12 text-text-tertiary">/</kbd>
         </button>
 
         {/* Profile — desktop only (mobile has it in the menu) */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
+              data-icon-button=""
               type="button"
               className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
-              aria-label="User menu"
+              aria-label={translateUi("User menu")}
             >
               <User className="h-[14px] w-[14px]" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+            <div className="shell-account-heading">
+              <p className="shell-user-name">{user?.display_name ?? translateUi("User")}</p>
+              <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
-            >
-              Settings
-            </DropdownMenuItem>
+              className="rounded-md text-14"
+            >{translateUi("Settings")}</DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
+              className="rounded-md text-14 text-destructive focus:text-destructive"
+            >{translateUi("Log out")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -302,62 +305,61 @@ function TopBar({
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
-          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 type-row-title text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
             <Github className="h-3 w-3" />
           </span>
-          <span>GitHub</span>
+          <span>{translateUi("GitHub")}</span>
         </a>
 
         {/* Mobile: profile */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
+              data-icon-button=""
               type="button"
               className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
-              aria-label="User menu"
+              aria-label={translateUi("User menu")}
             >
               <User className="h-[14px] w-[14px]" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+            <div className="shell-account-heading">
+              <p className="shell-user-name">{user?.display_name ?? translateUi("User")}</p>
+              <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
-            >
-              Settings
-            </DropdownMenuItem>
+              className="rounded-md text-14"
+            >{translateUi("Settings")}</DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
+              className="rounded-md text-14 text-destructive focus:text-destructive"
+            >{translateUi("Log out")}</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
         {/* Mobile: GitHub */}
         <a
+          data-icon-button=""
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
           className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-          aria-label="GitHub"
+          aria-label={translateUi("GitHub")}
         >
           <Github className="h-[14px] w-[14px]" />
         </a>
 
         {onMobileMenu && (
         <button
+          data-icon-button=""
           type="button"
           onClick={onMobileMenu}
           className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Open menu"
+          aria-label={translateUi("Open menu")}
         >
           <Menu className="h-4 w-4" />
         </button>
@@ -377,11 +379,13 @@ function MobileNavItem({
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  useUiTranslation();
   return (
     <Link
       to={item.to}
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-xl px-4 py-3 text-14 transition-colors ${
+      aria-current={active ? "page" : undefined}
+      className={`flex items-center gap-3 rounded-xl px-4 py-3 shell-nav-item transition-colors ${
         active
           ? "bg-overlay-strong font-medium text-foreground"
           : "text-muted-foreground active:bg-overlay-strong"
@@ -392,7 +396,7 @@ function MobileNavItem({
           active ? "text-nyx-secondary-400" : "text-text-tertiary"
         }`}
       />
-      {item.label}
+      {translateUi(item.label)}
     </Link>
   );
 }
@@ -406,6 +410,7 @@ function MobileNav({
   readonly onClose: () => void;
   readonly onAnimationEnd: () => void;
 }) {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -466,7 +471,7 @@ function MobileNav({
           type="button"
           onClick={onClose}
           className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Close menu"
+          aria-label={translateUi("Close menu")}
         >
           <X className="h-4 w-4" />
         </button>
@@ -480,8 +485,8 @@ function MobileNav({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search..."
-            className="flex-1 bg-transparent text-13 text-foreground placeholder:text-text-tertiary outline-none"
+            placeholder={translateUi("Search...")}
+            className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
           />
           {searchQuery && (
             <button type="button" onClick={() => setSearchQuery("")} className="text-text-tertiary">
@@ -495,7 +500,7 @@ function MobileNav({
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
         {searchResults !== null ? (
           searchResults.length > 0 ? (
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {searchResults.map((item) => (
                 <button
                   key={`${item.to ?? "action"}-${item.label}`}
@@ -504,22 +509,21 @@ function MobileNav({
                   className="flex items-center gap-3 rounded-xl px-4 py-3 text-14 text-muted-foreground active:bg-overlay-strong"
                 >
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="flex-1 text-left">{translateUi(item.label)}</span>
                   {item.group === "action" && (
-                    <span className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                    <span className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
                   )}
                 </button>
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center text-13 text-text-tertiary">
-              No results for &ldquo;{searchQuery}&rdquo;
+            <div className="py-8 text-center text-15 text-text-tertiary">{translateUi("No results for “")}{searchQuery}&rdquo;
             </div>
           )
         ) : (
           <>
             <AssistantNavEntry mobile onClick={onClose} />
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {mainNav.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -530,12 +534,10 @@ function MobileNav({
               ))}
             </div>
 
-            <div className="px-4 my-3">
-              <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                Approvals
-              </span>
+            <div className="flex items-center">
+              <span className="shell-group-label">{translateUi("Approvals")}</span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {APPROVALS_NAV.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -546,12 +548,10 @@ function MobileNav({
               ))}
             </div>
 
-            <div className="px-4 my-3">
-              <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                Developer
-              </span>
+            <div className="flex items-center">
+              <span className="shell-group-label">{translateUi("Developer")}</span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {DEVELOPER_NAV.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -564,12 +564,10 @@ function MobileNav({
 
             {(adminNav.length > 0) && (
               <>
-                <div className="px-4 my-3">
-                  <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                    Admin
-                  </span>
+                <div className="flex items-center">
+                  <span className="shell-group-label">{translateUi("Admin")}</span>
                 </div>
-                <div className="flex flex-col gap-0.5">
+                <div className="shell-nav-stack">
                   {adminNav.map((item) => (
                     <MobileNavItem
                       key={item.to}
@@ -587,32 +585,28 @@ function MobileNav({
 
       {/* Footer — user info + logout */}
       <div className="shrink-0 border-t border-border/60 px-5 py-4 space-y-2" style={{ paddingBottom: "max(1rem, var(--sab))" }}>
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+        <div className="shell-user-block">
+          <div className="shell-user-avatar border border-hairline bg-overlay-strong">
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-13 font-medium text-foreground truncate">{user?.display_name ?? "User"}</p>
-            <p className="text-11 text-text-tertiary truncate">{user?.email ?? ""}</p>
+          <div className="shell-user-copy">
+            <p className="shell-user-name truncate">{user?.display_name ?? translateUi("User")}</p>
+            <p className="shell-user-email truncate">{user?.email ?? ""}</p>
           </div>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-muted-foreground active:bg-overlay-strong"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-muted-foreground active:bg-overlay-strong"
           >
-            <Settings className="h-3.5 w-3.5" />
-            Settings
-          </button>
+            <Settings className="h-3.5 w-3.5" />{translateUi("Settings")}</button>
           <button
             type="button"
             onClick={() => void handleLogout()}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-destructive active:bg-overlay-strong"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-destructive active:bg-overlay-strong"
           >
-            <LogOut className="h-3.5 w-3.5" />
-            Log out
-          </button>
+            <LogOut className="h-3.5 w-3.5" />{translateUi("Log out")}</button>
         </div>
       </div>
     </div>

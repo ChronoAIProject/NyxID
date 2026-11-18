@@ -13,7 +13,10 @@ import { MachineActivity } from "./machine-activity";
 import { MachineSharingBadge } from "./machine-isolation";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import { api } from "@/lib/api-client";
-vi.mock("@/lib/api-client", () => ({ api: { get: vi.fn() } }));
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api-client")>(),
+  api: { get: vi.fn() },
+}));
 const agent = "11111111-1111-4111-8111-111111111111";
 const page = {
   machine_name: "Work MacBook Air",

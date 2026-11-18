@@ -1,0 +1,2149 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { ApiError } from "../../../lib/api/ApiError";
+import {
+  AssistantVoiceClient,
+  type AssistantVoiceApi,
+  type VoiceClientClock,
+  type VoiceControlSocket,
+  type VoiceMediaAdapter,
+  type VoiceMediaEvent,
+} from "./AssistantVoiceClient";
+import type {
+  VoiceControlRequest,
+  VoicePreferences,
+  VoiceSession,
+  VoiceSnapshot,
+  VoiceStartRequest,
+} from "./voiceContracts";
+import type { VoiceStartRecovery } from "./voiceStartError";
+
+const conversationId = "nyxa-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const requestId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const preferences: VoicePreferences = {
+  service_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  connection_id: null,
+  key_source: "platform",
+  model: "gpt-live-1",
+  voice: "alloy",
+  input_mode: "push_to_talk",
+  language: null,
+  notify_on_completion: true,
+};
+
+function session(changes: Partial<VoiceSession> = {}): VoiceSession {
+  return {
+    id: sessionId,
+    created_at: "2026-10-16T00:00:00Z",
+    closed_at: null,
+    generation: 1,
+    state: "active",
+    muted: false,
+    input_muted: false,
+    end_requested: false,
+    control_revision: 0,
+    observed_seconds: 0,
+    reserved_until: 15,
+    final_usage_confirmed: false,
+    end_reason: null,
+    idle_warning: false,
+    resumable: true,
+    ...changes,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+class Media implements VoiceMediaAdapter {
+  inputs: boolean[] = [];
+  holds: boolean[] = [];
+  speaker: boolean[] = [];
+  answers: string[] = [];
+  enqueued: { bytes: ArrayBuffer; endMs: number }[] = [];
+  listeners = new Set<(event: VoiceMediaEvent) => void>();
+  prepared: string[] = [];
+  closed = 0;
+  flushed = 0;
+  resumed = 0;
+  report = { playback_ms: 123, playback_audible: true };
+  prepareResult: Promise<string> = Promise.resolve("offer");
+  answerResult?: Promise<void>;
+  resumeResult = Promise.resolve();
+  async prepare(protocol: string) {
+    this.prepared.push(protocol);
+    return this.prepareResult;
+  }
+  async answer(sdp: string) {
+    this.answers.push(sdp);
+    return this.answerResult;
+  }
+  setInput(enabled: boolean) {
+    this.inputs.push(enabled);
+  }
+  hold(pressed: boolean) {
+    this.holds.push(pressed);
+  }
+  muteSpeaker(muted: boolean) {
+    this.speaker.push(muted);
+  }
+  async resume() {
+    this.resumed++;
+    return this.resumeResult;
+  }
+  enqueue(bytes: ArrayBuffer, endMs: number) {
+    this.enqueued.push({ bytes, endMs });
+  }
+  flush() {
+    this.flushed++;
+  }
+  playback() {
+    return this.report;
+  }
+  close() {
+    this.closed++;
+  }
+  subscribe(listener: (event: VoiceMediaEvent) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  emit(event: VoiceMediaEvent) {
+    this.listeners.forEach((listener) => listener(event));
+  }
+  get input() {
+    return this.inputs.at(-1);
+  }
+}
+
+class Socket implements VoiceControlSocket {
+  readyState = 1;
+  bufferedAmount = 0;
+  binaryType = "";
+  onopen: VoiceControlSocket["onopen"] = null;
+  onmessage: VoiceControlSocket["onmessage"] = null;
+  onclose: VoiceControlSocket["onclose"] = null;
+  onerror: VoiceControlSocket["onerror"] = null;
+  sent: (string | ArrayBuffer)[] = [];
+  closed = 0;
+  send(data: string | ArrayBuffer) {
+    this.sent.push(data);
+  }
+  close() {
+    this.closed++;
+    this.readyState = 3;
+  }
+  receive(data: unknown) {
+    this.onmessage?.({
+      data:
+        typeof data === "object" && !(data instanceof ArrayBuffer)
+          ? JSON.stringify(data)
+          : data,
+    });
+  }
+  events() {
+    return this.sent
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => JSON.parse(value));
+  }
+}
+
+class Clock implements VoiceClientClock {
+  intervals = new Map<number, () => void>();
+  timeouts = new Map<number, () => void>();
+  timeoutDelays = new Map<number, number>();
+  sequence = 0;
+  setInterval(callback: () => void) {
+    const id = ++this.sequence;
+    this.intervals.set(id, callback);
+    return id;
+  }
+  clearInterval(handle: unknown) {
+    this.intervals.delete(handle as number);
+  }
+  setTimeout(callback: () => void, ms: number) {
+    const id = ++this.sequence;
+    this.timeouts.set(id, callback);
+    this.timeoutDelays.set(id, ms);
+    return id;
+  }
+  clearTimeout(handle: unknown) {
+    this.timeouts.delete(handle as number);
+    this.timeoutDelays.delete(handle as number);
+  }
+  tick() {
+    [...this.intervals.values()].forEach((callback) => callback());
+  }
+  expire() {
+    [...this.timeouts.values()].forEach((callback) => callback());
+  }
+}
+
+function setup() {
+  const media = new Media();
+  const socket = new Socket();
+  const clock = new Clock();
+  const starts: {
+    thread: string;
+    input: VoiceStartRequest;
+    signal?: AbortSignal;
+  }[] = [];
+  const controls: {
+    thread: string;
+    id: string;
+    input: VoiceControlRequest;
+    signal?: AbortSignal;
+  }[] = [];
+  const cancels: { thread: string; id: string }[] = [];
+  const errors: string[] = [];
+  const errorKinds: ("conflict" | "playback" | undefined)[] = [];
+  const recoveries: (VoiceStartRecovery | undefined)[] = [];
+  const conflicts: (VoiceSession | null)[] = [];
+  const conflictThreads: (string | undefined)[] = [];
+  const conflictUnknown: (boolean | undefined)[] = [];
+  const cleanup: {
+    session: VoiceSession | null;
+    unknown: boolean;
+    thread?: string;
+  }[] = [];
+  const snapshots: VoiceSnapshot[] = [];
+  const inputChanges: boolean[] = [];
+  const paths: string[] = [];
+  let closed = 0;
+  let ready = 0;
+  let activeCalls = 0;
+  let nextId = 0;
+  const responses = {
+    start: async (): Promise<unknown> => ({
+      session: session(),
+      sdp_answer: "answer",
+    }),
+    active: async (): Promise<unknown> => ({ session: null }),
+    control: async (input: VoiceControlRequest): Promise<unknown> =>
+      session({
+        ...(snapshots.at(-1)?.session ?? {}),
+        muted: input.action === "mute",
+        control_revision: (snapshots.at(-1)?.session.control_revision ?? 0) + 1,
+        ...(input.action === "end"
+          ? { state: "closed" as const, end_requested: true }
+          : {}),
+      }),
+    socket: async (): Promise<VoiceControlSocket> => socket,
+    cancel: async (): Promise<void> => {},
+  };
+  const api: AssistantVoiceApi = {
+    start: async (thread, input, signal) => {
+      starts.push({ thread, input, signal });
+      return responses.start();
+    },
+    active: async () => {
+      activeCalls++;
+      return responses.active();
+    },
+    control: async (thread, id, input, signal) => {
+      controls.push({ thread, id, input, signal });
+      return responses.control(input);
+    },
+    cancelRequest: async (thread, id) => {
+      cancels.push({ thread, id });
+      return responses.cancel();
+    },
+  };
+  const client = new AssistantVoiceClient({
+    conversationId,
+    media,
+    api,
+    clock,
+    createSocket: async (path) => {
+      paths.push(path);
+      return responses.socket();
+    },
+    onSnapshot: (value) => snapshots.push(value),
+    onReady: () => {
+      ready++;
+    },
+    onInputChanged: (enabled) => inputChanges.push(enabled),
+    onError: (value, recovery, kind) => {
+      errors.push(value);
+      errorKinds.push(kind);
+      recoveries.push(recovery);
+    },
+    onConflict: (value, thread, unknown) => {
+      conflicts.push(value);
+      conflictThreads.push(thread);
+      conflictUnknown.push(unknown);
+    },
+    onClosed: () => {
+      closed++;
+    },
+    onCleanup: (session, unknown, thread) =>
+      cleanup.push({ session, unknown, thread }),
+    randomId: () =>
+      `dddddddd-dddd-4ddd-8ddd-${String(++nextId).padStart(12, "0")}`,
+  });
+  const snapshot = (changes: Partial<VoiceSession> = {}) =>
+    socket.receive({
+      type: "snapshot",
+      session: session(changes),
+      captions: [],
+      tasks: [],
+    });
+  const open = async (
+    protocol: "openai_live" | "xai_realtime" = "openai_live",
+    inputMode: "push_to_talk" | "automatic" = "push_to_talk",
+  ) => {
+    await client.start({ ...preferences, input_mode: inputMode }, protocol);
+    if (protocol === "openai_live") media.emit({ type: "provider-ready" });
+    snapshot();
+  };
+  return {
+    api,
+    client,
+    media,
+    socket,
+    clock,
+    starts,
+    controls,
+    cancels,
+    errors,
+    errorKinds,
+    recoveries,
+    conflicts,
+    conflictThreads,
+    conflictUnknown,
+    cleanup,
+    snapshots,
+    inputChanges,
+    paths,
+    responses,
+    snapshot,
+    open,
+    count: () => ({ closed, ready, activeCalls }),
+  };
+}
+
+test("foreground resync verifies the exact active call without recreating media or losing captions", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "snapshot",
+    session: session(),
+    captions: [
+      {
+        id: "caption",
+        speaker: "assistant",
+        text: "Still here",
+        sealed: true,
+        complete: true,
+      },
+    ],
+    tasks: [],
+  });
+  const reads: string[][] = [];
+  e.api.status = async (thread, id) => {
+    reads.push([thread, id]);
+    return session({ observed_seconds: 20, control_revision: 1 });
+  };
+  assert.equal(await e.client.resync(), "active");
+  assert.deepEqual(reads, [[conversationId, sessionId]]);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.media.prepared, ["openai_live"]);
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.snapshots.at(-1)?.session.observed_seconds, 20);
+  assert.equal(e.snapshots.at(-1)?.captions[0]?.text, "Still here");
+  assert.equal(e.socket.events().at(-1)?.type, "heartbeat");
+  await e.client.end();
+});
+
+test("foreground resync ends only on definitive current server evidence", async () => {
+  for (const observed of [
+    session({ state: "closed" }),
+    session({ state: "failed" }),
+    session({ end_requested: true }),
+    session({ id: requestId }),
+  ]) {
+    const e = setup();
+    await e.open();
+    e.api.status = async () => observed;
+    assert.equal(await e.client.resync(), "ended");
+    assert.equal(e.starts.length, 1);
+    await e.client.end();
+  }
+});
+
+test("foreground resync accepts higher-generation recovery and keeps inconclusive reads connected", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "snapshot",
+    session: session({ control_revision: 5 }),
+    captions: [],
+    tasks: [],
+  });
+  e.api.status = async () => session({ generation: 2, control_revision: 1 });
+  assert.equal(await e.client.resync(), "active");
+  assert.equal(e.snapshots.at(-1)?.session.generation, 2);
+  assert.equal(e.snapshots.at(-1)?.session.control_revision, 1);
+  for (const observed of [
+    session({ generation: 1, state: "closed" }),
+    session({ generation: 2, control_revision: 0, state: "closed" }),
+    null,
+  ]) {
+    e.api.status = async () => {
+      if (!observed) throw new Error("offline");
+      return observed;
+    };
+    assert.equal(await e.client.resync(), "inconclusive");
+    assert.equal(e.snapshots.at(-1)?.session.control_revision, 1);
+    assert.equal(e.media.closed, 0);
+    assert.equal(e.client.isClosed, false);
+  }
+  e.api.status = () => new Promise(() => {});
+  const check = e.client.resync();
+  e.clock.expire();
+  assert.equal(await check, "inconclusive");
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.starts.length, 1);
+  await e.client.end();
+});
+
+test("a call creates exactly once, exchanges SDP and waits for both provider and authoritative readiness", async () => {
+  const e = setup();
+  await e.client.start(preferences);
+  assert.equal(e.media.input, false);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.starts[0]!.thread, conversationId);
+  assert.equal(e.starts[0]!.input.sdp_offer, "offer");
+  assert.deepEqual(e.media.answers, ["answer"]);
+  e.snapshot();
+  e.client.hold(true);
+  assert.equal(e.media.input, false);
+  e.media.emit({ type: "provider-ready" });
+  assert.equal(e.media.input, false, "hold before readiness must not latch");
+  e.client.hold(true);
+  assert.equal(e.media.input, true);
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.socket.binaryType, "arraybuffer");
+  assert.ok(e.paths[0]!.endsWith(`/${sessionId}/stream`));
+  await e.client.end();
+});
+
+test("automatic mode starts only when provider, authoritative session and input permissions agree", async () => {
+  const e = setup();
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  e.snapshot({ state: "starting" });
+  assert.equal(e.media.input, false);
+  e.snapshot();
+  assert.equal(e.media.input, true);
+  e.snapshot({ input_muted: true });
+  assert.equal(e.media.input, false);
+  e.snapshot({ muted: true });
+  assert.equal(e.media.input, false);
+  await e.client.end();
+});
+
+test("capture notifications follow the applied input gate through readiness, remote mute and End", async () => {
+  const e = setup();
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  assert.deepEqual(e.inputChanges, []);
+  e.snapshot();
+  assert.equal(e.media.input, true);
+  assert.deepEqual(e.inputChanges, [true]);
+  e.snapshot({ input_muted: true });
+  assert.equal(e.media.input, false);
+  assert.deepEqual(e.inputChanges, [true, false]);
+  e.snapshot();
+  assert.deepEqual(e.inputChanges, [true, false, true]);
+  e.client.muteSpeaker(true);
+  assert.deepEqual(e.inputChanges, [true, false, true]);
+  const ending = e.client.end();
+  assert.equal(e.media.input, false);
+  assert.deepEqual(e.inputChanges, [true, false, true, false]);
+  await ending;
+});
+
+test("PTT capture notifications change on accepted press and release rather than connected readiness", async () => {
+  const e = setup();
+  await e.open();
+  assert.equal(e.count().ready, 1);
+  assert.deepEqual(e.inputChanges, []);
+  assert.equal(e.client.hold(true), true);
+  assert.deepEqual(e.inputChanges, [true]);
+  assert.equal(e.client.hold(false), false);
+  assert.deepEqual(e.inputChanges, [true, false]);
+  await e.client.end();
+});
+
+test("a synchronous media failure while enabling input cannot publish a stale capture notification", async () => {
+  const e = setup();
+  await e.open();
+  const applyInput = e.media.setInput.bind(e.media);
+  e.media.setInput = (enabled) => {
+    applyInput(enabled);
+    if (enabled) e.media.emit({ type: "error", message: "capture failed" });
+  };
+  e.client.hold(true);
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.inputChanges.includes(true), false);
+  assert.equal(e.inputChanges.at(-1), false);
+  await e.client.end();
+});
+
+for (const order of ["provider-first", "snapshot-first"] as const) {
+  test(`connected readiness waits for both signals with ${order} delivery`, async () => {
+    const e = setup();
+    await e.client.start(preferences);
+    if (order === "provider-first") e.media.emit({ type: "provider-ready" });
+    else e.snapshot();
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.clock.timeouts.size, 1);
+    if (order === "provider-first") e.snapshot();
+    else e.media.emit({ type: "provider-ready" });
+    assert.equal(e.count().ready, 1);
+    assert.equal(e.clock.timeouts.size, 0);
+    assert.equal(e.media.input, false, "PTT need not be held to be connected");
+    e.snapshot();
+    e.media.emit({ type: "provider-ready" });
+    assert.equal(e.count().ready, 1);
+    await e.client.end();
+  });
+}
+
+test("provider readiness before control socket creation is retained until an active snapshot", async () => {
+  const e = setup();
+  e.responses.socket = async () => {
+    e.media.emit({ type: "provider-ready" });
+    return e.socket;
+  };
+  await e.client.start(preferences);
+  assert.equal(e.count().ready, 0);
+  e.snapshot({ state: "starting" });
+  assert.equal(e.count().ready, 0);
+  e.snapshot();
+  assert.equal(e.count().ready, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+  await e.client.end();
+});
+
+test("readiness and its timeout also wait for the control socket to be open", async () => {
+  const e = setup();
+  e.socket.readyState = 0;
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  e.snapshot();
+  assert.equal(e.count().ready, 0);
+  assert.equal(e.media.input, false);
+  assert.equal(e.clock.timeouts.size, 1);
+  e.socket.readyState = 1;
+  e.socket.onopen!();
+  assert.equal(e.count().ready, 1);
+  assert.equal(e.media.input, true);
+  assert.equal(e.clock.timeouts.size, 0);
+  await e.client.end();
+});
+
+test("muted input is independent of connected readiness", async () => {
+  for (const changes of [{ muted: true }, { input_muted: true }]) {
+    const e = setup();
+    await e.client.start({ ...preferences, input_mode: "automatic" });
+    e.media.emit({ type: "provider-ready" });
+    e.snapshot(changes);
+    assert.equal(e.count().ready, 1);
+    assert.equal(e.media.input, false);
+    assert.equal(e.clock.timeouts.size, 0);
+    await e.client.end();
+  }
+});
+
+for (const reason of ["timeout", "close"] as const) {
+  test(`late media, snapshot and socket callbacks cannot report readiness after ${reason}`, async () => {
+    const e = setup();
+    await e.client.start(preferences);
+    const lateMedia = [...e.media.listeners][0]!;
+    const lateSnapshot = e.socket.onmessage!;
+    const lateOpen = e.socket.onopen!;
+    e.snapshot();
+    if (reason === "timeout") e.clock.expire();
+    else e.socket.onclose!();
+    lateMedia({ type: "provider-ready" });
+    e.socket.readyState = 1;
+    lateOpen();
+    lateSnapshot({
+      data: JSON.stringify({
+        type: "snapshot",
+        session: session(),
+        captions: [],
+        tasks: [],
+      }),
+    });
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.media.inputs.includes(true), false);
+    await e.client.end();
+    assert.equal(e.clock.timeouts.size, 0);
+    assert.equal(e.socket.onopen, null);
+  });
+}
+
+test("Grok PTT begins before PCM and release commits once while restoring output", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  assert.equal(e.starts[0]!.input.sdp_offer, "");
+  assert.deepEqual(e.media.answers, []);
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.deepEqual(e.socket.sent, []);
+  e.client.hold(true);
+  e.client.hold(true);
+  const pcm = new ArrayBuffer(960);
+  e.media.emit({ type: "pcm", bytes: pcm });
+  e.client.hold(false);
+  e.client.hold(false);
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.deepEqual(e.socket.events(), [
+    { type: "ptt_begin" },
+    { type: "ptt_commit" },
+  ]);
+  assert.equal(e.socket.sent[1], pcm);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.holds.at(-1), false);
+  await e.client.end();
+});
+
+test("loudness meter events never reach the provider or end a held Grok call", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  const sent = e.socket.sent.length;
+  e.media.emit({ type: "level", input: 0.8, output: 0.2 });
+  assert.equal(e.socket.sent.length, sent);
+  assert.equal(e.client.isClosed, false);
+  assert.deepEqual(e.errors, []);
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.equal(e.socket.sent.length, sent + 1);
+  await e.client.end();
+});
+
+test("Grok automatic mode is refused before opening media or creating a paid call", async () => {
+  const e = setup();
+  await e.client.start(
+    { ...preferences, input_mode: "automatic" },
+    "xai_realtime",
+  );
+  assert.equal(e.starts.length, 0);
+  assert.deepEqual(e.media.prepared, []);
+  assert.match(e.errors[0]!, /Hold to talk/);
+  assert.equal(e.client.isClosed, true);
+});
+
+test("media denial cannot create a server session or expose local exception details", async () => {
+  const e = setup();
+  e.media.prepareResult = Promise.reject(
+    new Error("private device identifier"),
+  );
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 0);
+  assert.equal(e.count().activeCalls, 0);
+  assert.equal(
+    e.errors.some((error) => error.includes("private device")),
+    false,
+  );
+  assert.equal(e.client.isClosed, true);
+});
+
+test("a denied microphone is diagnosed before any server session is created", async () => {
+  const e = setup();
+  const denied = new Error("private microphone identifier");
+  denied.name = "NotAllowedError";
+  e.media.prepareResult = Promise.reject(denied);
+  await e.client.start(preferences);
+  assert.deepEqual(e.errors, ["Microphone permission was denied"]);
+  assert.equal(e.starts.length, 0);
+  assert.equal(e.count().activeCalls, 0);
+});
+
+for (const first of ["media event", "prepare rejection"] as const) {
+  test(`the simulator microphone stops preparation once when ${first} arrives first`, async () => {
+    const message =
+      "A test microphone is active. Select a real microphone and try again.";
+    const e = setup();
+    const waiting = deferred<string>();
+    e.media.prepareResult = waiting.promise;
+    const lateMedia = [...e.media.listeners][0]!;
+    const starting = e.client.start(preferences);
+    if (first === "media event") e.media.emit({ type: "error", message });
+    waiting.reject(new Error(message));
+    await starting;
+    lateMedia({ type: "error", message });
+    lateMedia({ type: "provider-ready" });
+    await e.client.start(preferences);
+
+    assert.deepEqual(e.errors, [message]);
+    assert.deepEqual(e.recoveries, [undefined]);
+    assert.deepEqual(e.starts, []);
+    assert.deepEqual(e.controls, []);
+    assert.deepEqual(e.paths, []);
+    assert.deepEqual(e.snapshots, []);
+    assert.deepEqual(e.conflicts, []);
+    assert.deepEqual(e.count(), { closed: 1, ready: 0, activeCalls: 0 });
+    assert.equal(
+      e.media.inputs.every((enabled) => !enabled),
+      true,
+    );
+    assert.equal(e.client.isClosed, true);
+  });
+}
+
+test("simulator diagnostics allow only the exact fixed message without exposing appended device details", async () => {
+  const message =
+    "A test microphone is active. Select a real microphone and try again.";
+  for (const detail of [
+    `${message} private microphone identifier`,
+    `private microphone identifier ${message}`,
+    message.slice(0, -1),
+  ]) {
+    const rejected = setup();
+    rejected.media.prepareResult = Promise.reject(new Error(detail));
+    await rejected.client.start(preferences);
+    assert.deepEqual(rejected.errors, ["Microphone could not be opened"]);
+    assert.deepEqual(rejected.starts, []);
+
+    const event = setup();
+    const waiting = deferred<string>();
+    event.media.prepareResult = waiting.promise;
+    const starting = event.client.start(preferences);
+    event.media.emit({ type: "error", message: detail });
+    waiting.reject(new Error(detail));
+    await starting;
+    assert.deepEqual(event.errors, [
+      "Voice media stopped. Check microphone permission and start a new call.",
+    ]);
+    assert.deepEqual(event.starts, []);
+  }
+
+  const object = setup();
+  object.media.prepareResult = Promise.reject({ message });
+  await object.client.start(preferences);
+  assert.deepEqual(object.errors, ["Microphone could not be opened"]);
+  assert.deepEqual(object.starts, []);
+});
+
+test("HTTP startup rejection reports safe provider diagnostics without retrying creation", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw new ApiError({
+      statusCode: 503,
+      errorCode: 12501,
+      errorKey: "voice_provider_unavailable",
+      message: "private upstream body and credential",
+      details: {
+        stage: "provider_create",
+        reason: "private reason",
+        provider: "openai",
+        provider_status: 400,
+        provider_code: "invalid_value",
+        provider_param: "session.audio.input.format",
+      },
+    });
+  };
+  await e.client.start(preferences);
+  await e.client.start(preferences);
+  assert.deepEqual(e.errors, [
+    "Voice provider rejected the session (OpenAI 400: invalid_value · session.audio.input.format · code 12501)",
+  ]);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.count().activeCalls, 1);
+  assert.deepEqual(e.controls, []);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.isClosed, true);
+});
+
+test("response, local WebRTC and control transport startup failures retain their distinct safe phase", async () => {
+  for (const phase of ["response", "webrtc", "transport"] as const) {
+    const e = setup();
+    if (phase === "response")
+      e.responses.start = async () => ({ session: session(), sdp_answer: 7 });
+    else if (phase === "webrtc")
+      e.media.answerResult = Promise.reject(new Error("private SDP"));
+    else
+      e.responses.socket = async () => {
+        throw new Error("private websocket URL and auth headers");
+      };
+    await e.client.start(preferences);
+    const expected = {
+      response: "Voice server returned an invalid session answer",
+      webrtc: "WebRTC negotiation failed",
+      transport: "Voice control connection could not open",
+    };
+    assert.deepEqual(e.errors, [expected[phase]], phase);
+    assert.equal(e.starts.length, 1, phase);
+    assert.equal(e.count().activeCalls, 0, phase);
+    assert.deepEqual(
+      e.controls.map((item) => item.input.action),
+      ["end"],
+      phase,
+    );
+    assert.equal(e.media.input, false, phase);
+    assert.equal(e.client.isClosed, true, phase);
+  }
+});
+
+test("HTTP billing rejection forwards recovery while disposing media without retrying", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw new ApiError({
+      statusCode: 402,
+      errorCode: 11300,
+      errorKey: "insufficient_credits",
+      message: "private wallet state",
+      details: { stage: "billing_reservation", reason: "private balance" },
+    });
+  };
+  await e.client.start(preferences);
+  await e.client.start(preferences);
+  assert.deepEqual(e.errors, [
+    "Insufficient voice credits (billing_reservation · code 11300)",
+  ]);
+  assert.equal(e.recoveries[0]?.kind, "credits");
+  assert.equal(e.errorKinds[0], undefined);
+  assert.match(e.recoveries[0]!.message, /initial voice reservation/);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.client.isClosed, true);
+  assert.deepEqual(e.controls, []);
+});
+
+test("streamed billing failure forwards recovery and still ends its owned session", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "start_failed",
+    error: {
+      error: "wallet_suspended",
+      error_code: 11307,
+      message: "private wallet state",
+      details: { stage: "billing_reservation", reason: "private reason" },
+    },
+  });
+  assert.equal(e.recoveries[0]?.kind, "wallet_suspended");
+  assert.match(e.errors[0]!, /billing_reservation/);
+  assert.equal(e.errors[0]!.includes("private"), false);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.isClosed, true);
+  assert.deepEqual(
+    e.controls.map((item) => item.input.action),
+    ["end"],
+  );
+});
+
+test("startup failure from the control stream uses the same sanitized provider diagnosis", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "start_failed",
+    error: {
+      error: "voice_provider_unavailable",
+      error_code: 12501,
+      message: "private body must never be displayed",
+      details: {
+        stage: "transport",
+        reason: "private reason",
+        provider: "xai",
+        provider_status: 502,
+        provider_type: "server_error",
+      },
+    },
+  });
+  assert.deepEqual(e.errors, [
+    "Voice transport could not connect (xAI 502: server_error · code 12501)",
+  ]);
+  assert.deepEqual(
+    e.controls.map((item) => item.input.action),
+    ["end"],
+  );
+  assert.equal(e.client.isClosed, true);
+});
+
+test("a 409 observes the active call without deleting it or retrying session creation", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  const other = session({ id: requestId });
+  e.responses.active = async () => ({ session: other });
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.count().activeCalls, 1);
+  assert.deepEqual(e.conflicts, [other]);
+  assert.deepEqual(e.controls, []);
+  assert.match(e.errors[0]!, /Another voice call/);
+  assert.equal(e.errorKinds[0], "conflict");
+});
+
+test("a cross-chat 409 preserves the verified account call and its conversation without ending it", async () => {
+  const e = setup();
+  const otherThread = `nyxa-${"b".repeat(32)}`;
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => ({
+    session: session(),
+    conversation_id: otherThread,
+  });
+  await e.client.start(preferences);
+  assert.deepEqual(e.conflictThreads, [otherThread]);
+  assert.equal(e.count().activeCalls, 0);
+  assert.equal(e.controls.length, 0);
+  assert.equal(e.starts.length, 1);
+  assert.match(e.errors[0]!, /Another voice call/);
+});
+
+test("a 409 without a verified account call does not claim another call exists", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => ({ session: null, conversation_id: null });
+  await e.client.start(preferences);
+  assert.match(e.errors[0]!, /Voice state changed/);
+  assert.equal(e.errors[0]!.includes("Another voice call"), false);
+  assert.equal(e.controls.length, 0);
+});
+
+test("an unavailable account lookup preserves unknown ownership for a status check", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => {
+    throw new Error("lookup unavailable");
+  };
+  await e.client.start(preferences);
+  assert.deepEqual(e.conflicts, [null]);
+  assert.deepEqual(e.conflictUnknown, [true]);
+  assert.equal(e.controls.length, 0);
+});
+
+test("failed End retains the owned call identity after immediate local audio cleanup", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () => {
+    throw new Error("lost End response");
+  };
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.conflicts.at(-1)?.id, sessionId);
+  assert.equal(e.conflictThreads.at(-1), conversationId);
+  assert.equal(e.controls.length, 1);
+});
+
+test("automatic transport failure exposes owned cleanup before the End response arrives", async () => {
+  const e = setup();
+  await e.open();
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  e.socket.onclose!();
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.media.input, false);
+  assert.equal(e.controls.length, 1);
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  waiting.resolve(session({ state: "closing", end_requested: true }));
+  await e.client.end();
+  assert.equal(e.conflicts.at(-1)?.state, "closing");
+});
+
+test("accepted closing End remains recoverable until the server releases the call", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true });
+  const ending = e.client.end();
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.conflicts.at(-1)?.end_requested, true);
+});
+
+test("a lost POST response is reconciled once through active, never through another POST", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw new Error("network");
+  };
+  e.responses.active = async () => ({ session: session() });
+  await e.client.start(preferences);
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.count().activeCalls, 1);
+  assert.equal(e.conflicts[0]?.id, sessionId);
+  assert.deepEqual(
+    e.controls,
+    [],
+    "unknown ownership cannot end another live session",
+  );
+});
+
+test("an unverifiable active lookup reports explicit unknown ownership", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw new Error("network");
+  };
+  e.responses.active = async () => ({ session: { id: "invalid" } });
+  await e.client.start(preferences);
+  assert.deepEqual(e.conflicts, [null]);
+  assert.equal(e.client.isClosed, true);
+});
+
+test("ending while microphone setup is pending closes any late device result without POST", async () => {
+  const e = setup();
+  const waiting = deferred<string>();
+  e.media.prepareResult = waiting.promise;
+  const starting = e.client.start(preferences);
+  await e.client.end();
+  waiting.resolve("offer");
+  await starting;
+  assert.equal(e.starts.length, 0);
+  assert.equal(e.media.closed, 2, "late prepare is explicitly cleaned up too");
+  assert.equal(e.count().closed, 1);
+});
+
+test("ending during POST cleans up a late successful owned session exactly once", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  e.responses.start = () => waiting.promise;
+  const dispatch = e.api.start;
+  e.api.start = (thread, input, signal) => {
+    signal?.addEventListener(
+      "abort",
+      () => waiting.reject(new Error("transport aborted")),
+      { once: true },
+    );
+    return dispatch(thread, input, signal);
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 8 && !e.starts.length; step++)
+    await Promise.resolve();
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.client.pendingStart, true);
+  await e.client.end();
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
+  await starting;
+  assert.equal(e.client.pendingStart, true);
+  assert.equal(e.starts[0]!.signal!.aborted, false);
+  waiting.resolve({ session: session(), sdp_answer: "answer" });
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.equal(e.client.pendingStart, false);
+  assert.ok(
+    e.cleanup.some(
+      (row) => row.session?.id === sessionId && row.thread === conversationId,
+    ),
+  );
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["end"],
+  );
+  assert.equal(
+    e.controls[0]!.signal?.aborted,
+    true,
+    "durable End uses its own bounded controller after local abort",
+  );
+  assert.deepEqual(e.media.answers, []);
+  assert.deepEqual(e.paths, []);
+  assert.equal(e.count().closed, 1);
+});
+
+test("End between a provider response and foreground delivery still closes the exact owned session", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  e.responses.start = () => waiting.promise;
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 32 && !e.starts.length; step++)
+    await Promise.resolve();
+  let ending: Promise<void> | undefined;
+  void waiting.promise.then(() => {
+    ending = e.client.end();
+  });
+  waiting.resolve({ session: session(), sdp_answer: "answer" });
+  await starting;
+  await ending;
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.deepEqual(
+    e.controls.map((control) => control.id),
+    [sessionId],
+  );
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.deepEqual(e.media.answers, []);
+  assert.equal(e.starts.length, 1);
+});
+
+test("a rejected POST after local End retains verified cross-chat recovery without replay or auto-End", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  const otherThread = `nyxa-${"b".repeat(32)}`;
+  e.responses.start = () => waiting.promise;
+  e.api.accountActive = async () => ({
+    session: session({ id: requestId }),
+    conversation_id: otherThread,
+  });
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 8 && !e.starts.length; step++)
+    await Promise.resolve();
+  await e.client.end();
+  waiting.reject(new Error("lost response"));
+  await starting;
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.unknown, false);
+  assert.equal(e.cleanup.at(-1)?.session?.id, requestId);
+  assert.equal(e.cleanup.at(-1)?.thread, otherThread);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.errors, []);
+});
+
+test("ending while socket setup is pending closes the late socket and ignores its events", async () => {
+  const e = setup();
+  const waiting = deferred<VoiceControlSocket>();
+  e.responses.socket = () => waiting.promise;
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 32 && !e.paths.length; step++)
+    await Promise.resolve();
+  assert.equal(e.paths.length, 1);
+  await e.client.end();
+  waiting.resolve(e.socket);
+  await starting;
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.socket.onmessage, null);
+  assert.equal(e.count().closed, 1);
+});
+
+for (const phase of ["microphone", "server", "webrtc", "transport"] as const) {
+  test(`a noncooperative ${phase} startup has a bounded deadline and disposes late resources`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup();
+    const offer = deferred<string>();
+    const post = deferred<unknown>();
+    const answer = deferred<void>();
+    const socket = deferred<VoiceControlSocket>();
+    if (phase === "microphone") e.media.prepareResult = offer.promise;
+    if (phase === "server") e.responses.start = () => post.promise;
+    if (phase === "webrtc") e.media.answerResult = answer.promise;
+    if (phase === "transport") e.responses.socket = () => socket.promise;
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    const timeout =
+      phase === "server" ? 30_000 : phase === "transport" ? 15_000 : 40_000;
+    context.mock.timers.tick(timeout - 1);
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(1);
+    await starting;
+
+    const expected = {
+      microphone: "Microphone could not be opened",
+      server:
+        "Voice server could not be reached. Check the active call before trying again.",
+      webrtc: "WebRTC negotiation failed",
+      transport: "Voice control connection could not open",
+    };
+    assert.deepEqual(e.errors, [expected[phase]]);
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, false);
+    assert.equal(e.count().closed, 1);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.equal(e.count().activeCalls, phase === "server" ? 1 : 0);
+    if (phase === "server") assert.equal(e.starts[0]!.signal!.aborted, true);
+    assert.equal(e.media.inputs.includes(true), false);
+    if (phase === "server") {
+      assert.deepEqual(e.controls, []);
+      // A valid owned identity is enough to clean up even a malformed late SDP.
+      post.resolve({ session: session(), sdp_answer: 7 });
+    } else if (phase === "microphone") offer.resolve("late offer");
+    else if (phase === "webrtc") answer.resolve();
+    else socket.resolve(e.socket);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    await e.client.start(preferences);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.deepEqual(
+      e.controls.map((value) => value.input.action),
+      phase === "microphone" ? [] : ["end"],
+    );
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.socket.closed, phase === "transport" ? 1 : 0);
+    assert.equal(e.socket.onmessage, null);
+    assert.equal(e.clock.timeouts.size, 0);
+    context.mock.timers.tick(120_000);
+    assert.equal(e.count().closed, 1);
+    assert.deepEqual(e.errors, [expected[phase]]);
+  });
+
+  test(`End settles a noncooperative ${phase} startup immediately without waiting for its deadline`, async () => {
+    const e = setup();
+    const offer = deferred<string>();
+    const post = deferred<unknown>();
+    const answer = deferred<void>();
+    const socket = deferred<VoiceControlSocket>();
+    if (phase === "microphone") e.media.prepareResult = offer.promise;
+    if (phase === "server") e.responses.start = () => post.promise;
+    if (phase === "webrtc") e.media.answerResult = answer.promise;
+    if (phase === "transport") e.responses.socket = () => socket.promise;
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    await e.client.end();
+    await starting;
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, phase === "server");
+    assert.equal(e.count().closed, 1);
+    assert.deepEqual(e.errors, []);
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.starts.length, phase === "microphone" ? 0 : 1);
+    assert.equal(e.clock.timeouts.size, 0);
+    offer.resolve("late offer");
+    post.resolve({ session: session(), sdp_answer: "late answer" });
+    answer.resolve();
+    socket.resolve(e.socket);
+    for (let step = 0; step < 32; step++) await Promise.resolve();
+    assert.equal(e.client.pendingStart, false);
+    assert.deepEqual(
+      e.controls.map((value) => value.input.action),
+      phase === "microphone" ? [] : ["end"],
+    );
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.socket.closed, phase === "transport" ? 1 : 0);
+  });
+}
+
+test("an owned late POST cleanup cannot be overwritten by its older uncertain-start lookup", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup();
+  const post = deferred<unknown>();
+  const discovery = deferred<unknown>();
+  let discoveryStarted = false;
+  e.responses.start = () => post.promise;
+  e.api.accountActive = async () => {
+    discoveryStarted = true;
+    return discovery.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 32 && !e.starts.length; step++)
+    await Promise.resolve();
+  context.mock.timers.tick(30_000);
+  for (let step = 0; step < 32 && !discoveryStarted; step++)
+    await Promise.resolve();
+  assert.equal(discoveryStarted, true);
+  assert.equal(e.client.isClosed, true);
+  post.resolve({ session: session(), sdp_answer: "late answer" });
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.cleanup.at(-1)?.unknown, false);
+  const cleanup = e.cleanup.length;
+  discovery.resolve({
+    session: session({ id: requestId }),
+    conversation_id: `nyxa-${"b".repeat(32)}`,
+  });
+  await starting;
+  assert.equal(e.cleanup.length, cleanup);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(
+    e.controls.map((value) => value.id),
+    [sessionId],
+  );
+  assert.deepEqual(e.conflicts, [null]);
+  assert.deepEqual(e.media.answers, []);
+  assert.deepEqual(e.paths, []);
+});
+
+test("an invalid SDP response with a valid owned session still sends durable End", async () => {
+  const e = setup();
+  e.responses.start = async () => ({ session: session(), sdp_answer: 7 });
+  await e.client.start(preferences);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["end"],
+  );
+  assert.equal(e.count().activeCalls, 0);
+  assert.deepEqual(e.media.answers, []);
+});
+
+test("socket loss immediately disables input, ends once and never reconnects", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  assert.equal(e.media.input, true);
+  const staleMessage = e.socket.onmessage!;
+  e.socket.onclose!();
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.isClosed, true);
+  e.clock.tick();
+  e.clock.expire();
+  staleMessage({
+    data: JSON.stringify({
+      type: "snapshot",
+      session: session(),
+      captions: [],
+      tasks: [],
+    }),
+  });
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.equal(e.paths.length, 1);
+  assert.equal(e.snapshots.length, 1);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["end"],
+  );
+  await e.client.end();
+  assert.equal(e.clock.intervals.size, 0);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+test("missing authoritative readiness times out without ever enabling the microphone", async () => {
+  const e = setup();
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  e.clock.expire();
+  assert.equal(e.media.inputs.includes(true), false);
+  assert.equal(e.client.isClosed, true);
+  assert.match(e.errors[0]!, /timed out/);
+});
+
+test("an active control stream cannot mask missing provider readiness or leave a paid call stuck", async () => {
+  const e = setup();
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.snapshot();
+  assert.equal(e.media.input, false);
+  e.clock.expire();
+  assert.equal(e.client.isClosed, true);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["end"],
+  );
+});
+
+test("a locally closed socket stops microphone frames even before the close callback arrives", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  e.socket.readyState = 3;
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.socket.sent.length, 1);
+});
+
+test("a durable server end request disables input immediately before terminal settlement", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  assert.equal(e.media.input, true);
+  e.snapshot({ end_requested: true });
+  assert.equal(e.media.input, false);
+  e.client.hold(true);
+  assert.equal(e.media.input, false);
+  await e.client.end();
+});
+
+test("heartbeat reports verified playback and monotonically increasing revisions", async () => {
+  const e = setup();
+  await e.client.start(preferences);
+  e.clock.tick();
+  assert.deepEqual(e.socket.sent, []);
+  e.snapshot();
+  e.clock.tick();
+  e.clock.tick();
+  assert.deepEqual(e.socket.events(), [
+    {
+      type: "heartbeat",
+      generation: 1,
+      revision: 1,
+      playback_ms: 123,
+      playback_audible: true,
+    },
+    {
+      type: "heartbeat",
+      generation: 1,
+      revision: 2,
+      playback_ms: 123,
+      playback_audible: true,
+    },
+  ]);
+  await e.client.end();
+});
+
+test("invalid playback telemetry fails closed instead of inventing a spoken confirmation watermark", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.media.report.playback_ms = Number.NaN;
+  e.clock.tick();
+  assert.deepEqual(e.socket.sent, []);
+  assert.equal(e.client.isClosed, true);
+});
+
+test("Grok PCM metadata is paired with one bounded frame and supports generation-aware flush", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  const bytes = new ArrayBuffer(960);
+  e.socket.receive({ type: "audio", generation: 1, end_ms: 20 });
+  e.socket.receive(bytes);
+  assert.deepEqual(e.media.enqueued, [{ bytes, endMs: 20 }]);
+  e.socket.receive({ type: "audio", generation: 0, end_ms: 40 });
+  e.socket.receive(new ArrayBuffer(960));
+  assert.equal(
+    e.media.enqueued.length,
+    1,
+    "stale generation pair is discarded",
+  );
+  e.socket.receive({ type: "audio_flush", generation: 0 });
+  assert.equal(e.media.flushed, 0);
+  e.socket.receive({ type: "audio_flush", generation: 1 });
+  assert.equal(e.media.flushed, 1);
+  await e.client.end();
+});
+
+for (const [name, events] of [
+  ["unframed PCM", [new ArrayBuffer(960)]],
+  [
+    "odd PCM",
+    [{ type: "audio", generation: 1, end_ms: 20 }, new ArrayBuffer(3)],
+  ],
+  [
+    "oversized PCM",
+    [{ type: "audio", generation: 1, end_ms: 20 }, new ArrayBuffer(1922)],
+  ],
+  [
+    "duplicate metadata",
+    [
+      { type: "audio", generation: 1, end_ms: 20 },
+      { type: "audio", generation: 1, end_ms: 40 },
+    ],
+  ],
+  [
+    "unbounded watermark",
+    [{ type: "audio", generation: 1, end_ms: 1_830_001 }],
+  ],
+] as const) {
+  test(`${name} ends Grok audio without accepting unverifiable output`, async () => {
+    const e = setup();
+    await e.open("xai_realtime");
+    events.forEach((event) => e.socket.receive(event));
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.media.enqueued.length, 0);
+    assert.deepEqual(
+      e.controls.map((value) => value.input.action),
+      ["end"],
+    );
+  });
+}
+
+test("Grok microphone frames are bounded and connection backpressure ends capture", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  e.socket.bufferedAmount = 96_001;
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.equal(e.media.input, false);
+  assert.equal(e.socket.sent.length, 1, "only ptt_begin was sent");
+  assert.match(e.errors[0]!, /too slow/);
+  const invalid = setup();
+  await invalid.open("xai_realtime");
+  invalid.client.hold(true);
+  invalid.media.emit({ type: "pcm", bytes: new ArrayBuffer(3) });
+  assert.equal(invalid.client.isClosed, true);
+});
+
+test("snapshot ID, generation and revision fences cannot restore stale input authority", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  e.snapshot({ muted: true, control_revision: 2 });
+  e.snapshot({ control_revision: 1 });
+  e.snapshot({ id: requestId, generation: 10 });
+  e.snapshot({ generation: 0, control_revision: 20 });
+  assert.equal(e.media.input, false);
+  assert.equal(e.snapshots.length, 2);
+  e.snapshot({ generation: 2, control_revision: 0 });
+  assert.equal(e.media.input, true);
+  assert.equal(e.media.flushed, 1);
+  await e.client.end();
+});
+
+test("mute suspends input immediately and late control responses cannot override newer snapshots", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const waiting = deferred<unknown>();
+  e.responses.control = () => waiting.promise;
+  const muting = e.client.mute(true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.controls[0]!.input.expected_revision, 0);
+  e.snapshot({ control_revision: 3, muted: true });
+  waiting.resolve(session({ control_revision: 1, muted: false }));
+  await muting;
+  assert.equal(e.media.input, false);
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
+});
+
+test("failed or mismatched mute controls end the call rather than reopening input", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  e.responses.control = async (input) => {
+    if (input.action === "end") return session();
+    return session({ id: requestId });
+  };
+  await e.client.mute(true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.isClosed, true);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["mute", "end"],
+  );
+});
+
+test("ending audio never cancels accepted work; Stop only cancels the chosen task", async () => {
+  const e = setup();
+  await e.open();
+  await e.client.stopTask(requestId);
+  assert.deepEqual(e.cancels, [{ thread: conversationId, id: requestId }]);
+  await e.client.end();
+  await e.client.end();
+  await e.client.stopTask(sessionId);
+  assert.equal(e.cancels.length, 1);
+  assert.deepEqual(
+    e.controls.map((value) => value.input.action),
+    ["end"],
+  );
+  assert.equal(e.count().closed, 1);
+});
+
+test("media-first shutdown publishes the verified terminal control state with retained captions", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const captions = [
+    {
+      id: requestId,
+      speaker: "user",
+      text: "recognized speech",
+      sealed: false,
+      complete: false,
+    },
+  ];
+  e.socket.receive({
+    type: "snapshot",
+    session: session({ muted: true, idle_warning: true }),
+    captions,
+    tasks: [],
+  });
+  const waiting = deferred<VoiceSession>();
+  e.responses.control = async () => waiting.promise;
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.snapshots.at(-1)?.session.state, "active");
+
+  const ended = session({
+    state: "closed",
+    closed_at: "2026-10-16T00:04:25Z",
+    end_reason: "idle",
+    control_revision: 1,
+  });
+  waiting.resolve(ended);
+  await e.client.end();
+  assert.deepEqual(e.snapshots.at(-1)?.session, ended);
+  assert.deepEqual(e.snapshots.at(-1)?.captions, captions);
+  assert.deepEqual(e.snapshots.at(-1)?.tasks, []);
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.count().closed, 1);
+  assert.equal(e.starts.length, 1);
+});
+
+test("a media-first closing response retains recovery without inventing a terminal snapshot", async () => {
+  const e = setup();
+  await e.open();
+  const before = e.snapshots.length;
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 1 });
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  await e.client.end();
+  assert.equal(e.snapshots.length, before);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.conflicts.at(-1)?.end_requested, true);
+});
+
+test("stale terminal cleanup cannot replace a newer owned session snapshot", async () => {
+  const e = setup();
+  await e.open();
+  e.snapshot({ generation: 2, control_revision: 2, idle_warning: true });
+  const before = e.snapshots.length;
+  e.responses.control = async () =>
+    session({ state: "closed", generation: 1, control_revision: 3 });
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  await e.client.end();
+  assert.equal(e.snapshots.length, before);
+  assert.equal(e.client.pendingEnd?.generation, 2);
+  assert.equal(e.client.pendingEnd?.state, "active");
+});
+
+test("closed server snapshot releases media once without another End or task cancellation", async () => {
+  const e = setup();
+  await e.open();
+  e.snapshot({
+    state: "closed",
+    closed_at: "2026-10-16T00:01:00Z",
+    end_reason: "server_update",
+  });
+  await e.client.end();
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.count().closed, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.cancels, []);
+  assert.match(e.errors[0]!, /server update/);
+});
+
+test("speaker mute and audio resume remain local and never send server mute or task commands", async () => {
+  const e = setup();
+  await e.open();
+  e.client.muteSpeaker(true);
+  await e.client.resumeAudio();
+  assert.deepEqual(e.media.speaker, [true, true]);
+  assert.equal(e.media.resumed, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.cancels, []);
+  await e.client.end();
+});
+
+test("blocked playback offers local resume without ending or recreating the connected call", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const lateMedia = [...e.media.listeners][0]!;
+  e.media.emit({ type: "playback-blocked" });
+  assert.deepEqual(e.errors, ["Tap Resume audio to hear the assistant."]);
+  assert.equal(e.errorKinds[0], "playback");
+  assert.equal(e.client.isClosed, false);
+  assert.equal(e.media.input, true);
+  assert.equal(e.count().ready, 1);
+  e.media.resumeResult = Promise.reject(new Error("private device detail"));
+  await e.client.resumeAudio();
+  assert.equal(e.errors.at(-1), "Tap Resume audio to hear the assistant.");
+  assert.equal(e.client.isClosed, false);
+  e.media.resumeResult = Promise.resolve();
+  await e.client.resumeAudio();
+  assert.equal(e.media.resumed, 2);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.cancels, []);
+  await e.client.end();
+  const errorCount = e.errors.length;
+  lateMedia({ type: "playback-blocked" });
+  assert.equal(e.errors.length, errorCount);
+});
+
+test("malformed state and media errors are sanitized and fail closed", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive("{private invalid event");
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.errors[0]!.includes("private"), false);
+  const mediaError = setup();
+  await mediaError.open();
+  mediaError.media.emit({ type: "error", message: "secret provider text" });
+  assert.equal(mediaError.client.isClosed, true);
+  assert.equal(mediaError.errors[0]!.includes("secret"), false);
+});
+
+for (const protocol of ["openai_live", "xai_realtime"] as const) {
+  for (const [reason, blocked] of [
+    ["muted", { muted: true }],
+    ["input muted", { input_muted: true }],
+    ["end requested", { end_requested: true }],
+    ["closing", { state: "closing" }],
+    ["starting", { state: "starting" }],
+  ] as const) {
+    test(`${protocol} requires a fresh press after an authoritative ${reason} snapshot`, async () => {
+      const e = setup();
+      await e.open(protocol);
+      assert.equal(e.client.hold(true), true);
+      assert.equal(e.media.input, true);
+      e.snapshot({ ...blocked, control_revision: 1 });
+      assert.equal(e.media.input, false);
+      assert.equal(
+        e.media.holds.at(-1),
+        false,
+        "input revocation also releases the held output state",
+      );
+      assert.equal(
+        e.client.hold(true),
+        false,
+        "a blocked press cannot latch for later",
+      );
+      e.snapshot({ control_revision: 2 });
+      assert.equal(
+        e.media.input,
+        false,
+        "permission restoration cannot resume an old held press",
+      );
+      assert.equal(e.client.hold(false), false);
+      if (protocol === "xai_realtime")
+        assert.deepEqual(
+          e.socket.events(),
+          [{ type: "ptt_begin" }],
+          "revocation and stale release must not commit interrupted speech",
+        );
+      assert.equal(e.client.hold(true), true);
+      assert.equal(e.media.input, true);
+      e.client.hold(false);
+      await e.client.end();
+    });
+  }
+  test(`${protocol} generation recovery cannot preserve a previous held press`, async () => {
+    const e = setup();
+    await e.open(protocol);
+    e.client.hold(true);
+    e.snapshot({ generation: 2 });
+    assert.equal(e.media.input, false);
+    assert.equal(e.media.holds.at(-1), false);
+    e.snapshot({ generation: 2, control_revision: 1 });
+    assert.equal(e.media.input, false);
+    assert.equal(e.client.hold(true), true);
+    assert.equal(e.media.input, true);
+    await e.client.end();
+  });
+}
+
+test("diagnostic failures release a held microphone and hold state before closing", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  e.media.emit({ type: "error", message: "private diagnostic text" });
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.holds.at(-1), false);
+  assert.equal(e.client.hold(true), false);
+  assert.equal(
+    e.errors.some((message) => message.includes("private")),
+    false,
+  );
+});
+
+test("explicit OpenAI End quiets immediately and preserves transport until a verified final snapshot", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  e.client.setInputMode("push_to_talk");
+  e.client.hold(true);
+  assert.equal(e.media.input, true);
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => {
+    assert.equal(
+      e.media.closed,
+      0,
+      "provider transport remains available for the End request",
+    );
+    assert.equal(e.socket.closed, 0);
+    return waiting.promise;
+  };
+  const ending = e.client.end();
+  assert.equal(e.client.end(), ending, "duplicate End shares one operation");
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.holds.at(-1), false);
+  assert.equal(e.media.speaker.at(-1), true);
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.socket.closed, 0);
+  assert.deepEqual([...e.clock.timeoutDelays.values()], [7_000]);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.controls[0]!.signal?.aborted, false);
+
+  // Controls, media readiness and ordinary snapshots cannot reopen audio.
+  e.client.hold(true);
+  e.client.setInputMode("automatic");
+  e.client.muteSpeaker(false);
+  await e.client.resumeAudio();
+  await e.client.mute(false);
+  e.media.emit({ type: "provider-ready" });
+  e.media.emit({ type: "error", message: "late private media error" });
+  e.snapshot({ state: "closing", end_requested: true, control_revision: 1 });
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.speaker.at(-1), true);
+  assert.equal(e.media.resumed, 0);
+  assert.deepEqual(e.errors, []);
+  assert.equal(e.controls.length, 1);
+  assert.equal(
+    e.snapshots.length,
+    1,
+    "nonterminal cleanup is not a live callback",
+  );
+
+  const terminal = session({
+    state: "closed",
+    end_requested: true,
+    control_revision: 1,
+  });
+  e.snapshot(terminal);
+  // A delayed HTTP result cannot undo the terminal snapshot, even in the same turn.
+  waiting.resolve(
+    session({ state: "closing", end_requested: true, control_revision: 1 }),
+  );
+  e.snapshot({ state: "active", control_revision: 1 });
+  await ending;
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.deepEqual(e.snapshots.at(-1)?.session, terminal);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+  assert.equal(e.count().closed, 1);
+});
+
+test("End's absolute deadline releases transport even when HTTP ignores abort, fencing its late success", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  const ending = e.client.end();
+  e.snapshot({ state: "closing", end_requested: true, control_revision: 2 });
+  const snapshots = e.snapshots.length;
+  assert.equal(e.media.closed, 0);
+  e.clock.expire();
+  // A response arriving in the deadline's own turn is already too late.
+  waiting.resolve(session({ state: "closed", control_revision: 3 }));
+  await ending;
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.client.pendingEnd?.control_revision, 2);
+  const cleanupCount = e.cleanup.length;
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  assert.equal(e.snapshots.length, snapshots);
+  assert.equal(e.cleanup.length, cleanupCount);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+test("a lost End response can settle from a final socket snapshot without retrying the POST", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () => {
+    throw new Error("lost response");
+  };
+  const ending = e.client.end();
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  assert.equal(e.media.closed, 0);
+  e.snapshot({
+    state: "failed",
+    control_revision: 1,
+    end_reason: "provider_closed",
+  });
+  await ending;
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.snapshots.at(-1)?.session.state, "failed");
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.controls.length, 1);
+});
+
+test("draining End ignores wrong-resource and regressing terminal snapshots", async () => {
+  const e = setup();
+  await e.open();
+  e.snapshot({ generation: 2, control_revision: 4 });
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  const ending = e.client.end();
+  e.snapshot({ id: requestId, state: "closed", generation: 3 });
+  e.snapshot({ state: "closed", generation: 1, control_revision: 5 });
+  e.snapshot({ state: "closed", generation: 2, control_revision: 3 });
+  e.socket.receive({ type: "snapshot", session: { state: "closed" } });
+  e.socket.receive({ type: "audio", generation: 2, end_ms: 1 });
+  e.socket.receive(new ArrayBuffer(960));
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.enqueued.length, 0);
+  assert.equal(e.snapshots.length, 2);
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.pendingEnd?.generation, 2);
+  assert.equal(e.client.pendingEnd?.control_revision, 4);
+  assert.equal(e.snapshots.length, 2);
+  assert.equal(e.media.closed, 1);
+});
+
+test("a transport fault closes media immediately while a noncooperative End request remains bounded", async () => {
+  const e = setup();
+  await e.open();
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  e.socket.onclose!();
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.media.input, false);
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+for (const prior of [
+  { state: "closing" as const },
+  { state: "active" as const, end_requested: true },
+]) {
+  test(`a 409 with ${prior.state} cleanup describes finalization without claiming a second live call`, async () => {
+    const e = setup();
+    e.responses.start = async () => {
+      throw { status: 409 };
+    };
+    e.responses.active = async () => ({ session: session(prior) });
+    await e.client.start(preferences);
+    assert.deepEqual(e.errors, [
+      "The previous voice call is finishing. You can continue with text.",
+    ]);
+    assert.equal(e.conflicts[0]?.id, sessionId);
+    assert.deepEqual(e.controls, []);
+    assert.equal(e.starts.length, 1);
+  });
+}
+
+for (const rejection of ["conflict", "lost response"] as const) {
+  test(`initial ${rejection} discovery times out after eight seconds and ignores a late call`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup();
+    const waiting = deferred<unknown>();
+    let signal: AbortSignal | undefined;
+    e.responses.start = async () => {
+      throw rejection === "conflict" ? { status: 409 } : new Error("network");
+    };
+    e.api.accountActive = async (_thread, requestSignal) => {
+      signal = requestSignal;
+      return waiting.promise;
+    };
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+    assert.ok(signal);
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(7_999);
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(1);
+    await starting;
+    assert.equal(signal.aborted, true);
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, false);
+    assert.deepEqual(e.conflictUnknown, [true]);
+    assert.deepEqual(e.controls, []);
+    assert.equal(e.starts.length, 1);
+    const conflicts = e.conflicts.length;
+    const cleanup = e.cleanup.length;
+    waiting.resolve({ session: session(), conversation_id: conversationId });
+    for (let step = 0; step < 12; step++) await Promise.resolve();
+    assert.equal(e.conflicts.length, conflicts);
+    assert.equal(e.cleanup.length, cleanup);
+    assert.equal(e.starts.length, 1);
+  });
+}
+
+test("End cancels a hung initial discovery without allowing its late result to install a conflict", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  let signal: AbortSignal | undefined;
+  e.responses.start = async () => {
+    throw { status: 409 };
+  };
+  e.api.accountActive = async (_thread, requestSignal) => {
+    signal = requestSignal;
+    return waiting.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+  assert.ok(signal);
+  await e.client.end();
+  await starting;
+  assert.equal(signal.aborted, true);
+  assert.equal(e.client.pendingStart, false);
+  assert.deepEqual(e.conflicts, []);
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
+  assert.equal(e.media.closed, 1);
+  const cleanup = e.cleanup.length;
+  waiting.resolve({ session: session(), conversation_id: conversationId });
+  for (let step = 0; step < 12; step++) await Promise.resolve();
+  assert.deepEqual(e.conflicts, []);
+  assert.equal(e.cleanup.length, cleanup);
+  assert.deepEqual(e.controls, []);
+});
+
+test("late rejected POST recovery is bounded and settles pendingStart as unknown without live callbacks", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup();
+  const post = deferred<unknown>();
+  const discovery = deferred<unknown>();
+  let signal: AbortSignal | undefined;
+  e.responses.start = () => post.promise;
+  e.api.accountActive = async (_thread, requestSignal) => {
+    signal = requestSignal;
+    return discovery.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 20 && !e.starts.length; step++)
+    await Promise.resolve();
+  assert.equal(e.client.pendingStart, true);
+  await e.client.end();
+  post.reject(new Error("lost response"));
+  for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+  assert.ok(signal);
+  assert.equal(
+    signal.aborted,
+    false,
+    "late metadata cleanup has its own bounded lifetime",
+  );
+  context.mock.timers.tick(8_000);
+  await starting;
+  assert.equal(signal.aborted, true);
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
+  assert.deepEqual(e.conflicts, []);
+  assert.deepEqual(e.errors, []);
+  assert.deepEqual(e.controls, []);
+  assert.equal(e.starts.length, 1);
+});
+
+test("End observes the exact call without waiting for a missing control snapshot", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const reads: string[][] = [];
+  e.api.status = async (thread, id) => {
+    reads.push([thread, id]);
+    return session({
+      state: "closed",
+      end_requested: true,
+      control_revision: 2,
+    });
+  };
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 1 });
+  await e.client.end();
+  assert.deepEqual(reads, [[conversationId, sessionId]]);
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.clock.intervals.size, 0);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+test("End polling ignores a foreign terminal call and never overlaps status reads", async () => {
+  const e = setup();
+  await e.open();
+  const pending = deferred<unknown>();
+  let reads = 0;
+  e.api.status = async () => {
+    reads++;
+    return pending.promise;
+  };
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 2 });
+  const ending = e.client.end();
+  await Promise.resolve();
+  await Promise.resolve();
+  e.clock.tick();
+  e.clock.tick();
+  assert.equal(reads, 1);
+  pending.resolve(
+    session({ id: requestId, state: "closed", control_revision: 3 }),
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.clock.intervals.size, 0);
+});
+
+test("native cancellation listeners cannot tear down a known session before End dispatch", async () => {
+  const f = setup();
+  const order: string[] = [];
+  f.media.prepare = async (_protocol: string, signal?: AbortSignal) => {
+    signal?.addEventListener("abort", () => order.push("abort media"));
+    return "offer";
+  };
+  await f.client.start(preferences);
+  f.socket.readyState = 3;
+  f.api.control = async () => {
+    order.push("end");
+    return session({ state: "closed", end_requested: true });
+  };
+  f.media.close = () => {
+    order.push("close");
+  };
+  await f.client.end();
+  assert.deepEqual(order, ["end", "abort media", "close"]);
+});
+
+test("Android/WebView and Grok End is dispatched before media teardown", async () => {
+  for (const protocol of ["openai_live", "xai_realtime"] as const) {
+    const f = setup();
+    await f.client.start(preferences, protocol);
+    const order: string[] = [];
+    f.api.control = async () => {
+      order.push("end");
+      return session({ state: "closed", end_requested: true });
+    };
+    f.media.close = () => {
+      order.push("close");
+    };
+    if (protocol === "openai_live") f.socket.readyState = 3;
+    await f.client.end();
+    assert.deepEqual(order, ["end", "close"]);
+  }
+});
+
+test("a lost start response discovers and ends only this attempt's orphan without conflict", async () => {
+  const e = setup();
+  let requestId = "";
+  e.responses.start = async () => {
+    requestId = e.starts[0]!.input.client_request_id;
+    throw new Error("lost response");
+  };
+  e.responses.active = async () => ({
+    session: requestId ? session({ client_request_id: requestId }) : null,
+  });
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.controls[0]!.id, sessionId);
+  assert.equal(e.controls[0]!.input.action, "end");
+  assert.deepEqual(
+    e.conflicts,
+    [null],
+    "terminal cleanup clears recovery without a conflict row",
+  );
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.client.isClosed, true);
+  const next = setup();
+  await next.client.start(preferences);
+  assert.equal(next.starts.length, 1);
+  await next.client.end();
+});

@@ -111,6 +111,50 @@ async fn machine_discovery_production_search_reaches_the_model() {
 }
 
 #[tokio::test]
+async fn owner_chat_native_tools_are_listed_and_searchable() {
+    // NyxAgent finds tools through search, and the reset recap tells it to
+    // read truncated owner messages with nyx__conversation_history.
+    let f = Box::pin(production()).await;
+    let auth = authenticated_machine_chat(&f).await;
+    let response = Box::pin(handle_tools_list(
+        &f.state,
+        &auth,
+        None,
+        &JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        },
+    ))
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let tools = envelope["result"]["tools"].as_array().unwrap();
+    for (name, query) in [
+        ("nyx__attachment_read", "read attachment"),
+        ("nyx__attachment_list", "list uploads"),
+        ("nyx__conversation_history", "conversation history"),
+        ("nyx__conversation_history", "truncated owner messages"),
+    ] {
+        assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
+        let result =
+            machine_mcp_call(&f, &auth, "nyx__search_tools", json!({"query": query})).await;
+        assert!(
+            result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name),
+            "{name} not found by {query:?}"
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn machine_discovery_failures_warn_without_content_and_keep_other_tools() {
     use tracing::instrument::WithSubscriber;
     let f = Box::pin(production()).await;

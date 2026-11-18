@@ -198,10 +198,14 @@ export function resolveStep(
 /**
  * Render a step into the header's text: `Step 2 of 3 · configure scope`.
  */
-export function formatStepLabel(step: WizardStep): string {
+export function formatStepLabel(
+  step: WizardStep,
+  t: (key: string, options?: Record<string, string | number>) => string = (key, options) =>
+    key.replace(/{{(\w+)}}/g, (_, name: string) => String(options?.[name] ?? "")),
+): string {
   if (step.label.startsWith("Recovery")) {
     // Recovery phases show "Recovery · …" on its own, no step numbering.
-    return step.label
+    return t(step.label)
   }
-  return `Step ${step.current} of ${step.total} · ${step.label}`
+  return t("Step {{current}} of {{total}} · {{label}}", { current: step.current, total: step.total, label: t(step.label) })
 }

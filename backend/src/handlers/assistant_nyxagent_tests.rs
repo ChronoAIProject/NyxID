@@ -1,4 +1,10 @@
+#[path = "assistant_shutdown_tests.rs"]
+mod shutdown_tests;
 use super::*;
+#[path = "assistant_first_byte_outcome_tests.rs"]
+mod first_byte_outcome_tests;
+#[path = "assistant_guest_turn_tests.rs"]
+mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::services::assistant_nyxagent::TurnResult;
 use crate::{
@@ -21,6 +27,30 @@ use std::sync::{
 };
 
 const OWNER: &str = "12345678-1234-4123-8123-123456789012";
+
+#[test]
+fn voice_history_dto_preserves_interrupted_boundary_and_omits_false() {
+    for interrupted in [false, true] {
+        let message: AssistantMessage = mongodb::bson::from_document(doc! {
+            "_id": "voice-message", "conversation_id": "conversation", "user_id": OWNER,
+            "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "Speech",
+            "status": "completed", "created_at": mongodb::bson::DateTime::now(),
+            "via": "voice", "voice": {
+                "session_id": "call", "segment_id": "segment", "start_ms": 0_i64,
+                "end_ms": 1000_i64, "sealed": true, "complete": false,
+                "interrupted": interrupted, "delivery": "generated",
+            },
+        })
+        .unwrap();
+        let response = serde_json::to_value(MessageResponse::from(message)).unwrap();
+        assert_eq!(response["voice"]["segment_id"], "segment");
+        if interrupted {
+            assert_eq!(response["voice"]["interrupted"], true);
+        } else {
+            assert!(response["voice"].get("interrupted").is_none());
+        }
+    }
+}
 
 #[test]
 fn upstream_request_id_is_bounded_and_validated() {
@@ -59,6 +89,10 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        supplemental_result_claims: Vec::new(),
+        automation_work: None,
+        execution_task: None,
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -274,6 +308,14 @@ async fn setup_options_with_tool_gate(
                         engine::attach_routed_image(&image_state.db, &image_state.encryption_keys, OWNER, &row.id,
                             "camera__snapshot", "image/png", b"fixture pixels", true).await.unwrap();
                     }
+                    if matches!(failure, Some("http_dependency" | "http_dependency_after_activity")) {
+                        if failure == Some("http_dependency_after_activity") {
+                            let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                                .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
+                            engine::activity_started_for_turn(&image_state.db, OWNER, &row.id, &row.active_turn.unwrap().turn_id, "tool").await.unwrap();
+                        }
+                        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"code":"dependency_unavailable"}}))).into_response();
+                    }
                     if matches!(failure, Some("http_capacity" | "http_capacity_long" | "http_capacity_observed" | "http_draining" | "http_busy" | "http_slow_body")) {
                         let status = if failure == Some("http_busy") { StatusCode::CONFLICT } else { StatusCode::SERVICE_UNAVAILABLE };
                         let code = if failure == Some("http_draining") { "draining" } else if failure == Some("http_busy") { "session_busy" } else { "capacity_exceeded" };
@@ -300,6 +342,10 @@ async fn setup_options_with_tool_gate(
                         };
                         return (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], Body::from_stream(body)).into_response();
                     }
+                    let failure = if failure == Some("http_start_window_passed") {
+                        tokio::time::sleep(Duration::from_secs(16)).await;
+                        None
+                    } else { failure };
                     let failure = if failure == Some("http_delayed_accept") {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         None
@@ -565,6 +611,12 @@ async fn delayed_headers_fail_as_first_byte_with_internal_stage() {
         reply.upstream_error_code, None,
         "a NyxID timeout is not an upstream code"
     );
+    let outcome = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+    assert_eq!(
+        outcome["action_outcome"]["summary"],
+        "No actions were taken."
+    );
+    assert_eq!(outcome["action_outcome"]["retry_warning"], Value::Null);
     let detail = reply.error_detail.unwrap();
     assert_eq!(detail.stage, "first_byte");
     assert_eq!(detail.response_id, None);
@@ -628,8 +680,10 @@ async fn tool_progress_events_reset_the_no_progress_bound() {
     assert_eq!(
         reply.status,
         "completed",
-        "{:?}",
-        reply.error_detail.map(|d| d.stage)
+        "stage={:?}; activity_total={}; activities={:?}",
+        reply.error_detail.as_ref().map(|d| &d.stage),
+        reply.activity_total,
+        reply.activities
     );
     server.abort();
 }
@@ -655,13 +709,32 @@ async fn silent_transport_fails_on_the_idle_bound() {
 
 #[tokio::test]
 async fn unreachable_upstream_fails_at_connect() {
-    short_bounds();
+    // Keep the production first-byte bound: live authority reads precede the
+    // socket attempt. This case asserts connect classification and retry count.
     let (state, _, server) = setup_stream("nyxa_connect", Duration::ZERO, vec![]).await;
     server.abort();
     let _ = server.await;
+    // Port zero cannot host a listener. A released ephemeral port can otherwise
+    // be reused by another process before this request.
+    assert!(tokio::net::TcpStream::connect("127.0.0.1:0").await.is_err());
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .update_one(
+            doc! {"slug": engine::SERVICE_SLUG},
+            doc! {"$set": {"base_url": "http://127.0.0.1:0"}},
+        )
+        .await
+        .unwrap();
     let reply = run_turn_to_reply(&state).await;
-    assert_eq!(reply.error_code.as_deref(), Some("assistant_unavailable"));
+    assert_eq!(
+        reply.error_code.as_deref(),
+        Some("assistant_start_unavailable")
+    );
     assert_eq!(reply.upstream_error_code, None);
+    assert_eq!(reply.turn_metadata.as_ref().unwrap().attempts, Some(3));
+    assert_eq!(reply.activity_total, 0);
+    assert!(reply.text.is_empty());
     assert_eq!(reply.error_detail.unwrap().stage, "connect");
 }
 fn turn_request(id: Option<&str>) -> Request<Body> {
@@ -1140,6 +1213,16 @@ async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server
         format!("Bearer {}", key.raw_key.as_str())
     );
     assert_eq!(call.headers["idempotency-key"], messages[0].turn_id);
+    assert!(crate::services::proxy_service::valid_traceparent_header(
+        &call.headers
+    ));
+    assert_eq!(
+        &call.headers["traceparent"].to_str().unwrap()[3..35],
+        messages[0].turn_id.replace('-', "")
+    );
+    assert!(uuid::Uuid::parse_str(call.headers["x-request-id"].to_str().unwrap()).is_ok());
+    assert!(!call.headers.contains_key("baggage"));
+    assert!(!call.headers.contains_key("tracestate"));
     assert_eq!(call.body["input"], "hello");
     assert!(call.body.get("previous_response_id").is_none());
     let dto = serde_json::to_string(&ConversationResponse::from(row.clone())).unwrap();
@@ -1307,6 +1390,17 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
     let reset_at = saved
         .context_reset_at
         .expect("rebind records reset timestamp");
+    assert_eq!(messages.len(), 4);
+    assert!(
+        messages[3].error_code.is_none(),
+        "session recovery must complete before checking reset ordering: code={:?}, stage={:?}",
+        messages[3].error_code,
+        messages[3]
+            .error_detail
+            .as_ref()
+            .map(|detail| &detail.stage),
+    );
+    assert_eq!(saved.context_reset_reason.as_deref(), Some("session_lost"));
     assert!(messages[2].created_at <= reset_at);
     assert!(messages[3].created_at > reset_at);
     let calls = calls.lock().await;
@@ -1448,6 +1542,7 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ),
         ("POST", "turns".into()),
         ("GET", "models".into()),
+        ("GET", format!("agents/{id}/guest-readiness")),
     ];
     assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
     assert!(
@@ -1939,12 +2034,13 @@ async fn lagged_browser_subscription_keeps_full_text_and_terminal_event() {
 }
 
 #[tokio::test]
-async fn model_fallbacks_are_uncached_and_successes_are_cached() {
+async fn model_fallbacks_are_cached_and_expire_for_later_success() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
     let (state, _, server) = setup(None, Duration::ZERO).await;
+    let cache_key = format!("{}:{OWNER}", state.db.name());
     let upstream = MockServer::start().await;
     state
         .db
@@ -1966,13 +2062,8 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .await
         .unwrap();
     assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
-    assert!(
-        !MODELS
-            .lock()
-            .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
-    engine::begin_turn(
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    let row = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
@@ -1989,6 +2080,37 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
     )
     .await
     .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$set": {"group_id": "crew"}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
+    let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
+        .await
+        .unwrap();
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(
+                crate::models::assistant_agent_credential::COLLECTION_NAME
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$unset": {"group_id": ""}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(503))
@@ -2004,15 +2126,16 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .with_priority(2)
         .mount(&upstream)
         .await;
-    let _ = models(State(state.clone()), test_auth_user(OWNER), request())
-        .await
-        .unwrap();
-    assert!(
-        !MODELS
-            .lock()
+    for _ in 0..2 {
+        let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
+            .unwrap();
+        assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    }
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    // Expire the failure without sleeping; the next successful load replaces it.
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     for _ in 0..2 {
         let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
@@ -2020,6 +2143,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         assert_eq!(rows.len(), 2);
     }
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+    assert_eq!(MODELS.lock().await[&cache_key].1.as_ref().unwrap().len(), 2);
     server.abort();
 }
 
@@ -2244,6 +2368,160 @@ async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
 }
 
 #[tokio::test]
+async fn history_names_the_automation_behind_an_automation_turn() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("history_automation")
+        .await;
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    let mut message = messages
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    message.id = uuid::Uuid::new_v4().to_string();
+    message.turn_id = "automation-turn".into();
+    message.role = "event".into();
+    message.seq = 50;
+    message.origin = Some(crate::models::assistant_conversation::TurnOrigin::Trigger);
+    messages.insert_one(&message).await.unwrap();
+    let docs = |name: &str| f.state.db.collection::<mongodb::bson::Document>(name);
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-1", "trigger_id": "trigger-1", "user_id": &f.owner, "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "trigger-1", "user_id": &f.owner, "label": "Keep the FAQ current"})
+        .await
+        .unwrap();
+    // Another owner's trigger with the same turn never names this message.
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(doc! {"_id": "run-2", "trigger_id": "trigger-2", "user_id": "someone-else", "turn_id": "automation-turn"})
+        .await
+        .unwrap();
+    let Json(page) = history(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    let dto = serde_json::to_value(page).unwrap();
+    let rows = dto["messages"].as_array().unwrap();
+    let automation = rows
+        .iter()
+        .find(|m| m["turn_id"] == "automation-turn")
+        .unwrap();
+    assert_eq!(automation["origin"], "trigger");
+    assert_eq!(
+        automation["automation"],
+        serde_json::json!({"trigger_id": "trigger-1", "run_id": "run-1", "label": "Keep the FAQ current"})
+    );
+    assert!(
+        rows.iter()
+            .filter(|m| m["turn_id"] != "automation-turn")
+            .all(|m| m["automation"].is_null())
+    );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "run-1"},
+            doc! {"$set": {"label": "Original run label"}},
+        )
+        .await
+        .unwrap();
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "trigger-1"},
+            doc! {"$set": {"label": "Renamed automation"}},
+        )
+        .await
+        .unwrap();
+    let mut named = vec![MessageResponse::from(message.clone())];
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Renamed automation"
+    );
+    docs(crate::models::trigger::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "trigger-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert_eq!(
+        named[0].automation.as_ref().unwrap().label,
+        "Original run label"
+    );
+    docs(crate::models::trigger_run::COLLECTION_NAME)
+        .delete_one(doc! {"_id": "run-1"})
+        .await
+        .unwrap();
+    named[0].automation = None;
+    attach_automations(&f.state.db, &f.owner, &f.row.id, &mut named).await;
+    assert!(named[0].automation.is_none());
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    attach_automations(
+        &client.database("unavailable"),
+        &f.owner,
+        &f.row.id,
+        &mut named,
+    )
+    .await;
+    assert!(named[0].automation.is_none());
+    assert_eq!(named[0].text, message.text);
+}
+
+#[tokio::test]
+async fn automation_enrichment_warning_keeps_diagnostics_and_omits_message_text() {
+    use tracing::instrument::WithSubscriber;
+
+    let client =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=50")
+            .await
+            .unwrap();
+    let message = bson::from_document::<AssistantMessage>(doc! {
+        "_id": "automation-message", "conversation_id": "automation-conversation", "user_id": OWNER,
+        "seq": 1_i64, "turn_id": "automation-turn", "role": "event",
+        "text": "PRIVATE automation input", "status": "completed", "origin": "trigger",
+        "created_at": bson::DateTime::now(), "activities": [], "attachments": [],
+    })
+    .unwrap();
+    let mut messages = vec![MessageResponse::from(message)];
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    Box::pin(attach_automations(
+        &client.database("unavailable"),
+        OWNER,
+        "automation-conversation",
+        &mut messages,
+    ))
+    .with_subscriber(subscriber)
+    .await;
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    assert!(logs.contains("WARN"));
+    assert!(logs.contains("Could not attach automation names to history"));
+    assert!(logs.contains("error=Database error"));
+    assert!(logs.contains(OWNER));
+    assert!(logs.contains("conversation_id=\"automation-conversation\""));
+    assert!(logs.contains("message_count=1"));
+    assert!(!logs.contains("PRIVATE automation input"));
+    assert_eq!(messages[0].text, "PRIVATE automation input");
+    assert!(messages[0].automation.is_none());
+}
+
+#[tokio::test]
 async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
     use crate::models::assistant_acknowledgement::{
         AssistantAcknowledgement, COLLECTION_NAME as ACKS,
@@ -2420,6 +2698,9 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
+        execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),
@@ -2511,6 +2792,11 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        activity_execution: None,
+        automation_work: None,
+        execution_task: None,
+        connect_own: None,
+        activity_id: None,
         invocation_id: None,
         routing: None,
         link: None,
@@ -2612,7 +2898,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
             .unwrap()
             .starts_with(engine::SYSTEM_PROMPT)
     );
-    assert!(first.contains("Chat card decisions the user made since your previous reply"));
+    assert!(first.contains("Chat card states recorded since your previous reply"));
     assert!(first.contains(prepared.binding.marker.as_deref().unwrap()));
     assert!(calls[0].body["conversation"].as_str() == Some(SESSION));
     assert!(first.contains("\n- allowed: service github"));
@@ -2629,7 +2915,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     assert!(!first.contains("IGNORE") && !first.contains("Summary text"));
     // The next turn does not repeat decisions it has already been told about.
     let second = calls[1].body["input"].as_str().unwrap();
-    assert!(!second.contains("Chat card decisions"));
+    assert!(!second.contains("Chat card states"));
     server.abort();
 }
 
@@ -2718,6 +3004,24 @@ async fn budget_and_time_limits_continue_the_same_session_without_reset_or_extra
         assert!(messages[1].error_code.is_none());
         let calls = calls.lock().await;
         assert_eq!(calls.len(), 2);
+        for call in calls.iter() {
+            assert!(crate::services::proxy_service::valid_traceparent_header(
+                &call.headers
+            ));
+            assert_eq!(
+                &call.headers["traceparent"].to_str().unwrap()[3..35],
+                messages[0].turn_id.replace('-', "")
+            );
+        }
+        assert_ne!(
+            calls[0].headers["traceparent"],
+            calls[1].headers["traceparent"]
+        );
+        assert_ne!(
+            calls[0].headers["x-request-id"],
+            calls[1].headers["x-request-id"]
+        );
+
         assert_eq!(calls[1].body["conversation"], SESSION);
         assert_eq!(
             calls[0].headers["authorization"],
@@ -3095,6 +3399,8 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     // A claimed turn can retain this snapshot after its channel is removed
     // while first-turn history or upload preparation is in flight.
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
         nyxbot_channel_id: "removed-channel".into(),
         partition: "thread_v1_removed".into(),
         platform: "telegram".into(),
@@ -4074,6 +4380,7 @@ async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_
             description: "Answers restaurant questions".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -4292,12 +4599,15 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            decision: None,
+            retry_identity: None,
             digest: None,
             machine: None,
             id: "activity".into(),
             label: "tool".into(),
             status: "error".into(),
             failure: Some(ToolFailure {
+                reason: None,
                 kind: kind.into(),
                 status,
             }),
@@ -5875,4 +6185,146 @@ async fn a_queued_turn_gives_up_at_its_deadline_without_resetting_context() {
     assert!(!permit.is_queued());
     assert!(calls.lock().await.is_empty());
     server.abort();
+}
+
+#[tokio::test]
+async fn channel_start_dependency_retry_keeps_same_command_and_stops_after_three_attempts() {
+    for (failures, expected, code) in [
+        (vec!["http_dependency"], 2, None),
+        (
+            vec!["http_dependency"; 5],
+            3,
+            Some("assistant_start_unavailable"),
+        ),
+        (
+            vec!["http_dependency_after_activity"],
+            1,
+            Some("assistant_unavailable"),
+        ),
+    ] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, failures).await;
+        let reply = run_turn_to_reply(&state).await;
+        assert_eq!(reply.error_code.as_deref(), code);
+        let seen = calls.lock().await;
+        assert_eq!(seen.len(), expected);
+        for request in seen.iter().skip(1) {
+            assert_eq!(
+                request.headers.get("idempotency-key"),
+                seen[0].headers.get("idempotency-key")
+            );
+            assert_eq!(request.body, seen[0].body);
+        }
+        if code == Some("assistant_start_unavailable") {
+            assert!(
+                engine::TurnError::new(code.unwrap())
+                    .message
+                    .contains("Nothing was done")
+            );
+        }
+        assert!(reply.turn_metadata.as_ref().unwrap().timing.is_some());
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn channel_start_retry_does_not_shorten_a_later_continuation() {
+    let (state, calls, server) = setup_script(
+        None,
+        Duration::ZERO,
+        vec![
+            "http_dependency",
+            "tool_budget_exhausted",
+            "http_start_window_passed",
+        ],
+    )
+    .await;
+    let reply = run_turn_to_reply(&state).await;
+    assert!(reply.error_code.is_none(), "{:?}", reply.error_code);
+    let seen = calls.lock().await;
+    assert_eq!(seen.len(), 3);
+    assert_eq!(
+        seen[0].headers["idempotency-key"],
+        seen[1].headers["idempotency-key"]
+    );
+    assert!(
+        seen[2].headers["idempotency-key"]
+            .to_str()
+            .unwrap()
+            .ends_with(":continuation:1")
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[path = "assistant_nyxagent_model_image_tests.rs"]
+mod model_image_tests;
+
+#[test]
+fn generated_active_turn_fields_are_hidden_when_disabled_in_all_conversation_responses() {
+    let row: AssistantConversation = bson::from_document(doc!{
+        "_id":"nyxa-view","user_id":OWNER,"title":"view","model":"nyxagent/chat","credential_api_key_id":"key","message_count":1,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        "active_turn":{"turn_id":"view-turn","origin":"event","started_at":bson::DateTime::now(),"attachments":[
+            {"id":"legacy","origin":"tool","content_type":"image/png","size":8_i64,"label":"tool"},
+            {"id":"generated","origin":"generated_artifact","content_type":"video/mp4","size":8_i64,"label":"result","filename":"private.mp4","preview_kind":"video"}
+        ]}
+    }).unwrap();
+    for enabled in [false, true] {
+        let response =
+            serde_json::to_value(ConversationResponse::from(row.clone()).with_artifacts(enabled))
+                .unwrap();
+        let files = response["active_turn"]["attachments"].as_array().unwrap();
+        assert_eq!(files.len(), if enabled { 2 } else { 1 });
+        assert_eq!(files[0]["origin"], "tool");
+        assert!(files[0].get("filename").is_none());
+    }
+}
+
+#[test]
+fn activity_decision_projection_is_additive_and_excludes_internal_execution_flags() {
+    let legacy =
+        bson::doc! {"id":"step","label":"tool","status":"error","started_at":bson::DateTime::now()};
+    let row: crate::models::assistant_conversation::TurnActivity =
+        bson::from_document(legacy.clone()).unwrap();
+    let public = serde_json::to_value(ActivityResponse::from(row)).unwrap();
+    assert!(public.get("decision").is_none());
+    let mut new = legacy;
+    new.insert(
+        "decision",
+        bson::doc! {"kind":"acknowledgement","id":"card","state":"waiting","executing":false},
+    );
+    let row: crate::models::assistant_conversation::TurnActivity =
+        bson::from_document(new).unwrap();
+    let public = serde_json::to_value(ActivityResponse::from(row)).unwrap();
+    assert_eq!(public["status"], "error");
+    assert_eq!(
+        public["decision"],
+        json!({"kind":"acknowledgement","id":"card","state":"waiting"})
+    );
+}
+
+#[tokio::test]
+async fn first_party_turn_persists_ui_language_without_forwarding_it_to_nyxagent() {
+    for language in ["en-US", "zh-CN"] {
+        let (state, calls, server) = setup_options(None, Duration::ZERO, vec![], false).await;
+        let mut request = turn_request(None);
+        request
+            .headers_mut()
+            .insert("accept-language", language.parse().unwrap());
+        let response = turns(State(state.clone()), test_auth_user(OWNER), request)
+            .await
+            .unwrap();
+        let _ = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let row = settled(&state).await;
+        assert_eq!(row.title_language.as_deref(), Some(language));
+        for call in calls.lock().await.iter() {
+            assert!(!call.headers.contains_key("accept-language"));
+            assert!(!call.body.to_string().contains("title_language"));
+            assert!(!call.body.to_string().contains("output_language"));
+            assert!(!call.body.to_string().contains("ui_language"));
+        }
+        server.abort();
+    }
 }

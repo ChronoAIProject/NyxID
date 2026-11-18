@@ -67,6 +67,7 @@ pub struct McpSessionSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpSessionAccess {
     pub user_id: String,
+    pub created_at: DateTime<Utc>,
     pub proxy_authorized: bool,
     pub session_fallback_allowed: bool,
     pub parent_session_id: Option<String>,
@@ -440,6 +441,7 @@ impl McpSessionStore {
             .await?
             .map(|record| McpSessionAccess {
                 user_id: record.user_id,
+                created_at: record.created_at,
                 proxy_authorized: record.proxy_authorized,
                 session_fallback_allowed: record.session_fallback_allowed,
                 parent_session_id: record.parent_session_id.clone(),

@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import {
   decimalCredits,
   exactCredits,
@@ -20,21 +22,21 @@ export const periods: Record<BillingUsagePeriod, string> = {
   all: "All time",
 };
 export const number = (value: number) =>
-  new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(value);
+  new Intl.NumberFormat(getFormattingLocale(), { maximumFractionDigits: 6 }).format(value);
 export const credits = (value: string | number | null | undefined) => {
   const exact =
     typeof value === "string" ? value : exactCredits(undefined, value);
-  return exact === null ? "Unavailable" : formatExactCredits(exact);
+  return exact === null ? translateUi("Unavailable") : formatExactCredits(exact);
 };
 export const compact = (value: number) =>
-  new Intl.NumberFormat(undefined, {
+  new Intl.NumberFormat(getFormattingLocale(), {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(value);
-export const timestamp = (value: string) => new Date(value).toLocaleString();
+export const timestamp = (value: string) => new Date(value).toLocaleString(getFormattingLocale());
 export const serviceName = (catalog: BillingCatalog, slug?: string | null) =>
   catalog.find((entry) => entry.slug === slug)?.name ??
-  (slug ? slug.replace(/[-_]+/g, " ") : "Unavailable service");
+  (slug ? slug.replace(/[-_]+/g, " ") : translateUi("Unavailable service"));
 export const serviceCategory = (catalog: BillingCatalog, slug: string) => {
   const entry = catalog.find((service) => service.slug === slug);
   return entry
@@ -122,9 +124,9 @@ const SOON_DAYS = 14;
 
 /** e.g. "Oct 31 · in 5 days"; the year only when it is not this year. */
 export function expiryLabel(expiresAt: string | null | undefined, now: number) {
-  if (!expiresAt) return "No expiry";
+  if (!expiresAt) return translateUi("No expiry");
   const date = new Date(expiresAt);
-  const text = date.toLocaleDateString(undefined, {
+  const text = date.toLocaleDateString(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     ...(date.getFullYear() !== new Date(now).getFullYear()
@@ -135,8 +137,8 @@ export function expiryLabel(expiresAt: string | null | undefined, now: number) {
   if (days > SOON_DAYS) return text;
   const relative =
     days <= 0
-      ? "today"
-      : new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(
+      ? translateUi("today")
+      : new Intl.RelativeTimeFormat(getFormattingLocale(), { numeric: "auto" }).format(
           days,
           "day",
         );

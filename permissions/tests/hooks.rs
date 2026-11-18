@@ -559,3 +559,52 @@ fn bad_hook_configuration_is_rejected_at_startup() {
         );
     }
 }
+
+#[tokio::test]
+async fn verified_primary_refusal_is_not_uncertain_but_a_sent_write_is() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Host {
+        drive: MockDrive,
+        sent: AtomicUsize,
+        verification: AtomicUsize,
+        dispatch: bool,
+    }
+    #[async_trait]
+    impl Transport for Host {
+        async fn send(&self, request: &Request) -> Result<Response, Error> {
+            self.verification.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.method, Method::GET);
+            self.drive.send(request).await
+        }
+        async fn send_verified(
+            &self,
+            verified: nyxid_permissions::VerifiedPlan<'_>,
+            mark: nyxid_permissions::DispatchMark,
+        ) -> Result<Response, Error> {
+            assert_eq!(verified.plan().request.method, Method::PATCH);
+            if !self.dispatch {
+                return Err(Error::Denied("human review required"));
+            }
+            mark.dispatched();
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Upstream)
+        }
+    }
+    for dispatch in [false, true] {
+        let host = Arc::new(Host {
+            drive: MockDrive::default(),
+            sent: AtomicUsize::new(0),
+            verification: AtomicUsize::new(0),
+            dispatch,
+        });
+        let engine = Engine::new(example_policy(), Arc::new(DriveAdapter), host.clone()).unwrap();
+        let result = engine.execute(rename("Reviewed")).await;
+        if dispatch {
+            assert!(matches!(result, Err(Error::OutcomeUncertain)), "{result:?}");
+        } else {
+            assert!(matches!(result, Err(Error::Denied(_))), "{result:?}");
+        }
+        assert_eq!(host.sent.load(Ordering::SeqCst), usize::from(dispatch));
+        assert!(host.verification.load(Ordering::SeqCst) > 0);
+    }
+}

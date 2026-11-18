@@ -43,6 +43,7 @@ static PUBLIC_SENDS: Semaphore = Semaphore::const_new(4);
 
 #[cfg(test)]
 tokio::task_local! {
+    pub(crate) static TEST_BEFORE_NOTICE_SNAPSHOT: Arc<tokio::sync::Barrier>;
     static TEST_CONTROL_CAPACITY: Arc<Semaphore>;
 }
 
@@ -366,6 +367,35 @@ fn append_card_notices(
     Ok(render_saved_text(&rendered))
 }
 
+async fn pin_notice_card_ids(
+    db: &Database,
+    delivery_id: &str,
+    ids: &[&str],
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<()> {
+    // Concurrent renderers may pin the same ordered snapshot. Expression
+    // equality compares the whole array, rather than matching nested elements.
+    let deliveries = db.collection::<bson::Document>(COLLECTION_NAME);
+    let update = deliveries.update_one(
+        doc! {
+            "_id": delivery_id,
+            "$or": [
+                {"notice_card_ids": {"$exists": false}},
+                {"$expr": {"$eq": ["$notice_card_ids", {"$literal": ids}]}},
+            ],
+        },
+        doc! {"$set": {"notice_card_ids": ids}},
+    );
+    let changed = match session {
+        Some(tx) => update.session(tx).await?,
+        None => update.await?,
+    };
+    if changed.matched_count != 1 {
+        return Err(AppError::Conflict("Reply notice snapshot changed".into()));
+    }
+    Ok(())
+}
+
 pub(crate) async fn render_personal(
     state: &AppState,
     message: &AssistantMessage,
@@ -378,73 +408,92 @@ pub(crate) async fn render_personal(
     // decided/expired card must not change the plan after an accepted prefix.
     let deliveries = state.db.collection::<bson::Document>(COLLECTION_NAME);
     let saved_filter = doc! {"reference.reply_id": &message.id, "reference.kind": "reply"};
-    let snapshot = match session.as_deref_mut() {
-        Some(tx) => {
-            deliveries
-                .find_one(saved_filter.clone())
-                .session(tx)
-                .await?
-        }
-        None => deliveries.find_one(saved_filter.clone()).await?,
-    };
-    let ids = snapshot
-        .as_ref()
-        .and_then(|row| row.get_array("notice_card_ids").ok());
-    let mut filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
-    "kind":"action","status":"pending","decider":"user","authored_skill":bson::Bson::Null,
-    "expires_at":{"$gt":bson::DateTime::now()}};
-    if let Some(ids) = ids {
-        filter = doc! {"_id": {"$in": ids}, "user_id": &message.user_id,
-        "conversation_id": &message.conversation_id};
-    }
     let collection = state.db.collection::<AssistantAcknowledgement>(ACKS);
     let conversations = state.db.collection::<AssistantConversation>(CONVERSATIONS);
-    let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
-        match session.as_deref_mut() {
-            Some(session) => {
-                let mut cursor = collection
-                    .find(filter)
-                    .sort(doc! {"created_at":1,"_id":1})
-                    .limit(65)
-                    .session(&mut *session)
-                    .await?;
-                let cards = cursor.stream(&mut *session).try_collect().await?;
-                let thread = conversations
-                    .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
-                    .session(session)
-                    .await?;
-                (cards, thread)
-            }
-            None => (
-                collection
-                    .find(filter)
-                    .sort(doc! {"created_at":1,"_id":1})
-                    .limit(65)
+    // A concurrent render may pin a different plan first. Its pin is the plan,
+    // so a lost pin re-reads the snapshot once and renders the winner's plan.
+    let mut lost_pin = false;
+    let (cards, thread) = loop {
+        let snapshot = match session.as_deref_mut() {
+            Some(tx) => {
+                deliveries
+                    .find_one(saved_filter.clone())
+                    .session(tx)
                     .await?
-                    .try_collect()
-                    .await?,
-                conversations
-                    .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
-                    .await?,
-            ),
+            }
+            None => deliveries.find_one(saved_filter.clone()).await?,
         };
-    if ids.is_none()
-        && let Some(saved) = snapshot
-    {
-        let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
-        let update = deliveries.update_one(
-            doc! {"_id":saved.get_str("_id").map_err(|_| refused())?,
-            "notice_card_ids":{"$exists":false}},
-            doc! {"$set":{"notice_card_ids":ids}},
-        );
-        let changed = match session {
-            Some(tx) => update.session(tx).await?,
-            None => update.await?,
-        };
-        if changed.matched_count != 1 {
-            return Err(AppError::Conflict("Reply notice snapshot changed".into()));
+        let ids = snapshot
+            .as_ref()
+            .and_then(|row| row.get_array("notice_card_ids").ok());
+        let mut filter = doc! {"user_id":&message.user_id,"conversation_id":&message.conversation_id,
+        "kind":"action","status":"pending","decider":"user","authored_skill":bson::Bson::Null,
+        "expires_at":{"$gt":bson::DateTime::now()}};
+        if let Some(ids) = ids {
+            filter = doc! {"_id": {"$in": ids}, "user_id": &message.user_id,
+            "conversation_id": &message.conversation_id};
         }
-    }
+        let (cards, thread): (Vec<AssistantAcknowledgement>, Option<AssistantConversation>) =
+            match session.as_deref_mut() {
+                Some(session) => {
+                    let mut cursor = collection
+                        .find(filter)
+                        .sort(doc! {"created_at":1,"_id":1})
+                        .limit(65)
+                        .session(&mut *session)
+                        .await?;
+                    let cards = cursor.stream(&mut *session).try_collect().await?;
+                    let thread = conversations
+                        .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
+                        .session(session)
+                        .await?;
+                    (cards, thread)
+                }
+                None => (
+                    collection
+                        .find(filter)
+                        .sort(doc! {"created_at":1,"_id":1})
+                        .limit(65)
+                        .await?
+                        .try_collect()
+                        .await?,
+                    conversations
+                        .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
+                        .await?,
+                ),
+            };
+        if ids.is_none()
+            && let Some(saved) = snapshot
+        {
+            // Tests meet twice between reading and pinning, so they can act
+            // in between. Only the first attempt waits.
+            #[cfg(test)]
+            if session.is_none()
+                && !lost_pin
+                && let Ok(barrier) = TEST_BEFORE_NOTICE_SNAPSHOT.try_with(Arc::clone)
+            {
+                barrier.wait().await;
+                barrier.wait().await;
+            }
+            let ids: Vec<_> = cards.iter().map(|card| card.id.as_str()).collect();
+            match pin_notice_card_ids(
+                &state.db,
+                saved.get_str("_id").map_err(|_| refused())?,
+                &ids,
+                session.as_deref_mut(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::Conflict(_)) if !lost_pin => {
+                    lost_pin = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        break (cards, thread);
+    };
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
     append_card_notices(
@@ -1617,7 +1666,7 @@ async fn send_impl(
         stall_native_claim_for_test(native.is_some()).await;
         let result:AppResult<_>=async {
             let Some(observation)=validate_in_session(state,identity.as_ref(),public.as_deref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
-            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":&*claim,"multipart_version":1,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","$expr":{"$gt":["$expires_at","$$NOW"]}},vec![doc! {"$set":{"state":"dispatching","claim_id":&*claim,"multipart_version":1,"updated_at":"$$NOW"}}]).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
             capture_material_in_session(state,session,row,claim,&observation,*native).await
         }.await;
         tx::transaction_result(result)
@@ -1663,16 +1712,22 @@ async fn send_impl(
             return Err(error);
         }
     };
-    send_claimed(
-        state,
-        &row,
-        &claim_id,
-        body,
-        credential,
-        native.as_ref(),
-        api,
-        identity,
-        public,
+    super::channel_text_preparation::with_parent(
+        super::channel_text_preparation::Parent::Manager {
+            id: row.id.clone(),
+            claim: claim_id.clone(),
+        },
+        send_claimed(
+            state,
+            &row,
+            &claim_id,
+            body,
+            credential,
+            native.as_ref(),
+            api,
+            identity,
+            public,
+        ),
     )
     .await
 }
@@ -1693,6 +1748,16 @@ async fn send_claimed(
     identity: Arc<dyn ManagerIdentityProducer>,
     public: Option<Arc<dyn PublicTurnProducer>>,
 ) -> AppResult<DeliveryOutcome> {
+    let turn = match &row.reference {
+        DeliveryReference::Reply { turn_id, .. }
+        | DeliveryReference::PublicReply { turn_id, .. } => Some(turn_id.as_str()),
+        _ => row.origin_turn_id.as_deref(),
+    };
+    let mut operation = crate::turn_trace::Operation::start(
+        turn.and_then(crate::turn_trace::TurnContext::for_turn),
+        crate::turn_trace::Stage::Channel,
+    );
+    let result: AppResult<DeliveryOutcome> = crate::turn_trace::scope(operation.context(), async {
     use super::channel_text_delivery as journal;
     use crate::models::channel_text_delivery::TextPartState;
     if !matches!(
@@ -1763,8 +1828,8 @@ async fn send_claimed(
             row,
             claim_id,
             body.as_str(),
-            identity.as_ref(),
-            public.as_deref(),
+            identity.clone(),
+            public.clone(),
             token,
             api,
         )
@@ -1780,14 +1845,18 @@ async fn send_claimed(
             Err(error) => return Err(error),
         }
     }
-    let parts = super::channel_reply_plan::assistant_parts(&rendered, chat.platform(), &url);
-    let plan = journal::begin(
+    let (plan, parts) = journal::assistant_plan(
         &state.db,
         &multipart_key(row),
         owner,
         source,
-        &super::channel_reply_plan::fingerprint(&parts),
-        parts.len(),
+        chat.platform(),
+        None,
+        |version, _| {
+            let parts = super::channel_reply_plan::recorded_assistant_parts(&rendered, chat.platform(), &url, version)?;
+            let fingerprint = super::channel_reply_plan::fingerprint(&parts);
+            Ok((parts, fingerprint))
+        },
     )
     .await?;
     let mut telegram_ids = Vec::new();
@@ -1811,7 +1880,7 @@ async fn send_claimed(
             finish(state, row, claim_id, "refused", telegram_ids, None).await?;
             return Ok(DeliveryOutcome::Refused(UnavailableReason::OriginRevoked));
         }
-        let attempt = match journal::claim(&state.db, &plan, index).await {
+        let attempt = match super::channel_text_preparation::claim(&state.db, &plan, index).await {
             Ok(journal::PartClaim::Sent(previous)) => {
                 if let Some(id) = previous.platform_message_id {
                     if credential.is_some() {
@@ -1823,22 +1892,34 @@ async fn send_claimed(
                 continue;
             }
             Ok(journal::PartClaim::Send(attempt)) => attempt,
+            Err(error) if error.retry_after_seconds().is_some() => {
+                let retry_at=Utc::now()+Duration::seconds(super::channel_text_preparation::RETRY_SECS as i64);
+                finish(state,row,claim_id,"pending",telegram_ids,Some(retry_at)).await?;
+                return Ok(DeliveryOutcome::Deferred {retry_at});
+            }
             Err(_) => {
                 finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
                 return Ok(DeliveryOutcome::Uncertain);
             }
         };
-        let result = if let Some(token) = &credential {
-            telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part).await
+        let mut part_trace = crate::turn_trace::Operation::part(crate::turn_trace::TurnContext::current(), index);
+        let result = super::channel_text_preparation::with_part(&state.db,&plan,index,&attempt,async {
+        let result=if let Some(token) = &credential {
+            let guard = telegram_effect_guard(state, row, claim_id, &body, &identity, public.as_ref());
+            super::telegram_formatting::scope(&state.db,
+                journal::formatting_receipt(&plan, index, &attempt), None,
+                super::channel_platform::with_post_effect_guard(guard,
+                    telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part))).await
         } else if let CapturedMaterial::Native(authority) = &material {
             use super::platform_native_reply_service::NativeSendOutcome;
-            match super::platform_native_reply_service::send_part(
+            let guard=telegram_effect_guard(state,row,claim_id,&body,&identity,public.as_ref());
+            match super::channel_platform::with_post_effect_guard(guard,super::platform_native_reply_service::send_part(
                 state,
                 authority,
                 Zeroizing::new(part.text.clone().unwrap_or_default()),
                 native.ok_or_else(refused)?.adapter.as_ref(),
                 part.metadata.as_ref(),
-            )
+            ))
             .await?
             {
                 NativeSendOutcome::Sent {
@@ -1850,6 +1931,13 @@ async fn send_claimed(
         } else {
             return Err(refused());
         };
+        Ok::<_,AppError>(result)
+        }).await?;
+        part_trace.finish(match &result {
+            PartResult::Sent(_) => crate::turn_trace::Outcome::Confirmed,
+            PartResult::Refused | PartResult::Retry(_) => crate::turn_trace::Outcome::Rejected,
+            PartResult::Uncertain => crate::turn_trace::Outcome::Unknown,
+        }, None, None);
         match result {
             PartResult::Sent(id) => {
                 journal::finish(
@@ -1869,7 +1957,7 @@ async fn send_claimed(
                 }
                 state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
                     doc! {"_id":&row.id,"state":"dispatching","claim_id":claim_id},
-                    doc! {"$set":{"telegram_message_ids":&telegram_ids,"platform_message_ids":&platform_ids,"updated_at":bson::DateTime::now()}}
+                    vec![doc! {"$set":{"telegram_message_ids":{"$literal":&telegram_ids},"platform_message_ids":{"$literal":&platform_ids},"updated_at":"$$NOW"}}]
                 ).await?;
             }
             PartResult::Retry(delay) => {
@@ -1912,6 +2000,11 @@ async fn send_claimed(
                 ));
             }
             PartResult::Uncertain => {
+                if super::channel_text_preparation::release(&state.db,&plan,index,&attempt).await? {
+                    let retry_at=Utc::now()+Duration::seconds(super::channel_text_preparation::RETRY_SECS as i64);
+                    finish(state,row,claim_id,"pending",telegram_ids,Some(retry_at)).await?;
+                    return Ok(DeliveryOutcome::Deferred {retry_at});
+                }
                 finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
                 return Ok(DeliveryOutcome::Uncertain);
             }
@@ -1927,44 +2020,65 @@ async fn send_claimed(
             platform_message_ids: platform_ids,
         }
     })
+
+    }).await;
+    operation.finish(
+        match &result {
+            Ok(DeliveryOutcome::Sent { .. } | DeliveryOutcome::NativeSent { .. }) => {
+                crate::turn_trace::Outcome::Confirmed
+            }
+            Ok(DeliveryOutcome::Refused(_)) => crate::turn_trace::Outcome::Rejected,
+            _ => crate::turn_trace::Outcome::Unknown,
+        },
+        None,
+        None,
+    );
+    result
 }
 
 async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<()> {
     loop {
         if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
-            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"expires_at":{"$gt":bson::DateTime::now()}},
-            doc! {"$set":{"updated_at":bson::DateTime::now()}},
+            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"$expr":{"$gt":["$expires_at","$$NOW"]}},
+            vec![doc! {"$set":{"updated_at":"$$NOW"}}],
         ).await?.matched_count != 1 {
             return Err(refused());
         }
-        let chat = super::coordination_service::RateWindowStore::admit(
-            &state.db,
-            "manager_part_chat",
-            &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
-            1,
-            std::time::Duration::from_secs(1),
-        )
-        .await?;
-        if chat.allowed {
-            let personal = matches!(row.reference, DeliveryReference::Reply { .. });
-            let lane = super::coordination_service::RateWindowStore::admit(
-                &state.db,
-                if personal {
-                    "manager_part_personal"
-                } else {
-                    "manager_part_public"
-                },
-                &manager_lane(row),
-                if personal { 24 } else { 4 },
-                std::time::Duration::from_secs(1),
-            )
-            .await?;
-            if lane.allowed {
-                return Ok(());
-            }
+        if part_rate_available(state, row).await? {
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+}
+
+async fn part_rate_available(state: &AppState, row: &Delivery) -> AppResult<bool> {
+    let chat = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "manager_part_chat",
+        &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
+        1,
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
+    if chat.allowed {
+        let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+        let lane = super::coordination_service::RateWindowStore::admit(
+            &state.db,
+            if personal {
+                "manager_part_personal"
+            } else {
+                "manager_part_public"
+            },
+            &manager_lane(row),
+            if personal { 24 } else { 4 },
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+        if lane.allowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn revalidate_part(
@@ -1996,8 +2110,8 @@ async fn revalidate_part(
                             .db
                             .collection::<Delivery>(COLLECTION_NAME)
                             .update_one(
-                                doc! {"_id":&row.id,"state":"dispatching","claim_id":*claim},
-                                doc! {"$set":{"updated_at":bson::DateTime::now()}},
+                                doc! {"_id":&row.id,"state":"dispatching","claim_id":*claim,"$expr":{"$gt":["$expires_at","$$NOW"]}},
+                                vec![doc! {"$set":{"updated_at":"$$NOW"}}],
                             )
                             .session(session)
                             .await?
@@ -2024,6 +2138,47 @@ enum PartResult {
     Uncertain,
 }
 
+/// Revalidate immediately before each HTTP effect, including the plain fallback.
+fn telegram_effect_guard(
+    state: &AppState,
+    row: &Delivery,
+    claim: &str,
+    body: &str,
+    identity: &Arc<dyn ManagerIdentityProducer>,
+    public: Option<&Arc<dyn PublicTurnProducer>>,
+) -> super::channel_platform::PostEffectGuard {
+    let state = state.clone();
+    let row = row.clone();
+    let claim = claim.to_owned();
+    let body = Arc::new(Zeroizing::new(body.to_owned()));
+    let identity = Arc::clone(identity);
+    let public = public.cloned();
+    Arc::new(move || {
+        let state = state.clone();
+        let row = row.clone();
+        let claim = claim.clone();
+        let body = Arc::clone(&body);
+        let identity = Arc::clone(&identity);
+        let public = public.clone();
+        Box::pin(async move {
+            if revalidate_part(
+                &state,
+                &row,
+                &claim,
+                body.as_str(),
+                identity.as_ref(),
+                public.as_deref(),
+            )
+            .await?
+            {
+                Ok(())
+            } else {
+                Err(refused())
+            }
+        })
+    })
+}
+
 async fn telegram_part(
     api: &super::telegram_new_api::TelegramApi<'_>,
     token: &str,
@@ -2033,59 +2188,26 @@ async fn telegram_part(
     let Ok(chat) = chat.parse::<i64>() else {
         return PartResult::Refused;
     };
-    let mut payload = serde_json::json!({"chat_id":chat,"text":part.text,"protect_content":true,"link_preview_options":{"is_disabled":true}});
+    // Keep the manager's numeric chat ID and authored privacy controls. The
+    // relay adapter's string IDs and Markdown default are a different contract.
+    let mut payload = serde_json::json!({"chat_id":chat,"text":part.text,
+        "protect_content":true,"link_preview_options":{"is_disabled":true}});
     if let Some(entities) = part.metadata.as_ref().and_then(|m| m.get("entities")) {
         payload["entities"] = entities.clone();
     }
-    let response = api
-        .http
-        .post(format!("{}/bot{token}/sendMessage", api.base_url))
-        .timeout(std::time::Duration::from_secs(20))
-        .json(&payload)
-        .send()
-        .await;
-    let envelope = match response {
-        Ok(mut response) => {
-            if !response.status().is_success() && !response.status().is_client_error() {
-                return PartResult::Uncertain;
-            }
-            let mut bytes = Zeroizing::new(Vec::new());
-            loop {
-                match response.chunk().await {
-                    Ok(Some(chunk)) if bytes.len() + chunk.len() <= 65536 => {
-                        bytes.extend_from_slice(&chunk)
-                    }
-                    Ok(None) => break,
-                    _ => return PartResult::Uncertain,
-                }
-            }
-            serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+    match super::channel_adapters::telegram::TelegramAdapter::for_api_base(api.base_url)
+        .send_text_body(api.http, token, payload)
+        .await
+    {
+        Ok(Some(id)) => PartResult::Sent(id),
+        Err(AppError::RateLimitedWithRetry { retry_after }) => {
+            PartResult::Retry(retry_after as i64)
         }
-        Err(_) => None,
-    };
-    if let Some(value) = envelope {
-        if value["ok"] == true
-            && let Some(id) = value["result"]["message_id"].as_i64().filter(|id| *id > 0)
-        {
-            return PartResult::Sent(id.to_string());
-        }
-        if value["ok"] == false {
-            if value["error_code"] == 429
-                && let Some(delay) = value["parameters"]["retry_after"]
-                    .as_i64()
-                    .filter(|n| *n > 0 && *n <= 86400)
-            {
-                return PartResult::Retry(delay);
-            }
-            if value["error_code"]
-                .as_i64()
-                .is_some_and(|code| (400..500).contains(&code))
-            {
-                return PartResult::Refused;
-            }
-        }
+        // The installed manager guard returns Conflict before provider I/O.
+        Err(AppError::Conflict(_)) => PartResult::Refused,
+        Err(error) if super::telegram_formatting::definite_refusal(&error) => PartResult::Refused,
+        _ => PartResult::Uncertain,
     }
-    PartResult::Uncertain
 }
 
 async fn send_single_claimed(
@@ -2283,9 +2405,12 @@ async fn finish_parent(
     let previous = doc! {"$ifNull":["$telegram_message_ids",[]]};
     let mut set = doc! {"state":status,"telegram_message_ids":{
         "$cond":[{"$gte":[{"$size":previous.clone()},ids.len() as i64]},previous,{"$literal":ids}]
-    },"updated_at":bson::DateTime::now()};
+    },"updated_at":"$$NOW"};
     if let Some(at) = retry {
-        set.insert("retry_at", bson::DateTime::from_chrono(at));
+        set.insert(
+            "retry_at",
+            doc! {"$add":["$$NOW",(at-Utc::now()).num_milliseconds().max(0)]},
+        );
     }
     let changed = db
         .collection::<Delivery>(COLLECTION_NAME)
@@ -2790,6 +2915,27 @@ fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
     }
 }
 
+pub(crate) async fn recover_attachment(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+) -> AppResult<()> {
+    media::recover(
+        state,
+        row,
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn recover_attachment_with_api(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<()> {
+    media::recover(state, row, api).await
+}
+
 pub async fn sweep(
     state: &AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
@@ -2804,20 +2950,22 @@ pub async fn sweep(
         });
     }
     let now = Utc::now();
-    let stale_before = bson::DateTime::from_chrono(now - Duration::minutes(2));
-    let due = bson::DateTime::from_chrono(now);
+    let stale = doc! {"$and":[{"$eq":[{"$type":"$updated_at"},"date"]},{"$lte":["$updated_at",{"$subtract":["$$NOW",super::channel_text_preparation::MANAGER_LEASE_SECS*1000]}]}]};
     let mut rows = state
         .db
         .collection::<Delivery>(COLLECTION_NAME)
         .find(doc! {"$or":[
-            {"state":"dispatching","updated_at":{"$lte":stale_before}},
-            {"state":"pending","retry_at":{"$lte":due}}
+            {"state":"dispatching","$expr":stale.clone()},
+            {"state":"pending","$expr":{"$lte":["$retry_at","$$NOW"]}}
         ]})
         .sort(doc! {"updated_at":1,"_id":1})
         .limit(i64::from(batch))
         .await?;
     let mut processed = 0;
     while let Some(row) = rows.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         // A process lost after claim may have sent. Never replay the attempt.
         if row.state == DeliveryState::Dispatching {
             let versioned = state.db.collection::<bson::Document>(COLLECTION_NAME)
@@ -2828,8 +2976,8 @@ pub async fn sweep(
                     .as_ref()
                     .is_none_or(super::channel_text_delivery::recoverable);
             state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
-                doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"updated_at":{"$lte":stale_before}},
-                doc! {"$set":{"state":if safe {"pending"} else {"uncertain"},"updated_at":due,"retry_at":due}},
+                doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"$expr":stale.clone()},
+                vec![doc! {"$set":{"state":if safe {"pending"} else {"uncertain"},"updated_at":"$$NOW","retry_at":"$$NOW"}}],
             ).await?;
         } else if row.expires_at <= now
             || matches!(
@@ -3114,6 +3262,69 @@ mod native_render_tests {
 }
 
 #[cfg(test)]
+mod notice_snapshot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn notice_snapshots_accept_only_identical_concurrent_initialization() {
+        let db = crate::test_utils::connect_transaction_test_database("notice_snapshot").await;
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        for ids in [vec![], vec!["card-a", "$card-b"]] {
+            let id = uuid::Uuid::new_v4().to_string();
+            rows.insert_one(doc! {"_id": &id}).await.unwrap();
+            let (first, second) = tokio::join!(
+                pin_notice_card_ids(&db, &id, &ids, None),
+                pin_notice_card_ids(&db, &id, &ids, None),
+            );
+            first.unwrap();
+            second.unwrap();
+            // A stale renderer with the same snapshot also succeeds inside a transaction.
+            let mut tx = db.client().start_session().await.unwrap();
+            tx.start_transaction().await.unwrap();
+            pin_notice_card_ids(&db, &id, &ids, Some(&mut tx))
+                .await
+                .unwrap();
+            tx.commit_transaction().await.unwrap();
+            for different in [vec!["replacement"], vec!["$card-b", "card-a"]] {
+                assert!(matches!(
+                    pin_notice_card_ids(&db, &id, &different, None).await,
+                    Err(AppError::Conflict(_))
+                ));
+            }
+            let stored = rows.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+            assert_eq!(
+                stored.get_array("notice_card_ids").unwrap(),
+                &ids.iter()
+                    .map(|id| bson::Bson::from(*id))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for malformed in [
+            bson::Bson::Null,
+            bson::Bson::from("card-a"),
+            bson::Bson::Int32(1),
+            bson::Bson::Array(vec![bson::Bson::Array(vec!["card-a".into()])]),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            rows.insert_one(doc! {"_id": &id, "notice_card_ids": &malformed})
+                .await
+                .unwrap();
+            assert!(matches!(
+                pin_notice_card_ids(&db, &id, &["card-a"], None).await,
+                Err(AppError::Conflict(_))
+            ));
+            let stored = rows.find_one(doc! {"_id": &id}).await.unwrap().unwrap();
+            assert_eq!(stored.get("notice_card_ids"), Some(&malformed));
+        }
+        assert!(matches!(
+            pin_notice_card_ids(&db, "missing-delivery", &[], None).await,
+            Err(AppError::Conflict(_))
+        ));
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
 mod future_size_tests {
     use super::*;
 
@@ -3227,6 +3438,319 @@ mod future_size_tests {
         let row = rows.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
         assert_eq!(row.get_array("telegram_message_ids").unwrap().len(), 4);
         assert_eq!(row.get_str("state").unwrap(), "sent");
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod telegram_formatting_tests {
+    use super::*;
+    use crate::services::{
+        channel_reply_plan, channel_text_delivery as journal, telegram_formatting,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    /// Frozen sendMessage JSON from b3367c63c: numeric chat IDs, no default
+    /// parse mode, and manager-authored privacy controls, regardless of metadata.
+    #[tokio::test]
+    async fn manager_legacy_and_planned_plain_sends_match_pre_pr_wire_json() {
+        for chat in ["700", "-100700", "+00700"] {
+            for planned in [false, true] {
+                let server = MockServer::start().await;
+                Mock::given(path("/botfixture/sendMessage"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(
+                            serde_json::json!({"ok":true,"result":{"message_id":42}}),
+                        ),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut part = if planned {
+                    channel_reply_plan::assistant_parts("plain reply", "telegram", "").remove(0)
+                } else {
+                    super::super::channel_platform::OutboundReply {
+                        text: Some("plain reply".into()),
+                        attachments: vec![],
+                        reply_to_platform_message_id: None,
+                        metadata: None,
+                    }
+                };
+                part.reply_to_platform_message_id = Some("42".into());
+                let metadata = part.metadata.get_or_insert_with(|| serde_json::json!({}));
+                for (key, value) in serde_json::json!({"message_thread_id":7,"reply_to_message_id":999,
+                    "reply_parameters":{"message_id":888},"parse_mode":"HTML","protect_content":false,
+                    "link_preview_options":{"is_disabled":false},"reply_markup":{"remove_keyboard":true}}).as_object().unwrap() {
+                    metadata[key] = value.clone();
+                }
+                let http = reqwest::Client::new();
+                let base = server.uri();
+                let api = super::super::telegram_new_api::TelegramApi {
+                    http: &http,
+                    base_url: &base,
+                };
+                assert!(matches!(
+                    telegram_part(&api, "fixture", chat, &part).await,
+                    PartResult::Sent(_)
+                ));
+                let mut before = serde_json::json!({"chat_id":chat.parse::<i64>().unwrap(),"text":"plain reply",
+                    "protect_content":true,"link_preview_options":{"is_disabled":true}});
+                if planned {
+                    before["entities"] = serde_json::json!([]);
+                }
+                assert_eq!(
+                    server.received_requests().await.unwrap()[0].body,
+                    serde_json::to_vec(&before).unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_authority_blocks_plain_fallback_after_confirmed_parse_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(path("/botfixture/sendMessage"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})))
+            .expect(1).mount(&server).await;
+        let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&checks);
+        let guard: super::super::channel_platform::PostEffectGuard = Arc::new(move || {
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(refused())
+                }
+            })
+        });
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let part = channel_reply_plan::assistant_parts("**bold**", "telegram", "").remove(0);
+        let outcome = super::super::channel_platform::with_post_effect_guard(
+            guard,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Refused));
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_part_claim_blocks_plain_fallback_before_second_effect() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("manager_stale_formatting").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        Mock::given(path("/botfixture/sendMessage"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})))
+            .expect(1).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts("**bold** `code`", "telegram", "").remove(0);
+        let row = journal::begin(
+            &db,
+            "manager",
+            "owner",
+            "turn",
+            &channel_reply_plan::fingerprint(std::slice::from_ref(&part)),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            journal::claim(&db, &row, 0).await.unwrap(),
+            journal::PartClaim::Send(_)
+        ));
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, "stale-attempt"),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Uncertain));
+        let saved = journal::load(&db, "manager").await.unwrap().unwrap();
+        assert!(saved.parts[0].formatting_fallback.is_none());
+        assert!(journal::claim(&db, &saved, 0).await.is_err());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_action_card_text_fallback_retains_receipt_and_claim() {
+        let db = crate::test_utils::connect_transaction_test_database("manager_formatting").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(path("/botfixture/sendMessage")).respond_with(move |_: &wiremock::Request| {
+            if sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"}))
+            }else{ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":19}}))}
+        }).expect(2).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts(
+            "**中文 🦉 မြန်မာ**\n\nReply yes 4821 to approve. `C:\\qa\\menu_01.txt`",
+            "telegram",
+            "",
+        )
+        .remove(0);
+        let row = journal::begin(
+            &db,
+            "manager",
+            "owner",
+            "turn",
+            &channel_reply_plan::fingerprint(std::slice::from_ref(&part)),
+            1,
+        )
+        .await
+        .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &row, 0).await.unwrap() else {
+            panic!("claim")
+        };
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, &attempt),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome,PartResult::Sent(ref id) if id=="19"));
+        journal::finish(
+            &db,
+            &row,
+            0,
+            &attempt,
+            crate::models::channel_text_delivery::TextPartState::Sent,
+            Some("19"),
+            None,
+        )
+        .await
+        .unwrap();
+        let saved = journal::load(&db, "manager").await.unwrap().unwrap();
+        assert_eq!(
+            saved.parts[0].formatting_fallback.as_deref(),
+            Some(telegram_formatting::FALLBACK)
+        );
+        assert!(matches!(
+            journal::claim(&db, &saved, 0).await.unwrap(),
+            journal::PartClaim::Sent(_)
+        ));
+        assert!(
+            journal::begin(&db, "manager", "owner", "turn", "changed-plan", 1)
+                .await
+                .is_err()
+        );
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["text"], bodies[1]["text"]);
+        assert!(bodies[1].get("entities").is_none());
+        assert_eq!(bodies[1]["protect_content"], true);
+        assert_eq!(bodies[0]["chat_id"], 123);
+        assert_eq!(
+            bodies[0]["link_preview_options"],
+            serde_json::json!({"is_disabled":true})
+        );
+        let mut expected_fallback = bodies[0].clone();
+        expected_fallback
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
+        assert_eq!(bodies[1], expected_fallback);
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod telegram_retry_formatting_tests {
+    use super::*;
+    use crate::services::{
+        channel_reply_plan, channel_text_delivery as journal, telegram_formatting,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn proven_rate_refusal_after_plain_fallback_resumes_plain_without_reformatting() {
+        let db = crate::test_utils::connect_transaction_test_database("manager_format_retry").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(path("/botfixture/sendMessage")).respond_with(move |_: &wiremock::Request| {
+            match sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst) {
+                0=>ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})),
+                1=>ResponseTemplate::new(429).set_body_json(serde_json::json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}})),
+                _=>ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":19}})),
+            }
+        }).expect(3).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts("**bold** `code`", "telegram", "").remove(0);
+        let hash = channel_reply_plan::fingerprint(std::slice::from_ref(&part));
+        let row = journal::begin(&db, "manager", "owner", "turn", &hash, 1)
+            .await
+            .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &row, 0).await.unwrap() else {
+            panic!("claim")
+        };
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, &attempt),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Retry(1)));
+        journal::finish(
+            &db,
+            &row,
+            0,
+            &attempt,
+            crate::models::channel_text_delivery::TextPartState::Pending,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let saved = journal::begin(&db, "manager", "owner", "turn", &hash, 1)
+            .await
+            .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &saved, 0).await.unwrap()
+        else {
+            panic!("retry claim")
+        };
+        assert!(matches!(
+            telegram_formatting::scope(
+                &db,
+                journal::formatting_receipt(&saved, 0, &attempt),
+                None,
+                telegram_part(&api, "fixture", "123", &part)
+            )
+            .await,
+            PartResult::Sent(_)
+        ));
+        let requests = server.received_requests().await.unwrap();
+        let last: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert!(last.get("entities").is_none() && last.get("parse_mode").is_none());
+        assert_eq!(last["text"], "bold code");
         db.drop().await.unwrap();
     }
 }

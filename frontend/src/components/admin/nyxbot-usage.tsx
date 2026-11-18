@@ -1,3 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { Label } from "@/components/ui/label";
+import { NyxbotRealWork } from "./nyxbot-real-work";
+import { Input as ThresholdInput } from "@/components/ui/input";
 import { NyxbotModelUsage } from "./nyxbot-model-usage";
 import { useId, useState } from "react";
 import {
@@ -13,6 +19,7 @@ import {
 } from "recharts";
 import { useAssistantAnalytics } from "@/hooks/use-assistant-analytics";
 import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
+import { ApiError } from "@/lib/api-client";
 import {
   nyxbotDailyData,
   nyxbotDateRange,
@@ -34,9 +41,9 @@ import { FilterCard } from "@/components/billing-analytics/filter-picker";
 import "@/components/billing-analytics/visualization.css";
 import "@/components/billing-analytics/operations.css";
 
-const number = (value: number) => value.toLocaleString();
+const number = (value: number) => value.toLocaleString(getFormattingLocale());
 const dayLabel = (day: string) =>
-  new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, {
+  new Date(`${day}T00:00:00Z`).toLocaleDateString(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -50,15 +57,16 @@ function Stat({
   value: string;
   detail: string;
 }) {
+  useUiTranslation();
   return (
     <Card className="min-w-0 px-4 py-4">
-      <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
+      <p className="type-group-label uppercase tracking-[1.5px] text-muted-foreground">
         {label}
       </p>
-      <p className="mt-3 font-display text-28 font-medium leading-none tracking-tight tabular-nums">
+      <p className="mt-3 font-display type-metric tracking-tight tabular-nums">
         {value}
       </p>
-      <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-12 text-muted-foreground">
         {detail}
       </p>
     </Card>
@@ -66,8 +74,9 @@ function Stat({
 }
 
 function Legend({ feedback = false }: { feedback?: boolean }) {
+  useUiTranslation();
   return (
-    <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 text-11 text-foreground">
+    <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 text-13 text-foreground">
       <span className="flex items-center gap-1.5">
         <span
           className="size-1.5 rounded-full"
@@ -77,7 +86,7 @@ function Legend({ feedback = false }: { feedback?: boolean }) {
               : "var(--analytics-series-1)",
           }}
         />
-        {feedback ? "Helpful" : "Active sessions"}
+        {feedback ? translateUi("Helpful") : translateUi("Active sessions")}
       </span>
       <span className="flex items-center gap-1.5">
         <span
@@ -88,31 +97,37 @@ function Legend({ feedback = false }: { feedback?: boolean }) {
               : "var(--analytics-series-2)",
           }}
         />
-        {feedback ? "Not helpful" : "Settled turns"}
+        {feedback ? translateUi("Not helpful") : translateUi("Settled turns")}
       </span>
     </div>
   );
 }
 
 export function NyxbotUsage() {
+  useUiTranslation();
+  const [threshold, setThreshold] = useState(3);
   const chartId = useId().replace(/:/g, "");
   const [dates, setDates] = useState(() => nyxbotDateRange(7));
   const window = nyxbotWindow(dates.from, dates.to);
   const from = window?.from ?? "";
   const to = window?.to ?? "";
-  const analytics = useAssistantAnalytics(from, to, Boolean(window));
+  const analytics = useAssistantAnalytics(from, to, Boolean(window), threshold);
   // Feedback uses an inclusive upper bound; analytics uses an exclusive one.
   const feedbackParams = new URLSearchParams(
     window ? { from, to: new Date(Date.parse(to) - 1).toISOString() } : {},
   );
   const feedback = useAssistantFeedbackAdmin(feedbackParams, Boolean(window));
   const data = analytics.data;
-  const votes = feedback.data?.counts.reduce(
+  const feedbackDenied =
+    feedback.error instanceof ApiError &&
+    [403, 404].includes(feedback.error.status);
+  const feedbackData = feedbackDenied ? undefined : feedback.data;
+  const votes = feedbackData?.counts.reduce(
     (total, row) => ({ up: total.up + row.up, down: total.down + row.down }),
     { up: 0, down: 0 },
   );
   const totalVotes = votes ? votes.up + votes.down : 0;
-  const daily = window ? nyxbotDailyData(from, to, data, feedback.data) : [];
+  const daily = window ? nyxbotDailyData(from, to, data, feedbackData) : [];
   const outcomes = data?.outcomes;
   const totalTurns = outcomes
     ? outcomes.completed + outcomes.failed + outcomes.stopped
@@ -120,71 +135,55 @@ export function NyxbotUsage() {
   return (
     <div className="analytics-visuals space-y-4">
       <div>
-        <h2 className="font-display text-15 font-semibold tracking-tight">
-          NyxBot usage & feedback
-        </h2>
-        <p className="mt-1 text-12 text-muted-foreground">
-          Understand how NyxBot and specialists are used, where work fails, and
-          what users say.
-        </p>
+        <h2 className="font-display type-card-title tracking-tight">{translateUi("NyxBot usage & feedback")}</h2>
+        <p className="mt-1 text-14 text-muted-foreground">{translateUi("Understand how NyxBot and specialists are used, where work fails, and what users say.")}</p>
       </div>
       <FilterCard
         pickers={
           <div
             className="flex flex-wrap items-end gap-2"
-            aria-label="NyxBot date range"
+            aria-label={translateUi("NyxBot date range")}
           >
             <Button
               variant="outline"
               onClick={() => setDates(nyxbotDateRange(7))}
-            >
-              Last 7 days
-            </Button>
+            >{translateUi("Last 7 days")}</Button>
             <Button
               variant="outline"
               onClick={() => setDates(nyxbotDateRange(30))}
-            >
-              Last 30 days
-            </Button>
-            <label className="space-y-1 text-11 text-muted-foreground">
-              From
-              <Input
+            >{translateUi("Last 30 days")}</Button>
+            <Label className="space-y-1 text-muted-foreground">{translateUi("From")}<Input
                 type="date"
                 value={dates.from}
                 onChange={(event) =>
                   setDates({ ...dates, from: event.target.value })
                 }
               />
-            </label>
-            <label className="space-y-1 text-11 text-muted-foreground">
-              To
-              <Input
+            </Label>
+            <Label className="space-y-1 text-muted-foreground">{translateUi("To")}<Input
                 type="date"
                 value={dates.to}
                 onChange={(event) =>
                   setDates({ ...dates, to: event.target.value })
                 }
               />
-            </label>
-            <span className="pb-2 text-11 text-text-tertiary">UTC</span>
+            </Label>
+            <span className="pb-2 text-13 text-text-tertiary">{translateUi("UTC")}</span>
           </div>
         }
         aside={
-          <span className="text-10 text-muted-foreground">Daily · UTC</span>
+          <span className="text-12 text-muted-foreground">{translateUi("Daily · UTC")}</span>
         }
       />
       {!window ? (
         <p
           role="alert"
-          className="rounded-lg border border-destructive/30 p-3 text-12 text-destructive"
-        >
-          Choose a start and end date covering at most 31 days.
-        </p>
+          className="rounded-lg border border-destructive/30 p-3 text-14 text-destructive"
+        >{translateUi("Choose a start and end date covering at most 31 days.")}</p>
       ) : (
         <>
-          <NyxbotModelUsage from={from} to={to} />
           <div
-            className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary"
+            className="flex flex-wrap items-center gap-2 text-13 text-text-tertiary"
             role="status"
           >
             <span
@@ -192,17 +191,17 @@ export function NyxbotUsage() {
               aria-hidden="true"
             />
             {analytics.isFetching
-              ? "Updating activity…"
+              ? translateUi("Updating activity…")
               : data
-                ? `Updated ${new Date(data.generated_at).toLocaleTimeString()} · live count refreshes every 30 seconds`
+                ? translateUi("Updated {{value1}} · live count refreshes every 30 seconds", { value1: new Date(data.generated_at).toLocaleTimeString(getFormattingLocale()) })
                 : analytics.isPending
-                  ? "Loading activity…"
-                  : "Activity unavailable"}
+                  ? translateUi("Loading activity…")
+                  : translateUi("Activity unavailable")}
           </div>
           {analytics.isError && (
             <div role="alert">
               <ErrorBanner
-                message="Unable to load NyxBot activity."
+                message={translateUi("Unable to load NyxBot activity.")}
                 onRetry={() => void analytics.refetch()}
               />
             </div>
@@ -210,14 +209,18 @@ export function NyxbotUsage() {
           {feedback.isError && (
             <div role="alert">
               <ErrorBanner
-                message="Unable to load feedback totals."
+                message={
+                  feedbackData
+                    ? translateUi("Showing previously loaded feedback totals. Refresh failed.")
+                    : translateUi("Unable to load feedback totals.")
+                }
                 onRetry={() => void feedback.refetch()}
               />
             </div>
           )}
           <div className="analytics-summary grid grid-cols-2 lg:grid-cols-4">
             <Stat
-              label="Active sessions"
+              label={translateUi("Active sessions")}
               value={data ? number(data.active_sessions) : "—"}
               detail={
                 data
@@ -226,12 +229,12 @@ export function NyxbotUsage() {
               }
             />
             <Stat
-              label="Running now"
+              label={translateUi("Running now")}
               value={data ? number(data.running_now) : "—"}
               detail="Live turns with a recent worker heartbeat"
             />
             <Stat
-              label="Feedback received"
+              label={translateUi("Feedback received")}
               value={votes ? number(totalVotes) : "—"}
               detail={
                 votes
@@ -240,7 +243,7 @@ export function NyxbotUsage() {
               }
             />
             <Stat
-              label="Helpful feedback"
+              label={translateUi("Helpful feedback")}
               value={
                 votes && totalVotes
                   ? `${Math.round((votes.up / totalVotes) * 100)}%`
@@ -255,25 +258,24 @@ export function NyxbotUsage() {
               }
             />
           </div>
+          <p className="type-secondary text-text-tertiary">{translateUi("Helpful rate reflects people who chose to leave feedback, not task success. Review a rating and preview its conversation to understand what worked or needs attention.")}</p>
+          <AssistantFeedbackPanel
+            key={`${from}:${to}`}
+            range={feedbackParams}
+          />
           <div className="grid min-w-0 gap-3 lg:grid-cols-2">
             <Card className="analytics-panel analytics-chart min-w-0 p-4">
-              <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
-                Session activity
-              </h3>
-              <p className="mb-4 mt-1 text-12 text-muted-foreground">
-                Daily conversations with user input and unique settled turns.
-              </p>
+              <h3 className="font-display type-card-title tracking-tight">{translateUi("Session activity")}</h3>
+              <p className="mb-4 mt-1 text-14 text-muted-foreground">{translateUi("Daily conversations with user input and unique settled turns.")}</p>
               <div
                 className="analytics-plot h-56"
-                aria-label="Daily session activity"
+                aria-label={translateUi("Daily session activity")}
               >
                 {!data ? (
                   analytics.isPending ? (
                     <Skeleton className="h-full" />
                   ) : (
-                    <p className="pt-16 text-center text-12 text-muted-foreground">
-                      Activity is unavailable.
-                    </p>
+                    <p className="pt-16 text-center text-14 text-muted-foreground">{translateUi("Activity is unavailable.")}</p>
                   )
                 ) : !data.active_sessions && !totalTurns ? (
                   <EmptyChart text="No session activity in this period." />
@@ -374,23 +376,17 @@ export function NyxbotUsage() {
               <Legend />
             </Card>
             <Card className="analytics-panel analytics-chart min-w-0 p-4">
-              <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
-                Feedback over time
-              </h3>
-              <p className="mb-4 mt-1 text-12 text-muted-foreground">
-                Helpful and not helpful votes, by submission day.
-              </p>
+              <h3 className="font-display type-card-title tracking-tight">{translateUi("Feedback over time")}</h3>
+              <p className="mb-4 mt-1 text-14 text-muted-foreground">{translateUi("Helpful and not helpful votes, by submission day.")}</p>
               <div
                 className="analytics-plot h-56"
-                aria-label="Daily reply feedback"
+                aria-label={translateUi("Daily reply feedback")}
               >
                 {!votes ? (
                   feedback.isPending ? (
                     <Skeleton className="h-full" />
                   ) : (
-                    <p className="pt-16 text-center text-12 text-muted-foreground">
-                      Feedback is unavailable.
-                    </p>
+                    <p className="pt-16 text-center text-14 text-muted-foreground">{translateUi("Feedback is unavailable.")}</p>
                   )
                 ) : !totalVotes ? (
                   <EmptyChart text="No feedback in this period." />
@@ -473,24 +469,17 @@ export function NyxbotUsage() {
             <Card className="p-4">
               <div className="flex flex-wrap justify-between gap-4">
                 <div>
-                  <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
-                    Turn outcomes
-                  </h3>
-                  <p className="mt-1 text-11 text-text-tertiary">
-                    {number(totalTurns)} settled turns · stopped turns are
-                    counted separately from failures.
-                  </p>
+                  <h3 className="font-display type-card-title tracking-tight">{translateUi("Turn outcomes")}</h3>
+                  <p className="mt-1 text-13 text-text-tertiary">
+                    {number(totalTurns)}{translateUi(" settled turns · stopped turns are counted separately from failures.")}</p>
                 </div>
-                <div className="text-12 text-muted-foreground">
+                <div className="text-14 text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {number(data.outcomes.with_tools)}
-                  </span>{" "}
-                  turns used tools <span className="mx-2">·</span>
+                  </span>{" "}{translateUi("turns used tools ")}<span className="mx-2">·</span>
                   <span className="font-medium text-foreground">
                     {number(data.outcomes.with_tool_errors)}
-                  </span>{" "}
-                  with recorded tool errors
-                </div>
+                  </span>{" "}{translateUi("with recorded tool errors")}</div>
               </div>
               {totalTurns > 0 && (
                 <div
@@ -517,21 +506,18 @@ export function NyxbotUsage() {
                   />
                 </div>
               )}
-              <div className="mt-3 flex flex-wrap gap-5 text-12">
-                <span>
-                  Completed{" "}
+              <div className="mt-3 flex flex-wrap gap-5 text-14">
+                <span>{translateUi("Completed")}{" "}
                   <strong className="ml-1 text-success">
                     {number(data.outcomes.completed)}
                   </strong>
                 </span>
-                <span>
-                  Failed{" "}
+                <span>{translateUi("Failed")}{" "}
                   <strong className="ml-1 text-destructive">
                     {number(data.outcomes.failed)}
                   </strong>
                 </span>
-                <span>
-                  Stopped{" "}
+                <span>{translateUi("Stopped")}{" "}
                   <strong className="ml-1 text-warning">
                     {number(data.outcomes.stopped)}
                   </strong>
@@ -540,15 +526,11 @@ export function NyxbotUsage() {
             </Card>
           )}
           {(data || votes) && (
-            <details className="text-11 text-muted-foreground">
-              <summary className="w-fit cursor-pointer">
-                View chart data
-              </summary>
+            <details className="text-13 text-muted-foreground">
+              <summary className="w-fit cursor-pointer">{translateUi("View chart data")}</summary>
               <div className="mt-3 overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-left text-12">
-                  <caption className="sr-only">
-                    Daily NyxBot activity and feedback in UTC
-                  </caption>
+                <table className="w-full text-left text-14">
+                  <caption className="sr-only">{translateUi("Daily NyxBot activity and feedback in UTC")}</caption>
                   <thead className="border-b border-border">
                     <tr>
                       {[
@@ -588,17 +570,34 @@ export function NyxbotUsage() {
               </div>
             </details>
           )}
-          <AssistantFeedbackPanel
-            key={`${from}:${to}`}
-            range={feedbackParams}
-          />
-          <p className="text-11 leading-relaxed text-text-tertiary">
-            Sessions are conversation threads with user input, including channel
-            input. Turn outcomes include specialist and automated work; mirrored
-            voice replies count once per turn. Feedback includes group replies.
-            These reports use retained records; edits and deletions can change
-            past totals. Tool indicators reflect recorded activities.
-          </p>
+          <div className="flex items-center gap-3 text-14">
+            <Label className="flex items-center gap-2">{translateUi("Weekly work threshold")}<ThresholdInput
+                aria-label={translateUi("Weekly work threshold")}
+                type="number"
+                min={1}
+                max={1000}
+                className="w-20"
+                value={threshold}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  if (Number.isInteger(value) && value >= 1 && value <= 1000)
+                    setThreshold(value);
+                }}
+              />
+            </Label>
+          </div>
+          {data?.real_work && <NyxbotRealWork data={data.real_work} />}
+          {data?.real_work_unavailable && (
+            <Card className="space-y-3 p-4">
+              <h3 className="font-display type-card-title">{translateUi("Weekly real work")}</h3>
+              <ErrorBanner
+                message={translateUi("Weekly real work is unavailable.")}
+                onRetry={() => void analytics.refetch()}
+              />
+            </Card>
+          )}
+          <NyxbotModelUsage from={from} to={to} />
+          <p className="type-secondary text-text-tertiary">{translateUi("Sessions are conversation threads with user input, including channel input. Turn outcomes include specialist and automated work; mirrored voice replies count once per turn. Feedback includes group replies. These reports use retained records; edits and deletions can change past totals. Tool indicators reflect recorded activities.")}</p>
         </>
       )}
     </div>
@@ -606,8 +605,9 @@ export function NyxbotUsage() {
 }
 
 function EmptyChart({ text }: { text: string }) {
+  useUiTranslation();
   return (
-    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border text-12 text-muted-foreground">
+    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border text-14 text-muted-foreground">
       {text}
     </div>
   );

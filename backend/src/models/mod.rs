@@ -8,15 +8,22 @@ pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_resource;
+pub mod assistant_sharing;
+pub mod assistant_voice_announcement;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;
 pub mod authorization_code;
 pub mod billing_ledger;
+pub mod billing_plan_sync;
 pub mod billing_rate_cache;
+pub mod billing_rate_epoch;
 pub mod billing_target;
+pub mod billing_tax_plan_epoch;
 pub mod billing_tax_profile;
 pub mod billing_topup_session;
+pub mod billing_usage_comparison;
+pub mod billing_usage_delivery;
 pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
@@ -33,11 +40,13 @@ pub mod channel_send_claim;
 pub mod channel_text_delivery;
 pub mod channel_thread;
 pub mod channel_thread_follow;
+pub mod channel_whatsapp_native;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
 #[allow(dead_code)]
 pub mod coordination;
+pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
@@ -48,12 +57,17 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod execution_enrollment_job;
+pub mod execution_enrollment_repair;
+pub mod execution_permission;
+pub mod execution_proposal;
 pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
 pub(crate) mod hmac_keyset;
 pub mod invite_code;
+pub mod invocation_diagnostic;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
@@ -63,6 +77,7 @@ pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;
+pub mod node_credential_desired;
 pub mod node_pending_credential;
 pub mod node_registration_token;
 pub mod node_service_binding;
@@ -100,9 +115,12 @@ pub mod platform_settings;
 pub mod platform_setup;
 pub mod provider_config;
 pub mod pushed_authorization_request;
+pub mod realtime_session;
 pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;
+pub mod security_capability_activation;
+pub mod security_effect_intent;
 pub mod security_replica;
 pub mod service_account;
 pub mod service_account_key_read_grant;
@@ -123,6 +141,7 @@ pub mod trigger;
 pub mod trigger_delivery;
 pub mod usage_allowance;
 pub mod usage_allowance_period;
+pub mod usage_checkpoint;
 pub mod usage_meter;
 pub mod user;
 pub mod user_api_key;
@@ -140,17 +159,28 @@ pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
+pub mod assistant_cma_agent;
+pub mod assistant_cma_sandbox;
 pub mod assistant_conversation;
+pub mod assistant_direct_handoff;
 pub mod assistant_group;
+pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
+pub mod assistant_notification;
+pub mod assistant_onboarding;
+pub mod assistant_platform_model;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;
+pub mod assistant_wake;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
+pub mod image_preparation;
 pub mod nyxbot_channel;
+pub mod nyxbot_event_binding;
+pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
@@ -198,6 +228,9 @@ pub mod async_service_operation;
 pub mod catalog_icon;
 
 pub mod machine_runtime_billing;
+pub mod sandbox_billing;
+pub mod sandbox_billing_settings;
+pub mod sandbox_rate_card;
 
 pub mod machine_oauth_consent_request;
 
@@ -229,3 +262,30 @@ pub mod credit_service_limit;
 pub mod oauth_delegation_authority;
 
 pub mod platform_help;
+
+pub mod nyxbot_gateway_release;
+
+pub mod discord_gateway;
+
+pub mod assistant_delegated_image;
+
+pub mod assistant_cma_creation;
+pub mod cma_session_origin;
+pub mod org_channel;
+pub mod voice_responses;
+
+pub mod generated_artifact;
+
+pub mod platform_model;
+
+pub mod platform_model_tariff;
+
+pub mod execution_permission_channel;
+
+pub mod assistant_tool_result;
+
+pub mod channel_turn_preparation;
+
+pub mod gateway_reply;
+
+pub mod nyxbot_response_read;

@@ -74,7 +74,7 @@ pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     .await
     .unwrap();
     if curated {
-        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id))
+        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id), None)
             .await
             .unwrap();
     }
@@ -218,7 +218,6 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         "/api/v1/providers".into(),
         "/api/v1/connections".into(),
         "/api/v1/nodes".into(),
-        "/api/v1/oracle/pools".into(),
         "/api/v1/triggers".into(),
         "/api/v1/services".into(),
         "/api/v1/catalog".into(),
@@ -233,6 +232,10 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
     }
+    // The built-in oracle is retired, so its confinement is the permanent 410
+    // every caller gets there, not a scope refusal.
+    let (status, body) = request(&f.state, "GET", "/api/v1/oracle/pools", &bearer, None).await;
+    assert_eq!(status, StatusCode::GONE, "/api/v1/oracle/pools: {body}");
     for (method, path) in [
         ("POST", "/api/v1/assistant/nyxagent/turns".to_string()),
         (
@@ -627,7 +630,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             false,
-            None
+            None,
+            None,
         )
         .await
         .is_err()
@@ -652,7 +656,7 @@ async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_f
     );
     let rotate = async {
         before.wait().await;
-        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         resume.wait().await;
@@ -1171,9 +1175,15 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         StatusCode::FORBIDDEN
     );
     assert!(
-        grants::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .is_err()
+        grants::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None
+        )
+        .await
+        .is_err()
     );
     f.state.db.collection::<Document>(SERVICES).update_one(doc! {"_id": &f.service.id}, doc! {"$set": {"proxy_operation_policy": bson::to_bson(&f.service.proxy_operation_policy).unwrap()}}).await.unwrap();
     // A missing SA credential must not fall back to either owner or master.
@@ -1345,7 +1355,7 @@ async fn curation_introspection_requires_current_persisted_token() {
         false
     );
     let fresh = token(&f, None).await;
-    accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+    accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
         .await
         .unwrap();
     assert_eq!(
@@ -1879,7 +1889,8 @@ async fn curation_router_rejects_other_credential_classes_and_live_grant_changes
         .insert_one(crate::models::session::Session {
             purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             mfa_method: None,
-            mfa_assured: false,
+            mfa_assured: Some(false),
+            mfa_exemption: None,
             id: Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             token_hash: hash_token(&session_token),

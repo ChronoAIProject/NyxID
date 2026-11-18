@@ -10,10 +10,11 @@ export function usePanelVisibility() {
     const element = ref.current;
     if (!element || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
-      ([entry]) => {
-        const next = entry?.isIntersecting ?? false;
+      (entries) => {
+        // Font/layout changes can queue several records before delivery.
+        const next = entries.at(-1)?.isIntersecting ?? false;
         setVisible(next);
-        if (next) setHasEntered(true);
+        if (entries.some((entry) => entry.isIntersecting)) setHasEntered(true);
       },
       { rootMargin: "240px" },
     );

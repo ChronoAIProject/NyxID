@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 pub struct Plan {
     pub id: String,
     pub org_labels: Vec<String>,
+    pub unresolved_org_connections: Vec<String>,
+    pub legacy_org_policy: bool,
+    instruction_version: i32,
     bindings: Vec<Document>,
     command: String,
 }
@@ -64,13 +67,52 @@ impl Plan {
         let updated = db.collection::<Document>("machine_jobs").update_one(doc! {"_id": &job.id,
             "api_key_id": &job.api_key_id, "state":"running", "expires_at":{"$gt":bson::DateTime::now()}},
             doc! {"$set":{"service_use": {"job_id": &self.id, "command_admission": &self.command,
-                "bindings": &self.bindings, "api_key_id": &job.api_key_id}}}).await?;
+                "bindings": &self.bindings, "api_key_id": &job.api_key_id, "instruction_receipt_version": self.instruction_version}}}).await?;
         if updated.matched_count != 1 {
             return Err(AppError::MachineAuthorityStale);
         }
         Ok(())
     }
-    pub async fn bind_card(&self, db: &mongodb::Database, refusal: &Value) -> AppResult<()> {
+    pub async fn bind_card(
+        &self,
+        db: &mongodb::Database,
+        chat: &acks::ChatAuthority,
+        mut refusal: Value,
+    ) -> AppResult<Value> {
+        let mut connections = Vec::new();
+        for id in &self.unresolved_org_connections {
+            let service = super::user_service_service::find_user_service_by_id(db, id)
+                .await?
+                .ok_or(AppError::MachineAuthorityStale)?;
+            let facts =
+                super::assistant_connection_service::facts(db, &chat.user_id, &service).await?;
+            let offer =
+                super::assistant_connection_service::connect_own(db, &chat.user_id, &service)
+                    .await?;
+            connections.push(json!({"connection_id":service.id,"connection_slug":service.slug,
+                "organization_name":facts["organization_name"],"catalog_service_id":facts["catalog_service_id"],
+                "service_slug":facts["catalog_service_slug"],"connection":facts,"connect_own":offer}));
+        }
+        if !connections.is_empty() {
+            // One combined card authorizes the command. Every unresolved identity
+            // retains its own setup guidance, with one supported hosted action.
+            let primary = connections
+                .iter()
+                .find(|row| row["connect_own"]["supported"] == true)
+                .unwrap_or(&connections[0]);
+            for field in [
+                "connection_id",
+                "connection_slug",
+                "organization_name",
+                "catalog_service_id",
+                "service_slug",
+                "connection",
+                "connect_own",
+            ] {
+                refusal[field] = primary[field].clone();
+            }
+            refusal["organization_connections"] = json!(connections);
+        }
         if let Some(id) = refusal["acknowledgement_id"].as_str() {
             db.collection::<Document>(execution::COLLECTION)
                 .update_one(
@@ -78,8 +120,17 @@ impl Plan {
                     doc! {"$set":{"acknowledgement_id":id}},
                 )
                 .await?;
+            if let Some(offer) = refusal.get("connect_own") {
+                db.collection::<Document>("assistant_acknowledgements")
+                    .update_one(
+                        doc! {"_id":id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
+                            "api_key_id":&chat.api_key_id,"confirmation.reason":"org_connection"},
+                        doc! {"$set":{"connect_own":bson::to_bson(offer).map_err(|_| AppError::Internal("Connection offer failed".into()))?}},
+                    )
+                    .await?;
+            }
         }
-        Ok(())
+        Ok(refusal)
     }
 }
 
@@ -160,11 +211,19 @@ pub async fn prepare(
     connections.dedup();
     let mut bindings = Vec::new();
     let mut labels = Vec::new();
+    let mut unresolved_org_connections = Vec::new();
+    let mut legacy_org_policy = false;
+    let instruction_version = if execution::instruction::active(&state.db, &chat.user_id).await? {
+        1
+    } else {
+        0
+    };
     let job_id = id.clone();
     for (id, pool) in connections {
         let row = super::user_service_service::find_user_service_by_id(&state.db, &id)
             .await?
             .ok_or_else(|| AppError::NotFound("Declared connection unavailable".into()))?;
+        let instruction_covered = execution::instruction::covered(&state.db, chat, &row).await?;
         let binding = execution::connection_binding(&state.db, &id, &chat.api_key_id).await?;
         let snapshot = doc! {"connection_id":&id,"owner":&row.user_id,"binding":&binding};
         if continued {
@@ -207,6 +266,7 @@ pub async fn prepare(
                 .await?
                 .ok_or(AppError::MachineAuthorityStale)?;
             if owner.user_type == crate::models::user::UserType::Org {
+                legacy_org_policy |= !instruction_covered;
                 labels.push(format!(
                     "organization connection {} ({}) in {}",
                     super::assistant_nyxagent::identifier(&row.slug),
@@ -220,6 +280,11 @@ pub async fn prepare(
                 ));
             }
         }
+        if instruction_covered
+            && !execution::instruction::owner_instruction(&state.db, chat, &row).await?
+        {
+            unresolved_org_connections.push(id.clone());
+        }
         bindings.push(snapshot);
     }
     if existing.is_none() {
@@ -231,6 +296,9 @@ pub async fn prepare(
     Ok(Ok(Plan {
         id,
         org_labels: labels,
+        unresolved_org_connections,
+        legacy_org_policy,
+        instruction_version,
         bindings,
         command,
     }))
@@ -273,6 +341,14 @@ pub fn validate<'a>(
             .await?
             .ok_or(AppError::MachineAuthorityStale)?;
         if let Ok(grant) = row.get_document("service_use") {
+            if let Some(chat) = auth.assistant_chat.as_deref()
+                && let Some(service) =
+                    super::user_service_service::find_user_service_by_id(db, connection).await?
+                && execution::instruction::covered(db, chat, &service).await?
+                && grant.get_i32("instruction_receipt_version") != Ok(1)
+            {
+                return Err(AppError::Forbidden("This organization job has no owner instruction receipt. Ask the owner to review a new bounded command card.".into()));
+            }
             let binding = execution::connection_binding(db, connection, &job.api_key_id).await?;
             if grant.get_str("job_id") != Ok(job_id)
                 || grant.get_str("api_key_id") != Ok(job.api_key_id.as_str())

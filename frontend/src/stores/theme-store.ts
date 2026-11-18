@@ -34,8 +34,10 @@ export const DISPLAY_SCALE_MIN = 0.5;
 export const DISPLAY_SCALE_MAX = 2;
 export const DISPLAY_SCALE_STEP = 0.01;
 export const DISPLAY_SCALE_DEFAULT = 1;
+/** New 1× uses the former 0.85× reading size on every themed surface. */
+export const DISPLAY_TEXT_BASE = 0.85;
 
-function validDisplayScale(value: unknown): number {
+function validDisplayScale(value: unknown, snap = true): number {
   if (
     typeof value !== "number" ||
     !Number.isFinite(value)
@@ -43,7 +45,7 @@ function validDisplayScale(value: unknown): number {
     return DISPLAY_SCALE_DEFAULT;
   }
   const bounded = Math.min(DISPLAY_SCALE_MAX, Math.max(DISPLAY_SCALE_MIN, value));
-  return Math.round(bounded / DISPLAY_SCALE_STEP) / (1 / DISPLAY_SCALE_STEP);
+  return snap ? Math.round(bounded / DISPLAY_SCALE_STEP) / (1 / DISPLAY_SCALE_STEP) : bounded;
 }
 
 /** `system` follows the OS reduced-motion setting; `reduce` always reduces. */
@@ -54,6 +56,20 @@ export type SidebarMode = "expanded" | "collapsed" | "hover";
 export type SidebarId = "dashboard" | "assistant";
 
 export const SIDEBAR_WIDTH = { min: 180, max: 360, default: 200 } as const;
+export const CHAT_CONTENT_WIDTH = { min: 520, max: 1600, default: 758 } as const;
+export const COMPOSER_MAX_HEIGHT = { min: 64, max: 1600, default: 92 } as const;
+
+export function clampChatContentWidth(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.min(CHAT_CONTENT_WIDTH.max, Math.max(CHAT_CONTENT_WIDTH.min, value)))
+    : CHAT_CONTENT_WIDTH.default;
+}
+
+export function clampComposerMaxHeight(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.min(COMPOSER_MAX_HEIGHT.max, Math.max(COMPOSER_MAX_HEIGHT.min, value)))
+    : COMPOSER_MAX_HEIGHT.default;
+}
 
 export function clampSidebarWidth(width: number): number {
   return Math.round(Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, width)));
@@ -116,6 +132,8 @@ interface ThemeState {
   readonly sidebarMode: SidebarMode;
   /** Expanded width in px of each desktop sidebar. */
   readonly sidebarWidths: Record<SidebarId, number>;
+  readonly chatContentWidth: number;
+  readonly composerMaxHeight: number;
   /** Live OS preference. Not persisted — re-derived each boot and on change. */
   readonly systemPrefersDark: boolean;
   /** Set an explicit mode (or `system`). */
@@ -132,6 +150,8 @@ interface ThemeState {
   readonly setSidebarMode: (mode: SidebarMode) => void;
   /** Clamped to `SIDEBAR_WIDTH`. */
   readonly setSidebarWidth: (sidebar: SidebarId, width: number) => void;
+  readonly setChatContentWidth: (width: number) => void;
+  readonly setComposerMaxHeight: (height: number) => void;
   /** Restore every display preference except the theme mode. */
   readonly resetDisplay: () => void;
 }
@@ -143,6 +163,8 @@ const DISPLAY_DEFAULTS = {
   customColors: EMPTY_CUSTOM_COLORS,
   sidebarMode: "expanded",
   sidebarWidths: { dashboard: SIDEBAR_WIDTH.default, assistant: SIDEBAR_WIDTH.default },
+  chatContentWidth: CHAT_CONTENT_WIDTH.default,
+  composerMaxHeight: COMPOSER_MAX_HEIGHT.default,
 } as const satisfies Partial<ThemeState>;
 
 export const useThemeStore = create<ThemeState>()(
@@ -160,6 +182,8 @@ export const useThemeStore = create<ThemeState>()(
       setSidebarMode: (sidebarMode) => set({ sidebarMode }),
       setSidebarWidth: (sidebar, width) =>
         set({ sidebarWidths: { ...get().sidebarWidths, [sidebar]: clampSidebarWidth(width) } }),
+      setChatContentWidth: (width) => set({ chatContentWidth: clampChatContentWidth(width) }),
+      setComposerMaxHeight: (height) => set({ composerMaxHeight: clampComposerMaxHeight(height) }),
       setCustomColor: (mode, key, color) => {
         if (!isHexColor(color)) return;
         const { customColors } = get();
@@ -185,7 +209,19 @@ export const useThemeStore = create<ThemeState>()(
     }),
     {
       name: "nyxid.theme",
-      version: 1,
+      version: 2,
+      migrate: (persisted) => {
+        const p = (persisted ?? {}) as Record<string, unknown>;
+        const old = p.textScale;
+        return {
+          ...p,
+          // Default users adopt the smaller baseline; custom choices retain
+          // their rendered size (within the slider bounds), without rounding.
+          textScale: typeof old === "number" && Number.isFinite(old) && old !== 1
+            ? validDisplayScale(old / DISPLAY_TEXT_BASE, false)
+            : DISPLAY_SCALE_DEFAULT,
+        };
+      },
       // Persist only the user's intent; the OS preference is environmental.
       partialize: (s) => ({
         mode: s.mode,
@@ -195,17 +231,21 @@ export const useThemeStore = create<ThemeState>()(
         customColors: s.customColors,
         sidebarMode: s.sidebarMode,
         sidebarWidths: s.sidebarWidths,
+        chatContentWidth: s.chatContentWidth,
+        composerMaxHeight: s.composerMaxHeight,
       }),
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Record<string, unknown>;
         return {
           ...current,
           mode: oneOf(THEME_MODES, p.mode, current.mode),
-          textScale: validDisplayScale(p.textScale),
+          textScale: validDisplayScale(p.textScale, false),
           density: validDisplayScale(p.density),
           motion: oneOf(MOTION_PREFERENCES, p.motion, current.motion),
           customColors: sanitizeCustomColors(p.customColors),
           sidebarMode: oneOf(SIDEBAR_MODES, p.sidebarMode, current.sidebarMode),
+          chatContentWidth: clampChatContentWidth(p.chatContentWidth),
+          composerMaxHeight: clampComposerMaxHeight(p.composerMaxHeight),
           sidebarWidths: {
             dashboard: validSidebarWidth((p.sidebarWidths as Record<string, unknown> | undefined)?.dashboard),
             assistant: validSidebarWidth((p.sidebarWidths as Record<string, unknown> | undefined)?.assistant),

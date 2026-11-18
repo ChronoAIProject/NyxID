@@ -1,4 +1,13 @@
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { describeChanges, changeList } from "@/lib/grouped-form-changes";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import { ArrowDown, ArrowUp, ChevronRight } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { useKeys } from "@/hooks/use-keys";
@@ -22,6 +31,7 @@ export function AgentConnections({
 }: {
   readonly agent: AssistantAgent;
 }) {
+  useUiTranslation();
   const keys = useKeys();
   const inventory = keys.data ?? [];
   const connections =
@@ -33,27 +43,40 @@ export function AgentConnections({
             agent.services.includes(key.slug),
         );
   return (
-    <section aria-label="Connections" className="space-y-3">
-      <div className="space-y-1">
-        <h3 className="text-13 font-semibold text-foreground">Connections</h3>
-        <p className="text-12 text-muted-foreground">
-          Accounts grouped by service, so you can see which source this agent
-          can use.
-        </p>
-      </div>
-      {keys.isPending && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Loading connections…
-        </p>
-      )}
-      {keys.isError && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not load connections.</p>
-          <Button type="button" onClick={() => void keys.refetch()}>
-            Retry connections
-          </Button>
-        </div>
-      )}
+    <section aria-label={translateUi("Connections")} className="space-y-3">
+      <GroupedList
+        title={translateUi("Connections")}
+        footer={
+          <>
+            <p>{translateUi("Accounts grouped by service, so you can see which source this agent can use. A connection chooses an account. Folder, database and other resource restrictions depend on the service’s operation limits.")}</p>
+            {keys.isError ? (
+              <p role="alert" className="text-destructive">{translateUi("Could not load connections.")}</p>
+            ) : null}
+          </>
+        }
+      >
+        <GroupedRow search={{ id: "manage-connections", title: "Manage connected accounts", breadcrumb: "Access › Connections" }} asChild interactive>
+          <Link to="/keys">
+            <span className="flex-1">{translateUi("Manage connected accounts")}</span>
+            <ChevronRight aria-hidden className="size-[1.125em]" />
+          </Link>
+        </GroupedRow>
+        {keys.isPending ? <GroupedRow title={translateUi("Loading connections…")} /> : null}
+        {keys.isError ? (
+          <GroupedRow asChild interactive>
+            <button type="button" onClick={() => void keys.refetch()}>{translateUi("Retry connections")}</button>
+          </GroupedRow>
+        ) : null}
+        {!keys.isPending && !keys.isError && !connections.length ? (
+          <GroupedRow
+            title={
+              agent.kind === "nyxbot"
+                ? translateUi("Connect a service to choose the accounts NyxBot uses.")
+                : translateUi("Grant services in Access to make their connections available here.")
+            }
+          />
+        ) : null}
+      </GroupedList>
       {agent.kind === "nyxbot" ? (
         <ConnectionPreferences
           inventory={inventory}
@@ -64,23 +87,6 @@ export function AgentConnections({
       ) : (
         <ConnectionGroups groups={groupServiceConnections(connections)} />
       )}
-      {!keys.isPending && !keys.isError && !connections.length && (
-        <p className="rounded-lg border border-dashed border-border p-3 text-12 text-muted-foreground">
-          {agent.kind === "nyxbot"
-            ? "Connect a service to choose the accounts NyxBot uses."
-            : "Grant services in Access to make their connections available here."}
-        </p>
-      )}
-      <p className="text-11 text-muted-foreground">
-        A connection chooses an account. Folder, database and other resource
-        restrictions depend on the service's operation limits.
-      </p>
-      <Link
-        to="/keys"
-        className="inline-block text-12 underline underline-offset-4"
-      >
-        Manage connected accounts
-      </Link>
     </section>
   );
 }
@@ -92,6 +98,7 @@ function ConnectionPreferences({
   readonly inventory: readonly KeyInfo[];
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const order = useServiceGroupOrder(inventory);
   const groups = groupServiceConnections(order.inventory).map((group) => {
     const saved = order.savedOrder(group.id);
@@ -107,23 +114,27 @@ function ConnectionPreferences({
   });
   return (
     <>
-      <p className="text-12 text-muted-foreground">
-        Your saved connection order applies across your agents. Eligible
-        personal accounts are used before organization accounts.
-      </p>
-      {order.readError && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not load saved connection order.</p>
-          <Button type="button" onClick={() => void order.retryRead()}>
-            Retry saved order
-          </Button>
-        </div>
-      )}
-      {order.unavailable && (
-        <p role="status" className="text-12 text-muted-foreground">
-          Saving connection order requires a server update.
-        </p>
-      )}
+      <GroupedList
+        title={translateUi("Connection order")}
+        footer={
+          <>
+            <p>{translateUi("Your saved connection order applies across your agents. Eligible personal accounts are used before organization accounts.")}</p>
+            {order.readError ? (
+              <p role="alert" className="text-destructive">{translateUi("Could not load saved connection order.")}</p>
+            ) : null}
+            {order.unavailable ? (
+              <p role="status">{translateUi("Saving connection order requires a server update.")}</p>
+            ) : null}
+          </>
+        }
+      >
+        <GroupedRow title={translateUi("Personal accounts first")} />
+        {order.readError ? (
+          <GroupedRow asChild interactive>
+            <button type="button" onClick={() => void order.retryRead()}>{translateUi("Retry saved order")}</button>
+          </GroupedRow>
+        ) : null}
+      </GroupedList>
       <ConnectionGroups groups={groups} order={order} disabled={disabled} />
     </>
   );
@@ -138,87 +149,76 @@ function ConnectionGroups({
   readonly order?: ServiceGroupOrder;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   return (
-    <div className="space-y-3">
+    <div className="space-y-6">
       {groups.map((group) => {
         const editing = order?.groupId === group.id;
         const rows = editing ? order.connections : group.connections;
         return (
-          <details
-            key={group.id}
-            className="rounded-lg border border-border p-3"
-            open={editing || undefined}
-          >
-            <summary className="cursor-pointer break-words text-12 font-medium">
-              {group.name}
-              <span className="ml-2 text-11 font-normal text-muted-foreground">
-                {group.connections.length}{" "}
-                {group.connections.length === 1 ? "account" : "accounts"}
-              </span>
-            </summary>
-            <div className="mt-3 space-y-3">
-              <ol
-                aria-label={`${group.name} connections`}
-                className="space-y-2"
-              >
+          <GroupedList key={group.id} title={group.name} info="Accounts connected to this service. Choose which account this agent should try first.">
+            <div className="space-y-0">
+              <ol aria-label={translateUi("{{value1}} connections", { value1: group.name })}>
                 {rows.map((key, index) => (
-                  <li key={key.id} className="flex items-center gap-2 text-12">
-                    <span className="min-w-0 flex-1 break-words">
-                      <span className="block font-medium">{key.label}</span>
-                      <span className="text-11 text-muted-foreground">
-                        {connectionOwnerLabel(key)} · {key.slug}
-                        {connectionAvailable(key) ? "" : " · Unavailable"}
+                  <GroupedRow search={{ id: `connection-${key.id}`, title: key.label, breadcrumb: `Access › Connections › ${group.name}`, keywords: `${key.slug} ${connectionOwnerLabel(key)} ${connectionAvailable(key) ? "Available" : "Unavailable"}` }} asChild key={key.id}>
+                    <li>
+                      <span className="min-w-0 flex-1 break-words">
+                        <span className="block font-medium">{key.label}</span>
+                        <span className="type-secondary text-text-tertiary">
+                          {connectionOwnerLabel(key)} · {key.slug}
+                          {connectionAvailable(key) ? "" : translateUi(" · Unavailable")}
+                        </span>
                       </span>
-                    </span>
-                    {editing && (
-                      <>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Move ${key.label} up`}
-                          disabled={
-                            disabled ||
-                            order.busy ||
-                            order.blocked ||
-                            index === 0
-                          }
-                          onClick={() => {
-                            const ids = rows.map((row) => row.id);
-                            [ids[index - 1], ids[index]] = [
-                              ids[index]!,
-                              ids[index - 1]!,
-                            ];
-                            order.update(ids);
-                          }}
-                        >
-                          <ArrowUp aria-hidden className="size-3.5" />
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Move ${key.label} down`}
-                          disabled={
-                            disabled ||
-                            order.busy ||
-                            order.blocked ||
-                            index === rows.length - 1
-                          }
-                          onClick={() => {
-                            const ids = rows.map((row) => row.id);
-                            [ids[index], ids[index + 1]] = [
-                              ids[index + 1]!,
-                              ids[index]!,
-                            ];
-                            order.update(ids);
-                          }}
-                        >
-                          <ArrowDown aria-hidden className="size-3.5" />
-                        </Button>
-                      </>
-                    )}
-                  </li>
+                      {editing && (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={translateUi("Move {{value1}} up", { value1: key.label })}
+                            disabled={
+                              disabled ||
+                              order.busy ||
+                              order.blocked ||
+                              index === 0
+                            }
+                            onClick={() => {
+                              const ids = rows.map((row) => row.id);
+                              [ids[index - 1], ids[index]] = [
+                                ids[index]!,
+                                ids[index - 1]!,
+                              ];
+                              order.update(ids);
+                            }}
+                          >
+                            <ArrowUp aria-hidden className="size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label={translateUi("Move {{value1}} down", { value1: key.label })}
+                            disabled={
+                              disabled ||
+                              order.busy ||
+                              order.blocked ||
+                              index === rows.length - 1
+                            }
+                            onClick={() => {
+                              const ids = rows.map((row) => row.id);
+                              [ids[index], ids[index + 1]] = [
+                                ids[index + 1]!,
+                                ids[index]!,
+                              ];
+                              order.update(ids);
+                            }}
+                          >
+                            <ArrowDown aria-hidden className="size-3.5" />
+                          </Button>
+                        </>
+                      )}
+                    </li>
+                  </GroupedRow>
                 ))}
               </ol>
               {order &&
@@ -227,20 +227,18 @@ function ConnectionGroups({
                 ) : (
                   group.id.startsWith("catalog:") &&
                   rows.length > 1 && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={disabled || Boolean(order.reason)}
-                      title={order.reason}
-                      onClick={() => order.start(group)}
-                    >
-                      Edit connection order
-                    </Button>
+                    <GroupedRow asChild interactive>
+                      <button
+                        type="button"
+                        disabled={disabled || Boolean(order.reason)}
+                        title={order.reason}
+                        onClick={() => order.start(group)}
+                      >{translateUi("Edit connection order")}</button>
+                    </GroupedRow>
                   )
                 ))}
             </div>
-          </details>
+          </GroupedList>
         );
       })}
     </div>
@@ -254,94 +252,89 @@ function ConnectionOrderForm({
   readonly order: ServiceGroupOrder;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   return (
-    <form onSubmit={order.save} className="space-y-3">
-      {order.message && (
-        <p role="status" className="text-12 text-muted-foreground">
-          {order.message}
-        </p>
-      )}
-      {order.validationError && (
-        <p role="alert" className="text-12 text-destructive">
-          {order.validationError}
-        </p>
-      )}
+    <form onSubmit={order.save} className="space-y-0">
+      <GroupedFooter>
+        {order.message && (
+          <p role="status" className="text-13 text-text-tertiary">
+            {order.message}
+          </p>
+        )}
+        {order.validationError && (
+          <p role="alert" className="text-13 text-destructive">
+            {order.validationError}
+          </p>
+        )}
+        {order.failure === "conflict" && (
+          <p role="alert">{translateUi("Connection order changed elsewhere. Reload it before saving.")}</p>
+        )}
+        {order.failure === "stale" && (
+          <p role="alert">{translateUi("Some connections are no longer available.")}</p>
+        )}
+        {order.failure === "network" && (
+          <p role="alert">{translateUi("Could not save connection order. Your edits are kept.")}</p>
+        )}
+        {order.failure === "capacity" && (
+          <p role="alert">
+            {order.capacityMessage || translateUi("Connection order storage is full.")}
+          </p>
+        )}
+      </GroupedFooter>
       {order.failure === "conflict" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Connection order changed elsewhere. Reload it before saving.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy}
             onClick={() => void order.recover(false)}
-          >
-            Reload order
-          </Button>
-        </div>
+          >{translateUi("Reload order")}</button>
+        </GroupedRow>
       )}
       {order.failure === "stale" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Some connections are no longer available.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy}
             onClick={() => void order.refreshStale()}
-          >
-            Refresh connections
-          </Button>
-        </div>
+          >{translateUi("Refresh connections")}</button>
+        </GroupedRow>
       )}
       {order.failure === "network" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>Could not save connection order. Your edits are kept.</p>
-          <Button
+        <GroupedRow asChild interactive>
+          <button
             type="button"
             disabled={order.busy || order.blocked}
             onClick={() => void order.retrySave()}
-          >
-            Retry save
-          </Button>
-        </div>
+          >{translateUi("Retry save")}</button>
+        </GroupedRow>
       )}
       {order.failure === "capacity" && (
-        <div role="alert" className="space-y-2 text-12">
-          <p>{order.capacityMessage || "Connection order storage is full."}</p>
-          <Link to="/keys" className="underline">
-            Manage saved orders
-          </Link>
-        </div>
+        <GroupedRow asChild interactive>
+          <Link to="/keys">{translateUi("Manage saved orders")}</Link>
+        </GroupedRow>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Button
+      {!order.dirty && (
+        <GroupedRow asChild interactive>
+          <button type="button" disabled={order.busy} onClick={order.cancel}>{translateUi("Done")}</button>
+        </GroupedRow>
+      )}
+      <GroupedRow asChild interactive>
+        <button
           type="button"
-          variant="outline"
-          disabled={order.busy}
-          onClick={order.cancel}
-        >
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
           disabled={disabled || order.busy || order.blocked}
           onClick={order.reset}
-        >
-          Use default order
-        </Button>
-        <Button
-          type="submit"
-          variant="primary"
-          isLoading={order.busy}
-          disabled={
-            disabled ||
-            order.busy ||
-            order.blocked ||
-            !order.dirty ||
-            Boolean(order.failure)
-          }
-        >
-          Save order
-        </Button>
-      </div>
+        >{translateUi("Use default order")}</button>
+      </GroupedRow>
+      <GroupedFormActions
+        changes={() => describeChanges({ order: order.groupId ? order.savedOrder(order.groupId) : [] }, { order: order.ordered }, [{ key: "order", label: "Account order", list: (value) => changeList(value).map((id) => { const key = order.inventory.find((key) => key.id === id); return key?.name || key?.label || "Unavailable account"; }) }])}
+        label={translateUi("connection order")}
+        dirty={order.dirty}
+        pending={order.busy}
+        disabled={disabled || order.blocked || Boolean(order.failure)}
+        saveLabel={translateUi("Save order")}
+        save={() => order.save()}
+        discard={order.cancel}
+      />
     </form>
   );
 }

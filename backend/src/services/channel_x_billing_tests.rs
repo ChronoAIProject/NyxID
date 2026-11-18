@@ -62,6 +62,7 @@ impl LagoApi for FakeLago {
         customer_id: &str,
         subscription_id: &str,
     ) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
@@ -118,6 +119,7 @@ pub(crate) async fn enable_billing_with_entitlement(
     service.slug = "api-twitter".into();
     service.billing = Some(ServiceBilling {
         byok_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "2".into(),
             lago_metric_code: "platform_svc_api-twitter_byok".into(),
@@ -128,6 +130,7 @@ pub(crate) async fn enable_billing_with_entitlement(
         }),
         // A very different master-key price proves shared OAuth picks its own lane.
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "99".into(),
             lago_metric_code: "platform_svc_api-twitter_pk".into(),
@@ -549,6 +552,7 @@ async fn x_billing_no_agent_route_still_accounts_for_received_event() {
             "sender_id": "20", "target": {"recipient_id": "10"}, "message_data": {"text": "private content"}
         }}]}}}).to_string().into_bytes()).await.unwrap();
     crate::services::channel_inbound_service::process_inbound_messages(
+        crate::services::channel_inbound_service::InboundSource::Webhook,
         crate::services::channel_inbound_service::InboundDeps::from(&state),
         &bot,
         &adapter,
@@ -666,6 +670,7 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         }}]}}}).to_string().into_bytes()).await.unwrap();
     assert!(
         crate::services::channel_inbound_service::process_inbound_messages(
+            crate::services::channel_inbound_service::InboundSource::Webhook,
             crate::services::channel_inbound_service::InboundDeps::from(&state),
             &bot,
             &adapter,
@@ -677,6 +682,16 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
     let failed = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
+    assert_eq!(
+        failed.diagnostics.inbound_outcomes["x_billing_refused"].count,
+        1
+    );
+    let health = crate::services::channel_bot_health::setup_evidence(&state.db, &failed, false)
+        .await
+        .unwrap();
+    assert_eq!(health["recommended_action"], "enable_billing");
+    assert_eq!(health["last_inbound_outcome"]["code"], "x_billing_refused");
+    assert!(failed.diagnostics.last_outbound_at.is_none());
     assert_eq!(failed.status, "failed");
     assert!(
         failed.webhook_registered,

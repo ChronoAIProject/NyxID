@@ -57,10 +57,19 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let seconds = (call.closed_at.unwrap_or_else(Utc::now) - call.created_at)
         .num_seconds()
         .clamp(0, 1800);
-    let text = render(seconds, &requests, &source_map, &cards);
+    let mut text = render(seconds, &requests, &source_map, &cards);
+    text.push_str("\n\n");
+    text.push_str(&super::progress::close_notice(
+        call.end_reason.as_deref(),
+        requests.iter().any(super::progress::pending),
+    ));
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
+            automation_work: None,
+            execution_task: None,
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -116,16 +125,12 @@ fn render(
     cards: &[Document],
 ) -> String {
     let mut text = format!("**Call receipt** · {}:{:02}", seconds / 60, seconds % 60);
-    let has_work = !requests.is_empty();
-    text.push_str("\n\n");
-    text.push_str(if has_work {
-        "Handed to NyxBot:\n"
-    } else {
-        "Just a conversation, nothing handed off."
-    });
-    if !has_work {
+    // Direct service calls use ordinary live turns rather than VoiceRequests.
+    // An empty task list does not establish that the call performed no actions.
+    if requests.is_empty() {
         return text;
     }
+    text.push_str("\n\nTasks:\n");
     for request in requests {
         let title = sources
             .get(&request.message_id)
@@ -136,6 +141,11 @@ fn render(
             RequestState::Completed => "Done",
             RequestState::Claimed => "Running",
             RequestState::Queued => "Queued",
+            RequestState::Cancelled
+                if crate::services::assistant_voice::request_outcome(request) == Some("failed") =>
+            {
+                "Failed"
+            }
             RequestState::Cancelled => "Cancelled",
             RequestState::AwaitingConfirmation => "Needs your OK",
         };
@@ -166,6 +176,12 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            execution_enrolled: false,
+            model_task: None,
+            progress: None,
+            timing: Default::default(),
+            started_at: None,
+            terminal_error_code: None,
             async_operation_pending: false,
             id: id.into(),
             user_id: "owner".into(),
@@ -190,15 +206,29 @@ mod tests {
     }
 
     #[test]
+    fn voice_2142_receipt_distinguishes_failure_from_stop() {
+        let mut failed = request(RequestState::Cancelled, "failed", "m1");
+        failed.terminal_error_code = Some("model_authority_changed".into());
+        let stopped = request(RequestState::Cancelled, "stopped", "m2");
+        let text = render(20, &[failed, stopped], &HashMap::new(), &[]);
+        assert!(text.contains("— Failed"));
+        assert!(text.contains("— Cancelled"));
+    }
+
+    #[test]
     fn receipt_hides_empty_work_and_lists_human_statuses_and_results() {
         let empty = render(12, &[], &HashMap::new(), &[]);
-        assert!(empty.contains("Just a conversation, nothing handed off"));
+        assert_eq!(empty, "**Call receipt** · 0:12");
         assert!(!empty.contains("Cost:"));
         let done = request(RequestState::Completed, "r1", "m1");
         let queued = request(RequestState::Queued, "r2", "m2");
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                supplemental_result_claims: Vec::new(),
+                automation_work: None,
+                execution_task: None,
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -237,6 +267,7 @@ mod tests {
             },
         )]);
         let text = render(72, &[done, queued], &sources, &[]);
+        assert!(text.contains("Tasks:\n"));
         assert!(text.contains("Check my calendar"));
         assert!(text.contains("Done"));
         assert!(text.contains("Queued"));

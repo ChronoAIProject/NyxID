@@ -1,3 +1,4 @@
+import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -10,6 +11,7 @@ import type {
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
+import { isCmaOperationPending } from "@/schemas/cma-operation";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
@@ -225,18 +227,20 @@ export function useNyxAgentAssistantChat({
     // fallback without it and a slow backstop with it. A turn NyxID (not
     // this page) starts here reaches the thread row first: `streaming`.
     refetchInterval: (query) =>
-      streaming || query.state.data?.conversation.active_turn
+      streaming || nyxAgentTransport.hasUnsettledInterruption(selectedConversationId) || query.state.data?.conversation.active_turn
         ? (live ? 5000 : 2000)
-        : livePollInterval(
-          query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
-          (query.state.data?.approvals.length ?? 0) > 0
-          ? 2000
-          : // Waiting on something outside the chat: notice when it happens.
-            (query.state.data?.waiting.length ?? 0) > 0
-            ? 10_000
-            : false,
-        live,
-      ),
+        : query.state.data?.cma_operations.some(isCmaOperationPending)
+          ? 5000
+          : livePollInterval(
+              query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
+                query.state.data?.approvals.some((row) => !row.status || row.status === "pending")
+                ? 2000
+                : // Waiting on something outside the chat: notice when it happens.
+                  (query.state.data?.waiting.length ?? 0) > 0
+                  ? 10_000
+                  : false,
+              live,
+            ),
   });
   // A settled turn, a decided card or a resolved wait changes the agent's
   // summary and its thread row.
@@ -424,7 +428,9 @@ export function useNyxAgentAssistantChat({
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
     isLoading: history.isLoading,
-    error: history.error?.message ?? threads.threadsError?.message ?? agents.error?.message,
+    interruption: nyxAgentTransport.getInterruption(viewId),
+    error: historyErrorMessage(history.error ?? threads.threadsError ?? agents.error)
+      ?? (nyxAgentTransport.getHistory(selectedConversationId)?.unsupported_history_items ? HISTORY_UNSUPPORTED : undefined),
     send,
     retry: (id: string, messageId: string) =>
       nyxAgentTransport.retry(id, messageId, onConversationAdopted),
@@ -432,7 +438,7 @@ export function useNyxAgentAssistantChat({
       nyxAgentTransport.checkRecovery(id, messageId),
     /** Reload the selected thread's transcript (after a context reset). */
     refreshHistory: async () => {
-      if (selectedConversationId) await nyxAgentTransport.history(selectedConversationId);
+      if (selectedConversationId) await history.refetch();
     },
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],

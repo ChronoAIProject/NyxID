@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { metricLabel } from "@/schemas/billing-metrics";
 import type {
   ConfiguredCatalogEntry,
@@ -61,35 +62,35 @@ export function plainBilling(
   const supplier = supplierOf(bill);
   const oauth = OAUTH.includes(connection.credential_type);
   const master = bill.credential_class === "nyxid_managed_master";
-  const thing = oauth ? "app" : "key";
-  const owner = org ? `${org}'s` : "Your";
-  const you = org ?? "you";
+  const thing = oauth ? translateUi("app") : translateUi("key");
+  const owner = org ? `${org}'s` : translateUi("Your");
+  const you = org ?? translateUi("you");
 
   const key =
     supplier === "nyxid"
       ? master
-        ? { title: `NyxID's ${provider} key`, note: "NyxID provides the key." }
+        ? { title: translateUi("NyxID's {{value0}} key", { value0: provider }), note: translateUi("NyxID provides the key.") }
         : {
-            title: `NyxID's ${provider} app`,
-            note: `You sign in with your own ${provider} account; NyxID provides the app.`,
+            title: translateUi("NyxID's {{value0}} app", { value0: provider }),
+            note: translateUi("You sign in with your own {{value0}} account; NyxID provides the app.", { value0: provider }),
           }
       : supplier === "own"
         ? {
             title:
               connection.credential_type === "node_managed" ||
               bill.credential_class === "node_managed"
-                ? "A key stored on your node"
+                ? translateUi("A key stored on your node")
                 : oauth
                   ? `${owner} own ${provider} app`
                   : `${owner} own API key`,
           }
         : supplier === "none"
-          ? { title: "No key needed" }
+          ? { title: translateUi("No key needed") }
           : {
-              title: "Not confirmed",
+              title: translateUi("Not confirmed"),
               note: oauth
-                ? `We can't tell yet whether this sign-in uses your own ${provider} app or NyxID's.`
-                : "We can't tell who supplied this key.",
+                ? translateUi("We can't tell yet whether this sign-in uses your own {{value0}} app or NyxID's.", { value0: provider })
+                : translateUi("We can't tell who supplied this key."),
             };
 
   if (bill.status === "restricted" || bill.status === "unavailable") {
@@ -97,15 +98,15 @@ export function plainBilling(
     return {
       verdict: "hidden",
       headline: restricted
-        ? "You can't see billing for this connection"
-        : "Billing couldn't load",
+        ? translateUi("You can't see billing for this connection")
+        : translateUi("Billing couldn't load"),
       detail: restricted
-        ? "Ask the owner of this connection what it costs."
-        : "Try again later.",
+        ? translateUi("Ask the owner of this connection what it costs.")
+        : translateUi("Try again later."),
       key,
-      payer: "Not available",
-      price: "Not available",
-      short: "Billing unavailable",
+      payer: translateUi("Not available"),
+      price: translateUi("Not available"),
+      short: translateUi("Billing unavailable"),
       tips: [],
     };
   }
@@ -134,38 +135,38 @@ export function plainBilling(
     : bill.rates;
   const unit = (metric: string) => metricLabel(metric, 1);
   const price = free
-    ? "Free on NyxID"
+    ? translateUi("Free on NyxID")
     : rates.length
       ? rates
           .map((rate) =>
             rate.credits_per_unit == null
-              ? `Plan price per ${unit(rate.metric)}`
+              ? translateUi("Plan price per {{value0}}", { value0: unit(rate.metric) })
               : `${rate.credits_per_unit} credits per ${unit(rate.metric)}`,
           )
           .join(" + ")
-      : "Not confirmed";
+      : translateUi("Not confirmed");
   const shortPrice =
     rates.length === 1 && rates[0]!.credits_per_unit != null
       ? `${rates[0]!.credits_per_unit} credits/${unit(rates[0]!.metric)}`
-      : "NyxID credits";
+      : translateUi("NyxID credits");
 
   if (free) {
     const detail =
       supplier === "nyxid"
-        ? `This connection uses NyxID's ${provider} ${thing}, and NyxID doesn't charge for it right now.`
+        ? translateUi("This connection uses NyxID's {{value0}} {{value1}}, and NyxID doesn't charge for it right now.", { value0: provider, value1: thing })
         : supplier === "own"
-          ? `This connection uses ${org ? owner : "your"} own ${thing}, so NyxID doesn't charge for it. ${provider} may bill ${you} directly.`
+          ? translateUi("This connection uses {{value0}} own {{value1}}, so NyxID doesn't charge for it. {{value2}} may bill {{value3}} directly.", { value0: org ? owner : "your", value1: thing, value2: provider, value3: you })
           : supplier === "none"
-            ? "This service doesn't need a key, and NyxID doesn't charge for it."
-            : "NyxID doesn't charge for this connection.";
+            ? translateUi("This service doesn't need a key, and NyxID doesn't charge for it.")
+            : translateUi("NyxID doesn't charge for this connection.");
     return {
       verdict: "free",
-      headline: "Free on NyxID",
+      headline: translateUi("Free on NyxID"),
       detail,
       key,
-      payer: "No one. NyxID doesn't charge for this.",
+      payer: translateUi("No one. NyxID doesn't charge for this."),
       price,
-      short: "Free on NyxID",
+      short: translateUi("Free on NyxID"),
       tips: [],
     };
   }
@@ -173,59 +174,59 @@ export function plainBilling(
   if (supplier === "unknown") {
     return {
       verdict: "unconfirmed",
-      headline: "Cost not confirmed",
-      detail: `NyxID charges for ${provider} when you use NyxID's ${thing}, but not when you use your own. We can't tell yet which one this connection uses.`,
+      headline: translateUi("Cost not confirmed"),
+      detail: translateUi("NyxID charges for {{value0}} when you use NyxID's {{value1}}, but not when you use your own. We can't tell yet which one this connection uses.", { value0: provider, value1: thing }),
       key,
-      payer: "Depends on whose app is used",
+      payer: translateUi("Depends on whose app is used"),
       price,
-      short: "Cost not confirmed",
+      short: translateUi("Cost not confirmed"),
       tips: [],
     };
   }
 
   const payer = bill.account
     ? bill.account.kind === "personal"
-      ? "You, from your personal credits"
+      ? translateUi("You, from your personal credits")
       : `${bill.account.name}, from its organization credits`
     : master
-      ? "Whoever makes the call, from their personal credits"
+      ? translateUi("Whoever makes the call, from their personal credits")
       : org
         ? `${org}, from its organization credits`
-        : "You, from your personal credits";
+        : translateUi("You, from your personal credits");
   const payerShort = bill.account
     ? bill.account.kind === "personal"
-      ? "You pay"
+      ? translateUi("You pay")
       : `${bill.account.name} pays`
     : master
-      ? "Caller pays"
+      ? translateUi("Caller pays")
       : org
         ? `${org} pays`
-        : "You pay";
+        : translateUi("You pay");
   const each =
     rates.length === 1 && rates[0]!.credits_per_unit != null
-      ? `Each ${unit(rates[0]!.metric)} costs ${rates[0]!.credits_per_unit} NyxID credits`
-      : "Usage costs NyxID credits";
+      ? translateUi("Each {{value0}} costs {{value1}} NyxID credits", { value0: unit(rates[0]!.metric), value1: rates[0]!.credits_per_unit })
+      : translateUi("Usage costs NyxID credits");
   const payerPhrase =
     payer.startsWith("You") || payer.startsWith("Whoever")
       ? payer.charAt(0).toLowerCase() + payer.slice(1)
       : payer;
   const tips = [
-    "Credits are used in this order: free allowances first, then credit grants, then your wallet balance.",
+    translateUi("Credits are used in this order: free allowances first, then credit grants, then your wallet balance."),
     ...(rates.some((rate) => rate.sync_status && rate.sync_status !== "synced")
       ? [
-          "A new price is waiting to be activated. Until then, the previous price applies.",
+          translateUi("A new price is waiting to be activated. Until then, the previous price applies."),
         ]
       : []),
     ...(rates.some((rate) => rate.credits_per_unit == null)
-      ? ["The price comes from your billing plan and isn't shown here."]
+      ? [translateUi("The price comes from your billing plan and isn't shown here.")]
       : []),
     ...(bill.context === "configuration"
-      ? ["Agent keys set to use a different key can be billed differently."]
+      ? [translateUi("Agent keys set to use a different key can be billed differently.")]
       : []),
   ];
   return {
     verdict: "charged",
-    headline: "Uses NyxID credits",
+    headline: translateUi("Uses NyxID credits"),
     detail: `${each}, paid by ${payerPhrase}.${
       supplier === "own"
         ? ` This is a NyxID fee on top of anything ${provider} bills ${you} directly.`

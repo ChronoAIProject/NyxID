@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope"
 /**
  * Access Scope card — Services + Nodes multi-select, porting
@@ -17,7 +19,7 @@ import { PlatformServiceScope } from "@/components/shared/platform-service-scope
  */
 
 import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
+import { Label, FieldHelp } from "@/components/ui/label"
 import { ServiceIcon } from "@/components/service-icon"
 import { useKeys } from "@/hooks/use-keys"
 import { useNodes } from "@/hooks/use-nodes"
@@ -41,6 +43,7 @@ export function AccessScopeCard({
   onChange,
   ownerId,
 }: AccessScopeCardProps) {
+  useUiTranslation();
   const services = useKeys({ includeTools: true });
   const nodes = useNodes()
 
@@ -61,25 +64,23 @@ export function AccessScopeCard({
   return (
     <section
       aria-labelledby="access-scope-title"
-      className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-4"
+      className="flex flex-col gap-4 rounded-lg border border-border/60 bg-background/25 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-13 font-semibold">
-          Access Scope
-        </h3>
-        <p className="text-xs text-muted-foreground">
-          Restrict which services and nodes this key can access via proxy.
-        </p>
+        <h3 id="access-scope-title" className="type-card-title">{translateUi("Access Scope")}</h3>
+        <p className="text-13 text-muted-foreground">{translateUi("Restrict which services and nodes this key can access via proxy.")}</p>
       </div>
 
+      <div className="grid items-start gap-4 sm:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-4">
       <AccessGroup
-        label="Services"
+        label={translateUi("Services")}
         icon={<ShieldIcon />}
         allowAll={value.allowAllServices}
         onAllowAllChange={(allowAll) => {
           onChange({ ...value, allowAllServices: allowAll })
         }}
-        listLabel="Select allowed services:"
+        listLabel={translateUi("Select allowed services:")}
         loading={services.isLoading}
         items={
           services.data
@@ -123,14 +124,15 @@ export function AccessScopeCard({
           orgOwned={!!ownerId}
         />
       )}
+        </div>
       <AccessGroup
-        label="Nodes"
+        label={translateUi("Nodes")}
         icon={<ServersIcon />}
         allowAll={value.allowAllNodes}
         onAllowAllChange={(allowAll) => {
           onChange({ ...value, allowAllNodes: allowAll })
         }}
-        listLabel="Select allowed nodes:"
+        listLabel={translateUi("Select allowed nodes:")}
         loading={nodes.isLoading}
         items={
           nodes.data
@@ -144,6 +146,7 @@ export function AccessScopeCard({
         selectedIds={value.selectedNodeIds}
         onToggle={toggleNode}
       />
+      </div>
     </section>
   )
 }
@@ -178,37 +181,36 @@ function AccessGroup({
   selectedIds,
   onToggle,
 }: AccessGroupProps) {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-12 font-medium">
+      <div className="flex items-center gap-1.5 type-row-title">
         <span className="text-muted-foreground">{icon}</span>
         <span>{label}</span>
       </div>
-      <Label className="flex cursor-pointer items-center gap-2 text-12">
+      <Label className="flex cursor-pointer items-center gap-2">
         <Checkbox
           checked={allowAll}
           onCheckedChange={(checked) => {
             onAllowAllChange(checked === true)
           }}
         />
-        <span>Allow all {label.toLowerCase()}</span>
+        <span>{translateUi("Allow all ")}{label.toLowerCase()}</span>
       </Label>
 
       {allowAll ? null : (
         <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-background/40 p-3">
-          <p className="text-xs text-muted-foreground">{listLabel}</p>
+          <p className="text-13 text-muted-foreground">{listLabel}</p>
           {loading ? (
-            <p className="text-xs text-muted-foreground">Loading…</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Loading…")}</p>
           ) : items.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              None available. Add one first, then come back.
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("None available. Add one first, then come back.")}</p>
           ) : (
             <div className="flex flex-col gap-1" role="list">
               {items.map((item) => (
                 <Label
                   key={item.id}
-                  className="flex cursor-pointer items-center gap-2 text-12"
+                  className="flex cursor-pointer items-center gap-2"
                 >
                   <Checkbox
                     checked={selectedIds.has(item.id)}
@@ -220,9 +222,9 @@ function AccessGroup({
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (
-                      <span className="ml-1.5 text-xs text-muted-foreground">
+                      <FieldHelp className="ml-1.5 text-muted-foreground">
                         ({item.secondary})
-                      </span>
+                      </FieldHelp>
                     ) : null}
                   </span>
                 </Label>
@@ -236,6 +238,7 @@ function AccessGroup({
 }
 
 function ShieldIcon() {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"
@@ -254,6 +257,7 @@ function ShieldIcon() {
 }
 
 function ServersIcon() {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"

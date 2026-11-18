@@ -115,6 +115,15 @@ async fn external_signed_telegram_channel_post_keeps_guest_delivery_without_owne
         .replace_one(doc! {"_id": &row.id}, &row)
         .await
         .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.channel_bot_id},
+            doc! {"$set": {"platform": "telegram", "platform_bot_id": "123", "platform_bot_username": "helper_bot"}},
+        )
+        .await
+        .unwrap();
     let chat = chats::record_chat(
         &state,
         &row,
@@ -405,6 +414,7 @@ async fn external_bot_mentions_start_only_bounded_guest_turns_without_sender_oau
                 description: "Community assistant".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,
@@ -1681,6 +1691,15 @@ async fn external_lark_human_mentions_require_receiver_identity_but_all_mode_sti
         .replace_one(doc! {"_id":&row.id}, &row)
         .await
         .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.channel_bot_id},
+            doc! {"$set":{"platform":"lark","platform_bot_id":"cli_app"}},
+        )
+        .await
+        .unwrap();
     put_binding(
         State(state.clone()),
         Path("bnd_chats".into()),
@@ -2223,7 +2242,7 @@ async fn previously_acknowledged_quiet_policy_is_revoked_by_unconfirmed_replacem
 }
 
 #[tokio::test]
-async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports_write_failure() {
+async fn binding_quiet_proof_survives_unbind_but_resets_on_replacement_and_reports_write_failure() {
     let (state, _, server) = setup("external_binding_quiet_proof").await;
     let (mut row, key) = channel(&state, "gateway").await;
     row.binding_id = Some("quiet-binding".into());
@@ -2253,7 +2272,7 @@ async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports
     state
         .db
         .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",
-        "validator": {"binding_id": "quiet-binding"}})
+        "validator": {"gateway_binding_unbound_at": {"$exists": false}}})
         .await
         .unwrap();
     assert_eq!(
@@ -2289,12 +2308,29 @@ async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports
         .status(),
         StatusCode::NO_CONTENT
     );
+    // Provider DELETE is not proof of terminal deletion. The same live
+    // binding retains its confirmed quiet policy across unbind/rebind.
+    let unbound = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(unbound.binding_id.as_deref(), Some("quiet-binding"));
+    assert!(unbound.gateway_no_progress);
+    assert_eq!(put().await.status(), StatusCode::OK);
     assert!(
-        !load_channel(&state, OWNER, &row.id)
+        load_channel(&state, OWNER, &row.id)
             .await
             .unwrap()
             .gateway_no_progress
     );
+    // A new setup with no binding still must discard proof from the previous
+    // binding. Seed that state independently of nonterminal provider DELETE.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"binding_id": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
     state
         .db
         .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",
@@ -2323,4 +2359,50 @@ async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports
     );
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn supplemental_bot_reference_writer_supplies_fallback_without_human_pointer() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
+    Box::pin(async {
+        let activity:Value=serde_json::from_str(include_str!("fixtures/native_bot_mentions/telegram.json")).unwrap();
+        let (state,_,server)=setup("supplemental_bot_reference").await;
+        let (mut row,key)=channel(&state,"gateway").await;
+        row.gateway_bot_id=Some("77".into());
+        row.gateway_bot_mentions.enabled=true;
+        row.gateway_bot_mentions.supported=true;
+        row.gateway_bot_mentions.checked_at=Some(Utc::now());
+        state.db.collection::<NyxbotChannel>(CHANNELS).replace_one(doc!{"_id":&row.id},&row).await.unwrap();
+        state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"platform_bot_id":"77"}}).await.unwrap();
+        put_binding(State(state.clone()),Path("bnd_chats".into()),bearer(&key),Json(binding_body(&key,OWNER))).await;
+        ensure_partition(&state,&key,PARTITION).await;
+        let chatid=activity["conversation"]["id"].as_str().unwrap();
+        let chat=chats::record_chat(&state,&row,&chats::group_partition(chatid,None),&chats::ChatFacts{kind:"group",chat_id:chatid.into(),thread_id:None,owner:false,title:None},None).await.unwrap();
+        state.db.collection::<NyxbotThread>(THREADS).update_one(doc!{"_id":&chat.id},doc!{"$set":{"members":"everyone"}}).await.unwrap();
+        let id=activity["event_id"].as_str().unwrap();
+        state.db.collection::<bson::Document>("channel_messages").insert_one(doc!{"_id":id,"user_id":OWNER,"conversation_id":&row.route_id,"channel_bot_id":&row.channel_bot_id,"direction":"inbound","platform":"telegram","platform_conversation_id":chatid,"platform_message_id":"42","sender_platform_id":activity["actor"]["id"].as_str().unwrap(),"agent_api_key_id":&row.route_api_key_id,"content_type":"text","created_at":bson::DateTime::now()}).await.unwrap();
+        let mut request=event("bot request",activity["actor"]["id"].as_str().unwrap(),id);
+        request["event_context"]["activity"]=activity.clone();
+        assert!(body_text(Box::pin(respond(&state,&key,&request,"bot-ref")).await).await.contains("Here is your answer"));
+        let chat=state.db.collection::<NyxbotThread>(THREADS).find_one(doc!{"_id":&chat.id}).await.unwrap().unwrap();
+        assert!(chat.last_relay_message_id.is_none());
+        assert_eq!(crate::services::channel_supplemental_delivery::reference_anchor(&chat).ok(),Some(id));
+        let cipher=state.encryption_keys.encrypt(b"test-token").await.unwrap();
+        state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+        let platform=MockServer::start().await;
+        Mock::given(path_regex("/bot.*/sendMessage")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}}))).mount(&platform).await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(row.channel_bot_id.clone(),Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&platform.uri())));
+        let mut conversation=channel_conversations(&state,&row.id).await.remove(0);
+        let saved=state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"conversation_id":&conversation.id,"role":"assistant"}).sort(doc! {"seq":-1}).await.unwrap().unwrap();
+        conversation.active_turn=Some(bson::from_document(doc! {"turn_id":saved.get_str("turn_id").unwrap(),"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
+        deliver_to(&state,&conversation,conversation.channel.as_ref().unwrap(),"team result",None).await;
+        let requests=platform.received_requests().await.unwrap();
+        assert_eq!(requests.len(),1);
+        let body:Value=serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["chat_id"],chatid);assert_eq!(body["reply_to_message_id"],42);
+        let audit=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc!{"event_type":"nyxbot_channel_supplemental_delivery"}).await.unwrap().unwrap();
+        assert_eq!(audit.get_document("event_data").unwrap().get_str("anchor"),Ok("chat_reference_event"));
+        server.abort();state.db.drop().await.unwrap();
+    }).await;
 }

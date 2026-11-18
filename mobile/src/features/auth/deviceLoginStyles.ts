@@ -12,6 +12,11 @@ export function createDeviceLoginStyles(c: ThemeColors) {
   return StyleSheet.create({
     fill: { flex: 1 },
     content: { padding: spacing.xxl, paddingBottom: 48 },
+    rootContent: {
+      width: "100%" as const,
+      maxWidth: 720,
+      alignSelf: "center" as const,
+    },
     screenHeader: {
       minHeight: TOUCH_TARGET,
       flexDirection: "row" as const,
@@ -177,6 +182,12 @@ export function createDeviceLoginStyles(c: ThemeColors) {
       alignItems: "center" as const,
       padding: spacing.huge,
       gap: spacing.xxxl,
+    },
+    terminalBody: {
+      ...typeScale.description,
+      color: c.textSecondary,
+      textAlign: "center" as const,
+      maxWidth: 360,
     },
     terminalTitle: {
       ...typeScale.pageHeader,

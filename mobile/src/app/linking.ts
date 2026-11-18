@@ -1,112 +1,125 @@
-import type { LinkingOptions } from "@react-navigation/native";
+import {
+  getStateFromPath,
+  type LinkingOptions,
+} from "@react-navigation/native";
+import * as WebBrowser from "expo-web-browser";
+import {
+  nativeWebFallback,
+  deduplicatedWebFallback,
+} from "../lib/nativeWebFallback";
+import {
+  isServiceOAuthReturn,
+  parseServiceOAuthReturn,
+  serviceOAuthReturnUri,
+} from "../features/services/serviceOAuthModel";
+import { recordServiceOAuthReturn } from "../features/services/serviceOAuthStore";
 import * as Notifications from "expo-notifications";
 import { Linking } from "react-native";
-import type { RootStackParamList } from "./AppNavigator";
+import type { RootStackParamList } from "./navigationTypes";
+import { navigationLinkingConfig } from "./navigationLinking";
+import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
 import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
+import {
+  getFrontendUrl,
+  IS_DEV_BUILD,
+  NYXID_APP_SCHEME,
+  NYXID_TRUSTED_API_BASE_URLS,
+  NYXID_TRUSTED_FRONTEND_URLS,
+  NYXID_UNIVERSAL_LINK_HOST,
+} from "../lib/env";
+import { buildLinkingPrefixes } from "../lib/linkingPrefixes";
 
-type NotificationData = {
-  deeplink?: unknown;
-  deep_link?: unknown;
-  url?: unknown;
-  link?: unknown;
-  challenge_id?: unknown;
-  challengeId?: unknown;
-  request_id?: unknown;
-  data?: unknown;
-  payload?: unknown;
-  dataString?: unknown;
+import {
+  nativeNotificationUrl,
+  notificationDestination,
+} from "../lib/notifications/notificationDestination";
+
+export const notificationLinkConfig = {
+  scheme: NYXID_APP_SCHEME,
+  trustedUrls: [
+    ...NYXID_TRUSTED_FRONTEND_URLS,
+    ...NYXID_TRUSTED_API_BASE_URLS,
+    ...(NYXID_UNIVERSAL_LINK_HOST
+      ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
+      : []),
+  ],
 };
 
-function buildChallengeUrl(challengeId: string): string {
-  return `nyxid://challenge/${encodeURIComponent(challengeId)}`;
+function consumeServiceOAuthReturn(url: string): boolean {
+  const returnUri = serviceOAuthReturnUri();
+  const scheme = returnUri.slice(0, returnUri.indexOf("://"));
+  if (!isServiceOAuthReturn(url, scheme)) return false;
+  const result = parseServiceOAuthReturn(url, scheme);
+  if (result) recordServiceOAuthReturn(result);
+  return true;
+}
+
+const openFallback = deduplicatedWebFallback((url) =>
+  WebBrowser.openBrowserAsync(url),
+);
+function consumeWebFallback(url: string): boolean {
+  if (isSupportedDirectLink(url)) return false;
+  const target = nativeWebFallback(
+    url,
+    {
+      apiBaseUrls: NYXID_TRUSTED_API_BASE_URLS,
+      frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
+      universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
+    },
+    getFrontendUrl(),
+  );
+  if (!target) return false;
+  openFallback(target);
+  return true;
+}
+
+const directLinkListeners = new Set<() => void>();
+
+export function subscribeDirectLinkOpened(listener: () => void): () => void {
+  directLinkListeners.add(listener);
+  return () => {
+    directLinkListeners.delete(listener);
+  };
+}
+
+function reportDirectLinkOpened(url: string): void {
+  // Supersede queued intent only for a destination the native router supports.
+  if (isSupportedDirectLink(url)) {
+    for (const listener of directLinkListeners) listener();
+  }
+  reportDeepLinkOpened(url);
+}
+
+function isSupportedDirectLink(url: string): boolean {
+  if (!nativeNotificationUrl(url, notificationLinkConfig)) return false;
+  try {
+    const parsed = new URL(rewriteChallengeUrl(url));
+    const path =
+      (parsed.protocol === `${NYXID_APP_SCHEME}:` ? parsed.host : "") +
+      parsed.pathname +
+      parsed.search;
+    return Boolean(appLinking.getStateFromPath?.(path, appLinking.config));
+  } catch {
+    return false;
+  }
 }
 
 export function extractChallengeIdFromUrl(url: string): string | null {
-  const match = url.match(/(?:^|\/\/|\/)challenge\/([^/?#]+)/i);
-  if (!match || !match[1]) return null;
-
   try {
-    const decoded = decodeURIComponent(match[1]);
-    return decoded.trim().length > 0 ? decoded.trim() : null;
+    const normalized = nativeNotificationUrl(url, notificationLinkConfig);
+    if (!normalized) return null;
+    return new URL(normalized).searchParams.get("challengeId");
   } catch {
-    return match[1];
+    return null;
   }
 }
 
-function asNonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function extractUrlFromNotificationData(data: unknown): string | null {
-  const pending: unknown[] = [data];
-  const visited = new Set<object>();
-
-  while (pending.length > 0) {
-    const current = pending.shift();
-    if (!current || typeof current !== "object") {
-      continue;
-    }
-    if (visited.has(current)) {
-      continue;
-    }
-    visited.add(current);
-
-    const payload = current as NotificationData;
-    const deeplink =
-      asNonEmptyString(payload.deeplink) ?? asNonEmptyString(payload.deep_link);
-    if (deeplink) return deeplink;
-
-    const url = asNonEmptyString(payload.url) ?? asNonEmptyString(payload.link);
-    if (url) return url;
-
-    const challengeId =
-      asNonEmptyString(payload.challenge_id) ??
-      asNonEmptyString(payload.challengeId) ??
-      asNonEmptyString(payload.request_id);
-    if (challengeId) {
-      return buildChallengeUrl(challengeId);
-    }
-
-    if (typeof payload.dataString === "string" && payload.dataString.length > 0) {
-      try {
-        pending.push(JSON.parse(payload.dataString));
-      } catch {
-        // ignore invalid JSON and continue
-      }
-    }
-
-    for (const value of Object.values(payload)) {
-      if (!value) {
-        continue;
-      }
-
-      if (typeof value === "object") {
-        pending.push(value);
-        continue;
-      }
-
-      if (
-        typeof value === "string" &&
-        value.length > 1 &&
-        (value.startsWith("{") || value.startsWith("["))
-      ) {
-        try {
-          pending.push(JSON.parse(value));
-        } catch {
-          // ignore non-JSON string fields
-        }
-      }
-    }
-  }
-
-  return null;
-}
+const extractUrlFromNotificationData = (data: unknown) =>
+  notificationDestination(data, notificationLinkConfig);
 
 export function extractUrlFromNotificationResponse(
-  response: Notifications.NotificationResponse | null
+  response: Notifications.NotificationResponse | null,
 ): string | null {
   if (!response) return null;
 
@@ -134,7 +147,9 @@ export function extractUrlFromNotificationResponse(
       return pushPayloadUrl;
     }
 
-    const remoteMessageUrl = extractUrlFromNotificationData(pushTrigger.remoteMessage?.data);
+    const remoteMessageUrl = extractUrlFromNotificationData(
+      pushTrigger.remoteMessage?.data,
+    );
     if (remoteMessageUrl) {
       return remoteMessageUrl;
     }
@@ -144,7 +159,7 @@ export function extractUrlFromNotificationResponse(
 }
 
 export function extractChallengeIdFromNotificationResponse(
-  response: Notifications.NotificationResponse | null
+  response: Notifications.NotificationResponse | null,
 ): string | null {
   const url = extractUrlFromNotificationResponse(response);
   if (!url) return null;
@@ -170,8 +185,11 @@ function classifyLinkType(url: string): LinkType {
 
 // No telemetry buffer: pre-consent/pre-login events cannot acquire later
 // permission or become associated with a newly selected account.
-function reportDeepLinkOpened(url: string): void {
-  void capture({ name: "mobile.deep_link_opened", props: { link_type: classifyLinkType(url) } });
+export function reportDeepLinkOpened(url: string): void {
+  void capture({
+    name: "mobile.deep_link_opened",
+    props: { link_type: classifyLinkType(url) },
+  });
 }
 
 /**
@@ -182,88 +200,57 @@ function reportDeepLinkOpened(url: string): void {
 function rewriteChallengeUrl(url: string): string {
   const challengeId = extractChallengeIdFromUrl(url);
   if (challengeId) {
-    return `nyxid://activity?challengeId=${encodeURIComponent(challengeId)}`;
+    return `${NYXID_APP_SCHEME}://activity?challengeId=${encodeURIComponent(challengeId)}`;
   }
   return url;
 }
 
 export const appLinking: LinkingOptions<RootStackParamList> = {
-  prefixes: ["nyxid://"],
-  config: {
-    screens: {
-      Auth: "auth",
-      Activity: {
-        path: "activity",
-        parse: { challengeId: String },
-      },
-      AccountSettings: "account",
-      DeviceLogin: {
-        path: "login/device",
-        parse: { user_code: String },
-      },
-      AgentKeyLogin: {
-        path: "login/agent-key",
-        parse: { user_code: String },
-      },
-      TermsOfService: "terms",
-      PrivacyPolicy: "privacy",
-    },
-  },
+  prefixes: buildLinkingPrefixes({
+    appScheme: NYXID_APP_SCHEME,
+    // Both embedded sets: native links can arrive on either API host.
+    apiBaseUrls: NYXID_TRUSTED_API_BASE_URLS,
+    frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
+    universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
+    allowHttp: IS_DEV_BUILD,
+  }),
+  config: navigationLinkingConfig,
+  getStateFromPath: (path, options) =>
+    workspaceStateFromPath(path, (next) => getStateFromPath(next, options)),
   async getInitialURL() {
     try {
       const directUrl = await Linking.getInitialURL();
       if (directUrl) {
-        reportDeepLinkOpened(directUrl);
+        if (
+          consumeServiceOAuthReturn(directUrl) ||
+          consumeWebFallback(directUrl)
+        )
+          return null;
+        reportDirectLinkOpened(directUrl);
         return rewriteChallengeUrl(directUrl);
       }
     } catch (error) {
       if (__DEV__) console.warn("[linking] getInitialURL failed", error);
     }
 
-    try {
-      const lastNotificationResponse = await Notifications.getLastNotificationResponseAsync();
-      const url = extractUrlFromNotificationResponse(lastNotificationResponse);
-      if (url) {
-        reportDeepLinkOpened(url);
-        return rewriteChallengeUrl(url);
-      }
-      return null;
-    } catch (error) {
-      if (__DEV__) {
-        console.warn("[linking] getLastNotificationResponseAsync failed", error);
-      }
-      return null;
-    }
+    // App retains tapped notifications until authentication and navigation guards allow them.
+    return null;
   },
   subscribe(listener) {
     let linkingSubscription: { remove: () => void } | null = null;
-    let notificationSubscription: { remove: () => void } | null = null;
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
-        reportDeepLinkOpened(url);
+        if (consumeServiceOAuthReturn(url) || consumeWebFallback(url)) return;
+        reportDirectLinkOpened(url);
         listener(rewriteChallengeUrl(url));
       });
     } catch (error) {
       if (__DEV__) console.warn("[linking] url subscription failed", error);
     }
 
-    try {
-      notificationSubscription =
-        Notifications.addNotificationResponseReceivedListener((response) => {
-          const url = extractUrlFromNotificationResponse(response);
-          if (url) {
-            reportDeepLinkOpened(url);
-            listener(rewriteChallengeUrl(url));
-          }
-        });
-    } catch (error) {
-      if (__DEV__) console.warn("[linking] notification subscription failed", error);
-    }
-
     return () => {
       linkingSubscription?.remove();
-      notificationSubscription?.remove();
     };
   },
 };

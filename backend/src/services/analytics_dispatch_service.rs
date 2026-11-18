@@ -417,14 +417,53 @@ mod tests {
         let consent = super::super::analytics_consent_service::set(&db, &user, true)
             .await
             .unwrap();
-        let mut ids = Vec::new();
-        for _ in 0..32 {
-            let id = begin(&db, &user, &consent.revision).await.unwrap();
-            settle(&db, &id, false).await.unwrap();
-            ids.push(id);
-        }
-        assert!(begin(&db, &user, &consent.revision).await.is_none());
+        // Reconciliation starts with retained historical uncertainty. Seed that
+        // history without requiring 32 consecutive sub-250ms admissions merely
+        // to reach the behavior under test. The neighboring bound test exercises
+        // real admission/settlement; cap refusal and resumption below stay real.
+        let ids: Vec<_> = (0..32).map(|_| uuid::Uuid::new_v4().to_string()).collect();
         let generation = ids.last().unwrap();
+        let durable = super::super::transaction_service::durable_database(&db);
+        let dispatches = durable.collection::<Document>(COLLECTION);
+        let accounts = durable.collection::<Document>(ACCOUNTS);
+        let now = bson::DateTime::now();
+        dispatches
+            .insert_many(ids.iter().map(|id| {
+                doc! {"_id":id,"user_id":&user,"status":"uncertain",
+                "created_at":now,"settled_at":now}
+            }))
+            .await
+            .unwrap();
+        accounts
+            .insert_one(doc! {"_id":&user,"generation":generation,"updated_at":now})
+            .await
+            .unwrap();
+        durable
+            .collection::<Document>("users")
+            .update_one(
+                doc! {"_id":&user},
+                doc! {"$set":{"analytics_dispatch_sequence":32_i64}},
+            )
+            .await
+            .unwrap();
+        let unresolved = doc! {"user_id":&user,"status":{"$in":["in_flight","uncertain"]}};
+        assert_eq!(
+            dispatches
+                .count_documents(unresolved.clone())
+                .await
+                .unwrap(),
+            32
+        );
+        assert_eq!(
+            accounts
+                .find_one(doc! {"_id":&user})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("generation"),
+            Ok(generation.as_str())
+        );
+        assert!(begin(&db, &user, &consent.revision).await.is_none());
         let actor = super::super::audit_service::AuditActor::from_auth_user(
             &crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string()),
         );
@@ -488,10 +527,27 @@ mod tests {
             doc! {"event_type":"analytics.dispatch.delivery_reconciled","user_id":&actor.user_id}
         ).await.unwrap(),1);
         assert!(needs_provider_drain(&db, &user).await.unwrap());
+        assert_eq!(
+            dispatches
+                .count_documents(unresolved.clone())
+                .await
+                .unwrap(),
+            31
+        );
         let resumed = begin(&db, &user, &renewed.revision)
             .await
             .expect("repaired slot resumes opted-in capture");
         assert_ne!(&resumed, generation);
+        assert_eq!(dispatches.count_documents(unresolved).await.unwrap(), 32);
+        assert_eq!(
+            accounts
+                .find_one(doc! {"_id":&user})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("generation"),
+            Ok(resumed.as_str())
+        );
         assert!(
             reconcile_active_dispatch(
                 &db,

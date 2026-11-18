@@ -60,6 +60,7 @@ export const setServiceApprovalConfigSchema = z
   );
 
 export const updateNotificationSettingsSchema = z.object({
+  group_mentions_enabled: z.boolean().optional(),
   telegram_enabled: z.boolean(),
   push_enabled: z.boolean(),
   global_approval_mode: globalApprovalModeSchema,

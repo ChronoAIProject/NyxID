@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 
 export const chartTick = {
   fill: "var(--analytics-label)",
-  fontSize: 11,
+  fontSize: "var(--text-13)",
   fontFamily: "var(--font-sans)",
 };
 
@@ -13,7 +13,7 @@ export const chartTooltipStyle: CSSProperties = {
   padding: "10px 12px",
   boxShadow: "0 8px 24px rgb(0 0 0 / 16%)",
   color: "var(--color-foreground)",
-  fontSize: 12,
+  fontSize: "var(--text-13)",
   maxWidth: "min(420px, calc(100vw - 32px))",
   whiteSpace: "normal",
   overflowWrap: "anywhere",

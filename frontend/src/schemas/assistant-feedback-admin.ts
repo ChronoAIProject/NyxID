@@ -29,9 +29,13 @@ export const feedbackReplyContextSchema = z.object({
 });
 
 export const assistantFeedbackAdminSchema = z.object({
-  counts: z.array(z.object({ day: z.string(), up: z.number(), down: z.number() })),
+  can_preview_threads: z.boolean().optional(),
+  counts: z.array(
+    z.object({ day: z.string(), up: z.number(), down: z.number() }),
+  ),
   recent: z.array(
     z.object({
+      id: z.string().optional(),
       message_id: z.string(),
       vote: z.enum(["up", "down"]),
       comment: z.string().nullable().optional(),
@@ -44,4 +48,21 @@ export const assistantFeedbackAdminSchema = z.object({
 });
 
 export type FeedbackReplyContext = z.infer<typeof feedbackReplyContextSchema>;
-export type AssistantFeedbackAdmin = z.infer<typeof assistantFeedbackAdminSchema>;
+export type AssistantFeedbackAdmin = z.infer<
+  typeof assistantFeedbackAdminSchema
+>;
+
+export const feedbackThreadSchema = z.object({
+  unavailable: z.boolean(),
+  messages: z.array(
+    z.object({
+      id: z.string(),
+      role: z.enum(["user", "assistant", "agent"]),
+      text: z.string(),
+      created_at: z.string(),
+      rated: z.boolean(),
+      truncated: z.boolean(),
+    }),
+  ),
+  next_cursor: z.string().nullable(),
+});

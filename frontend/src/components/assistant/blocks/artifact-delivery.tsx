@@ -1,0 +1,133 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import {
+  getAssistantIdentityRevision,
+  getAssistantIdentityUserId,
+} from "@/lib/assistant/identity";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import { assistantHttp } from "@/lib/assistant/assistant-http";
+import type { ChatMessage } from "@/lib/assistant/chat-types";
+import { attachmentFailure } from "@/lib/assistant/attachment-errors";
+
+export function ArtifactDelivery({
+  delivery,
+}: {
+  readonly delivery: NonNullable<ChatMessage["artifactDelivery"]>;
+}) {
+  useUiTranslation();
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const active = useRef(true);
+  const endpoint = useRef(delivery.endpoint);
+  useEffect(() => {
+    active.current = true;
+    endpoint.current = delivery.endpoint;
+    return () => {
+      active.current = false;
+    };
+  }, [delivery.endpoint]);
+  if (delivery.state === "materialized" && !delivery.rejected?.length)
+    return null;
+  const copy =
+    delivery.state === "retention_expired"
+      ? "The generated attachments are no longer available under retention policy. Ask for a new execution to generate them again."
+      : delivery.state === "delivery_missing"
+        ? "Some saved generated files are no longer available. Other attachments in this reply remain available."
+        : delivery.state === "source_verification_failed"
+          ? "The generated result could not be verified. No files were attached and no saved-result recovery is available."
+          : delivery.state === "artifact_too_large"
+            ? "The generated result exceeded the supported response limit (13 MiB and eight files). No files were attached."
+            : delivery.state === "materialized"
+              ? `${delivery.count} verified file${delivery.count === 1 ? "" : "s"} attached. Some generated files could not be delivered.`
+              : delivery.state === "result_expired"
+                ? "The generated result expired before delivery. Ask for a new execution to generate it again."
+                : delivery.state === "cancelled" ||
+                    delivery.state === "discarded"
+                  ? "File delivery was cancelled."
+                  : delivery.state === "delivery_pending"
+                    ? "The result is verified. Attachment delivery is pending."
+                    : delivery.state === "delivery_capacity_exhausted"
+                      ? "The result is verified. This reply reached its attachment limit; the files have not been delivered."
+                      : delivery.state === "delivery_failed"
+                        ? "The result is verified, but attachment delivery failed."
+                        : "Generated file delivery status is unavailable.";
+  async function recover() {
+    if (busy) return;
+    setBusy(true);
+    setError(undefined);
+    const identity = getAssistantIdentityRevision();
+    const user = getAssistantIdentityUserId();
+    const current = () =>
+      active.current &&
+      endpoint.current === delivery.endpoint &&
+      identity === getAssistantIdentityRevision();
+    try {
+      await assistantHttp(delivery.endpoint, { method: "POST" });
+      if (current()) {
+        await nyxAgentTransport.history(
+          delivery.conversationId,
+          delivery.messageSeq + 1,
+        );
+        if (!current()) return;
+        await queryClient.invalidateQueries({
+          queryKey: nyxBotQueryKeys.history(
+            user ?? undefined,
+            delivery.conversationId,
+          ),
+        });
+      }
+      if (current()) setBusy(false);
+    } catch (failure) {
+      if (current()) {
+        setError(attachmentFailure(failure));
+        setBusy(false);
+      }
+    }
+  }
+  return (
+    <div
+      role="status"
+      className="mb-2 space-y-1 rounded-lg border border-hairline p-3 text-12 text-muted-foreground"
+    >
+      <p>{copy}</p>
+      {!!delivery.rejected?.length && (
+        <ul>
+          {delivery.rejected.map((file) => (
+            <li key={file.index}>{translateUi("File ")}{file.index + 1} ({file.filename}{translateUi("): generated but not delivered —")}{" "}
+              {file.reason === "too_large"
+                ? translateUi("exceeds the supported file or accepted-total size limit")
+                : file.reason === "unavailable"
+                  ? translateUi("the producer could not retrieve this file")
+                  : file.reason === "missing"
+                    ? translateUi("the saved file is no longer available")
+                    : translateUi("the returned file failed validation")}
+              .
+            </li>
+          ))}
+        </ul>
+      )}
+      {delivery.recoveryAvailable &&
+        [
+          "delivery_pending",
+          "delivery_failed",
+          "delivery_capacity_exhausted",
+        ].includes(delivery.state) && (
+          <Button
+            variant="link"
+            size="sm"
+            type="button"
+            disabled={busy}
+            onClick={() => void recover()}
+          >
+            {busy ? translateUi("Recovering attachments…") : translateUi("Retry attachment delivery")}
+          </Button>
+        )}
+      {error && <p>{error}</p>}
+    </div>
+  );
+}

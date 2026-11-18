@@ -22,3 +22,23 @@ it("shows both lane prices and allows choosing your own key", async () => {
   );
   expect(onChange).toHaveBeenCalledWith(false);
 });
+
+it("can leave pricing out and describe each key instead", () => {
+  render(
+    <CredentialBindingChoice
+      value
+      onChange={vi.fn()}
+      showPricing={false}
+      resaleBillable
+      platformPrice={{
+        metric: "tokens",
+        credits_per_unit: "0.25",
+        sync_status: "synced",
+      }}
+    />,
+  );
+  expect(screen.queryByText(/credits/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/resale fee/)).not.toBeInTheDocument();
+  expect(screen.getByText("NyxID supplies the key. Nothing to paste.")).toBeInTheDocument();
+  expect(screen.getByText("Use a key from your own account.")).toBeInTheDocument();
+});

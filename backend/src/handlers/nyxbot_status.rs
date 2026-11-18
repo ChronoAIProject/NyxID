@@ -21,7 +21,7 @@ use crate::{
 /// counts as lost (it normally calls the provider within seconds).
 const NOT_RECEIVED_GRACE_SECS: i64 = 120;
 /// At most one "messages are not arriving" notice per channel in this window.
-const DELIVERY_NOTICE_HOURS: i64 = 6;
+const DELIVERY_NOTICE_HOURS: i64 = crate::services::assistant_wake_service::DELIVERY_NOTICE_HOURS;
 /// Channels checked per sweep, least recently checked first.
 const DELIVERY_BATCH: i64 = 100;
 /// Inbound messages looked at per channel per sweep, newest first.
@@ -33,15 +33,7 @@ const JUDGE_WINDOW_HOURS: i64 = 12;
 
 // Preserve unknown labels verbatim here, including the generic "chat app".
 fn platform_name(platform: &str) -> &str {
-    match platform {
-        "telegram" | "telegram-new" => "Telegram",
-        "discord" => "Discord",
-        "slack" => "Slack",
-        "lark" => "Lark",
-        "feishu" => "Feishu",
-        "whatsapp" => "WhatsApp",
-        other => other,
-    }
+    crate::services::assistant_wake_service::text::platform_name(platform)
 }
 
 // ---------------------------------------------------------------------------
@@ -140,9 +132,12 @@ pub(crate) async fn waiting(
                 "Waiting for you to verify your {} account with {bot}",
                 platform_name(&row.platform)
             ),
-            detail: match super::org_access_holds(state, &row).await? {
-                true => verification_hint(state, &row).await?,
-                false => None,
+            detail: match super::org_access(state, &row).await {
+                Ok(super::OrgAccess::Holds) => verification_hint(state, &row).await?,
+                Ok(super::OrgAccess::Lost) => None,
+                Ok(super::OrgAccess::Unavailable) | Err(_) => Some(
+                    "This assistant is temporarily unavailable. Please try again later.".into(),
+                ),
             },
             since: row.updated_at,
             expires_at: row.link_code_expires_at,
@@ -383,49 +378,7 @@ fn media_verdict(event: &NyxbotEvent) -> Verdict {
 
 /// Plain words for a delivery failure code, for the agent and the owner.
 pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
-    let receiver = if transport == "gateway" {
-        "the Agent Event Gateway"
-    } else {
-        "NyxID's relay"
-    };
-    if code == "media_interrupted" {
-        return "a photo or file was accepted but interrupted before processing".into();
-    }
-    let media_reason = match code {
-        "media_too_large" => Some("a photo or file exceeded the size limit"),
-        "media_source_unavailable" => {
-            Some("a photo or file source was unavailable or no longer authorized")
-        }
-        "media_unsupported_or_invalid" => {
-            Some("a photo or file had an unsupported or invalid format")
-        }
-        "media_rate_limited" => {
-            Some("a photo or file could not be processed because the upload rate limit was reached")
-        }
-        "media_fetch_or_store_failed" => Some("a photo or file could not be downloaded or stored"),
-        "media_timeout" => Some("photo or file processing timed out"),
-        "media_stopped" => Some("the turn stopped before a photo or file was processed"),
-        "media_expired" => Some("a photo or file expired in the queue before processing"),
-        "media_failed" => Some("a photo or file could not be processed"),
-        _ => None,
-    };
-    if let Some(reason) = media_reason {
-        return reason.into();
-    }
-    if code == "not_received" {
-        return format!("{receiver} accepted it but never passed it on");
-    }
-    if code == "routed_elsewhere" {
-        return "another route on this bot, from an earlier setup, sent it to a different agent"
-            .into();
-    }
-    if code == "undelivered" {
-        return format!("NyxID could not deliver it to {receiver}");
-    }
-    match code.strip_prefix("refused_") {
-        Some(status) => format!("{receiver} refused it (HTTP {status})"),
-        None => "it could not be delivered".into(),
-    }
+    crate::services::assistant_wake_service::text::failure_reason(code, transport)
 }
 
 /// Whether an inbound message came from a private chat. Telegram's private
@@ -571,6 +524,7 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
     for row in rows {
         if let Err(error) = check_delivery(state, &row).await {
             tracing::debug!(%error, "NyxBot delivery check deferred");
+            continue;
         }
         // A gateway update that failed or raced is retried here.
         match super::chats::sync_gateway_groups(state, &row, false).await {
@@ -585,8 +539,45 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
 async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
     // A demoted or removed org admin's link to the org's bot is released,
     // even if no message ever arrives to trigger it.
-    if !super::org_access_holds(state, row).await? {
-        return super::release_org_channel(state, row).await;
+    match super::org_access(state, row).await? {
+        super::OrgAccess::Holds => {}
+        super::OrgAccess::Lost => return super::release_org_channel(state, row).await,
+        super::OrgAccess::Unavailable => {
+            return Err(crate::errors::AppError::SecurityReadinessUnavailable);
+        }
+    }
+    if row.platform == "discord" {
+        let bot =
+            crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        let intake = crate::services::channel_bot_health::discord::load(&state.db, &[bot]).await?;
+        if let Some(intake) = intake.get(&row.channel_bot_id) {
+            if let Some(code) = intake.code {
+                let mut filter = doc! {"_id":&row.id,"status":"active","transport":&row.transport,"binding_id":&row.binding_id};
+                if code == crate::services::channel_bot_health::discord::NATIVE_UNCONFIRMED {
+                    // An admission after the health read must not be replaced
+                    // by this stale no-event observation.
+                    filter.insert("$or",bson::bson!([
+                        {"gateway_intake.binding_id":{"$ne":&row.binding_id}},
+                        {"gateway_intake.last_inbound_at":null},
+                        {"$expr":{"$lt":["$gateway_intake.last_inbound_at","$gateway_intake.handed_over_at"]}}
+                    ]));
+                }
+                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(filter,
+                    doc! {"$set":{"delivery_status":if intake.receiving_side=="native_gateway" {"unconfirmed"}else{"failing"},"delivery_error":code}}).await?;
+                return Ok(());
+            }
+            if row
+                .delivery_error
+                .as_deref()
+                .is_some_and(crate::services::channel_bot_health::discord::is_intake_code)
+            {
+                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"delivery_error":&row.delivery_error},
+                    doc! {"$set":{"delivery_status":"unknown"},"$unset":{"delivery_error":"","delivery_failed_at":""}}).await?;
+            }
+        }
+    }
+    if row.transport == "gateway" && row.gateway_source.is_some() {
+        return crate::services::nyxbot_gateway_source::check_status(state, row).await;
     }
     let Some(route_id) = row.route_id.as_deref() else {
         return Ok(());
@@ -739,21 +730,26 @@ async fn notify_failing(
     code: &str,
     at: DateTime<Utc>,
 ) -> AppResult<()> {
-    let cutoff =
-        bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(DELIVERY_NOTICE_HOURS));
-    let claimed = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id, "$or": [{"delivery_notified_at": null},
-            {"delivery_notified_at": {"$lt": cutoff}}]},
-            doc! {"$set": {"delivery_notified_at": bson::DateTime::now()}},
-        )
-        .await?
-        .modified_count
-        == 1;
-    if !claimed {
-        return Ok(());
+    let durable = crate::services::assistant_wake_service::enabled(&state.db).await?;
+    if !durable {
+        let cutoff =
+            bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(DELIVERY_NOTICE_HOURS));
+        let claimed = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id, "$or": [{"delivery_notified_at": null},
+                {"delivery_notified_at": {"$lt": cutoff}}]},
+                doc! {"$set": {"delivery_notified_at": bson::DateTime::now()}},
+            )
+            .await?
+            .modified_count
+            == 1;
+        if !claimed {
+            return Ok(());
+        }
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("health_claimed").await;
     }
     let agent = match row.agent_id.as_deref() {
         Some(id) => crate::services::assistant_team_service::agent(&state.db, &row.user_id, id)
@@ -791,6 +787,18 @@ async fn notify_failing(
             .id
         }
     };
+    if durable {
+        if crate::services::assistant_wake_service::health(
+            &state.db, row, &target, &agent.id, code, at,
+        )
+        .await?
+        {
+            #[cfg(test)]
+            crate::services::durable_wake_tests::after("health_claimed").await;
+            super::super::assistant_team::wake(state, &row.user_id, &target).await;
+        }
+        return Ok(());
+    }
     let platform = platform_name(&row.platform);
     let remedy = if code == "routed_elsewhere" {
         "List the bot's routes with nyxid__list_channel_routes, show the user which one takes \
@@ -1161,6 +1169,55 @@ mod tests {
             judge(&state, &row, &message).await,
             Verdict::Skip,
             "expired winner never becomes Lost"
+        );
+        state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn durable_wake_health_survives_crash_after_throttle_claim() {
+        let (state, mut channel, _) = fixture("wake_health_crash").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let agent =
+            crate::services::assistant_team_service::ensure_nyxbot(&state.db, &channel.user_id)
+                .await
+                .unwrap();
+        let home = crate::services::assistant_team_service::home_thread(
+            &state.db,
+            &state.encryption_keys,
+            &agent,
+        )
+        .await
+        .unwrap();
+        channel.source_conversation_id = Some(home.id.clone());
+        state
+            .db
+            .collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id":&channel.id},
+                doc! {"$set":{"source_conversation_id":&home.id}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc! {"_id":&home.id}, doc! {"$set":{"event_streak":3}})
+            .await
+            .unwrap();
+        crate::services::durable_wake_tests::drop_after(
+            "health_claimed",
+            notify_failing(&state, &channel, "routed_elsewhere", Utc::now()),
+        )
+        .await;
+        notify_failing(&state, &channel, "routed_elsewhere", Utc::now())
+            .await
+            .unwrap();
+        let row = crate::services::assistant_nyxagent::get(&state.db, &channel.user_id, &home.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.pending_events.len(),
+            1,
+            "six-hour throttle must commit with the wake"
         );
         state.db.drop().await.unwrap();
     }

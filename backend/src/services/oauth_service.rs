@@ -3,6 +3,7 @@ use chrono::{Duration, Utc};
 use mongodb::bson::doc;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::Url;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -23,6 +24,16 @@ pub async fn validate_client(
     client_id: &str,
     redirect_uri: &str,
 ) -> AppResult<OauthClient> {
+    // Always apply the execution-time redirect policy before looking at any
+    // stored registration branch. Legacy rows and public fallback redirects
+    // must receive exactly the same scheme checks as new registrations.
+    validate_redirect_uri_scheme(redirect_uri).inspect_err(|_| {
+        tracing::warn!(
+            client_id,
+            reason = "invalid_redirect",
+            "OAuth redirect rejected"
+        );
+    })?;
     let client = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one(doc! { "_id": client_id })
@@ -51,6 +62,51 @@ pub async fn validate_client(
     }
 
     Err(AppError::InvalidRedirectUri)
+}
+
+const REJECTED_REDIRECT_SCHEMES: &[&str] = &[
+    "javascript",
+    "vbscript",
+    "data",
+    "file",
+    "blob",
+    "filesystem",
+    "about",
+    "view-source",
+];
+
+/// Normalize the characters that browsers discard before parsing a URL. Tabs,
+/// newlines and carriage returns are removed anywhere; leading/trailing C0
+/// controls and spaces are trimmed. Execution and registration reject a URI
+/// whenever this browser-normalized spelling differs from the raw OAuth value,
+/// preserving exact redirect matching.
+pub fn normalize_redirect_uri(raw: &str) -> String {
+    raw.chars()
+        .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect::<String>()
+        .trim_matches(|character: char| character <= '\u{20}')
+        .to_string()
+}
+
+/// Parse and enforce the one redirect-URI policy used at registration and
+/// execution time. The returned URL is safe for redirect-page rendering.
+pub fn validate_redirect_uri_scheme(raw: &str) -> AppResult<Url> {
+    let normalized = normalize_redirect_uri(raw);
+    if normalized != raw {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    let parsed = Url::parse(&normalized).map_err(|_| AppError::InvalidRedirectUri)?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if REJECTED_REDIRECT_SCHEMES.contains(&scheme.as_str()) {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if !matches!(scheme.as_str(), "http" | "https") && parsed.cannot_be_a_base() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    if parsed.fragment().is_some() {
+        return Err(AppError::InvalidRedirectUri);
+    }
+    Ok(parsed)
 }
 
 /// Validate that the requested scopes are a subset of the client's allowed scopes.
@@ -229,6 +285,7 @@ pub struct ExchangedTokens {
     pub external_subject: Option<ExternalSubjectRef>,
     pub binding_grant_id: Option<String>,
     pub broker_capability_enabled: bool,
+    pub broker_require_sender_constraint: bool,
     pub resource_uris: Vec<String>,
     // Populated by the token exchange for the granted per-service access, but not
     // yet consumed on the access-token path (only the refresh_token_* siblings are
@@ -328,12 +385,49 @@ pub async fn issue_oauth_refresh_token(
     })
 }
 
+/// A missing value is an unverified permissive gate, not a policy denial.
+#[derive(Clone, Copy)]
+pub struct CodeBrokerRequirements {
+    pub require_admin_capability: Option<bool>,
+    pub require_sender_constraint: Option<bool>,
+}
+
+impl CodeBrokerRequirements {
+    pub fn known(require_admin_capability: bool, require_sender_constraint: bool) -> Self {
+        Self {
+            require_admin_capability: Some(require_admin_capability),
+            require_sender_constraint: Some(require_sender_constraint),
+        }
+    }
+
+    /// Resolve only gates that can change this exchange's result. None asks for
+    /// one live refresh before the code is consumed.
+    fn for_client(self, client: &OauthClient, sender_constrained: bool) -> Option<(bool, bool)> {
+        let broker = if super::oauth_broker_service::is_broker_client_with_policy(client, true) {
+            true
+        } else if !super::oauth_broker_service::is_broker_client_with_policy(client, false) {
+            false
+        } else {
+            !self.require_admin_capability?
+        };
+        let require_sender = if broker && !sender_constrained {
+            self.require_sender_constraint?
+        } else {
+            // Either this is not a broker exchange, or the sender already
+            // satisfies both possible policies.
+            self.require_sender_constraint.unwrap_or(false)
+        };
+        Some((broker, require_sender))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
-    broker_require_admin_capability: bool,
+    broker_requirements: CodeBrokerRequirements,
+    refresh_broker_requirements: impl std::future::Future<Output = CodeBrokerRequirements>,
     code: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -344,6 +438,29 @@ pub async fn exchange_authorization_code(
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
 ) -> AppResult<ExchangedTokens> {
+    // Load the live client before claiming the code. Policy uncertainty must
+    // leave the code usable, and a non-broker client needs no policy refresh.
+    // Keep the active filter so soft-deleted clients cannot redeem old codes.
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id, "is_active": true })
+        .await?;
+    let sender_constrained = dpop_jkt.is_some() || mtls_x5t_s256.is_some();
+    let (broker_capability_enabled, broker_require_sender_constraint) =
+        if let Some(client) = &client {
+            match broker_requirements.for_client(client, sender_constrained) {
+                Some(resolved) => resolved,
+                None => refresh_broker_requirements
+                    .await
+                    .for_client(client, sender_constrained)
+                    .ok_or(AppError::OAuthAuthorityUnavailable)?,
+            }
+        } else {
+            // Retain replay revocation even after the client was removed. A
+            // missing/inactive client cannot issue tokens under either policy.
+            (false, false)
+        };
+
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -405,30 +522,14 @@ pub async fn exchange_authorization_code(
         ));
     }
 
+    validate_redirect_uri_scheme(redirect_uri)?;
     if stored.redirect_uri != redirect_uri {
         return Err(AppError::InvalidRedirectUri);
     }
 
-    // Validate client_secret for confidential clients. Reject auth
-    // codes against soft-deleted clients (`is_active = false`) so an
-    // already-issued code cannot be exchanged after the developer
-    // app -- or its owning org -- has been deleted. The legacy
-    // delete path on `oauth_clients` is a soft-delete, so the row
-    // can linger with `is_active = false` until the org cascade
-    // sweeps it; without this filter the code window is up to the
-    // auth-code TTL after the delete.
-    let client = db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! { "_id": client_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
-
+    let client =
+        client.ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
     validate_client_secret(&client, client_secret)?;
-    let broker_capability_enabled =
-        crate::services::oauth_broker_service::is_broker_client_with_policy(
-            &client,
-            broker_require_admin_capability,
-        );
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -612,6 +713,7 @@ pub async fn exchange_authorization_code(
         external_subject: stored.external_subject,
         binding_grant_id: stored.binding_grant_id,
         broker_capability_enabled,
+        broker_require_sender_constraint,
         resource_uris: token_resource_scope.resource_uris,
         allowed_service_ids: token_resource_scope.allowed_service_ids,
         allow_all_services: token_resource_scope.allow_all_services,
@@ -638,7 +740,7 @@ pub async fn revoke_issued_refresh(db: &mongodb::Database, jti: &str) -> AppResu
 /// the client binds an ephemeral port. Only `http` scheme is accepted (loopback
 /// connections never leave the machine, so TLS is unnecessary).
 fn is_loopback_redirect_uri(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     parsed.scheme() == "http"
@@ -657,7 +759,7 @@ fn is_loopback_redirect_uri(uri: &str) -> bool {
 /// Only non-standard schemes are accepted (`http` and `https` require explicit
 /// registration to prevent open-redirector vulnerabilities).
 fn is_private_use_uri_scheme(uri: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(uri) else {
+    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
         return false;
     };
     !matches!(parsed.scheme(), "http" | "https")
@@ -759,6 +861,49 @@ mod tests {
         assert!(!is_private_use_uri_scheme("not a uri"));
     }
 
+    #[test]
+    fn redirect_policy_normalizes_browser_controls_and_rejects_dangerous_schemes() {
+        for value in [
+            " JaVaScRiPt:marker ",
+            "java\tscript:marker",
+            "java\nscript:marker",
+            "vbscript:marker",
+            "data:text/plain,marker",
+            "file:///tmp/marker",
+            "blob:https://example.test/id",
+            "filesystem:https://example.test/temporary/x",
+            "about:blank",
+            "view-source:https://example.test",
+            "custom:",
+            "custom:payload",
+            "\u{0000}https://app.example/callback",
+            "https://app.example/callback\u{001f}",
+            "https://app.exa\tmple/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_err(),
+                "unsafe redirect accepted: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_policy_keeps_native_and_loopback_redirects() {
+        for value in [
+            "cursor://oauth/callback",
+            "vscode://nyxid/auth",
+            "com.example.app:/oauth2redirect",
+            "http://127.0.0.1:43123/callback",
+            "http://localhost/callback",
+            "http://[::1]/callback",
+        ] {
+            assert!(
+                validate_redirect_uri_scheme(value).is_ok(),
+                "legitimate redirect rejected: {value}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn validate_client_accepts_exact_and_public_native_redirects() {
         let db = connect_test_database("oauth_val_ok")
@@ -810,6 +955,28 @@ mod tests {
             .await
             .expect_err("missing client rejected");
         assert!(matches!(err, AppError::NotFound(message) if message == "OAuth client not found"));
+    }
+
+    #[tokio::test]
+    async fn validate_client_applies_redirect_policy_to_legacy_and_public_fallbacks() {
+        let db = connect_test_database("oauth_val_policy_branches")
+            .await
+            .expect("local MongoDB required for oauth_service tests");
+
+        let mut legacy = test_client("legacy-unsafe-client", "public", "");
+        legacy.redirect_uris = vec!["javascript:marker".to_string()];
+        insert_client(&db, &legacy).await;
+        let err = validate_client(&db, &legacy.id, "javascript:marker")
+            .await
+            .expect_err("legacy dangerous exact rows must be rejected at execution");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
+
+        let public = test_client("public-opaque-client", "public", "");
+        insert_client(&db, &public).await;
+        let err = validate_client(&db, &public.id, "custom:payload")
+            .await
+            .expect_err("opaque public fallback redirects must be rejected");
+        assert!(matches!(err, AppError::InvalidRedirectUri));
     }
 
     #[tokio::test]
@@ -981,7 +1148,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1088,7 +1256,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1203,7 +1372,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1292,7 +1462,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             client_id,
             "https://app.example/callback",

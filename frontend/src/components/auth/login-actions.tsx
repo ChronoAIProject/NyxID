@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 
@@ -12,6 +13,7 @@ export function LoginActions({
   disabled: boolean;
   paired?: boolean;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div
       className={
@@ -27,18 +29,14 @@ export function LoginActions({
           variant="outline"
           disabled={disabled}
           onClick={onDeny}
-        >
-          Deny request
-        </Button>
+        >{t("Deny request")}</Button>
       ) : (
         <button
           type="button"
           disabled={disabled}
           onClick={onDeny}
           className="min-h-8 rounded-sm text-left text-11 text-muted-foreground hover:text-foreground hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:pointer-events-none disabled:opacity-50"
-        >
-          Cancel request
-        </button>
+        >{t("Cancel request")}</button>
       )}
     </div>
   );

@@ -48,10 +48,8 @@ function Website({
     window.dispatchEvent(new Event("nyxid:public-url-context"));
   }, [location.pathname, location.searchStr, location.hash]);
   const { locale: language, route } = parsePublicPath(location.pathname);
-  const [menuOpen, setMenuOpen] = useState(false);
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [navigationRevision]);
+  const [menu, setMenu] = useState({ revision: navigationRevision, open: false });
+  const menuOpen = menu.revision === navigationRevision && menu.open;
   const [filters, setFilters] = useState<Record<string, string>>({
     catF: "all",
     chF: "",
@@ -114,7 +112,7 @@ function Website({
     setLanguage: (next) => {
       window.location.assign(publicationPath(route, next) + urlContext.search);
     },
-    toggleMenu: () => setMenuOpen((open) => !open),
+    toggleMenu: () => setMenu({ revision: navigationRevision, open: !menuOpen }),
     authHref: (kind) => authHref(kind, urlContext.search),
     siteHref: (path) => {
       const url = new URL(path, "https://nyx.chrono-ai.fun");

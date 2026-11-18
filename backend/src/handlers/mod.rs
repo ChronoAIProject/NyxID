@@ -10,10 +10,13 @@ pub mod admin_helpers;
 pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
+pub mod admin_personal_erasure;
 pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
+pub mod admin_sandbox_rates;
+pub mod admin_sandbox_settings;
 pub mod admin_service_accounts;
 pub mod admin_upload_retention;
 pub mod admin_usage;
@@ -32,6 +35,7 @@ pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_readiness;
+pub mod assistant_sharing;
 pub mod auth;
 pub mod auth_agent_key;
 pub mod auth_device;
@@ -53,12 +57,14 @@ mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
+pub mod channel_whatsapp_native;
 pub mod cli_pairings;
 pub mod codex_connection;
 pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;
+pub mod credential_verification;
 pub mod delegation;
 pub mod demo;
 pub mod developer_apps;
@@ -69,6 +75,8 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+#[cfg(test)]
+mod key_authority_audit_tests;
 pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;
@@ -80,11 +88,13 @@ pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub(crate) mod mobile_redirect;
 pub mod node_admin;
 pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
 pub mod oracle_login_profiles;
@@ -95,6 +105,8 @@ pub mod oracle_worker_bundle;
 pub mod oracle_workers;
 pub mod org_role_scopes;
 pub mod orgs;
+#[cfg(test)]
+mod password_change_tests;
 pub mod platform_binding;
 pub mod platform_bots;
 pub mod platform_personal_bindings;
@@ -105,6 +117,7 @@ pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod sandbox_billing;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;
@@ -141,16 +154,22 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod assistant_cma_agents;
+pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
 pub mod assistant_group;
+pub mod assistant_notifications;
 pub mod assistant_nyxagent;
+pub mod assistant_onboarding;
+pub mod assistant_platform_models;
 pub mod assistant_team;
 pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod nyxbot;
+pub mod nyxbot_event_bindings;
 pub mod options;
 pub(crate) mod org_group;
 
@@ -213,3 +232,19 @@ pub mod call_adapters;
 pub mod platform_help;
 
 pub mod telegram_managers;
+
+pub mod nyxbot_gateway_releases;
+
+pub mod billing_benefits;
+pub mod monitoring;
+
+pub mod collaboration_group;
+
+pub mod cma_sessions;
+pub mod org_specialist_channels;
+
+pub(crate) mod execution_permission_resume;
+pub(crate) mod invocation_diagnostics;
+
+mod platform_model_gateway;
+pub mod platform_models;

@@ -1,4 +1,8 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useEffect, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { Check, Loader2, MessageSquareText, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +18,7 @@ export function InputCard({
   readonly disabled?: boolean;
   readonly onResolve: (answer: InputAnswer) => Promise<void> | void;
 }) {
+  useUiTranslation();
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
   const [pending, setPending] = useState<"selection" | "text" | null>(null);
@@ -41,7 +46,7 @@ export function InputCard({
     const submitted = block.status === "submitted";
     return (
       <section
-        className={`rounded-lg border p-4 ${
+        className={`${STATUS_CARD_MAX_W} rounded-lg border p-4 ${
           resolved
             ? "border-success/30 bg-success/[0.06]"
             : submitted
@@ -49,7 +54,7 @@ export function InputCard({
               : "border-border bg-overlay"
         }`}
       >
-        <div className="flex items-center gap-2 text-12 font-semibold text-foreground">
+        <div className="flex items-center gap-2 type-body-strong text-foreground">
           {submitted ? (
             <Loader2 className="h-4 w-4 animate-spin text-warning" />
           ) : (
@@ -58,18 +63,16 @@ export function InputCard({
             />
           )}
           {resolved
-            ? "Answer recorded"
+            ? translateUi("Answer recorded")
             : submitted
-              ? "Answer sent"
-              : "Input cancelled"}
+              ? translateUi("Answer sent")
+              : translateUi("Input cancelled")}
         </div>
-        <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+        <p className="mt-2 text-14 text-muted-foreground">
           {block.prompt}
         </p>
         {submitted ? (
-          <p className="mt-1.5 text-11 text-text-tertiary">
-            Waiting for committed confirmation.
-          </p>
+          <p className="mt-1.5 text-13 text-text-tertiary">{translateUi("Waiting for committed confirmation.")}</p>
         ) : null}
       </section>
     );
@@ -78,16 +81,14 @@ export function InputCard({
   const busy = pending !== null;
   const normalizedText = freeText.trim();
   return (
-    <section className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-lg border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/30 bg-nyx-secondary-400/10">
           <MessageSquareText className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-13 font-semibold text-foreground">
-            Input required
-          </h3>
-          <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+          <h3 className="type-card-title text-foreground">{translateUi("Input required")}</h3>
+          <p className="mt-1 text-14 text-muted-foreground">
             {block.prompt}
           </p>
         </div>
@@ -98,9 +99,9 @@ export function InputCard({
           {block.options.map((option) => {
             const checked = selectedOptionIds.includes(option.option_id);
             return (
-              <label
+              <Label
                 key={option.option_id}
-                className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 text-12 hover:bg-muted"
+                className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 hover:bg-muted"
               >
                 <input
                   checked={checked}
@@ -121,16 +122,16 @@ export function InputCard({
                   value={option.option_id}
                 />
                 <span className="min-w-0">
-                  <span className="block font-medium text-foreground">
+                  <span className="block text-foreground">
                     {option.label}
                   </span>
                   {option.description ? (
-                    <span className="mt-0.5 block text-11 text-muted-foreground">
+                    <FieldHelp className="mt-0.5 block text-muted-foreground">
                       {option.description}
-                    </span>
+                    </FieldHelp>
                   ) : null}
                 </span>
-              </label>
+              </Label>
             );
           })}
           <Button
@@ -144,9 +145,7 @@ export function InputCard({
               <Loader2 className="animate-spin" />
             ) : (
               <Send />
-            )}
-            Submit
-          </Button>
+            )}{translateUi("Submit")}</Button>
         </div>
       ) : null}
 
@@ -160,7 +159,7 @@ export function InputCard({
           }}
         >
           <Input
-            aria-label="Answer"
+            aria-label={translateUi("Answer")}
             disabled={busy || disabled}
             maxLength={32_768}
             onChange={(event) => setFreeText(event.target.value)}
@@ -170,14 +169,14 @@ export function InputCard({
             type="submit"
             size="icon"
             disabled={busy || disabled || !normalizedText}
-            title="Submit answer"
+            title={translateUi("Submit answer")}
           >
             {pending === "text" ? (
               <Loader2 className="animate-spin" />
             ) : (
               <Send />
             )}
-            <span className="sr-only">Submit answer</span>
+            <span className="sr-only">{translateUi("Submit answer")}</span>
           </Button>
         </form>
       ) : null}

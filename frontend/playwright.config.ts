@@ -31,7 +31,7 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npm run dev -- --mode test --port ${String(PORT)} --strictPort`,
+    command: `npm run dev -- --config vite.e2e.config.ts --mode test --port ${String(PORT)} --strictPort`,
     url: `http://localhost:${String(PORT)}`,
     reuseExistingServer: false,
     timeout: 90_000,

@@ -984,6 +984,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1009,6 +1010,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1033,6 +1035,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1149,6 +1152,7 @@ mod tests {
                         approval_timeout_secs: 30,
                         grant_expiry_days: 30,
                         approval_required: Some(approval_required),
+                        group_mentions_enabled: true,
                         push_enabled: has_existing_device,
                         push_devices: if has_existing_device {
                             vec![old_device.clone()]
@@ -1216,6 +1220,7 @@ mod tests {
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
                 approval_required: Some(true),
+                group_mentions_enabled: true,
                 push_enabled: true,
                 push_devices: vec![old_device],
                 created_at: Utc::now(),
@@ -1321,6 +1326,7 @@ mod tests {
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
                 approval_required: Some(true),
+                group_mentions_enabled: true,
                 push_enabled: true,
                 // `$pull` removes every matching token. Duplicate legacy rows
                 // must still count as losing the previous owner's last channel.

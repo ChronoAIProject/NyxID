@@ -167,6 +167,7 @@ impl InspectOwnerEgress {
             keys: &self.state.encryption_keys,
             http: &self.state.http_client,
             config: &self.state.config,
+            jwt_keys: &self.state.jwt_keys,
             token_exchange_cache: &self.state.token_exchange_cache,
             node_manager: &self.state.node_ws_manager,
         };
@@ -593,6 +594,7 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         .await
         .unwrap();
     model.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
         allowed_owner_ids: accounts.to_vec(),

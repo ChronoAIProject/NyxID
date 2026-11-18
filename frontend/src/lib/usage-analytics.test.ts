@@ -195,3 +195,26 @@ it("filters sample services, organizations, and users rather than relabeling unc
     sampleAnalytics(EMPTY_FILTERS, newPanel()).total!,
   );
 });
+
+it("supports model breakdowns in persisted views and conserves their token totals", () => {
+  const panel = newView().panels.find((item) => item.title === "Tokens by model")!;
+  expect(panel.breakdown).toBe("model");
+  expect(panel.measure).toBe("total_tokens");
+  expect(analyticsPanelSchema.parse(panel).breakdown).toBe("model");
+  expect(analyticsPath(EMPTY_FILTERS, panel)).toContain("breakdown=model");
+  const filters = {
+    ...EMPTY_FILTERS,
+    services: [SAMPLE_OPTIONS.services[0]!.id],
+  };
+  const models = sampleAnalytics(filters, panel);
+  expect(models.slices).toHaveLength(2);
+  expect(
+    models.slices.every((slice) => slice.label.startsWith("sample-model-1-")),
+  ).toBe(true);
+  expect(models.slices.reduce((sum, slice) => sum + slice.value!, 0)).toBe(
+    models.total,
+  );
+  expect(models.total).toBe(
+    sampleAnalytics(filters, { ...panel, breakdown: "service" }).total,
+  );
+});

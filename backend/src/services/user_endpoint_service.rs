@@ -213,7 +213,7 @@ pub enum RecommendedSkillsUpdate {
 }
 
 /// How the caller wants to treat the `openapi_spec_url` field on update.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum OpenApiSpecUrlUpdate<'a> {
     /// Leave existing value untouched.
     #[default]
@@ -378,6 +378,10 @@ pub async fn delete_service_endpoint(
         }
         crate::services::service_history::collection::<UserEndpoint>(&db, COLLECTION_NAME)
             .delete_one(doc! { "_id": &endpoint_id, "user_id": &owner }).session(&mut *session).await?;
+        crate::services::service_history::collection::<bson::Document>(&db, USER_SERVICES)
+            .update_many(doc! { "_id": { "$in": &service_ids }, "user_id": &owner,
+                "endpoint_id": &endpoint_id, "source": crate::services::voice::access::BOUND_SOURCE },
+                doc! { "$unset": { "source_id": "" } }).session(&mut *session).await?;
         crate::services::service_history::collection::<bson::Document>(&db, USER_SERVICES)
             .update_many(doc! { "_id": { "$in": &service_ids }, "user_id": &owner, "endpoint_id": &endpoint_id, "deleted_at": null },
                 doc! { "$set": { "deleted_at": bson::DateTime::from_chrono(Utc::now()), "is_active": false } }).session(&mut *session).await?;

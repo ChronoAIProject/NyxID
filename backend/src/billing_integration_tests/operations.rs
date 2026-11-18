@@ -37,6 +37,7 @@ fn prices(slug: &str, rows: &[(&str, i64, bool)]) -> Vec<OperationPrice> {
 fn requests_lane(slug: &str, operations: Vec<OperationPrice>) -> ServiceBilling {
     ServiceBilling {
         byok_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "1".into(),
             lago_metric_code: format!("platform_svc_{slug}_byok"),

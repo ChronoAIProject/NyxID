@@ -18,6 +18,8 @@ pub struct SocialTokenExchangeResponse {
     pub id_token: Option<String>,
     pub expires_in: i64,
     pub scope: String,
+    pub(crate) user_id_for_telemetry: String,
+    pub(crate) mobile_mfa_exempt: bool,
 }
 
 /// Exchange an external provider token (Google ID token or GitHub access token)
@@ -62,6 +64,8 @@ pub async fn exchange_social_token(
                     "subject_token_type": subject_token_type,
                     "client_id": client_id,
                     "result": "success",
+                    "session_id": resp.session_id,
+                    "mfa": if resp.mobile_mfa_exempt {"skipped_mobile_rollout"} else {"not_required"},
                 })),
                 None,
                 None,
@@ -89,13 +93,16 @@ pub async fn exchange_social_token(
         }
     }
 
-    // Strip the internal-only user_id before returning
+    // Carry metadata-only identity to the handler's telemetry emitter. The
+    // handler builds a dedicated token response and never serializes it.
     result.map(|r| SocialTokenExchangeResponse {
         access_token: r.access_token,
         refresh_token: r.refresh_token,
         id_token: r.id_token,
         expires_in: r.expires_in,
         scope: r.scope,
+        user_id_for_telemetry: r.user_id_for_audit,
+        mobile_mfa_exempt: r.mobile_mfa_exempt,
     })
 }
 
@@ -107,6 +114,8 @@ struct SocialTokenExchangeInner {
     expires_in: i64,
     scope: String,
     user_id_for_audit: String,
+    session_id: String,
+    mobile_mfa_exempt: bool,
 }
 
 /// Core exchange logic. Separated to allow the outer function to audit-log
@@ -175,10 +184,12 @@ async fn complete_verified_exchange(
         .await?
         .user;
 
-    // Social subject-token exchange is a first-factor login. MFA users must
-    // redeem the same bounded challenge as password/social browser flows
+    // Native social exchange follows the person's mobile rollout decision.
+    // When enabled, redeem the same bounded challenge as other login flows
     // before any session or refresh token is materialized.
-    if user.mfa_enabled {
+    let mobile_exempt =
+        user.mfa_enabled && !feature_flag_service::mobile_mfa_required(db, &user.id).await?;
+    if user.mfa_enabled && !mobile_exempt {
         let challenge =
             token_service::start_social_mfa_challenge(db, &user.id, social_provider.as_str())
                 .await?;
@@ -188,9 +199,14 @@ async fn complete_verified_exchange(
     }
 
     // Step 5: Issue full NyxID token set
-    let tokens = token_service::create_session_and_issue_tokens(
-        db, config, jwt_keys, &user.id, None, // no IP from token exchange
+    let tokens = token_service::create_mobile_social_tokens(
+        db,
+        config,
+        jwt_keys,
+        &user.id,
+        None, // no IP from token exchange
         None, // no user agent
+        mobile_exempt,
     )
     .await?;
 
@@ -219,6 +235,8 @@ async fn complete_verified_exchange(
         expires_in: tokens.access_expires_in,
         scope: token_service::FIRST_PARTY_ACCESS_SCOPES.to_string(),
         user_id_for_audit: user.id,
+        session_id: tokens.session_id,
+        mobile_mfa_exempt: mobile_exempt,
     })
 }
 
@@ -397,6 +415,98 @@ mod tests {
     use mongodb::bson::doc;
 
     #[tokio::test]
+    async fn mobile_token_exchange_defaults_to_exempt_for_all_social_providers() {
+        use crate::models::{
+            session::{COLLECTION_NAME as SESSIONS, MfaExemption, Session},
+            user::{User, UserType},
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("mobile_exchange_exempt").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        for provider in [
+            SocialProvider::Google,
+            SocialProvider::GitHub,
+            SocialProvider::Apple,
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut user = crate::test_utils::test_user(&id, UserType::Person);
+            user.mfa_enabled = true;
+            user.social_provider = Some(provider.as_str().into());
+            user.social_provider_id = Some(format!("provider-{id}"));
+            let email = user.email.clone();
+            let profile = || SocialProfile {
+                provider,
+                provider_id: format!("provider-{id}"),
+                email: email.clone(),
+                display_name: None,
+                avatar_url: None,
+            };
+            db.collection::<User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(user)
+                .await
+                .unwrap();
+            let tokens = complete_verified_exchange(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                "public-client",
+                provider,
+                profile(),
+            )
+            .await
+            .unwrap();
+            let row = db
+                .collection::<Session>(SESSIONS)
+                .find_one(doc! {"user_id": &id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.mfa_assured, Some(false));
+            assert_eq!(row.mfa_exemption, Some(MfaExemption::MobileRollout));
+            feature_flag_service::set_platform_override(
+                &db,
+                feature_flag_service::MOBILE_MFA_FLAG_KEY,
+                &feature_flag_service::FlagTarget::User(id.clone()),
+                true,
+                &id,
+            )
+            .await
+            .unwrap();
+            let rotated = token_service::refresh_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &tokens.refresh_token,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rotated.session_id, row.id);
+            assert!(matches!(
+                complete_verified_exchange(
+                    &db,
+                    &state.config,
+                    &state.jwt_keys,
+                    "public-client",
+                    provider,
+                    profile(),
+                )
+                .await,
+                Err(AppError::MfaRequired { .. })
+            ));
+            assert_eq!(
+                db.collection::<Session>(SESSIONS)
+                    .count_documents(doc! {"user_id": &id})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn verified_social_exchange_requires_mfa_before_any_session_or_tokens() {
         use crate::models::{
             session::{COLLECTION_NAME as SESSIONS, Session},
@@ -404,6 +514,15 @@ mod tests {
         };
         let db = crate::test_utils::connect_transaction_test_database("social_exchange_mfa").await;
         let state = crate::test_utils::test_app_state(db.clone());
+        feature_flag_service::set_platform_override(
+            &db,
+            feature_flag_service::MOBILE_MFA_FLAG_KEY,
+            &feature_flag_service::FlagTarget::Global,
+            true,
+            "test-actor",
+        )
+        .await
+        .unwrap();
         for provider in [
             SocialProvider::Google,
             SocialProvider::GitHub,

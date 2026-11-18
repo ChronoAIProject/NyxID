@@ -1,6 +1,8 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { getProviderBrand } from "@/lib/provider-branding";
 import type {
   AssistantAgent,
+  AssistantGroupMember,
   AssistantAgentKind,
   NyxAgentAccessMode,
   NyxAgentActionConfirmation,
@@ -12,14 +14,14 @@ const PLATFORM_NAMES: Readonly<Record<string, string>> = {
   "telegram-new": "Telegram",
   whatsapp: "WhatsApp",
   x: "X",
-  aurinko: "Email",
+  get aurinko() { return translateUi("Email"); },
 };
 
 /** Display name of a channel platform id ("telegram" -> "Telegram"). */
 export function channelPlatformName(platform: string): string {
   const known = PLATFORM_NAMES[platform] ?? getProviderBrand(platform).label;
   if (known) return known;
-  return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : "Channel";
+  return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : translateUi("Channel");
 }
 
 /** A channel chat's name, or what kind of chat it is when unnamed. */
@@ -30,9 +32,9 @@ export function channelChatTitle(
 ): string {
   if (title) return title;
   const name = channelPlatformName(platform);
-  if (kind === "private") return `Private ${name} chat`;
-  if (kind === "channel") return `${name} channel`;
-  return kind === "group" ? `${name} group` : `${name} chat`;
+  if (kind === "private") return translateUi("Private {{name}} chat", { name });
+  if (kind === "channel") return translateUi("{{name}} channel", { name });
+  return kind === "group" ? translateUi("{{name}} group", { name }) : translateUi("{{name}} chat", { name });
 }
 
 /** An agent's threads through one channel bot, newest first. */
@@ -71,33 +73,49 @@ export function splitChannelThreads(threads: readonly Conversation[]): {
     bots: [...bots].map(([key, group]) => ({
       key,
       platform: group.platform,
-      label: group.label ?? `${channelPlatformName(group.platform)} bot`,
+      label: group.label ?? translateUi("{{platform}} bot", { platform: channelPlatformName(group.platform) }),
       threads: group.threads,
     })),
   };
 }
 
 export const AGENT_STATUS_LABEL = {
-  running: "Running",
-  idle: "Idle",
-  destroyed: "Destroyed",
+  get running() { return translateUi("Running"); },
+  get idle() { return translateUi("Idle"); },
+  get destroyed() { return translateUi("Destroyed"); },
 } as const;
 
 // "NyxID events (authored by NyxID; ...):" -- the parenthetical has changed
 // wording over time, so any NyxID events header is stripped.
 const EVENT_HEADER = /^NyxID events[^:\n]*:\s*/;
 
-/** The individual notices of a server-authored `event` message. */
+/**
+ * The individual notices of a server-authored `event` message. The server
+ * indents continuation lines, leaving unindented `- ` lines as boundaries.
+ * Old rows use quote balancing, with known event openers recovering from
+ * excerpts whose closing quote was truncated by the server.
+ * Text without the events header (an automation's instruction) is one notice.
+ */
 export function eventNotices(text: string): string[] {
-  const body = text.replace(EVENT_HEADER, "");
-  const lines = body
-    .split("\n")
-    .map((line) => line.replace(/^\s*-\s+/, "").trim())
-    .filter(Boolean);
-  return lines.length ? lines : [text.trim()];
+  if (!EVENT_HEADER.test(text)) return [text.trim()];
+  const indented = text.match(EVENT_HEADER)?.[0].includes("continuation lines are indented");
+  const notices: string[] = [];
+  const lines = text.replace(EVENT_HEADER, "").split("\n");
+  let remainingQuotes = (lines.join("\n").match(/"/g) ?? []).length;
+  for (const line of lines) {
+    const current = notices.at(-1);
+    const insideQuote = current !== undefined && (current.match(/"/g)?.length ?? 0) % 2 === 1;
+    const knownEvent = /^- (?:Specialist |The user |NyxBot |Asynchronous service operation|Skill |The owner |The \S+ channel bot )/.test(line);
+    if (/^- /.test(line) && (indented || !insideQuote || (knownEvent && remainingQuotes === 0))) notices.push(line.slice(2).trim());
+    else if (current === undefined) notices.push(line.replace(/^\s*-\s+/, "").trim());
+    else notices[notices.length - 1] = `${current}\n${indented ? line.replace(/^ {2}/, "") : line}`;
+    remainingQuotes -= (line.match(/"/g) ?? []).length;
+  }
+  const kept = notices.map((notice) => notice.trim()).filter(Boolean);
+  return kept.length ? kept : [text.trim()];
 }
 
-export const AGENT_KIND_LABEL = { nyxbot: "NyxBot", specialist: "Specialist" } as const;
+export const AGENT_KIND_LABEL = { get nyxbot() { return translateUi("NyxBot"); }, get specialist() { return translateUi("Specialist"); } } as const;
 
 export type EventNoticeKind =
   | "reply"
@@ -107,6 +125,7 @@ export type EventNoticeKind =
   | "connection"
   | "channel"
   | "message"
+  | "task"
   | "notice";
 export type EventNoticeTone = "neutral" | "success" | "warning" | "destructive";
 
@@ -234,6 +253,22 @@ export function describeEventNotice(text: string): EventNotice {
       detail: match[2]?.trim() || undefined,
     };
   }
+  match = /^Asynchronous service operation finished: ([^.]+)\./.exec(notice);
+  if (match) {
+    const outcome = match[1]?.trim() ?? "";
+    if (outcome === "operation_cancelled") {
+      return { kind: "task", tone: "neutral", summary: "Background task cancelled" };
+    }
+    if (outcome === "timeout") {
+      return { kind: "task", tone: "warning", summary: "Background tracking timed out" };
+    }
+    const ok = outcome === "done" || outcome === "completed";
+    return {
+      kind: "task",
+      tone: ok ? "success" : "warning",
+      summary: ok ? "Background task finished" : `Background task ${outcome.replace(/_/g, " ")}`,
+    };
+  }
   const summary = firstSentence(notice);
   return {
     kind: "notice",
@@ -259,7 +294,7 @@ export function workingLabel(names: readonly string[]): string {
 }
 
 interface NamedAgent {
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "unknown";
   /** The @handle ("NyxBot" for NyxBot). */
   readonly name: string;
   readonly display_name?: string | null;
@@ -277,16 +312,16 @@ export function agentHandle(agent: NamedAgent): string | undefined {
 }
 
 /**
- * Conversation and group payloads carry only `{id, name, kind}`; the display
- * name lives on the agent list. Join by id.
+ * Respect server display names, including a cleared name. Older payloads
+ * without the field can still join the viewer's agent list by id.
  */
-export function withDisplayName<T extends { readonly id: string }>(
+export function withDisplayName<T extends { readonly id: string; readonly display_name?: string | null }>(
   ref: T,
   agents: readonly { readonly id: string; readonly display_name: string | null }[] | undefined,
 ): T & { readonly display_name: string | null } {
   return {
     ...ref,
-    display_name: agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
+    display_name: ref.display_name !== undefined ? ref.display_name : agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
   };
 }
 
@@ -310,10 +345,10 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   >();
   for (const agent of agents) {
     const id =
-      agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
+      agent.share_role ? "shared" : agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
     const section = groups.get(id) ?? {
       id,
-      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      label: id === "personal" ? "Personal" : id === "shared" ? "Shared with me" : (agent.owner_name ?? id),
       agents: [],
     };
     section.agents.push(agent);
@@ -325,9 +360,9 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
 }
 
 export const ACCESS_MODE_LABEL = {
-  autopilot: "Full access",
-  nyxmode: "Auto",
-  ask_every_time: "Ask every time",
+  get autopilot() { return translateUi("Full access"); },
+  get nyxmode() { return translateUi("Auto"); },
+  get ask_every_time() { return translateUi("Ask every time"); },
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
@@ -347,21 +382,27 @@ export function effectiveAccessMode(
 }
 
 export const ACTION_RISK_LABEL = {
-  read: "Read",
-  change: "Change",
-  sensitive: "Sensitive",
-  destructive: "Destructive",
+  get read() { return translateUi("Read"); },
+  get change() { return translateUi("Change"); },
+  get sensitive() { return translateUi("Sensitive"); },
+  get destructive() { return translateUi("Destructive"); },
 } as const;
 
 /** Why a card asks, for its risk line. */
 export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
-  if (confirmation.reason === "webhook") return "This automation's confirmation policy asks.";
+  if (confirmation.reason === "org_connection") return translateUi("Using this organization connection requires your instruction, including in Full access.");
+  if (confirmation.reason === "webhook") return translateUi("This automation's confirmation policy asks.");
   if (confirmation.reason === "policy") {
-    return "This machine's or saved login's confirmation setting asks.";
+    return translateUi("This machine's or saved login's confirmation setting asks.");
   }
   return confirmation.access_mode
-    ? `Your access mode is ${ACCESS_MODE_LABEL[confirmation.access_mode]}.`
-    : "Your access mode asks.";
+    ? translateUi("Your access mode is {{mode}}.", { mode: ACCESS_MODE_LABEL[confirmation.access_mode] })
+    : translateUi("Your access mode asks.");
+}
+
+/** Missing deployment metadata is unknown, never a reason to omit an image. */
+export function modelCannotViewImages(model: Pick<NyxAgentModel, "input_modalities"> | undefined): boolean {
+  return model?.input_modalities != null && !model.input_modalities.includes("image");
 }
 
 /** Prefer the upstream name; older servers supply only the routing alias. */
@@ -371,4 +412,26 @@ export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): st
   if (label && label !== alias && label !== model.id) return label;
   if (model.id === "nyxagent/chat") return "Default model";
   return alias.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+export function groupAgentUnavailableReason(
+  member: AssistantGroupMember,
+): string {
+  const owner = member.owner_name ?? "the agent owner";
+  switch (member.unavailable_reason) {
+    case "destroyed":
+      return "This agent was destroyed. Ask the creator to remove it.";
+    case "removed":
+      return "This agent is no longer available. Ask the creator to remove it.";
+    case "org_agent_not_guestable":
+      return "Organization agents cannot allow guests. Ask an organization administrator for access.";
+    case "owner_approval_pending":
+      return `Waiting for ${owner} to allow participants.`;
+    case "not_shared_with_you":
+      return `Not shared with you — ask ${owner} to allow participants.`;
+    case "guest_access_off":
+      return `Participant access is off — ask ${owner} to allow participants.`;
+    default:
+      return `This agent is unavailable to you. Ask ${owner} for access.`;
+  }
 }

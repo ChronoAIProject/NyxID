@@ -11,6 +11,17 @@ drift = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(drift)
 
 
+class GitHubDriftTests(unittest.TestCase):
+    def test_projects_are_checked_against_official_rest_description(self):
+        self.assertEqual(drift.OFFICIAL_SPECS["github.openapi.json"], (
+            "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json", False, "",
+        ))
+        path = "/orgs/{org}/projectsV2/{project_number}"
+        overlay = {"paths": {path: {"get": {}}}}
+        self.assertEqual(drift.missing_operations("github.openapi.json", overlay, overlay), set())
+        self.assertEqual(drift.missing_operations("github.openapi.json", overlay, {"paths": {}}), {("GET", path)})
+
+
 class NotionDriftTests(unittest.TestCase):
     def setUp(self):
         self.query = ("POST", "/v1/databases/{database_id}/query")

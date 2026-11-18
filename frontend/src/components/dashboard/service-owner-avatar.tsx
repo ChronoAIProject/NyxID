@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { UserRound } from "lucide-react";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
@@ -14,13 +15,14 @@ export function ServiceOwnerAvatar({
   readonly avatarUrl?: string | null;
   readonly className?: string;
 }) {
+  const { t } = useUiTranslation();
   if (type === "org")
     return (
       <OrgAvatar
         displayName={name}
         avatarUrl={avatarUrl}
         className={cn(
-          "size-5 rounded-full [&>*]:rounded-full [&>*]:text-10",
+          "size-5 rounded-full [&>*]:rounded-full [&>*]:text-12",
           className,
         )}
       />
@@ -34,7 +36,7 @@ export function ServiceOwnerAvatar({
       )}
     >
       {type === "platform" ? (
-        <NyxidIcon className="size-3.5" alt="NyxID platform" />
+        <NyxidIcon className="size-3.5" alt={t("NyxID platform")} />
       ) : (
         <UserRound
           className="size-3 text-muted-foreground"

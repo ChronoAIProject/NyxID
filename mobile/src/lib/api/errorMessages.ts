@@ -8,7 +8,7 @@ import { ApiError, isApiError } from "./ApiError";
  *
  * Error code ranges (from backend AppError):
  *   1000-1008  General (bad_request, unauthorized, forbidden, etc.)
- *   2000-2002  Auth (authentication_failed, token_expired, mfa_required)
+ *   2000-2003  Auth (authentication_failed, token_expired, mfa_required, mfa_step_up_required)
  *   3000-3004  OAuth (pkce, redirect_uri, scope, consent, grant_type)
  *   4000-4007  RBAC (role, group, consent, slug, hierarchy)
  *   5000-5001  Service accounts
@@ -17,6 +17,9 @@ import { ApiError, isApiError } from "./ApiError";
  *   8000-8003  Nodes
  *   9000-9002  API key scope
  */
+export const MOBILE_MFA_STEP_UP_MESSAGE =
+  "Open the NyxID website to verify with your authenticator, then approve the sign-in or create a login code there.";
+
 const ERROR_MESSAGES: Record<number, string> = {
   // ── General ──
   1001: "Your session has expired. Please sign in again.",
@@ -25,6 +28,7 @@ const ERROR_MESSAGES: Record<number, string> = {
   // ── Auth ──
   2000: "Invalid email or password.",
   2001: "Your session has expired. Please sign in again.",
+  2003: MOBILE_MFA_STEP_UP_MESSAGE,
 
   // ── Approvals ──
   7000: "Approval required. A notification has been sent.",
@@ -98,6 +102,9 @@ export function resolveErrorMessage(error: unknown): string {
 }
 
 export function resolveAuthDeviceErrorMessage(error: unknown): string {
+  if (isApiError(error) && error.statusCode === 403 && error.errorCode === 2003 && error.errorKey === "mfa_step_up_required") {
+    return MOBILE_MFA_STEP_UP_MESSAGE;
+  }
   if (isApiError(error) && error.errorCode >= 11200 && error.errorCode <= 11207) {
     const mapped = ERROR_MESSAGES[error.errorCode];
     if (mapped) return mapped;

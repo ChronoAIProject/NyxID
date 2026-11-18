@@ -218,6 +218,35 @@ describe("changePasswordSchema", () => {
     confirmNewPassword: "NewPass123",
   };
 
+  it.each([
+    ["a".repeat(7), false],
+    ["abcdefé", true],
+    ["lowercaseonly", true],
+    ["é".repeat(63) + "a", true],
+    ["é".repeat(64), true],
+    ["🔐".repeat(31) + "abc", true],
+    ["🔐".repeat(31) + "abcde", false],
+    ["é".repeat(64) + "a", false],
+  ])("validates new password by UTF-8 bytes: %s", (newPassword, success) => {
+    expect(changePasswordSchema.safeParse({
+      currentPassword: "old", newPassword, confirmNewPassword: newPassword,
+    }).success).toBe(success);
+  });
+
+  it("accepts the current password as the new password", () => {
+    expect(changePasswordSchema.safeParse({
+      currentPassword: "samepassword", newPassword: "samepassword", confirmNewPassword: "samepassword",
+    }).success).toBe(true);
+  });
+
+  it("bounds current passwords in bytes without adding a minimum", () => {
+    expect(changePasswordSchema.safeParse({ ...validData, currentPassword: "x" }).success).toBe(true);
+    expect(changePasswordSchema.safeParse({ ...validData, currentPassword: "é".repeat(64) }).success).toBe(true);
+    const result = changePasswordSchema.safeParse({ ...validData, currentPassword: "é".repeat(64) + "a" });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.message).toContain("128 UTF-8 bytes");
+  });
+
   it("accepts valid change password data", () => {
     const result = changePasswordSchema.safeParse(validData);
     expect(result.success).toBe(true);

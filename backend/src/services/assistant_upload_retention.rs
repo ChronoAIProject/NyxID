@@ -28,7 +28,7 @@ use std::{
 pub const REFRESH_SECONDS: u64 = 5;
 const SWEEP_SECONDS: u64 = 60;
 const BATCH: i64 = 100;
-const LEASE: &str = "assistant-upload-retention";
+pub(crate) const LEASE: &str = "assistant-upload-retention";
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -56,6 +56,45 @@ pub async fn load(db: &Database) -> AppResult<Settings> {
         .find_one(doc! {"_id": SETTINGS_ID})
         .await?
         .unwrap_or_default())
+}
+pub async fn load_in_session(db: &Database, session: &mut ClientSession) -> AppResult<Settings> {
+    Ok(db
+        .collection::<Settings>(SETTINGS)
+        .find_one(doc! {"_id":SETTINGS_ID})
+        .session(session)
+        .await?
+        .unwrap_or_default())
+}
+/// Generated files keep an immutable cap; current policy can only shorten it.
+pub fn generated_expiry(row: &Document, policy: Policy) -> Option<DateTime<Utc>> {
+    let days = if row
+        .get_str("content_type")
+        .unwrap_or_default()
+        .starts_with("image/")
+    {
+        policy.image_days
+    } else {
+        policy.document_days
+    };
+    Some(date(row, "expires_at")?.min(date(row, "created_at")? + Duration::days(i64::from(days))))
+}
+pub async fn generated_available_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    filter: Document,
+    policy: Policy,
+) -> AppResult<()> {
+    let row = db
+        .collection::<Document>(ATTACHMENTS)
+        .find_one(filter)
+        .projection(projection())
+        .session(session)
+        .await?
+        .ok_or(AppError::AssistantAttachmentExpired)?;
+    if generated_expiry(&row, policy).is_none_or(|expiry| expiry <= Utc::now()) {
+        return Err(AppError::AssistantAttachmentExpired);
+    }
+    Ok(())
 }
 pub async fn refresh(db: &Database, cache: &Cache) -> AppResult<()> {
     let settings = load(db).await?;
@@ -126,7 +165,7 @@ async fn ensure_settings(db: &Database) -> AppResult<()> {
 }
 
 fn projection() -> Document {
-    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "origin":1,
+    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "collaboration_group_id":1, "origin":1,
     "content_type":1, "message_id":1, "created_at":1, "bound_at":1, "expires_at":1,
     "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
 }
@@ -146,6 +185,9 @@ fn bound_at(row: &Document) -> Option<DateTime<Utc>> {
 }
 
 fn age_expired(row: &Document, policy: Policy, now: DateTime<Utc>) -> bool {
+    if row.get_str("origin").ok() == Some("generated_artifact") {
+        return generated_expiry(row, policy).is_none_or(|expiry| expiry <= now);
+    }
     let (start, duration) = if row.get_str("origin").ok() == Some("machine_preview") {
         (
             date(row, "created_at"),
@@ -202,11 +244,23 @@ async fn turn_settled(db: &Database, row: &Document, now: DateTime<Utc>) -> AppR
         conversation = first.get_str("conversation_id").unwrap_or_default().into();
         turn = first.get_str("turn_id").unwrap_or_default().into();
     }
+    let mut thread_filter = doc! {"_id":&conversation,"user_id":owner};
+    if user_upload(row)
+        && let Ok(group) = row.get_str("group_id")
+    {
+        // A collaboration guest executes on the agent owner's key, while the
+        // public upload and its retention lifetime belong to the requester.
+        thread_filter.remove("user_id");
+        thread_filter.insert("$or", bson::bson!([
+            {"user_id":owner},
+            {"collaboration.version":1,"collaboration.group_id":group,"collaboration.original_requester_id":owner},
+        ]));
+    }
     let thread = db
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&conversation,"user_id":owner})
+        .find_one(thread_filter)
         .await?;
     Ok(thread
         .as_ref()
@@ -237,6 +291,9 @@ async fn expired(
 
 /// Scope must already be authorized. Live Mongo policy, never the replica cache.
 pub async fn require_available(db: &Database, filter: Document) -> AppResult<()> {
+    available_row(db, filter).await.map(|_| ())
+}
+pub async fn available_row(db: &Database, filter: Document) -> AppResult<Document> {
     let row = db
         .collection::<Document>(ATTACHMENTS)
         .find_one(filter.clone())
@@ -253,7 +310,7 @@ pub async fn require_available(db: &Database, filter: Document) -> AppResult<()>
         {
             return Err(AppError::AssistantAttachmentExpired);
         }
-        return Ok(());
+        return Ok(row);
     }
     if db
         .collection::<Document>(TOMBSTONES)
@@ -362,6 +419,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             "user_id",
             "conversation_id",
             "group_id",
+            "collaboration_group_id",
             "origin",
             "message_id",
             "created_at",
@@ -442,6 +500,48 @@ pub async fn settled_in_session(
             Box::pin(delete_root(db, session, &row)).await?;
         }
     }
+    Ok(())
+}
+
+/// Tool-image and upload history needs a prefix covering every attachment origin.
+/// Keep this late startup addition separate from the base index sequence.
+pub(crate) async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(ATTACHMENTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_attachments_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -655,7 +755,7 @@ pub async fn sweep(db: &Database) -> AppResult<usize> {
 
 pub fn spawn(state: AppState) {
     let refresh_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(REFRESH_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -670,11 +770,13 @@ pub fn spawn(state: AppState) {
             }
         }
     });
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(SWEEP_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if Box::pin(sweep(&state.db)).await.is_err() {
                 tracing::warn!("Upload retention sweep deferred");
             }

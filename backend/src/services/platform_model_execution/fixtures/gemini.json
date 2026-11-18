@@ -1,0 +1,1 @@
+{"responseId":"private-response","modelVersion":"private-native","candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"totalTokenCount":125,"cachedContentTokenCount":10,"thoughtsTokenCount":5}}

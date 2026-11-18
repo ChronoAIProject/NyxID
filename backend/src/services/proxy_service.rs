@@ -67,6 +67,16 @@ impl ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    /// Server-resolved catalog identity; absent only for custom endpoints.
+    /// A missing catalog row or failed lookup must fail resolution.
+    pub catalog_slug: Option<String>,
+    /// Privacy eligibility from the loaded catalog row, before user projection.
+    pub(crate) catalog_is_public: bool,
+    pub(crate) execution_request:
+        Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<super::execution_permission_dispatch::Permit>>,
+    pub credential_deferred: bool,
     pub workspace_destinations_pending: bool,
     pub target_id: Option<String>,
     pub base_url: String,
@@ -157,6 +167,17 @@ async fn decrypt_master_credential_string(
         .map_err(|_| AppError::Internal("Failed to decode credential".into()))
 }
 
+impl ProxyTarget {
+    pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
+        if self.credential_deferred {
+            return Err(AppError::Forbidden(
+                "Organization connection requires execution admission".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Catalog master credentials stay on NyxID, including legacy internal rows.
 /// Owner nodes may inject their own keys but must never receive this key.
 pub fn uses_server_held_master(target: &ProxyTarget) -> bool {
@@ -180,6 +201,7 @@ pub async fn authorize_master_credential(
             "Destination targets do not support platform keys".into(),
         ));
     }
+    super::platform_key_service::require_ordinary_use(service)?;
     super::retired_service_service::require_available(service)?;
     super::security_readiness_service::require_platform(db, actor_addressed_policy_required())
         .await?;
@@ -249,6 +271,7 @@ pub async fn authorize_master_credential_server_chosen(
             "Destination targets do not support platform keys".into(),
         ));
     }
+    super::platform_key_service::require_ordinary_use(service)?;
     super::retired_service_service::require_available(service)?;
     if let Some(config) = &service.platform_key
         && (!config.enabled
@@ -556,6 +579,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
+    // Write preconditions must survive both direct and node-routed HTTP.
+    "if-match",
+    "if-unmodified-since",
     // OpenRouter app-attribution headers. `HTTP-Referer` is OpenRouter's
     // nonstandard spelling (the standard `Referer` a browser auto-sends
     // stays blocked); `X-Title` is the legacy attribution name. A caller
@@ -1122,6 +1148,7 @@ pub(crate) fn prepare_node_request(
     caller_token: Option<&str>,
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
+    target.require_credential_materialized()?;
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     let mut node_delegated = delegated.to_vec();
     extend_with_path_credential(&mut node_delegated, target);
@@ -1134,16 +1161,18 @@ pub(crate) fn prepare_node_request(
     if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
         base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
     }
+    let mut headers = build_effective_outbound_headers(
+        target,
+        base_headers,
+        identity_headers,
+        &prepared.delegated_headers,
+        extra_outbound_headers,
+    );
+    crate::turn_trace::inject_secret_egress(&mut headers);
     Ok(PreparedNodeRequest {
         path,
         query: prepared.query,
-        headers: build_effective_outbound_headers(
-            target,
-            base_headers,
-            identity_headers,
-            &prepared.delegated_headers,
-            extra_outbound_headers,
-        ),
+        headers,
     })
 }
 
@@ -1191,6 +1220,7 @@ pub async fn resolve_admin_proxy_target(
 
     // A misconfigured platform row is a server fault, not a caller error:
     // the caller had no say in which service this is.
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::Internal(format!(
@@ -1223,6 +1253,11 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1248,6 +1283,11 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+        catalog_slug: Some(service.slug.clone()),
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1277,6 +1317,7 @@ pub async fn resolve_curation_proxy_target(
         .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
         .await?
         .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     let scope_authorized_editor =
         sa.purpose == ServiceAccountPurpose::CatalogEditor && sa.catalog_scope_authorized;
@@ -1338,6 +1379,11 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1378,6 +1424,7 @@ pub async fn resolve_proxy_target(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
@@ -1456,6 +1503,11 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1507,6 +1559,11 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+        catalog_slug: Some(service.slug.clone()),
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1535,6 +1592,11 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1564,6 +1626,11 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+        catalog_slug: Some(service.slug.clone()),
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -1601,6 +1668,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
@@ -1669,6 +1737,13 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(
+                    &service,
+                ),
+                catalog_slug: Some(service.slug.clone()),
+                execution_request: None,
+                execution_permission: None,
+                credential_deferred: false,
                 workspace_destinations_pending:
                     super::destination_routing::workspace_destinations_pending(&service),
                 target_id: None,
@@ -1742,6 +1817,11 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
             target_id: None,
@@ -1833,11 +1913,27 @@ async fn lookup_service_pool_member(
 
 #[derive(Clone, Copy)]
 pub struct ProxyExecutionContext<'a> {
+    assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     pub connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     pub platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 }
 
 impl<'a> ProxyExecutionContext<'a> {
+    pub fn with_assistant_chat(
+        mut self,
+        chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    ) -> Self {
+        self.assistant_chat = chat;
+        self
+    }
+    pub fn with_assistant_access(
+        mut self,
+        access: Option<&'a super::org_agent_service::RequestAccess>,
+    ) -> Self {
+        self.shared_access = access.and_then(|a| a.shared());
+        self
+    }
     pub const fn new(
         connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
         platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
@@ -1845,12 +1941,16 @@ impl<'a> ProxyExecutionContext<'a> {
         Self {
             connection_expiry_notifier,
             platform_user_rate_limit,
+            shared_access: None,
+            assistant_chat: None,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct ProxyCredentialResolution<'a> {
+    assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    shared_access: Option<&'a super::shared_agent_service::RequestAccess>,
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
     materialize_credentials: bool,
@@ -1860,6 +1960,8 @@ struct ProxyCredentialResolution<'a> {
 impl<'a> ProxyCredentialResolution<'a> {
     fn materialize(context: ProxyExecutionContext<'a>) -> Self {
         Self {
+            shared_access: context.shared_access,
+            assistant_chat: context.assistant_chat,
             connection_expiry_notifier: context.connection_expiry_notifier,
             platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
@@ -1869,6 +1971,8 @@ impl<'a> ProxyCredentialResolution<'a> {
 
     fn read_only_snapshot() -> Self {
         Self {
+            shared_access: None,
+            assistant_chat: None,
             connection_expiry_notifier: None,
             platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
             ),
@@ -1904,10 +2008,70 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        Some(encryption_keys),
+        user_id,
+        slug,
+        catalog_service_id,
+        ProxyCredentialResolution::materialize(execution_context),
+        true,
+    )
+    .await
+}
+
+/// Resolve the configured model slug with the same personal/legacy/org order
+/// as execution, without credential effects or pool selection. Only the guest
+/// default-route gate uses this; ordinary requests retain their existing work.
+pub(crate) async fn read_default_model_authority(
+    db: &mongodb::Database,
+    actor: &str,
+    slug: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        None,
+        actor,
+        Some(slug),
+        None,
+        ProxyCredentialResolution {
+            resolve_header_values: false,
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
+        false,
+    )
+    .await
+}
+
+async fn refuse_model_pool(
+    db: &mongodb::Database,
+    owner: &str,
+    slug: Option<&str>,
+) -> AppResult<()> {
+    if let Some(slug) = slug
+        && db
+            .collection::<mongodb::bson::Document>("service_pools")
+            .find_one(doc! {"user_id":owner,"slug":slug,"is_active":true})
+            .await?
+            .is_some()
+    {
+        return Err(AppError::GuestModelRouteRequired);
+    }
+    Ok(())
+}
+
+async fn resolve_proxy_target_from_user_service_with_mode(
+    db: &mongodb::Database,
+    encryption_keys: Option<&EncryptionKeys>,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    credential_resolution: ProxyCredentialResolution<'_>,
+    allow_pools: bool,
+) -> AppResult<Option<UserServiceResolution>> {
     // Keep catalog/credential resolution state on the heap; callers combine
     // several of these futures when revalidating delegated execution.
     Box::pin(async move {
-        let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
         // NyxID#974 routing boundary: identical-instance service pools belong
         // here, before `finish_resolution()`, because this function is the
         // authoritative place that preserves personal/legacy/org precedence and
@@ -1920,7 +2084,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1930,7 +2094,11 @@ pub async fn resolve_proxy_target_from_user_service(
                 .await?,
             ));
         }
-        if catalog_service_id.is_none()
+        if !allow_pools && catalog_service_id.is_none() {
+            refuse_model_pool(db, user_id, slug).await?;
+        }
+        if allow_pools
+            && catalog_service_id.is_none()
             && let Some((us, pool_selection)) =
                 lookup_service_pool_member(db, user_id, slug).await?
         {
@@ -1945,7 +2113,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     user_id,
                     us,
                     None,
@@ -1959,6 +2127,9 @@ pub async fn resolve_proxy_target_from_user_service(
         // 2. Legacy personal guard. Preserves the invariant that pre-migration
         //    personal connections beat org-shared credentials. See function doc.
         if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
+            if !allow_pools {
+                return Err(AppError::GuestModelRouteRequired);
+            }
             return Ok(None);
         }
 
@@ -1994,6 +2165,10 @@ pub async fn resolve_proxy_target_from_user_service(
             let (org_us, pool_selection) = if let Some(org_us) = org_us {
                 (org_us, None)
             } else if catalog_service_id.is_none() {
+                if !allow_pools {
+                    refuse_model_pool(db, &membership.org_user_id, slug).await?;
+                    continue;
+                }
                 match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
                     Some((svc, selection)) => (svc, Some(selection)),
                     None => continue,
@@ -2053,7 +2228,7 @@ pub async fn resolve_proxy_target_from_user_service(
             return Ok(Some(
                 finish_resolution(
                     db,
-                    Some(encryption_keys),
+                    encryption_keys,
                     &membership.org_user_id,
                     org_us,
                     Some(routing),
@@ -2391,6 +2566,30 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
     .await
 }
 
+/// Metadata-only exact shared resolution for pool planning and voice discovery.
+pub(crate) async fn read_proxy_authority_snapshot_with_access(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor: &str,
+    connection: &str,
+    expected_slug: Option<&str>,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        Some(encryption_keys),
+        actor,
+        connection,
+        expected_slug,
+        None,
+        ProxyCredentialResolution {
+            shared_access: access.and_then(|a| a.shared()),
+            ..ProxyCredentialResolution::read_only_snapshot()
+        },
+    )
+    .await
+}
+
 async fn resolve_proxy_target_by_user_service_id_with_mode(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
@@ -2431,21 +2630,31 @@ async fn resolve_proxy_target_by_user_service_id_with_mode(
         }
 
         // Access gate: resolve the actor's relationship to the service owner.
-        let access =
+        let shared = credential_resolution.shared_access;
+        if shared.is_some_and(|a| a.actor() != actor_user_id || !a.allows_resolution(&svc)) {
+            return Err(AppError::Forbidden(
+                "Shared connection authority mismatch".into(),
+            ));
+        }
+        let access = if shared.is_some() {
+            crate::services::org_service::OwnerAccess::Forbidden
+        } else {
             crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
-                .await?;
-        let allowed = match &access {
-            crate::services::org_service::OwnerAccess::Direct => true,
-            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-                access.allows_resource(&svc.id)
-            }
-            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-                role.can_proxy()
-                    && admin_only_allows_role(&svc, *role)
-                    && access.allows_resource(&svc.id)
-            }
-            crate::services::org_service::OwnerAccess::Forbidden => false,
+                .await?
         };
+        let allowed = shared.is_some()
+            || match &access {
+                crate::services::org_service::OwnerAccess::Direct => true,
+                crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                    access.allows_resource(&svc.id)
+                }
+                crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                    role.can_proxy()
+                        && admin_only_allows_role(&svc, *role)
+                        && access.allows_resource(&svc.id)
+                }
+                crate::services::org_service::OwnerAccess::Forbidden => false,
+            };
         if !allowed {
             return Err(AppError::OrgRoleInsufficient(
                 "you do not have proxy access to this service".to_string(),
@@ -2453,7 +2662,7 @@ async fn resolve_proxy_target_by_user_service_id_with_mode(
         }
 
         // Build the org_routing context if the service is org-owned.
-        let org_routing = if svc.user_id != actor_user_id {
+        let org_routing = if shared.is_none() && svc.user_id != actor_user_id {
             // The service belongs to an org; build the routing context from
             // the OwnerAccess that we already resolved above. We know the
             // access is at least AsOrgAdmin or AsOrgMember (Viewer was
@@ -2687,6 +2896,7 @@ pub async fn find_approval_resolution_hint_by_user_service_id(
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
+    shared_access: Option<&super::shared_agent_service::RequestAccess>,
 ) -> AppResult<Option<ApprovalResolutionHint>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(svc) => svc,
@@ -2712,19 +2922,24 @@ pub async fn find_approval_resolution_hint_by_user_service_id(
         }
     }
 
-    let access =
-        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
-    let allowed = match &access {
-        crate::services::org_service::OwnerAccess::Direct => true,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-            access.allows_resource(&svc.id)
+    let allowed = if let Some(shared) = shared_access {
+        shared.actor() == actor_user_id && shared.allows_resolution(&svc)
+    } else {
+        let access =
+            crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
+                .await?;
+        match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&svc, *role)
+                    && access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
         }
-        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy()
-                && admin_only_allows_role(&svc, *role)
-                && access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::Forbidden => false,
     };
     if !allowed {
         return Err(AppError::OrgRoleInsufficient(
@@ -2928,6 +3143,15 @@ pub(crate) async fn verify_auto_provision_eligibility(
     Ok(())
 }
 
+// Construct each large future outside its caller's poll frame. Catalog and
+// credential branches must not reserve one another's temporaries while nested
+// assistant authorization is polling a database operation.
+fn box_resolution_future<F: std::future::Future>(
+    make: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
+
 async fn finish_resolution(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
@@ -2944,17 +3168,20 @@ async fn finish_resolution(
     let header_record = user_service.id.clone();
     let header_owner = user_service.user_id.clone();
     let header_catalog = user_service.catalog_service_id.clone();
-    let mut resolution = Box::pin(async move {
+    let mut resolution = box_resolution_future(|| async move {
 
-    let materialize_credentials = credential_resolution.materialize_credentials;
+    let defer_org = if let Some(chat) = credential_resolution.assistant_chat {
+        super::assistant_service_execution::instruction::covered(db, chat, &user_service).await?
+    } else { false };
+    let materialize_credentials = credential_resolution.materialize_credentials && !defer_org;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
-    verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
+    box_resolution_future(|| verify_auto_provision_eligibility(db, &user_service, effective_owner_id)).await?;
 
     // Load the endpoint
-    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+    let mut endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -2974,11 +3201,14 @@ async fn finish_resolution(
     // this bounded local decode and never provider credential effects.
     let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
-        load_catalog_proxy_authorization_for_user_service(db, &user_service).await?;
-    let (catalog_billing, catalog_service_slug) =
-        load_catalog_metering_for_user_service(db, &user_service).await;
+        box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service, Some(&endpoint))).await?;
+    if let Some((catalog_id, url, spec)) = &catalog_proxy_authorization.managed_target {
+        super::catalog_endpoint_service::apply_live_target(&user_service, &mut endpoint, catalog_id, url, spec);
+    }
+    let catalog_billing = catalog_proxy_authorization.billing.clone();
+    let catalog_service_slug = catalog_proxy_authorization.catalog_slug.clone();
     let catalog_ws_frame_injections =
-        load_catalog_ws_frame_injections_for_user_service(db, &user_service).await?;
+        box_resolution_future(|| load_catalog_ws_frame_injections_for_user_service(db, &user_service)).await?;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
         catalog_ws_frame_injections
     } else {
@@ -2986,14 +3216,11 @@ async fn finish_resolution(
     };
     let user_service_default_headers: Vec<DefaultRequestHeader> = Vec::new();
 
-    if (super::platform_key_service::binding(&user_service) == "platform"
-        && (user_service.auth_method != "none"
-            || user_service.credential_binding.as_deref() == Some("platform")
-            || catalog_proxy_authorization.platform_key_configured))
-        || (catalog_proxy_authorization.no_auth_platform_service
-            && catalog_proxy_authorization.platform_key_configured)
+    if uses_catalog_platform_target(&user_service,
+        catalog_proxy_authorization.platform_key_configured,
+        catalog_proxy_authorization.no_auth_platform_service)
     {
-        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
+        let catalog_service = box_resolution_future(|| load_catalog_service_for_user_service(db, &user_service)).await?;
         let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
         if !no_auth && !super::platform_key_service::has_platform_key(&catalog_service) {
             return Err(AppError::NotFound(
@@ -3009,21 +3236,40 @@ async fn finish_resolution(
         let (auth_method, auth_key_name) = if no_auth {
             ("none".into(), String::new())
         } else {
-            super::platform_key_service::effective_auth(db, &catalog_service).await?
+            box_resolution_future(|| super::platform_key_service::effective_auth(db, &catalog_service)).await?
         };
-        let actor = EffectiveActor::from_user_id(effective_owner_id);
+        // Catalog material belongs to the exact connection owner. Sharing adds
+        // the recipient's audience ceiling; neither principal can lend the
+        // other eligibility. Usage/rate limits still belong to the recipient.
+        let platform_actor = credential_resolution
+            .shared_access
+            .map_or(effective_owner_id, |a| a.actor());
+        let credential_actor = effective_owner_id;
+        let actor = EffectiveActor::from_user_id(credential_actor);
+        if credential_resolution.shared_access.is_some() && platform_actor != credential_actor {
+            if no_auth {
+                box_resolution_future(|| super::platform_key_service::require(db, &catalog_service, platform_actor)).await?;
+            } else {
+                let recipient = EffectiveActor::from_user_id(platform_actor);
+                box_resolution_future(|| authorize_master_credential(db, &catalog_service,
+                    &recipient)).await?;
+            }
+        }
         let authorized = if no_auth {
-            super::platform_key_service::require(db, &catalog_service, effective_owner_id).await?;
+            box_resolution_future(|| {
+                super::platform_key_service::require(db, &catalog_service, credential_actor)
+            })
+            .await?;
             None
         } else {
-            Some(authorize_master_credential(db, &catalog_service, &actor).await?)
+            Some(box_resolution_future(|| authorize_master_credential(db, &catalog_service, &actor)).await?)
         };
         let credential = if let Some(authorized) = authorized.filter(|_| materialize_credentials) {
             crate::mw::rate_limit::enforce_platform_user_limit(
                 db,
                 platform_user_rate_limit,
                 &catalog_service.id,
-                &actor.user_id,
+                platform_actor,
             )
             .await?;
             decrypt_master_credential_string(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?
@@ -3054,6 +3300,11 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
+            catalog_slug: catalog_service_slug.clone(),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: !materialize_credentials,
                 base_url: catalog_service.base_url.clone(),
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3098,6 +3349,11 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
+            catalog_slug: catalog_service_slug.clone(),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
                 target_id: None,
@@ -3149,18 +3405,19 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
-    super::ifttt_oauth_service::validate_credential_route(
+    box_resolution_future(|| super::ifttt_oauth_service::validate_credential_route(
         db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
         &endpoint.url, user_service.node_id.as_deref(),
-    ).await?;
+    )).await?;
     let api_key = if materialize_credentials {
-        maybe_refresh_provider_backed_api_key(
+        let keys = encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?;
+        box_resolution_future(|| maybe_refresh_provider_backed_api_key(
             db,
-            encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?,
+            keys,
             effective_owner_id,
             api_key,
             connection_expiry_notifier,
-        )
+        ))
         .await?
     } else {
         api_key
@@ -3202,6 +3459,11 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
+            catalog_slug: catalog_service_slug.clone(),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
                 target_id: None,
@@ -3245,7 +3507,7 @@ async fn finish_resolution(
         // Fire-and-forget: update last_used_at only for execution materialization.
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
         credential
@@ -3269,6 +3531,11 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            catalog_is_public: catalog_proxy_authorization.catalog_is_public,
+            catalog_slug: catalog_service_slug.clone(),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: !materialize_credentials,
             workspace_destinations_pending: catalog_proxy_authorization
                 .workspace_destinations_pending,
             target_id: None,
@@ -3297,6 +3564,7 @@ async fn finish_resolution(
     })
 
     }).await?;
+    super::credential_verification::require_resolution(&resolution)?;
     if !resolve_header_values {
         return Ok(resolution);
     }
@@ -3344,6 +3612,11 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    managed_target: Option<(String, String, Option<String>)>,
+    catalog_id: Option<String>,
+    catalog_slug: Option<String>,
+    catalog_is_public: bool,
+    billing: Option<crate::models::service_billing::ServiceBilling>,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
@@ -3358,9 +3631,22 @@ struct CatalogProxyAuthorization {
     requires_user_credential: Option<bool>,
 }
 
+fn uses_catalog_platform_target(
+    connection: &UserService,
+    platform_key_configured: bool,
+    no_auth_platform_service: bool,
+) -> bool {
+    (super::platform_key_service::binding(connection) == "platform"
+        && (connection.auth_method != "none"
+            || connection.credential_binding.as_deref() == Some("platform")
+            || platform_key_configured))
+        || (no_auth_platform_service && platform_key_configured)
+}
+
 async fn load_catalog_proxy_authorization_for_user_service(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
+    endpoint: Option<&UserEndpoint>,
 ) -> AppResult<CatalogProxyAuthorization> {
     let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
         return Ok(CatalogProxyAuthorization::default());
@@ -3369,15 +3655,39 @@ async fn load_catalog_proxy_authorization_for_user_service(
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": catalog_id })
         .await?;
-    let Some(service) = service else {
-        // Existing UserService resolution tolerates a missing catalog row and
-        // continues with its stored endpoint/credential data. Policy lookup is
-        // additive and must not turn that legacy shape into a new outage.
-        return Ok(CatalogProxyAuthorization::default());
-    };
+    let service =
+        service.ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
     super::destination_routing::validate_credential_source(&service)?;
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    // Matching snapshots add no reads. Platform-key resolution already takes
+    // the live catalog target and performs its own provider checks below;
+    // never duplicate those checks for that branch, even on a mismatch.
+    let platform_target = uses_catalog_platform_target(
+        user_service,
+        service.platform_key.is_some(),
+        super::platform_key_service::no_auth_platform_service(&service),
+    );
+    let managed_target = if endpoint.is_some_and(|endpoint| {
+        endpoint.url != service.base_url || endpoint.openapi_spec_url != service.openapi_spec_url
+    }) && !platform_target
+        && super::catalog_endpoint_service::owned(user_service)
+        && super::catalog_endpoint_service::catalog_owns_url(db, &service).await?
+    {
+        Some((
+            service.id.clone(),
+            service.base_url.clone(),
+            service.openapi_spec_url.clone(),
+        ))
+    } else {
+        None
+    };
     Ok(CatalogProxyAuthorization {
+        managed_target,
+        catalog_id: Some(service.id.clone()),
+        catalog_slug: Some(service.slug.clone()),
+        catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
+        billing: service.billing.clone(),
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
@@ -3399,6 +3709,9 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    if let Some(id) = &authorization.catalog_id {
+        service.id = id.clone();
+    }
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -3446,34 +3759,6 @@ async fn load_catalog_ws_frame_injections_for_user_service(
         .await?
         .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
     Ok(service.ws_frame_injections)
-}
-
-async fn load_catalog_metering_for_user_service(
-    db: &mongodb::Database,
-    user_service: &crate::models::user_service::UserService,
-) -> (
-    Option<crate::models::service_billing::ServiceBilling>,
-    Option<String>,
-) {
-    let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
-        return (None, None);
-    };
-    match db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": catalog_id })
-        .await
-    {
-        Ok(Some(svc)) => (svc.billing, Some(svc.slug)),
-        Ok(None) => (None, None),
-        Err(e) => {
-            tracing::warn!(
-                catalog_id,
-                error = %e,
-                "Failed to load catalog metering metadata; proceeding without resale metering"
-            );
-            (None, None)
-        }
-    }
 }
 
 /// Resolve a per-agent credential override for the given API key + service.
@@ -3618,7 +3903,7 @@ pub async fn resolve_agent_credential_override_identity(
     if credential.is_some() {
         let db_clone = db.clone();
         let key_id = api_key.id.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             user_api_key_service::touch_last_used(&db_clone, &key_id).await;
         });
     }
@@ -3980,6 +4265,8 @@ fn build_minimal_downstream_service(
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -4274,6 +4561,9 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         billing_egress_permit,
         egress_guard,
         None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -4295,6 +4585,9 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
+    admission: Option<&'a super::service_dispatch_registry::DispatchAdmission>,
+    dispatch_caller: Option<&'a super::service_dispatch_registry::DispatchCaller<'a>>,
+    catalog_route: Option<&'a super::lark_attachment_tool::routing::BotRoute>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4313,6 +4606,9 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         billing_egress_permit,
         egress_guard,
         resource_proof,
+        admission,
+        dispatch_caller,
+        catalog_route,
     ))
 }
 
@@ -4334,7 +4630,42 @@ async fn forward_request_with_egress_guard_inner(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
+    admission: Option<&super::service_dispatch_registry::DispatchAdmission>,
+    dispatch_caller: Option<&super::service_dispatch_registry::DispatchCaller<'_>>,
+    catalog_route: Option<&super::lark_attachment_tool::routing::BotRoute>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    let mut operation = crate::turn_trace::Operation::start(
+        crate::turn_trace::TurnContext::current(),
+        crate::turn_trace::Stage::ProxyHeaders,
+    );
+    let result: Result<reqwest::Response, ForwardRequestError> = crate::turn_trace::scope(operation.context(), async {
+    super::credential_verification::require_target(target,&method,path).await.map_err(ForwardRequestError::PreDispatchRejected)?;
+    target.require_credential_materialized()?;
+    let dispatch_guard =
+        super::service_dispatch_registry::verify(admission, target, dispatch_caller)
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    if dispatch_guard.is_some() && !matches!(&body, ProxyBody::Buffered(_)) {
+        return Err(ForwardRequestError::PreDispatchRejected(
+            AppError::Forbidden("Protected services require a buffered HTTP request".into()),
+        ));
+    }
+    if let Some(permit) = &target.execution_permission {
+        let ProxyBody::Buffered(bytes) = &body else {
+            return Err(ForwardRequestError::PreDispatchRejected(
+                AppError::Forbidden("Execution coverage requires a bounded HTTP request".into()),
+            ));
+        };
+        permit
+            .validate_effect(
+                target,
+                method.as_str(),
+                path,
+                query,
+                bytes.as_deref().unwrap_or_default(),
+                &headers,
+            )
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
@@ -4366,18 +4697,26 @@ async fn forward_request_with_egress_guard_inner(
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
+    // Scope/permission/admission identities retain the existing logical path.
+    // This capability only changes the wire prefix for two trusted bot calls;
+    // it independently verifies the final destination policy and exact path.
+    let wire_path = match catalog_route {
+        Some(route) => route.forwarding_path(target, method.as_str(), path, &prepared.path)
+            .map_err(ForwardRequestError::PreDispatchRejected)?,
+        None => prepared.path.as_str(),
+    };
     let url = if let Some(q) = prepared.query.as_deref() {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path,
+            wire_path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            prepared.path
+            wire_path
         )
     };
 
@@ -4416,13 +4755,15 @@ async fn forward_request_with_egress_guard_inner(
             target.user_service_default_headers.as_slice(),
         ],
     );
-    let outbound_headers = build_effective_outbound_headers(
+    let mut outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
         &identity_headers,
         &prepared.delegated_headers,
         &extra_outbound_headers,
     );
+
+    crate::turn_trace::inject_secret_egress(&mut outbound_headers);
 
     if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
         let body = body.buffered()?;
@@ -4742,17 +5083,100 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(proof) = resource_proof {
+    if let Some(context) = &target.execution_request {
+        context
+            .check_drain()
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
+    let response = if let Some(guard) = dispatch_guard {
+        let mut request = request.build()?;
+        if let Some(proof) = resource_proof {
+            proof
+                .attach(&mut request)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        guard
+            .before_send(&request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        if let Some(context) = &target.execution_request {
+            context.native_dispatched();
+        }
+        let result = no_redirect_http_client().execute(request).await;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        let response = result?;
+        guard
+            .observe_response(response)
+            .await
+            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else if let Some(proof) = resource_proof {
         let mut request = request.build()?;
         proof
             .attach(&mut request)
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
-        no_redirect_http_client().execute(request).await?
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        if let Some(context) = &target.execution_request {
+            context.native_dispatched();
+        }
+        let result = no_redirect_http_client().execute(request).await;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        result?
     } else {
-        request.send().await?
+        let result = if let Some(permit) = &target.execution_permission {
+            // A local builder failure is not a provider attempt. Finish all
+            // request preparation before committing the one-use send barrier.
+            let request = request.build()?;
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
+            no_redirect_http_client().execute(request).await
+        } else {
+            let request = request.build()?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
+            client.execute(request).await
+        };
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        result?
     };
 
+    if super::credential_verification::checking() {
+        return super::credential_verification::observe(response).await.map_err(ForwardRequestError::Application);
+    }
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
     // passed through unchanged by `insert_and_replay`.
@@ -4764,6 +5188,31 @@ async fn forward_request_with_egress_guard_inner(
     }
 
     Ok(response)
+
+    }).await;
+    if let Err(ForwardRequestError::Transport(error)) = &result {
+        super::credential_verification::record(
+            "not_verified",
+            if error.is_timeout() {
+                "check_timeout"
+            } else {
+                "check_unavailable"
+            },
+        );
+    }
+    match &result {
+        Ok(response) => operation.finish(
+            if response.status().is_success() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            Some(response.status().as_u16()),
+            None,
+        ),
+        Err(_) => operation.finish(crate::turn_trace::Outcome::Failed, None, None),
+    }
+    result
 }
 
 /// Whether an HTTP method semantically supports a request body.
@@ -5285,6 +5734,7 @@ mod tests {
 
         let consent = crate::models::consent::Consent {
             revision: None,
+            write_version: None,
             issuance_fence: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
@@ -5553,6 +6003,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_endpoint_matching_proxy_snapshots_add_zero_commands() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let observed = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((event.command_name.clone(), collection.to_owned()));
+            }
+        });
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "catalog_endpoint_proxy_budget",
+            handler,
+        )
+        .await;
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.provider_config_id = Some("not-loaded-for-matching-snapshots".into());
+        catalog.openapi_spec_url = Some("https://example.com/openapi.json".into());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            "connection",
+            "owner",
+            "alias",
+            "endpoint",
+            Some(&catalog.id),
+            None,
+        );
+        connection.source = Some(AUTO_PROVISION_SOURCE.into());
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            "owner",
+            "Catalog",
+            &catalog.base_url,
+            catalog.openapi_spec_url.as_deref(),
+            Some(&catalog.id),
+        );
+        // The legacy projection performs one catalog read. Compare every
+        // command, including potential writes, with the real matching path.
+        commands.lock().unwrap().clear();
+        load_catalog_proxy_authorization_for_user_service(&db, &connection, None)
+            .await
+            .unwrap();
+        let baseline = commands.lock().unwrap().clone();
+        assert_eq!(baseline, vec![("find".into(), DOWNSTREAM_SERVICES.into())]);
+        commands.lock().unwrap().clear();
+        load_catalog_proxy_authorization_for_user_service(&db, &connection, Some(&endpoint))
+            .await
+            .unwrap();
+        assert_eq!(
+            *commands.lock().unwrap(),
+            baseline,
+            "matching auto connection adds zero commands"
+        );
+        for spec_only in [false, true] {
+            let mut changed = endpoint.clone();
+            if spec_only {
+                changed.openapi_spec_url = None;
+            } else {
+                changed.url = "https://old.example".into();
+            }
+            commands.lock().unwrap().clear();
+            load_catalog_proxy_authorization_for_user_service(&db, &connection, Some(&changed))
+                .await
+                .unwrap();
+            assert_eq!(
+                *commands.lock().unwrap(),
+                vec![
+                    ("find".into(), DOWNSTREAM_SERVICES.into()),
+                    ("find".into(), PROVIDER_CONFIGS.into())
+                ]
+            );
+        }
+        // LLM/platform-key resolution already uses the live catalog and owns
+        // provider authorization. Neither matching nor stale snapshots add a
+        // second provider lookup at this projection seam.
+        connection.auth_method = "bearer".into();
+        for matching in [true, false] {
+            let mut endpoint = endpoint.clone();
+            if !matching {
+                endpoint.url = "https://old.example".into();
+            }
+            commands.lock().unwrap().clear();
+            let result = load_catalog_proxy_authorization_for_user_service(
+                &db,
+                &connection,
+                Some(&endpoint),
+            )
+            .await
+            .unwrap();
+            assert!(result.managed_target.is_none());
+            assert_eq!(*commands.lock().unwrap(), baseline);
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn catalog_metering_keeps_protocol_identity_for_renamed_user_service() {
         let Some(db) = connect_test_database("proxy_catalog_protocol_identity").await else {
             eprintln!("skipping catalog protocol identity test: no local MongoDB available");
@@ -5576,11 +6128,118 @@ mod tests {
             Some(&catalog_id),
             None,
         );
-        let (_, catalog_service_slug) =
-            load_catalog_metering_for_user_service(&db, &user_service).await;
+        let catalog_service_slug =
+            load_catalog_proxy_authorization_for_user_service(&db, &user_service, None)
+                .await
+                .unwrap()
+                .catalog_slug;
 
         assert_eq!(catalog_service_slug.as_deref(), Some("llm-openai"));
         assert_ne!(user_service.slug, catalog_service_slug.unwrap());
+    }
+
+    #[tokio::test]
+    async fn catalog_dispatch_resolution_distinguishes_custom_alias_missing_and_unreadable_catalogs()
+     {
+        let db =
+            crate::test_utils::connect_transaction_test_database("catalog_dispatch_resolution")
+                .await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let nodes = Arc::new(NodeWsManager::new(30, 100));
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let vendor = wiremock::MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let endpoint =
+            test_user_endpoint(&endpoint_id, &owner, "Custom", &vendor.uri(), None, None);
+        db.collection(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        let connection = test_user_service(&id, &owner, "my-worker", &endpoint_id, None, None);
+        db.collection(USER_SERVICES)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        let resolve = || {
+            resolve_proxy_target_from_user_service(
+                &db,
+                &keys,
+                &nodes,
+                &owner,
+                Some("my-worker"),
+                None,
+                test_execution_context(),
+            )
+        };
+        let custom = resolve().await.unwrap().unwrap();
+        assert!(custom.target.catalog_slug.is_none());
+        assert!(custom.catalog_service_slug.is_none());
+        let mut catalog = dummy_service();
+        catalog.slug = "cma".into();
+        catalog.base_url = vendor.uri();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"catalog_service_id":&catalog.id}},
+            )
+            .await
+            .unwrap();
+        let resolved = resolve().await.unwrap().unwrap();
+        assert_eq!(resolved.target.service.slug, "my-worker");
+        assert_eq!(resolved.target.service.id, catalog.id);
+        assert_eq!(resolved.target.catalog_slug.as_deref(), Some("cma"));
+        assert_eq!(resolved.catalog_service_slug, resolved.target.catalog_slug);
+        assert!(matches!(
+            forward_request(
+                &Client::new(),
+                &resolved.target,
+                reqwest::Method::GET,
+                "/status",
+                None,
+                reqwest::header::HeaderMap::new(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_response_cache()
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        // Only the catalog record becomes unreadable; owner/connection/endpoint
+        // lookups continue to work. Deserialization failure must not downgrade.
+        db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .update_one(doc! {"_id":&catalog.id}, doc! {"$set":{"slug":42}})
+            .await
+            .unwrap();
+        assert!(resolve().await.is_err());
+        assert!(
+            db.collection::<mongodb::bson::Document>(USER_SERVICES)
+                .find_one(doc! {"_id":&id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .delete_one(doc! {"_id":&catalog.id})
+            .await
+            .unwrap();
+        assert!(resolve().await.is_err());
+        assert!(vendor.received_requests().await.unwrap().is_empty());
+        db.drop().await.unwrap();
     }
 
     // ---- forward header allowlist tests (NyxID#161) ----
@@ -6342,6 +7001,7 @@ mod tests {
         // credential whose secret is envelope-encrypted with the test keys.
         db.collection::<ApiKey>(API_KEYS)
             .insert_one(ApiKey {
+                permission_policy_id: None,
                 id: api_key_id.clone(),
                 user_id: user_id.clone(),
                 name: "coding-agent".to_string(),
@@ -6578,9 +7238,216 @@ mod tests {
         assert_eq!(credential_header_name(&target), None);
     }
 
+    #[tokio::test]
+    async fn turn_trace_proxy_resolution_command_count_parity() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::collections::BTreeMap;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("private-body"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut measured = Vec::new();
+        for enabled in [false, true] {
+            let counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let observed = counts.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                    *observed
+                        .lock()
+                        .unwrap()
+                        .entry(format!("{}:{collection}", event.command_name))
+                        .or_default() += 1;
+                }
+            });
+            let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+                "turn_trace_proxy",
+                handler,
+            )
+            .await;
+            let owner = uuid::Uuid::new_v4().to_string();
+            let endpoint = uuid::Uuid::new_v4().to_string();
+            let service = uuid::Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(test_user_endpoint(
+                    &endpoint,
+                    &owner,
+                    "Trace proxy",
+                    &server.uri(),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+                .insert_one(test_user_service(
+                    &service,
+                    &owner,
+                    "trace-proxy",
+                    &endpoint,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            counts.lock().unwrap().clear();
+            let trace = enabled.then(|| {
+                crate::turn_trace::TurnContext::for_turn(&uuid::Uuid::new_v4().to_string()).unwrap()
+            });
+            crate::turn_trace::scope(trace, async {
+                let target = resolve_proxy_target_from_user_service(
+                    &db,
+                    &test_encryption_keys(),
+                    &Arc::new(NodeWsManager::new(30, 100)),
+                    &owner,
+                    Some("trace-proxy"),
+                    None,
+                    test_execution_context(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let response = forward_request(
+                    &Client::new(),
+                    &target.target,
+                    reqwest::Method::GET,
+                    "/test",
+                    None,
+                    HeaderMap::new(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.text().await.unwrap(), "private-body");
+            })
+            .await;
+            measured.push(counts.lock().unwrap().clone());
+            db.drop().await.unwrap();
+        }
+        assert_eq!(measured[0], measured[1]);
+        assert!(measured[0].keys().any(|key| key.starts_with("find:")));
+        eprintln!(
+            "turn trace proxy resolution command parity: {:?}",
+            measured[0]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn turn_trace_proxy_and_node_headers_preserve_execution_semantics() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string("private-response-canary"),
+            )
+            .mount(&server)
+            .await;
+        let target = make_proxy_target(server.uri());
+        let turn = uuid::Uuid::new_v4().to_string();
+        let context = crate::turn_trace::TurnContext::for_turn(&turn).unwrap();
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            "traceparent",
+            "00-11111111111141118111111111111111-1111111111111111-01"
+                .parse()
+                .unwrap(),
+        );
+        incoming.insert("x-request-id", "private-header-canary".parse().unwrap());
+        incoming.insert(
+            "idempotency-key",
+            "unchanged:continuation:2".parse().unwrap(),
+        );
+        incoming.insert("baggage", "private-baggage-canary".parse().unwrap());
+        let (result, records) = crate::turn_trace::capture(crate::turn_trace::scope(Some(context), async {
+            let node = prepare_node_request(&target, "/test", None, vec![("traceparent".into(), "untrusted".into())], &[], &[], None, &[]).unwrap();
+            assert!(node.headers.iter().any(|(key, value)| key == "traceparent" && value == &context.traceparent()));
+            forward_request(&Client::new(), &target, reqwest::Method::POST, "/test", None, incoming.clone(),
+                ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"private-body-canary"))), vec![], vec![], None,
+                &empty_token_cache(), &empty_response_cache()).await.unwrap()
+        })).await;
+        assert_eq!(result.text().await.unwrap(), "private-response-canary");
+        let requests = server.received_requests().await.unwrap();
+        let headers = &requests[0].headers;
+        assert!(
+            headers["traceparent"]
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("00-{}-", turn.replace('-', "")))
+        );
+        assert_eq!(headers["idempotency-key"], "unchanged:continuation:2");
+        assert_ne!(headers["x-request-id"], "private-header-canary");
+        assert!(!headers.contains_key("baggage"));
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("private-")
+        );
+        let callback = crate::turn_trace::TurnContext::for_request(
+            &incoming,
+            Some(&uuid::Uuid::new_v4().to_string()),
+        );
+        assert!(callback.context().is_none());
+        callback
+            .scope(async {
+                let node = prepare_node_request(
+                    &target,
+                    "/test",
+                    None,
+                    vec![("traceparent".into(), "untrusted".into())],
+                    &[],
+                    &[],
+                    None,
+                    &[],
+                )
+                .unwrap();
+                assert!(!node.headers.iter().any(|(key, _)| key == "traceparent"));
+                let result = forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    "/test",
+                    None,
+                    incoming.clone(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.text().await.unwrap(), "private-response-canary");
+            })
+            .await;
+        let requests = server.received_requests().await.unwrap();
+        let headers = &requests[1].headers;
+        assert!(!headers.contains_key("traceparent"));
+        assert!(!headers.contains_key("baggage"));
+        assert!(!headers.contains_key("tracestate"));
+        assert!(uuid::Uuid::parse_str(headers["x-request-id"].to_str().unwrap()).is_ok());
+        assert_eq!(headers["idempotency-key"], "unchanged:continuation:2");
+    }
+
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -6640,6 +7507,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -7531,6 +8400,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cma_forwarding_requires_catalog_admission_even_with_a_connection_alias() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+        let vendor = MockServer::start().await;
+        Mock::given(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&vendor)
+            .await;
+        let mut target = make_proxy_target(vendor.uri());
+        target.service.slug = "my-worker".into();
+        target.catalog_slug = Some("cma".into());
+        let error = super::forward_request_with_resource_proof(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "/api/v1/agents",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+            vec![],
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a renamed CMA connection still needs a resource permit");
+        assert!(matches!(
+            error,
+            ForwardRequestError::PreDispatchRejected(AppError::Forbidden(_))
+        ));
+        assert!(vendor.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn forward_request_rejects_backslash_in_requested_path_injection() {
         let err = forward_request(
             &Client::new(),
@@ -8002,6 +8914,11 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8063,6 +8980,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8264,6 +9183,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 
@@ -8369,6 +9289,7 @@ mod tests {
             }),
         );
         let config = crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec!["pilot".into()],
@@ -8405,6 +9326,11 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8464,6 +9390,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8648,6 +9576,11 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.clone(),
@@ -8707,6 +9640,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8967,6 +9902,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -9082,6 +10019,11 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9103,6 +10045,11 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9124,6 +10071,11 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9142,6 +10094,11 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9160,6 +10117,11 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9178,6 +10140,11 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9230,6 +10197,11 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9250,6 +10222,11 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: String::new(),
@@ -9473,6 +10450,11 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: None,
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: "https://example.test".into(),

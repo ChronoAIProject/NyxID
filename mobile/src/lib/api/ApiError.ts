@@ -10,21 +10,34 @@ export class ApiError extends Error {
   readonly errorCode: number;
   /** HTTP status code */
   readonly statusCode: number;
+  /** Optional structured validation diagnostics; rendered only by their owner. */
+  readonly details?: unknown;
   readonly reason?: string;
+  readonly requestId?: string;
+  readonly traceId?: string;
+  readonly retryAfterMs?: number;
 
   constructor(opts: {
     errorKey: string;
     errorCode: number;
     statusCode: number;
     message: string;
+    details?: unknown;
     reason?: string;
+    requestId?: string;
+    traceId?: string;
+    retryAfterMs?: number;
   }) {
     super(opts.message);
     this.name = "ApiError";
     this.errorKey = opts.errorKey;
     this.errorCode = opts.errorCode;
     this.statusCode = opts.statusCode;
+    this.details = opts.details;
     this.reason = opts.reason;
+    this.requestId = opts.requestId;
+    this.traceId = opts.traceId;
+    this.retryAfterMs = opts.retryAfterMs;
   }
 }
 

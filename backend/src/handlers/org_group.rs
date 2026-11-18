@@ -61,7 +61,29 @@ pub(crate) async fn post(
         addressed.push(access.group.lead_agent_id.clone());
     }
     let id = Uuid::new_v4().to_string();
+    let participating = access.execution_enrolled
+        && crate::services::execution_permission_enrollment::live_enabled(
+            &state.db,
+            &access.actor,
+            None,
+        )
+        .await?;
     let request = GroupRequest {
+        execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
+            channel_source: None,
+            version: 1,
+            task: crate::models::execution_permission::TaskRef {
+                root_kind: crate::models::execution_permission::TaskRootKind::GroupRequest,
+                root_id: id.clone(),
+            },
+            actor_user_id: access.actor.clone(),
+            audience: crate::services::execution_permission_dispatch::group_audience(&access.group),
+            epoch: 1,
+            hard_deadline: Utc::now() + chrono::Duration::hours(24),
+            cancelled: false,
+            parent_turn_id: None,
+        }),
+        collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
         user_id: access.group.user_id.clone(),
@@ -94,6 +116,10 @@ pub(crate) async fn post(
 }
 
 pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
+    advance_inner(state, group, false).await;
+}
+
+pub(crate) async fn advance_inner(state: &AppState, group: &AssistantGroup, background: bool) {
     let result: AppResult<()> = Box::pin(async {
         let requests = groups::pending_requests(&state.db, &group.id).await?;
         for request in requests {
@@ -108,6 +134,14 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
                 Err(e) => return Err(e),
             };
             for agent_id in &request.pending_agent_ids {
+                let _claim = if background {
+                    let Some(work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
+                    Some(work)
+                } else {
+                    None
+                };
                 if personal::member_thread(&state.db, &access.actor, &group.id, agent_id)
                     .await?
                     .is_some_and(|r| engine::live_turn(&r, Utc::now()).is_some())
@@ -172,6 +206,13 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        title_language: None,
+        automation_work: None,
+        automation_parent: None,
+        execution_enrollment: request.execution_task.is_some(),
+        execution_parent: None,
+        channel_context: None,
+        owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
         invocation_id: None,
@@ -326,5 +367,5 @@ pub(crate) async fn member_settled(
     if result.is_err() {
         tracing::debug!("Organization group reply deferred");
     }
-    Box::pin(advance(state, &access.group)).await;
+    Box::pin(advance_inner(state, &access.group, true)).await;
 }

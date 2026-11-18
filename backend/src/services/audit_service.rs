@@ -12,6 +12,13 @@ use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::mw::auth::AuthUser;
 use crate::services::audit_chain_service;
 
+pub mod required;
+pub(crate) use required::append_intent;
+
+#[cfg(test)]
+#[path = "audit_intent_tests.rs"]
+mod durability_tests;
+
 static AUDIT_CHAIN_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -88,7 +95,7 @@ pub fn log_async(
         api_key_id,
         api_key_name,
     );
-    tokio::spawn(async move {
+    super::shutdown::process().spawn_cleanup(async move {
         let _ = write_audit_entry(db, entry, event_type).await;
     });
 }
@@ -238,7 +245,7 @@ fn build_audit_entry(
         id: Uuid::new_v4().to_string(),
         user_id,
         event_type,
-        event_data,
+        event_data: crate::turn_trace::audit_data(event_data),
         ip_address,
         user_agent,
         api_key_id,
@@ -385,15 +392,20 @@ mod tests {
             return;
         };
 
-        let entry = build_audit_entry(
-            Some("user-123".to_string()),
-            "test_event".to_string(),
-            Some(serde_json::json!({"key": "value"})),
-            Some("127.0.0.1".to_string()),
-            Some("test-agent".to_string()),
-            None,
-            None,
-        );
+        let turn_id = Uuid::new_v4().to_string();
+        let context = crate::turn_trace::TurnContext::for_turn(&turn_id);
+        let entry = crate::turn_trace::scope(context, async {
+            build_audit_entry(
+                Some("user-123".to_string()),
+                "test_event".to_string(),
+                Some(serde_json::json!({"key": "value"})),
+                Some("127.0.0.1".to_string()),
+                Some("test-agent".to_string()),
+                None,
+                None,
+            )
+        })
+        .await;
         write_audit_entry(db.clone(), entry, "test_event".to_string())
             .await
             .expect("write audit entry");
@@ -415,6 +427,31 @@ mod tests {
         assert_eq!(entry.user_agent.as_deref(), Some("test-agent"));
         assert!(entry.api_key_id.is_none());
         assert!(entry.api_key_name.is_none());
+        assert_eq!(entry.event_data.as_ref().unwrap()["turn_id"], turn_id);
+        assert_eq!(entry.event_data.as_ref().unwrap()["key"], "value");
+        let key = audit_chain_hmac_key().expect("test database initializes the audit key");
+        let report = audit_chain_service::verify_chain(&db, key, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(report.status, audit_chain_service::AuditChainStatus::Ok);
+        assert_eq!(report.checked_count, 1);
+
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .update_one(
+                mongodb::bson::doc! {"_id": &entry.id},
+                mongodb::bson::doc! {"$set": {"event_data.turn_id": Uuid::new_v4().to_string()}},
+            )
+            .await
+            .unwrap();
+        let report = audit_chain_service::verify_chain(&db, key, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(report.status, audit_chain_service::AuditChainStatus::Broken);
+        assert_eq!(
+            report.break_info.unwrap().break_kind,
+            audit_chain_service::AuditChainBreakKind::HashMismatch
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

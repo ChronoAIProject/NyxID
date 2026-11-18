@@ -22,6 +22,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub const TOOL_NAMES: &[&str] = &[
+    "list_cma_resources",
+    "cma_save_attachment",
+    "cma_guide",
     "list_agent_keys",
     "get_agent_key",
     "update_agent_key",
@@ -53,7 +56,9 @@ const MAX_RESULT_BYTES: usize = 64 * 1024;
 pub fn read_only(name: &str) -> bool {
     matches!(
         name,
-        "list_agent_keys"
+        "list_cma_resources"
+            | "cma_guide"
+            | "list_agent_keys"
             | "get_agent_key"
             | "list_agent_key_bindings"
             | "list_channel_adapters"
@@ -80,6 +85,9 @@ pub fn destructive(name: &str) -> bool {
 }
 
 pub fn schema(name: &str) -> Value {
+    if super::assistant_cma_tools::owns(name) {
+        return super::assistant_cma_tools::schema(name);
+    }
     let string = json!({"type": "string", "minLength": 1, "maxLength": 200});
     let boolean = json!({"type": "boolean"});
     let mut props = serde_json::Map::new();
@@ -188,6 +196,9 @@ pub fn schema(name: &str) -> Value {
 }
 
 fn description(name: &str) -> String {
+    if super::assistant_cma_tools::owns(name) {
+        return super::assistant_cma_tools::description(name);
+    }
     let purpose = match name {
         "list_agent_keys" => "List agent keys without secrets.",
         "get_agent_key" => "Inspect an agent key's permissions and settings.",
@@ -275,10 +286,32 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     service
         .endpoints
         .extend(super::assistant_team_tools::agent_endpoints());
+    if super::assistant_service_execution::is_shared_chat(chat) {
+        service.endpoints.retain(|e| {
+            matches!(
+                e.name.as_str(),
+                "remember" | "forget" | "get_agent_skills" | "skill_read" | "post_to_chat"
+            )
+        });
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|e| e.name == "list_channel_chats"),
+        );
+        service.description = Some("Use your private notes and explicitly allowed chats. Shared agents cannot manage either person's account.".into());
+    }
     // Gated authoring is appended only by the actor-aware discovery helper.
-    service
-        .endpoints
-        .retain(|e| e.name != super::assistant_skill_authoring::TOOL_NAME);
+    service.endpoints.retain(|e| {
+        e.name != super::assistant_skill_authoring::TOOL_NAME
+            && e.name != "list_notifications"
+            && (!chat.guest || e.name != "task_status")
+    });
+    if chat.collaboration_thread {
+        service.endpoints.retain(|e| {
+            !chat.guest && matches!(e.name.as_str(), "get_agent_skills" | "skill_read")
+        });
+        service.description = Some("Read this specialist's pinned skills. Private memory and account tools are unavailable in collaboration groups.".into());
+    }
     service
 }
 
@@ -287,10 +320,26 @@ pub async fn virtual_service_for(
     chat: &acks::ChatAuthority,
 ) -> McpToolService {
     let mut service = virtual_service(chat);
+    if chat.is_orchestrator()
+        && !chat.guest
+        && !chat.collaboration_thread
+        && !super::assistant_service_execution::is_shared_chat(chat)
+        && super::assistant_notification_service::enabled(db, &chat.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|endpoint| endpoint.name == "list_notifications"),
+        );
+    }
     // Owner chats (NyxBot and specialists, which draft only for themselves)
     // need this rollout lookup. A flag-store failure hides authoring alone,
     // preserving the existing tools for every caller.
     if !chat.guest
+        && !chat.collaboration_thread
+        && !super::assistant_service_execution::is_shared_chat(chat)
         && super::assistant_skill_authoring::enabled(db, &chat.user_id)
             .await
             .unwrap_or(false)
@@ -300,6 +349,36 @@ pub async fn virtual_service_for(
                 .into_iter()
                 .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
         );
+    }
+    if super::assistant_cma_tools::chat_eligible(db, chat)
+        .await
+        .unwrap_or(false)
+    {
+        service
+            .endpoints
+            .extend(
+                super::assistant_cma_tools::NAMES
+                    .iter()
+                    .map(|name| McpToolEndpoint {
+                        endpoint_id: format!("nyxid__{name}"),
+                        name: (*name).into(),
+                        description: Some(description(name)),
+                        method: "POST".into(),
+                        request_content_type: Some("application/json".into()),
+                        request_body_required: true,
+                        request_body_schema: Some(schema(name)),
+                        ..Default::default()
+                    }),
+            );
+    }
+    // NYX template outlines (`assistant:skill-runs`, default off). A flag-store
+    // failure keeps today's skill tools unchanged.
+    if !chat.guest
+        && Box::pin(super::skill_outline::enabled(db, &chat.user_id))
+            .await
+            .unwrap_or(false)
+    {
+        super::skill_outline::extend_tools(&mut service.endpoints);
     }
     service
 }
@@ -323,6 +402,7 @@ fn account_service() -> McpToolService {
         durable_endpoint_metadata: Default::default(),
         endpoints: TOOL_NAMES
             .iter()
+            .filter(|name| !super::assistant_cma_tools::owns(name))
             .map(|name| McpToolEndpoint {
                 attachment_input: None,
                 async_operation: None,
@@ -414,6 +494,7 @@ pub struct AccountTools<'a> {
     pub keys: &'a EncryptionKeys,
     pub http: &'a reqwest::Client,
     pub config: &'a AppConfig,
+    pub jwt_keys: &'a crate::crypto::jwt::JwtKeys,
     pub token_exchange_cache: &'a Arc<TokenExchangeCache>,
     pub node_manager: &'a NodeWsManager,
 }
@@ -445,6 +526,19 @@ pub fn error_result_for(
     result
 }
 
+/// Content-free memory diagnostics without changing the underlying error class.
+pub(crate) fn memory_error_result_for(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
+    let reason = crate::errors::memory_write::MemoryWriteReason::from_error(&error);
+    let mut result = error_result_for(error, chat, frontend);
+    result.value["message"] = json!(reason.message());
+    result.value["details"] = json!({"reason": reason, "category": reason.category()});
+    result
+}
+
 fn error_result_inner(
     error: AppError,
     chat: Option<&acks::ChatAuthority>,
@@ -473,7 +567,7 @@ fn error_result_inner(
                 value,
             };
         }
-        AppError::SkillDraftValidation(_) => {
+        AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) | AppError::SkillRead(_) => {
             return ToolResult {
                 permission_request: None,
                 is_error: true,
@@ -503,13 +597,46 @@ fn error_result_inner(
             };
         }
 
-        error if error.is_forbidden() || matches!(error, AppError::Unauthorized(_)) => {
+        AppError::ForbiddenWithGuidance { message, guidance }
+            if matches!(
+                guidance.as_ref(),
+                crate::errors::access_denial::AccessDenial::OrganizationAgentChannelUnsupported { .. }
+            ) =>
+        {
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: if message
+                    == crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE
+                {
+                    super::assistant_acknowledgement_service::organization_agent_channel_disabled_refusal()
+                } else {
+                    super::assistant_acknowledgement_service::organization_agent_channel_refusal()
+                },
+            };
+        }
+        // Forbidden messages are authored for this same principal and tell
+        // the agent how to correct its request or report the refusal. Guided
+        // denials keep their metadata HTTP-only, so guided and plain denials
+        // have the same assistant shape.
+        AppError::Forbidden(message) | AppError::ForbiddenWithGuidance { message, .. } => {
+            let message: String = message.chars().take(300).collect();
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": message}),
+            };
+        }
+        AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
         }
         AppError::Conflict(_) => {
             "The resource changed. Inspect it and request a new acknowledgement."
         }
-        AppError::AssistantAttachmentExpired => body.message.as_str(),
+        AppError::AssistantAttachmentExpired | AppError::ApprovalUnsupported => {
+            body.message.as_str()
+        }
         _ => "The account operation could not be completed. Review it in the NyxID UI.",
     };
     ToolResult {
@@ -597,7 +724,15 @@ impl AccountTools<'_> {
             .map(|chat| chat.conversation_id.clone());
         let result = match chat {
             Ok(Some(chat)) => Box::pin(self.execute_authorized(&chat, auth, tool_name, args)).await,
-            Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
+            Ok(None) => Ok(ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({
+                    "error": "forbidden",
+                    "error_code": 1002,
+                    "message": "This operation requires a conversation key and human acknowledgement."
+                }),
+            }),
             Err(error) => Err(error),
         };
         let mut result = result.unwrap_or_else(error_result);
@@ -644,6 +779,9 @@ impl AccountTools<'_> {
         let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
         validate_arguments(name, args)?;
         super::assistant_nyxagent::require_enabled(self.db, &chat.user_id).await?;
+        if super::assistant_cma_tools::owns(name) {
+            return super::assistant_cma_tools::execute(self, chat, name, args).await;
+        }
         if !chat.is_orchestrator() && !read_only(name) {
             return Ok(ToolResult {
                 permission_request: None,
@@ -1172,7 +1310,8 @@ impl AccountTools<'_> {
                 let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
                 let mut view = owned_bot_view(&bot, user, &orgs);
                 let gateway = channel_bot_service::gateway_linked(self.db, &bot.id).await?;
-                view["health"] = super::channel_bot_health::setup_evidence(&bot, gateway);
+                view["health"] =
+                    super::channel_bot_health::setup_evidence(self.db, &bot, gateway).await?;
                 view["personal_routing_available"] = json!(
                     super::platform_bot_authority::permits_personal_routes(self.db, &bot.id)
                         .await?
@@ -1311,17 +1450,33 @@ impl AccountTools<'_> {
                 let providers = platform_key_service::load_providers(self.db).await?;
                 let services =
                     unified_key_service::list_keys(self.db, self.keys, user, &providers).await?;
-                Ok(bounded_list(
-                    services
-                        .iter()
-                        .map(|s| {
-                            json!({"id": s.id, "slug": s.slug,
-                    "label": short(&s.label), "is_active": s.is_active, "status": s.status,
-                    "api_key_id": s.api_key_id, "auto_connected": s.auto_connected})
-                        })
-                        .collect(),
-                ))
+                use futures::TryStreamExt;
+                let connections: Vec<crate::models::user_service::UserService> = self
+                    .db
+                    .collection("user_services")
+                    .find(doc! {"_id":{"$in":services.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()}})
+                    .await?
+                    .try_collect()
+                    .await?;
+                // Facts are advisory; a lookup failure never fails the listing.
+                let facts =
+                    super::assistant_connection_service::facts_for(self.db, user, &connections)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(%error, "connection facts unavailable");
+                            Default::default()
+                        });
+                let rows: Vec<Value> = services
+                    .iter()
+                    .map(|service| {
+                        json!({"id":service.id,"slug":service.slug,"label":short(&service.label),"is_active":service.is_active,
+                        "status":service.status,"api_key_id":service.api_key_id,"auto_connected":service.auto_connected,
+                        "connection":facts.get(&service.id).cloned().unwrap_or(Value::Null)})
+                    })
+                    .collect();
+                Ok(bounded_list(rows))
             }
+
             "set_service_enabled" => {
                 user_service_service::update_user_service(
                     self.db,
@@ -1504,5 +1659,116 @@ mod search_tests {
             let found = crate::services::mcp_service::search_all_tools(&services, query);
             assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
         }
+    }
+
+    #[test]
+    fn forbidden_messages_are_bounded_and_guidance_stays_http_only() {
+        use crate::errors::access_denial::CredentialType;
+        for message in ["Missing scope".to_owned(), "界".repeat(301)] {
+            let plain = error_result(AppError::Forbidden(message.clone()));
+            assert!(plain.is_error);
+            assert!(plain.permission_request.is_none());
+            assert_eq!(
+                plain.value,
+                json!({"error": "forbidden", "error_code": 1002,
+                "message": message.chars().take(300).collect::<String>()})
+            );
+            let mut guided = vec![AppError::insufficient_scope(message.clone())];
+            for kind in [
+                CredentialType::ApiKey,
+                CredentialType::Delegated,
+                CredentialType::Relay,
+                CredentialType::ServiceAccount,
+                CredentialType::OauthClient,
+            ] {
+                guided.push(AppError::unsupported_credential(&message, kind));
+            }
+            for error in guided {
+                let result = error_result(error);
+                assert!(result.is_error);
+                assert!(result.permission_request.is_none());
+                assert_eq!(result.value, plain.value);
+            }
+        }
+    }
+
+    #[test]
+    fn unauthorized_keeps_fixed_conversation_key_copy() {
+        let result = error_result(AppError::Unauthorized(
+            "private authentication detail".into(),
+        ));
+        assert!(result.is_error);
+        assert_eq!(
+            result.value,
+            json!({"error": "unauthorized", "error_code": 1001,
+                "message": "This operation requires a conversation key and human acknowledgement."})
+        );
+        assert!(
+            !result
+                .value
+                .to_string()
+                .contains("private authentication detail")
+        );
+        assert!(result.permission_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn account_tool_without_conversation_key_keeps_fixed_refusal_and_audits_it() {
+        let db = crate::test_utils::connect_transaction_test_database("account_tool_no_key").await;
+        let state = crate::test_utils::test_app_state(db);
+        let owner = uuid::Uuid::new_v4().to_string();
+        let tools = AccountTools {
+            db: &state.db,
+            keys: &state.encryption_keys,
+            http: &state.http_client,
+            config: &state.config,
+            jwt_keys: &state.jwt_keys,
+            token_exchange_cache: &state.token_exchange_cache,
+            node_manager: &state.node_ws_manager,
+        };
+        for method in [AuthMethod::Session, AuthMethod::ApiKey] {
+            let mut auth = crate::test_utils::test_auth_user(&owner);
+            auth.auth_method = method;
+            if auth.auth_method == AuthMethod::ApiKey {
+                auth.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+            }
+            let result = tools.execute(&auth, "nyxid__list_nodes", &json!({})).await;
+            assert!(result.is_error);
+            assert!(result.permission_request.is_none());
+            assert_eq!(
+                result.value,
+                json!({"error": "forbidden", "error_code": 1002,
+            "message": "This operation requires a conversation key and human acknowledgement."})
+            );
+            let audit = state
+                .db
+                .collection::<crate::models::audit_log::AuditLog>(
+                    crate::models::audit_log::COLLECTION_NAME,
+                )
+                .find_one(doc! {
+                    "user_id": &owner,
+                    "event_type": "assistant_account_tool_call",
+                    "api_key_id": &auth.api_key_id,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let data = audit.event_data.unwrap();
+            assert_eq!(data["outcome"], "refused");
+            assert_eq!(data["tool_name"], "nyxid__list_nodes");
+            assert!(data["conversation_id"].is_null());
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
     }
 }

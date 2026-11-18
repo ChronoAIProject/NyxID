@@ -400,6 +400,29 @@ pub async fn cmd_credentials(
             println!("Credential added for service '{service}'.");
             Ok(())
         }
+        NodeCredentialCommands::SetUrl { service, url } => {
+            let service = service.to_lowercase();
+            let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
+            // Validate before resolving the owner's login or making any request.
+            // This changes only our in-memory copy, never the local config file.
+            node_config.set_credential_target_url(&service, &url)?;
+            let auth = crate::cli::AuthArgs {
+                base_url: Some(super::ws_client::node_agent_api_base_url_from_ws_url(
+                    &node_config.server.url,
+                )),
+                access_token: None,
+                access_token_env: "NYXID_ACCESS_TOKEN".into(),
+                profile: std::env::var("NYXID_PROFILE").ok(),
+                output: crate::cli::OutputFormat::Table,
+            };
+            let mut api = crate::api::ApiClient::from_auth_checked(&auth).await
+                .map_err(|_| super::error::Error::Validation("Endpoint migration needs an owner login to this NyxID server; run nyxid login first".into()))?;
+            migrate_existing_node_endpoint(&mut api, &service, &node_config.node.id, &url).await?;
+            // The revision-checked node push is the sole local metadata writer;
+            // a second CLI save could race a newer target update.
+            println!("Backend endpoint updated; local credential preserved.");
+            Ok(())
+        }
         NodeCredentialCommands::Setup {
             service,
             additional_scopes,
@@ -1193,6 +1216,9 @@ async fn credential_reload_loop(
     loop {
         tokio::time::sleep(interval).await;
 
+        let Ok(_store_guard) = config::credential_store_lock() else {
+            continue;
+        };
         let current_modified = match std::fs::metadata(&config_file).and_then(|m| m.modified()) {
             Ok(t) => t,
             Err(e) => {
@@ -1250,11 +1276,14 @@ async fn oauth_refresh_loop(
             Err(_) => continue,
         };
 
-        let mut config_changed = false;
-        let mut updated_config = node_config.clone();
-
         for (slug, cred) in &node_config.credentials {
-            if !cred.oauth_managed {
+            if !cred.oauth_managed
+                || node_config
+                    .credential_generation_fences
+                    .0
+                    .get(slug)
+                    .is_some_and(|fences| !fences.is_empty())
+            {
                 continue;
             }
 
@@ -1329,43 +1358,16 @@ async fn oauth_refresh_loop(
             .await
             {
                 Ok(new_token) => {
-                    tracing::info!(service = %slug, "OAuth token refreshed");
-
-                    let header_value = format!(
-                        "{} {}",
-                        new_token.token_type.as_deref().unwrap_or("Bearer"),
-                        new_token.access_token
-                    );
-
-                    if let Some(cred_mut) = updated_config.credentials.get_mut(slug) {
-                        // Update header value
-                        cred_mut.header_value_encrypted = backend
-                            .store_credential_value(slug, &header_value)
-                            .ok()
-                            .flatten();
-
-                        // Update OAuth tokens
-                        cred_mut.oauth_access_token_encrypted = backend
-                            .store_credential_value(
-                                &format!("{slug}:oauth_access"),
-                                &new_token.access_token,
-                            )
-                            .ok()
-                            .flatten();
-
-                        if let Some(ref rt) = new_token.refresh_token {
-                            cred_mut.oauth_refresh_token_encrypted = backend
-                                .store_credential_value(&format!("{slug}:oauth_refresh"), rt)
-                                .ok()
-                                .flatten();
-                        }
-
-                        cred_mut.oauth_token_expires_at = new_token.expires_in.map(|secs| {
-                            (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-                                .to_rfc3339()
-                        });
-
-                        config_changed = true;
+                    if apply_local_oauth_refresh(
+                        &config_file,
+                        &backend,
+                        &node_config,
+                        slug,
+                        new_token,
+                    )
+                    .is_err()
+                    {
+                        tracing::warn!("Failed to persist local OAuth refresh");
                     }
                 }
                 Err(e) => {
@@ -1373,11 +1375,69 @@ async fn oauth_refresh_loop(
                 }
             }
         }
-
-        if config_changed && let Err(e) = updated_config.save(&config_file) {
-            tracing::error!(error = %e, "Failed to save config after OAuth refresh");
-        }
     }
+}
+
+/// Rebase one provider result onto the current config, never the snapshot held
+/// across network I/O. A push that superseded this local authority wins.
+pub(super) fn apply_local_oauth_refresh(
+    path: &std::path::Path,
+    backend: &SecretBackend,
+    observed: &NodeConfig,
+    slug: &str,
+    token: oauth::TokenResponse,
+) -> Result<bool> {
+    let access = zeroize::Zeroizing::new(token.access_token);
+    let refresh = token.refresh_token.map(zeroize::Zeroizing::new);
+    let _store_guard = config::credential_store_lock()?;
+    let mut current = NodeConfig::load(path)?;
+    let Some(old) = observed.credentials.get(slug) else {
+        return Ok(false);
+    };
+    let Some(credential) = current.credentials.get(slug) else {
+        return Ok(false);
+    };
+    if !credential.oauth_managed
+        || current.credential_generations.0.get(slug) != observed.credential_generations.0.get(slug)
+        || current
+            .credential_generation_fences
+            .0
+            .get(slug)
+            .is_some_and(|fences| !fences.is_empty())
+        || credential.oauth_token_url != old.oauth_token_url
+        || credential.oauth_refresh_token_encrypted != old.oauth_refresh_token_encrypted
+        || credential.oauth_access_token_encrypted != old.oauth_access_token_encrypted
+        || credential.oauth_token_expires_at != old.oauth_token_expires_at
+        || credential.oauth_client_id_encrypted != old.oauth_client_id_encrypted
+        || credential.oauth_client_secret_encrypted != old.oauth_client_secret_encrypted
+        || credential.oauth_scopes != old.oauth_scopes
+        || credential.oauth_token_endpoint_auth_method != old.oauth_token_endpoint_auth_method
+        || credential.oauth_client_id_param_name != old.oauth_client_id_param_name
+        || credential.oauth_request_options != old.oauth_request_options
+    {
+        return Ok(false);
+    }
+    backend.refresh()?;
+    let Some(credential) = current.credentials.get_mut(slug) else {
+        return Ok(false);
+    };
+    let header = zeroize::Zeroizing::new(format!(
+        "{} {}",
+        token.token_type.as_deref().unwrap_or("Bearer"),
+        access.as_str()
+    ));
+    credential.header_value_encrypted = backend.store_credential_value(slug, &header)?;
+    credential.oauth_access_token_encrypted =
+        backend.store_credential_value(&format!("{slug}:oauth_access"), &access)?;
+    if let Some(refresh) = refresh {
+        credential.oauth_refresh_token_encrypted =
+            backend.store_credential_value(&format!("{slug}:oauth_refresh"), &refresh)?;
+    }
+    credential.oauth_token_expires_at = token
+        .expires_in
+        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
+    current.save(path)?;
+    Ok(true)
 }
 
 fn api_base_url_from_node_ws_url(ws_url: &str) -> String {
@@ -2000,6 +2060,49 @@ fn find_existing_service(
     None
 }
 
+async fn migrate_existing_node_endpoint(
+    api: &mut crate::api::ApiClient,
+    slug: &str,
+    node: &str,
+    target: &str,
+) -> Result<()> {
+    let keys = api
+        .get_value("/keys")
+        .await
+        .map_err(|e| super::error::Error::Validation(format!("Cannot read owned services: {e}")))?;
+    let matches: Vec<_> = keys["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|key| key["slug"].as_str() == Some(slug) && key["node_id"].as_str() == Some(node))
+        .collect();
+    if matches.len() != 1 || matches[0]["credential_type"].as_str() != Some("node_managed") {
+        return Err(super::error::Error::Validation("URL-only migration requires exactly one owned node-managed service on this node; use PUT /keys/{id} with endpoint_url for an explicit service".into()));
+    }
+    let id = matches[0]["id"]
+        .as_str()
+        .ok_or_else(|| super::error::Error::Validation("Service ID missing".into()))?;
+    update_backend_endpoint(api, id, target).await
+}
+
+async fn update_backend_endpoint(
+    api: &mut crate::api::ApiClient,
+    id: &str,
+    target: &str,
+) -> Result<()> {
+    let result: serde_json::Value = api.put(&format!("/keys/{id}"), &serde_json::json!({"endpoint_url": target})).await
+        .map_err(|e| super::error::Error::Validation(format!("Endpoint migration was refused; the local credential was not changed. Upgrade an older NyxID server for endpoint-only PUT support: {e}")))?;
+    for sync in result["node_target_sync"].as_array().into_iter().flatten() {
+        if sync["status"].as_str() != Some("synced") {
+            eprintln!(
+                "Server endpoint committed; node target sync {}. Nonempty server URLs remain authoritative.",
+                sync["status"].as_str().unwrap_or("unconfirmed")
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn prepare_backend_service_registration(
     api: &mut crate::api::ApiClient,
     service_slug: &str,
@@ -2034,16 +2137,7 @@ async fn prepare_backend_service_registration(
 
         if let Some(url) = target_url.filter(|url| *url != existing.endpoint_url) {
             println!("Updating backend endpoint URL for '{service_slug}'...");
-            api.put::<serde_json::Value, _>(
-                &format!("/keys/{}", existing.id),
-                &serde_json::json!({ "endpoint_url": url }),
-            )
-            .await
-            .map_err(|e| {
-                super::error::Error::Validation(format!(
-                    "Failed to update backend endpoint URL for '{service_slug}': {e}"
-                ))
-            })?;
+            update_backend_endpoint(api, &existing.id, url).await?;
             println!("Backend endpoint updated.");
             return Ok(BackendRegistrationChange::UpdatedEndpoint {
                 id: existing.id,
@@ -3507,5 +3601,73 @@ mod tests {
         assert!(backend.load_auth_token(&config).is_err());
         assert!(backend.load_signing_secret(&config).is_err());
         assert!(backend.load_credential_value("openai", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod endpoint_migration_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    #[tokio::test]
+    async fn node_endpoint_2126_registration_and_url_only_migration_send_metadata_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{
+                "id":"existing-service", "slug":"monitor", "node_id":"node", "credential_type":"node_managed", "endpoint_url":"http://old-monitor"
+            }]}))).expect(2).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/api/v1/keys/existing-service"))
+            .and(body_json(serde_json::json!({"endpoint_url":"http://new-monitor"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"existing-service", "endpoint_url":"http://new-monitor/canonical", "node_target_sync":[{"service_id":"existing-service", "status":"offline", "target_revision":3}]})))
+            .expect(2).mount(&server).await;
+        let mut api = crate::api::ApiClient::new(&server.uri(), uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .without_token_refresh();
+        migrate_existing_node_endpoint(&mut api, "monitor", "node", "http://new-monitor")
+            .await
+            .unwrap();
+        assert_eq!(
+            prepare_backend_service_registration(
+                &mut api,
+                "monitor",
+                "Monitor",
+                "node",
+                Some("http://new-monitor")
+            )
+            .await
+            .unwrap(),
+            BackendRegistrationChange::UpdatedEndpoint {
+                id: "existing-service".into(),
+                previous_endpoint_url: "http://old-monitor".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_registration_reports_old_server_refusal_without_promotion() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/keys/existing"))
+            .and(body_json(serde_json::json!({"endpoint_url":"http://new"})))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                serde_json::json!({"message":"node-managed endpoint edits unsupported"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = crate::api::ApiClient::new(&server.uri(), uuid::Uuid::new_v4().to_string())
+            .unwrap()
+            .without_token_refresh();
+        let error = update_backend_endpoint(&mut api, "existing", "http://new")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("local credential was not changed")
+        );
     }
 }

@@ -83,6 +83,7 @@ fn new_key(
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
     let key = ApiKey {
+        permission_policy_id: None,
         id: id.clone(),
         user_id: owner.into(),
         name: "Public NyxBot session".into(),
@@ -246,7 +247,7 @@ pub(crate) async fn issue_context(
     policy::verified_context(&state.db, &context).await?;
     let db = state.db.clone();
     let mut session = db.client().start_session().await?;
-    session
+    let admitted_context = session
         .start_transaction()
         .and_run(
             (db, store, context, row, key),
@@ -339,7 +340,9 @@ pub(crate) async fn issue_context(
             },
         )
         .await
-        .map_err(tx::map_transaction_error)
+        .map_err(tx::map_transaction_error)?;
+    crate::turn_trace::admitted(&admitted_context.turn.turn_id, now, None);
+    Ok(admitted_context)
 }
 
 /// Caller owns claim/controls/scope fences and transaction commit. Reuse never
@@ -840,6 +843,16 @@ ReplyPayload { ciphertext: cipher, text_bytes: *text_bytes, digest, contextual: 
             )
             .await
             .map_err(tx::map_transaction_error)?;
+        crate::turn_trace::milestone(
+            &context.turn.turn_id,
+            crate::turn_trace::Stage::Execution,
+            None,
+            Some(match result.error.as_ref() {
+                Some(error) if error.code == "cancelled" => crate::turn_trace::Outcome::Cancelled,
+                Some(_) => crate::turn_trace::Outcome::Failed,
+                None => crate::turn_trace::Outcome::Completed,
+            }),
+        );
         Ok(SettledExecution::Saved(reply))
     }
 }

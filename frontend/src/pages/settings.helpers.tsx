@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Monitor, Smartphone, Globe } from "lucide-react";
 
 export function getDeviceIcon(userAgent: string | null | undefined) {
@@ -32,14 +33,14 @@ export function humanizeUserAgent(
   userAgent: string | null | undefined,
 ): string {
   const ua = userAgent?.trim();
-  if (!ua) return "Unknown device";
+  if (!ua) return translateUi("Unknown device");
 
   // CLI / scripted clients first — usually the cleanest match.
   if (/^curl\//i.test(ua)) return `curl (${ua.split(" ")[0]})`;
   if (/^postmanruntime\//i.test(ua)) return "Postman";
   if (/python-requests\//i.test(ua)) return "python-requests";
   if (/^node\b|axios|fetch/i.test(ua) && !ua.includes("Mozilla")) {
-    return "Node / fetch client";
+    return translateUi("Node / fetch client");
   }
 
   // OS detection.
@@ -61,9 +62,9 @@ export function humanizeUserAgent(
   else if (firefox) browser = `Firefox ${firefox[1]}`;
   else if (safari) browser = `Safari ${safari[1]}`;
 
-  if (browser && os) return `${browser} on ${os}`;
+  if (browser && os) return translateUi("{{browser}} on {{os}}", { browser, os });
   if (browser) return browser;
-  if (os) return `Browser on ${os}`;
+  if (os) return translateUi("Browser on {{os}}", { os });
   return ua.length > 60 ? `${ua.slice(0, 57)}…` : ua;
 }
 
@@ -75,7 +76,7 @@ export function humanizeUserAgent(
 export function humanizeIpAddress(ip: string | null | undefined): string {
   const trimmed = ip?.trim();
   if (!trimmed) return "—";
-  if (trimmed === "127.0.0.1" || trimmed === "::1") return "Local network";
+  if (trimmed === "127.0.0.1" || trimmed === "::1") return translateUi("Local network");
   return trimmed;
 }
 

@@ -17,7 +17,7 @@ export function AssistantLink({ href, children }: {
       target={href.startsWith("#") ? undefined : "_blank"}
       rel="noopener noreferrer"
       className={connect
-        ? buttonVariants({ variant: "default", size: "sm" })
+        ? buttonVariants({ variant: "default", size: "sm", className: "h-auto max-w-full whitespace-normal py-1 text-center" })
         : "text-nyx-secondary-400 underline decoration-nyx-secondary-400/40 " +
           "underline-offset-2 hover:decoration-nyx-secondary-400"}
     >

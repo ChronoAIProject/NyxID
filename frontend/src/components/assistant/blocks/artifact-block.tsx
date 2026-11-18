@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ChevronRight, Download, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ export function ArtifactBlock({
 }: {
   readonly block: ArtifactContentBlock;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
     <section className="overflow-hidden rounded-xl border border-border/70 bg-card">
@@ -32,10 +34,10 @@ export function ArtifactBlock({
             <FileText className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-11 font-medium text-foreground">
+            <span className="block truncate type-secondary-emphasis text-foreground">
               {block.name}
             </span>
-            <span className="block font-mono text-9 text-text-tertiary">
+            <span className="block font-mono text-12 text-text-tertiary">
               {block.mime} - {formatSize(block.size_bytes)}
             </span>
           </span>
@@ -53,7 +55,7 @@ export function ArtifactBlock({
               download={block.name}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Download ${block.name}`}
+              aria-label={t("Download {{name}}", { name: block.name })}
             >
               <Download />
             </a>
@@ -66,19 +68,17 @@ export function ArtifactBlock({
                 variant="ghost"
                 size="icon"
                 disabled
-                aria-label={`Download ${block.name}`}
+                aria-label={t("Download {{name}}", { name: block.name })}
               >
                 <Download />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              This artifact carries no download URL yet
-            </TooltipContent>
+            <TooltipContent>{t("This artifact carries no download URL yet")}</TooltipContent>
           </Tooltip>
         )}
       </div>
       {open && block.preview && (
-        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-10 leading-relaxed text-muted-foreground">
+        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-14 text-muted-foreground">
           {block.preview}
         </pre>
       )}

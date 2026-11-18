@@ -1066,16 +1066,41 @@ async fn machine_git_final_send_rejects_live_catalog_and_credential_drift() {
             let key = resolved.api_key_id.as_deref().unwrap();
             let before = resolved.credential_epoch;
             let replacement = format!("synthetic-replacement-{}", Uuid::new_v4());
-            super::user_api_key_service::update_api_key(
-                &f.state.db,
-                &f.state.encryption_keys,
-                &f.owner,
-                key,
-                None,
-                Some(&replacement),
-            )
+            // Both target resolution and the positive egress check spawn usage
+            // timestamp writes. Rotation's exact-source CAS includes updated_at,
+            // so finish this fixture mutation after those writes settle. Only
+            // retry a CAS miss while the same key generation still exists; a
+            // deletion or another rotation must remain a test failure.
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    match super::user_api_key_service::update_api_key(
+                        &f.state.db,
+                        &f.state.encryption_keys,
+                        &f.owner,
+                        key,
+                        None,
+                        Some(&replacement),
+                    )
+                    .await
+                    {
+                        Ok(()) => break,
+                        Err(crate::errors::AppError::NotFound(_)) => {
+                            let current = super::user_api_key_service::get_api_key(
+                                &f.state.db,
+                                &f.owner,
+                                key,
+                            )
+                            .await
+                            .expect("credential remains present during drift setup");
+                            assert_eq!(current.credential_epoch, before);
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Err(error) => panic!("credential drift setup failed: {error:?}"),
+                    }
+                }
+            })
             .await
-            .unwrap();
+            .expect("credential rotation completes after background usage writes");
             let after = super::user_api_key_service::get_api_key(&f.state.db, &f.owner, key)
                 .await
                 .unwrap();
@@ -1249,6 +1274,7 @@ async fn machine_gateway_and_direct_api_key_auth_have_identical_effective_author
     catalog.auth_method = "bearer".into();
     catalog.credential_encrypted = vec![1];
     catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         ..Default::default()

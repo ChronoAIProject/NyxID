@@ -16,6 +16,7 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 pub(crate) struct Fixture {
+    pub(crate) readiness: tokio::task::JoinHandle<()>,
     pub(crate) state: crate::AppState,
     pub(crate) admin: String,
     pub(crate) member: String,
@@ -150,8 +151,8 @@ impl Fixture {
             .unwrap();
         (Self::with_db(db).await, memberships, reads)
     }
-    async fn with_db(db: mongodb::Database) -> Self {
-        super::security_readiness_service::ready_test_replica(&db).await;
+    pub(crate) async fn with_db(db: mongodb::Database) -> Self {
+        let readiness = super::security_readiness_service::controlled_ready_test_replica(&db).await;
         engine::ensure_indexes(&db).await.unwrap();
         let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
         for (i, id) in ids.iter().enumerate() {
@@ -199,6 +200,7 @@ impl Fixture {
                 .unwrap();
         }
         Self {
+            readiness,
             state: test_app_state(db),
             admin: ids[0].clone(),
             member: ids[1].clone(),
@@ -224,6 +226,7 @@ impl Fixture {
             description: "Organization specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,
@@ -1655,7 +1658,7 @@ async fn org_agent_platform_billing_uses_acting_person() {
         .await
         .unwrap();
     let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &auth.user_id.to_string(),
             &f.org,
             crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
@@ -2181,6 +2184,55 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     ))
     .await;
     assert!(error);
+    // The same signed pin must work through an ungranted concrete organization
+    // connection, with a real live thread/key and current organization access.
+    let endpoint = Uuid::new_v4().to_string();
+    let connection = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user_endpoint::COLLECTION_NAME)
+        .insert_one(test_user_endpoint(
+            &endpoint,
+            &f.org,
+            "Ornn",
+            &upstream.uri(),
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    let mut service = test_user_service(
+        &connection,
+        &f.org,
+        "org-ornn",
+        &endpoint,
+        Some(&catalog.id),
+        None,
+    );
+    service.identity_propagation_mode = "jwt".into();
+    f.state
+        .db
+        .collection(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(service)
+        .await
+        .unwrap();
+    let row = engine::begin_turn(
+        &f.state.db,
+        &f.admin,
+        &engine::TurnRequest {
+            conversation_id: Some(row.id.clone()),
+            text: "Read the attached guide".into(),
+            agent_id: None,
+            model: None,
+            access_mode: None,
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
     let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
         .await
         .unwrap()
@@ -2209,6 +2261,43 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
     assert!(!error);
     assert_eq!(content["content"], "Pinned team guidance");
     assert!(content["untrusted_guidance"].as_bool().unwrap());
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.turn_live);
+    assert!(!f.key(&row).await.allowed_service_ids.contains(&connection));
+    let before = upstream.received_requests().await.unwrap().len();
+    let (content, error) = Box::pin(crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &chat,
+        "skill_read",
+        &json!({"skill": id}),
+    ))
+    .await
+    .unwrap();
+    assert!(!error);
+    assert_eq!(content["content"], "Pinned team guidance");
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
+    let mut outsider = chat.clone();
+    outsider.user_id = f.outsider.clone();
+    assert!(
+        Box::pin(crate::handlers::agent_skills::dispatch(
+            &f.state,
+            &outsider,
+            "skill_read",
+            &json!({"skill": id}),
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before + 1
+    );
     assert!(
         Box::pin(crate::handlers::agent_skills::dispatch(
             &f.state,
@@ -2350,11 +2439,14 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
         assert_eq!(voice_turn.report_to, None);
         assert!(!voice_turn.with_nyxbot);
         assert_eq!(active.agent_owner_id.as_deref(), Some(f.org.as_str()));
-        let chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
+        let mut chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
             .await
             .unwrap()
             .unwrap();
         assert!(!chat.involved());
+        // Seed a legacy owner card: revocation must still fence its decision,
+        // although new Voice work no longer creates approval requests.
+        chat.execution_voice_task = false;
         let card = Box::pin(acks::request(
             db,
             &chat,
@@ -2504,4 +2596,122 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
         .unwrap();
     assert_eq!(value["error"], "acknowledgement_required");
     assert_eq!(card.unwrap().decider, "orchestrator");
+}
+
+#[tokio::test]
+async fn delegation_bare_names_filter_use_acl_before_ambiguity() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_admission").await;
+    let (first, _) = f.create().await;
+    let second_org = Uuid::new_v4().to_string();
+    let mut org = test_user(&second_org, UserType::Org);
+    org.slug = Some("second-team".into());
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(org)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(test_membership(
+            &second_org,
+            &f.member,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (second, _) = team::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &second_org,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let memberships = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME);
+    assert!(matches!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::ValidationError(ref message))
+            if message == "Agent name is ambiguous; use one of: org-agent-team/researcher, second-team/researcher"
+    ));
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+            .id,
+        first.id
+    );
+    // Read admission includes both readable profiles, even though one is unusable.
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // With only the Viewer candidate left, delegation must conceal its existence.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &first.id})
+        .await
+        .unwrap();
+    assert!(
+        matches!(team::delegable_specialist(&f.state.db, &f.member, "researcher").await,
+        Err(AppError::NotFound(ref message)) if message == "Agent not found")
+    );
+    assert!(
+        team::names_readable_organization_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+    );
+    // Read admission rechecks membership and excludes unreadable names and IDs.
+    memberships
+        .update_one(
+            doc! {"org_user_id": &second_org, "member_user_id": &f.member},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    for selector in [second.id.as_str(), "researcher", "second-team/researcher"] {
+        assert!(matches!(
+            team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    for selector in ["researcher", "second-team/researcher"] {
+        assert!(
+            !team::names_readable_organization_specialist(&f.state.db, &f.member, selector)
+                .await
+                .unwrap()
+        );
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegation_qualified_flag_error_precedes_org_selector_resolution() {
+    use crate::errors::AppError;
+    let f = Fixture::new("org_delegation_flag_order").await;
+    f.flag(false).await;
+    for selector in ["org-agent-team/researcher", "invisible-org/researcher"] {
+        assert!(
+            matches!(team::delegable_specialist(&f.state.db, &f.member, selector).await,
+            Err(AppError::ValidationError(ref message)) if message == "Organization agents are not enabled yet")
+        );
+    }
+    f.state.db.drop().await.unwrap();
 }

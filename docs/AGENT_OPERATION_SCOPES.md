@@ -55,6 +55,14 @@ body, so a body limit refuses them. Authoring is through the API or CLI
 (`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for
 operations that stay selected.
 
+Native `nyxid__set_agent_operations` and `nyxid__request_agent_operations`
+validate the `selection.inputs` dictionary before reading or changing scope
+state. Malformed entries return a bounded field path such as
+`selection.inputs.<endpoint-id>.body: expected path/query/body rules`; the
+error names only the rule location and never echoes rule values. A failed
+validation leaves the existing permission unchanged. The body vocabulary above
+is NyxID's tagged `JsonShape` form, rather than standard JSON Schema.
+
 The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
 catalog identity and operations, excluding the revision. A selection that
 carries `contract_digest` fails with a conflict if it now compiles differently.
@@ -317,12 +325,22 @@ new call. See the guide for all outcomes, the 400-day protection horizon, and
 ## Relationship to permission-bound keys
 
 Permission-bound keys (`purpose: permission_bound`) remain an immutable,
-single-connection pilot with their own ingress and Drive folder adapter. Both
-systems now share one input-rule evaluator (`permissions/src/values.rs`); the
-Google adapter's query and body checks call the same functions. The intended
-next steps are to express Google policies as scoped operations with input
-limits, move the Drive ancestry check into the shared pipeline as a resource
-adapter, and fold `/permission-execution` into `/proxy`.
+single-connection pilot with their own ingress and existing personal Google/Drive
+adapters. Both systems share the input-rule evaluator
+(`permissions/src/values.rs`). Operation scopes and input limits are access
+ceilings; they do not themselves supply affirmative execution consent.
+
+The [execution permission contract](EXECUTION_PERMISSIONS.md) (#2193) adds an
+optional versioned `ApprovalGrant.execution`, server-only task references, a
+pure coverage/validity/binding evaluator, and reader fields for native policy
+indirection and separately authored mandatory org review. The default-off
+`permissions:execution-v1` flag is readiness-gated. This step enables no new
+writer or dispatch behavior, does not fold `/permission-execution` into `/proxy`,
+and does not extend resource adapters. Existing keys, scopes, service approvals,
+Full/Auto/Ask behavior and exact/durable claims retain their contracts. The
+contract names exactly three prompt floors that future integration may satisfy;
+webhook, Machine, sign-in, delegation, org-instruction/mandatory and guest gates
+remain separate.
 
 ## Compatibility
 
@@ -344,3 +362,59 @@ compiled copies on keys, before rolling back to a binary without this variant.
 
 Scopes contain no person-specific ownership assumptions; execution and billing
 remain the acting person's.
+
+Execution-permission dispatch (default-off #2194 Phase A) can satisfy only the
+three eligible discretionary floors for a fully covered, exact actor/account
+operation. Operation and input scopes remain ceilings and always run first.
+Eligible assistant MCP/proxy gaps use one requester-private permission card
+and exact retained-effect resume (#2195 Part A); other gaps keep existing cards.
+Activation is per-person only and requires reader, dispatch and authoring readiness; see
+[the execution contract](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-a).
+
+## Native discovery pagination (#2271)
+
+`nyxid__get_agent_operations` keeps `subagent` required and `guests` optional,
+and adds optional `service_id`, `limit` (1–50, default 20), and `cursor`.
+`service_id` is the exact granted connection or platform-service ID, not a
+catalog alias or a slug. An unavailable or ungranted filter returns an empty
+complete view; it never resolves arbitrary service IDs. The existing live
+owner/organization maintenance checks, specialist self-only rule and shared/
+guest exclusions apply on every page. This is management discovery within the
+agent's grants, not permission to execute every listed operation.
+
+The response retains `services` and its fields and adds `snapshot`, `offset`,
+`count`, `total`, `complete`, `truncated`, `next_cursor`, and `continuation_hint`.
+Each service carries `page: {offset, count, total, complete}`. Page units are
+parallel slices of `operations`, selected `endpoint_ids`, explicit `rules`,
+and the ordered `inputs` map. A service with no entries occupies one unit.
+The service's `page.complete` means this page contains that entire service;
+top-level `complete` means there are no further pages in the discovery view.
+`total` counts these units, not only operations. Services sort by ID and
+operations by endpoint ID; selected IDs, rules and input keys have stable order.
+Append the three arrays and merge input keys for each service across pages.
+Do not interpret an empty partial array as an empty selection, or call
+`set_agent_operations` until all pages of the same snapshot are collected.
+
+Continue with `cursor=next_cursor`, retaining the same `subagent`, `service_id`
+and `guests`; `limit` may change. A page automatically shrinks to fit 9,200
+UTF-8 bytes including the second JSON escaping layer in MCP text content,
+below NyxAgent's 10,000-character projection and byte-oriented context budget.
+Nothing is clipped. A single operation, summary, path or saved rule that
+cannot fit yields a bounded error directing the user to Operations settings;
+no complete selection is claimed. REST keeps its full authorized response.
+
+The v1 cursor is a versioned view locator, not a bearer capability: it binds
+actor, conversation key, conversation, calling agent, target agent, guest mode,
+filter and the complete sorted view. No result cache or new collection is
+introduced. Every read rebuilds the live authorized view. Changes between
+pages return `discovery_snapshot_changed` with instructions to discard earlier
+pages and restart without `cursor`; no acknowledgement is required. Concurrent
+changes during a read may make the next page conflict; clients never silently
+combine versions. Cursor offsets are untrusted and bounded, and cannot bypass
+live authorization. Metadata diagnostics contain row counts and byte lengths
+only, never descriptions, paths, input values or cursors.
+
+The additional parameters and response fields are additive. Old replicas
+reject the new parameters under their existing closed schema and retain the
+old unpaged result; upgrade all serving replicas before relying on pagination.
+No stored model, execution policy or permission is changed by discovery.

@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+const gatewayStateSchema = z.string();
+
+/** Optional list/detail metadata; older servers and native gateways omit it. */
+export const channelBotGatewaySchema = z.object({
+  gateway_state: gatewayStateSchema.optional(),
+});
+export type ChannelBotGateway = z.infer<typeof channelBotGatewaySchema>;
+
+export const discordIntakeSchema = z.object({
+  receiving_side: z.string(),
+  state: z.string(),
+  code: z.string().nullable(),
+  block_reason: z.string().nullable(),
+  handed_over_at: z.string().nullable(),
+  last_inbound_at: z.string().nullable(),
+});
+
 const errorSchema = z.object({
   code: z.string(),
   /** Stable failure code (`rate_limited`, `scopes_missing`, ...). */
@@ -8,10 +25,21 @@ const errorSchema = z.object({
 });
 
 export const channelBotDiagnosticsSchema = z.object({
+  last_inbound_outcome: z.object({ code: z.string(), at: z.string() }).nullish(),
+  inbound_outcomes: z.record(z.string(), z.object({ count: z.number().int().nonnegative(), at: z.string() })).optional(),
+  last_callback_challenge_at: z.string().nullish(),
+  last_route_at: z.string().nullish(),
+  last_route_result: z.string().nullish(),
+  discord_gateway: z.object({
+    state: gatewayStateSchema,
+    reason: z.string().nullable(),
+    updated_at: z.string(),
+  }).optional(),
   last_inbound_at: z.string().nullable(),
   last_inbound_source: z.string().nullable(),
   last_outbound_at: z.string().nullable(),
   last_outbound_error: errorSchema.nullable(),
+  last_outbound_notice: errorSchema.nullish(),
   last_webhook_at: z.string().nullable(),
   last_webhook_error: errorSchema.nullable(),
   subscription_state: z
@@ -38,6 +66,7 @@ export const RECOMMENDED_ACTIONS = [
 ] as const;
 
 export const channelBotHealthSchema = z.object({
+  discord_intake: discordIntakeSchema.optional(),
   id: z.string(),
   platform: z.string(),
   label: z.string(),
@@ -52,6 +81,10 @@ export const channelBotHealthSchema = z.object({
   error: z.string().nullable(),
   recommended_action: z.enum(RECOMMENDED_ACTIONS),
   recommended_action_text: z.string(),
+  /** NyxBot linkage evidence, omitted for bots without a NyxBot row. */
+  nyxbot_status: z.string().optional(),
+  nyxbot_last_error: z.string().nullable().optional(),
+  nyxbot_restore_state: z.string().optional(),
   /** Whether the caller may run the recovery action. */
   can_write: z.boolean(),
   diagnostics: channelBotDiagnosticsSchema,

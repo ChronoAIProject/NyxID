@@ -98,15 +98,16 @@ for (const route of paths) {
   );
   results.push({ ...meta, file, markdown: mdPath, revision });
 }
-for (const slug of ["privacy", "terms"]) {
+for (const slug of ["privacy", "terms", "data-deletion"]) {
   const file = `${slug}.html`,
     html = await fs.readFile(path.join(dist, file), "utf8");
+  const title = { privacy: "Privacy Policy", terms: "Terms of Service", "data-deletion": "Data Deletion Instructions" }[slug];
   const meta = {
     path: `/${slug}`,
     route: `/${slug}`,
     locale: "en",
-    title: slug === "privacy" ? "Privacy Policy" : "Terms of Service",
-    description: `${slug === "privacy" ? "Privacy Policy" : "Terms of Service"} for NyxID`,
+    title,
+    description: `${title} for NyxID`,
     translated: false,
     indexable: true,
   };
@@ -130,7 +131,7 @@ for (const slug of ["privacy", "terms"]) {
 }
 // Metadata enhancement is the last legal HTML write; hash those exact bytes.
 const legalEtags = [];
-for (const slug of ["privacy", "terms"]) {
+for (const slug of ["privacy", "terms", "data-deletion"]) {
   const digest = hash(await fs.readFile(path.join(dist, `${slug}.html`)));
   for (const uri of [`/${slug}`, `/${slug}.html`])
     legalEtags.push(`    ${uri} ${JSON.stringify(`W/"${digest}"`)};`);

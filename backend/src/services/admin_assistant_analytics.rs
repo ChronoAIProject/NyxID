@@ -1,4 +1,5 @@
 //! Bounded, metadata-only NyxBot analytics. Never fetch transcript text.
+pub mod real_work;
 use super::assistant_nyxagent::{ACTIVE_TURN_HEARTBEAT_STALE_SECS, ACTIVE_TURN_TTL_SECS};
 use crate::models::{assistant_conversation, assistant_message};
 use chrono::{DateTime, Utc};

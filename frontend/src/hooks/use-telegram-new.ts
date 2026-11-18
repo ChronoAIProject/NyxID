@@ -5,6 +5,7 @@ import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   telegramNewBeginSchema,
+  telegramCreationLinkSchema,
   telegramNewConfigSchema,
   telegramNewLaunchSchema,
   telegramNewRequestSchema,
@@ -78,6 +79,21 @@ export function useTelegramNew(requestId?: string) {
       ),
     onSettled: refresh,
   });
+  const creationLink = useMutation({
+    mutationKey: key,
+    gcTime: 0,
+    mutationFn: async (id: string) => telegramCreationLinkSchema.parse(
+      await api.post(`${ROOT}/requests/${id}/creation-link`),
+    ),
+    onSettled: refresh,
+  });
+  const regenerateUsername = useMutation({
+    mutationKey: key,
+    mutationFn: async (id: string) => telegramNewRequestSchema.parse(
+      await api.post(`${ROOT}/requests/${id}/regenerate-username`),
+    ),
+    onSettled: refresh,
+  });
   const cancel = useMutation({
     mutationKey: key,
     mutationFn: (id: string) => api.delete(`${ROOT}/requests/${id}`),
@@ -97,5 +113,7 @@ export function useTelegramNew(requestId?: string) {
       await client.invalidateQueries({ queryKey: ["channel-bots"] });
     },
   });
-  return { configuration, begin, launch, cancel, connect };
+  return { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect,
+    getCurrentRequest: () => client.getQueryData<{ request: TelegramNewRequest | null }>(["telegram-new", actor, requestId, link?.id])?.request,
+  };
 }

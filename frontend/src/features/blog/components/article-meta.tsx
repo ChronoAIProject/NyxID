@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { DirectusUser } from "../types";
 
 interface ArticleMetaProps {
@@ -27,6 +28,7 @@ export function ArticleMeta({
   publishedAt,
   readingMinutes,
 }: ArticleMetaProps) {
+  const { t } = useUiTranslation();
   return (
     <div className="border-landing-border-subtle flex flex-wrap items-center gap-x-6 gap-y-3 border-y py-5">
       <div className="flex items-center gap-3">
@@ -48,8 +50,7 @@ export function ArticleMeta({
         {formatDate(publishedAt)}
       </span>
       <span className="font-mono text-xs text-gray-500">
-        {readingMinutes} min read
-      </span>
+        {readingMinutes}{t(" min read")}</span>
     </div>
   );
 }

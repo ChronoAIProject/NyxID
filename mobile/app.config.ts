@@ -1,54 +1,41 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { loadEnv, resolveProfile, appIdentity } = require("./scripts/lib/load-env");
-
-function safeHost(url: string): string | null {
-  try {
-    return new URL(url).host;
-  } catch {
-    return null;
-  }
-}
+const {
+  loadEnv,
+  resolveProfile,
+  appIdentity,
+} = require("./scripts/lib/load-env");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { buildNativeLinks } = require("./scripts/lib/native-links");
 
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = (process.env.APP_ENV ?? "dev") as "dev" | "prod";
   const env = loadEnv();
-  const r = resolveProfile(appEnv, env, { warnOnFrontendUrlFallback: true });
+  const r = resolveProfile(appEnv, env, {
+    warnOnFrontendUrlFallback: true,
+  });
   const ident = appIdentity(env);
 
+  // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
   process.env.EXPO_PUBLIC_FRONTEND_URL = r.frontendUrl;
+  process.env.EXPO_PUBLIC_LEGAL_BASE_URL = r.legalBaseUrl;
+  process.env.EXPO_PUBLIC_NEW_API_BASE_URL = r.newApiBaseUrl;
+  process.env.EXPO_PUBLIC_NEW_FRONTEND_URL = r.newFrontendUrl;
+  process.env.EXPO_PUBLIC_NEW_LEGAL_BASE_URL = r.newLegalBaseUrl;
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST = r.universalLinkHost;
   process.env.EXPO_PUBLIC_APP_SCHEME = ident.scheme;
   process.env.EXPO_PUBLIC_ALLOWED_EMAILS = r.allowedEmails;
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
-  const apiHost = safeHost(r.apiBaseUrl);
-  const associatedDomains: string[] = [];
-  if (apiHost) associatedDomains.push(`applinks:${apiHost}`);
-  if (r.universalLinkHost) associatedDomains.push(`applinks:${r.universalLinkHost}`);
-
-  const androidIntentFilters: NonNullable<ExpoConfig["android"]>["intentFilters"] = [
-    {
-      action: "VIEW",
-      data: [{ scheme: ident.scheme }],
-      category: ["BROWSABLE", "DEFAULT"],
-    },
-  ];
-  if (r.universalLinkHost) {
-    const data: { scheme: string; host: string; pathPrefix?: string } = {
-      scheme: "https",
-      host: r.universalLinkHost,
-    };
-    if (r.universalLinkPathPrefix) data.pathPrefix = r.universalLinkPathPrefix;
-    androidIntentFilters.unshift({
-      action: "VIEW",
-      autoVerify: true,
-      data: [data],
-      category: ["BROWSABLE", "DEFAULT"],
-    });
-  }
+  const { associatedDomains, androidIntentFilters } = buildNativeLinks({
+    associatedUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    androidHttpsAppLinks: r.androidHttpsAppLinks,
+    universalLinkHost: r.universalLinkHost,
+    universalLinkPathPrefix: r.universalLinkPathPrefix,
+    scheme: ident.scheme,
+  });
 
   return {
     ...config,
@@ -61,20 +48,48 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     userInterfaceStyle: "automatic",
     assetBundlePatterns: ["**/*"],
     ios: {
-      supportsTablet: false,
+      supportsTablet: true,
+      requireFullScreen: false,
       bundleIdentifier: r.iosBundleId,
       buildNumber: r.iosBuildNumber,
       associatedDomains,
       infoPlist: {
+        UIBackgroundModes: ["audio", "fetch", "remote-notification"],
         ITSAppUsesNonExemptEncryption: false,
-        NSCameraUsageDescription: "Allow NyxID to scan login approval QR codes.",
+        UISupportedInterfaceOrientations: [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight",
+        ],
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight",
+        ],
+        // Bundle resolves the device-qualified value before Expo reads its default.
+        // iPhone keeps the plugin's portrait default; iPad follows its window.
+        "EXDefaultScreenOrientationMask~ipad": "UIInterfaceOrientationMaskAll",
+        NSCameraUsageDescription:
+          "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
+        NSMicrophoneUsageDescription:
+          "Allow NyxID to use your microphone for dictation and voice conversations.",
+        NSPhotoLibraryAddUsageDescription:
+          "Allow NyxID to save images you choose from chats to your photo library.",
       },
     },
     android: {
       package: r.androidPackage,
       versionCode: Number(r.androidVersionCode),
-      googleServicesFile: "./google-services.json",
-      permissions: ["android.permission.CAMERA"],
+      ...(r.androidGoogleServicesFile
+        ? { googleServicesFile: r.androidGoogleServicesFile }
+        : {}),
+      permissions: [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        // Chromium WebView requires both audio permissions to expose a microphone.
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+      ],
       blockedPermissions: [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
@@ -86,6 +101,26 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withVoiceAudio",
+      [
+        "./plugins/withAndroidGoogleServicesValidation",
+        {
+          file: r.androidGoogleServicesFile,
+          androidPackage: r.androidPackage,
+        },
+      ],
+      ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
+      [
+        "expo-image-picker",
+        {
+          photosPermission:
+            "Allow NyxID to attach photos you choose from your library to chats.",
+          cameraPermission:
+            "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
+          microphonePermission:
+            "Allow NyxID to use your microphone for dictation and voice conversations.",
+        },
+      ],
       "expo-secure-store",
       [
         "expo-splash-screen",
@@ -108,12 +143,24 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       "expo-font",
       "expo-web-browser",
+      "expo-sharing",
+      [
+        "expo-speech-recognition",
+        {
+          microphonePermission:
+            "Allow NyxID to use your microphone for dictation and voice conversations.",
+          speechRecognitionPermission:
+            "Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.",
+        },
+      ],
       [
         "expo-camera",
         {
-          cameraPermission: "Allow NyxID to scan login approval QR codes.",
-          microphonePermission: false,
-          recordAudioAndroid: false,
+          cameraPermission:
+            "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
+          microphonePermission:
+            "Allow NyxID to use your microphone for dictation and voice conversations.",
+          recordAudioAndroid: true,
         },
       ],
     ],
@@ -122,7 +169,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,
       NYXID_SHARE_ANALYTICS: r.shareAnalytics,
-      LEGAL_BASE_URL: r.legalBaseUrl,
     },
   };
 };

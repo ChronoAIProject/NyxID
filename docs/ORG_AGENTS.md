@@ -69,7 +69,15 @@ name). They resolve ownership and recheck the maintaining person's authority;
 specialists cannot maintain other agents or self-escalate. Widening operation
 scopes and adding/re-pinning skills retain one-use cards decided by the requesting
 maintainer, bound to the exact agent and change. Destruction retains confirmation.
-Ornn search, pinning and reads use the managing/acting person's own access.
+Ornn search and pinning use the managing person's own visibility. Attached
+previews and runtime reads keep the acting person as Ornn's signed principal,
+but use only the owning organization's accessible Ornn connection. Ornn decides
+content visibility for that person, including creator and direct-user access;
+NyxID does not require an additional org grant. Ornn's private org grants receive
+a purpose-limited, live-checked membership callback;
+no member's personal connection or general account token is borrowed. See
+[Agent skills](AGENT_SKILLS.md#storage-and-authority). Preview success is specific
+to the testing person; runtime additionally enforces the key, turn and policy.
 
 The acting person's personal NyxBot may discover and delegate to an organization
 specialist that person can use when `assistant:org-agents` is enabled for that
@@ -177,7 +185,20 @@ never message, upload, memory or credential content.
 
 Existing group routes and management tools accept the B3a organization selector
 (ID, slug or unambiguous name). Personal NyxBot may manage authorized groups but
-MUST NOT post into or follow organization groups; channel links are unsupported.
+MUST NOT post into or follow organization groups. Channel links now have a
+separate default-off `nyxbot:org-specialist-channels` contract: only live admins
+link same-org bots and specialists, verified members use their own org-member
+lanes, and guests use bounded org-wallet authority. New bindings enable guests,
+including private chats, with disclosure before confirmation; missing billing
+refuses guest execution without changing that choice. Admins change bot settings;
+Members read them without private-chat/history data. Existing amount and bot-detail
+responses stay compatible; clients tolerate future absent amounts. This does not
+publish the agent as a shared agent or admit guests to org groups. See
+[the channel contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
+Outside that enabled path, incompatible links retain
+`organization_agent_channel_unsupported`. Personal bots still cannot target org
+specialists. From their own chat, members may delegate to an org specialist via
+`nyxid__message_subagent`; that path's authority and billing remain unchanged.
 Keep `assistant:org-agents` off while deploying, including when upgrading from
 B3a, then enable it only after every auth/proxy/MCP/worker replica is upgraded.
 Old group routes fail closed through actor/owner equality, but B3a binaries do

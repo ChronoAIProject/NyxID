@@ -7,10 +7,9 @@ pub const COLLECTION_NAME: &str = "feature_flag_metadata";
 ///
 /// The flag registry (`feature_flag_service::FEATURE_FLAGS`) stays the source
 /// of truth for which flags exist and what they default to; this collection
-/// only carries the editorial fields staff need to keep a growing flag list
-/// legible — what the flag is actually about, and who owns it. One row per
-/// `flag_key`, created lazily on first edit and deleted again when an admin
-/// clears every field.
+/// carries documentation, grouping, tags, and sunset visibility. These fields
+/// never affect execution. One row per flag and definition identity; sparse
+/// updates retain empty rows to avoid deleting concurrent disjoint edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureFlagMetadata {
     #[serde(rename = "_id")]
@@ -29,6 +28,13 @@ pub struct FeatureFlagMetadata {
     /// nobody has claimed the flag.
     #[serde(default)]
     pub owner: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Organizational state only; never consulted during flag evaluation.
+    #[serde(default)]
+    pub sunset: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -49,6 +55,9 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let row = FeatureFlagMetadata {
+            group: None,
+            tags: vec![],
+            sunset: false,
             definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             flag_key: "example_ui".to_string(),
@@ -71,6 +80,9 @@ mod tests {
     #[test]
     fn missing_optional_fields_default_to_none() {
         let mut doc = bson::to_document(&FeatureFlagMetadata {
+            group: None,
+            tags: vec![],
+            sunset: false,
             definition_id: None,
             id: "x".to_string(),
             flag_key: "example_ui".to_string(),
@@ -83,8 +95,14 @@ mod tests {
         .expect("serialize");
         doc.remove("description");
         doc.remove("owner");
+        doc.remove("group");
+        doc.remove("tags");
+        doc.remove("sunset");
         let restored: FeatureFlagMetadata = bson::from_document(doc).expect("deserialize");
         assert!(restored.description.is_none());
         assert!(restored.owner.is_none());
+        assert!(restored.group.is_none());
+        assert!(restored.tags.is_empty());
+        assert!(!restored.sunset);
     }
 }

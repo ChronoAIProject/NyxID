@@ -1,0 +1,353 @@
+// Keep keys and provider aliases aligned with the web service-icon registry.
+import type { ComponentType } from "react";
+import { Globe } from "lucide-react-native";
+
+import LlmOpenaiIcon from "./llm-openai";
+import LlmOpenaiCodexIcon from "./llm-openai-codex";
+import LlmXaiIcon from "./llm-xai";
+import LlmAnthropicIcon from "./llm-anthropic";
+import LlmGoogleAiIcon from "./llm-google-ai";
+import LlmMistralIcon from "./llm-mistral";
+import LlmCohereIcon from "./llm-cohere";
+import LlmDeepSeekIcon from "./llm-deepseek";
+import LlmOpenClawIcon from "./llm-openclaw";
+import LlmOpenRouterIcon from "./llm-openrouter";
+
+import ApiFirecrawlIcon from "./api-firecrawl";
+import ApiTwitterIcon from "./api-twitter";
+import ApiGoogleIcon from "./api-google";
+import ApiGoogleWorkspaceIcon from "./api-google-workspace";
+import ApiGoogleCalendarIcon from "./api-google-calendar";
+import ApiGoogleDriveIcon from "./api-google-drive";
+import ApiGoogleGmailIcon from "./api-google-gmail";
+import ApiGoogleDocsIcon from "./api-google-docs";
+import ApiGoogleSheetsIcon from "./api-google-sheets";
+import ApiGoogleSlidesIcon from "./api-google-slides";
+import ApiNotionIcon from "./api-notion";
+import ApiPosthogIcon from "./api-posthog";
+import ApiPosthogEuIcon from "./api-posthog-eu";
+import ApiGoogleCloudIcon from "./api-google-cloud";
+import ApiGithubIcon from "./api-github";
+import ApiGithubPatIcon from "./api-github-pat";
+import ApiFacebookIcon from "./api-facebook";
+import ApiLinkedinIcon from "./api-linkedin";
+import ApiDiscordIcon from "./api-discord";
+import ApiDiscordBotIcon from "./api-discord-bot";
+import ApiSpotifyIcon from "./api-spotify";
+import ApiSlackIcon from "./api-slack";
+import ApiSlackBotIcon from "./api-slack-bot";
+import ApiMicrosoftIcon from "./api-microsoft";
+import ApiTiktokIcon from "./api-tiktok";
+import ApiTwitchIcon from "./api-twitch";
+import ApiRedditIcon from "./api-reddit";
+import ApiLarkIcon from "./api-lark";
+import ApiLarkBotIcon from "./api-lark-bot";
+import ApiFeishuIcon from "./api-feishu";
+import ApiFeishuBotIcon from "./api-feishu-bot";
+import ApiTelegramBotIcon from "./api-telegram-bot";
+import ApiWhatsappBusinessIcon from "./api-whatsapp-business";
+import ApiSupabaseIcon from "./api-supabase";
+import ApiSupabaseManagementIcon from "./api-supabase-management";
+import ApiCloudflareIcon from "./api-cloudflare";
+import ApiRailwayIcon from "./api-railway";
+import ApiElevenLabsIcon from "./api-elevenlabs";
+import ApiTelnyxIcon from "./api-telnyx";
+import ApiTwilioIcon from "./api-twilio";
+import ApiAurinkoIcon from "./api-aurinko";
+import ApiIftttIcon from "./api-ifttt";
+import ApiIftttMcpIcon from "./api-ifttt-mcp";
+import ApiZohoMailIcon from "./api-zoho-mail";
+
+import ApiAirtableIcon from "./api-airtable";
+import ApiAsanaIcon from "./api-asana";
+import ApiAttioIcon from "./api-attio";
+import ApiBitbucketIcon from "./api-bitbucket";
+import ApiBoxIcon from "./api-box";
+import ApiCalendlyIcon from "./api-calendly";
+import ApiCapsuleCrmIcon from "./api-capsule-crm";
+import ApiClickupIcon from "./api-clickup";
+import ApiCrowdinIcon from "./api-crowdin";
+import ApiDialpadIcon from "./api-dialpad";
+import ApiDropboxIcon from "./api-dropbox";
+import ApiEventbriteIcon from "./api-eventbrite";
+import ApiFigmaIcon from "./api-figma";
+import ApiGitlabIcon from "./api-gitlab";
+import ApiHubspotIcon from "./api-hubspot";
+import ApiIntercomIcon from "./api-intercom";
+import ApiJiraIcon from "./api-jira";
+import ApiLinearIcon from "./api-linear";
+import ApiMiroIcon from "./api-miro";
+import ApiPagerdutyIcon from "./api-pagerduty";
+import ApiProductboardIcon from "./api-productboard";
+import ApiSentryIcon from "./api-sentry";
+import ApiShippoIcon from "./api-shippo";
+import ApiSquareIcon from "./api-square";
+import ApiTodoistIcon from "./api-todoist";
+import ApiZoomIcon from "./api-zoom";
+
+import AwsCostExplorerIcon from "./aws-cost-explorer";
+import AevatarIcon from "./aevatar";
+import CmaIcon from "./cma";
+import AgentEventGatewayIcon from "./cmaeg";
+import CmaTriggerGithubObserverStagingIcon from "./cma-trigger-github-observer-staging";
+import ChronoLlmIcon from "./chrono-llm";
+import ChronoLlmPublicIcon from "./chrono-llm-public";
+import ChronoSandboxIcon from "./chrono-sandbox";
+import ChronoStorageServiceIcon from "./chrono-storage-service";
+import LlmNyxIcon from "./llm-nyx";
+import OrnnApiIcon from "./ornn-api";
+import TalosIcon from "./talos";
+
+export type ServiceIconProps = { size?: number; color?: string };
+
+export type IconComponent = ComponentType<ServiceIconProps>;
+
+// The slugs seeded in `backend/src/services/provider_service.rs`
+// (`DEFAULT_SERVICE_SEEDS` and `MANAGED_OAUTH_PROVIDER_SEEDS`) — authoritative the test setup asserts against.
+export const SPEC_CATALOG_SLUGS = [
+  "llm-xai",
+  "llm-openai",
+  "llm-openai-codex",
+  "llm-anthropic",
+  "llm-google-ai",
+  "llm-mistral",
+  "llm-cohere",
+  "llm-deepseek",
+  "llm-openclaw",
+  "llm-openrouter",
+
+  "api-firecrawl",
+  "api-twitter",
+  "api-google",
+  "api-google-workspace",
+  "api-google-calendar",
+  "api-google-drive",
+  "api-google-gmail",
+  "api-google-docs",
+  "api-google-sheets",
+  "api-google-slides",
+  "api-google-cloud",
+  "api-notion",
+  "api-posthog",
+  "api-posthog-eu",
+  "api-github",
+  "api-github-pat",
+  "api-facebook",
+  "api-linkedin",
+  "api-discord",
+  "api-discord-bot",
+  "api-spotify",
+  "api-slack",
+  "api-slack-bot",
+  "api-microsoft",
+  "api-tiktok",
+  "api-twitch",
+  "api-reddit",
+  "api-lark",
+  "api-lark-bot",
+  "api-feishu",
+  "api-feishu-bot",
+  "api-telegram-bot",
+  "api-whatsapp-business",
+  "api-supabase",
+  "api-supabase-management",
+  "api-cloudflare",
+  "api-railway",
+  "api-elevenlabs",
+  "api-telnyx",
+  "api-twilio",
+  "api-aurinko",
+  "api-ifttt",
+  "api-ifttt-mcp",
+
+  // `MANAGED_OAUTH_PROVIDER_SEEDS`
+  "api-airtable",
+  "api-asana",
+  "api-attio",
+  "api-bitbucket",
+  "api-box",
+  "api-calendly",
+  "api-capsule-crm",
+  "api-clickup",
+  "api-crowdin",
+  "api-dialpad",
+  "api-dropbox",
+  "api-eventbrite",
+  "api-figma",
+  "api-gitlab",
+  "api-hubspot",
+  "api-intercom",
+  "api-jira",
+  "api-linear",
+  "api-miro",
+  "api-pagerduty",
+  "api-productboard",
+  "api-sentry",
+  "api-shippo",
+  "api-square",
+  "api-todoist",
+  "api-zoom",
+
+  "aws-cost-explorer",
+] as const;
+
+type Slug = (typeof SPEC_CATALOG_SLUGS)[number];
+export const CUSTOM_SERVICE_SLUGS = [
+  "api-zoho-mail",
+  "aevatar",
+  "cma",
+  "cmaeg",
+  "cma-trigger-github-observer-staging",
+  "chrono-llm",
+  "chrono-llm-public",
+  "chrono-sandbox",
+  "chrono-storage-service",
+  "llm-nyx",
+  "ornn-api",
+  "talos",
+] as const;
+type CustomSlug = (typeof CUSTOM_SERVICE_SLUGS)[number];
+
+const CATALOG_ICONS = {
+  "llm-xai": LlmXaiIcon,
+  "llm-openai": LlmOpenaiIcon,
+  "llm-openai-codex": LlmOpenaiCodexIcon,
+  "llm-anthropic": LlmAnthropicIcon,
+  "llm-google-ai": LlmGoogleAiIcon,
+  "llm-mistral": LlmMistralIcon,
+  "llm-cohere": LlmCohereIcon,
+  "llm-deepseek": LlmDeepSeekIcon,
+  "llm-openclaw": LlmOpenClawIcon,
+  "llm-openrouter": LlmOpenRouterIcon,
+
+  "api-firecrawl": ApiFirecrawlIcon,
+  "api-twitter": ApiTwitterIcon,
+  "api-google": ApiGoogleIcon,
+  "api-google-workspace": ApiGoogleWorkspaceIcon,
+  "api-google-calendar": ApiGoogleCalendarIcon,
+  "api-google-drive": ApiGoogleDriveIcon,
+  "api-google-gmail": ApiGoogleGmailIcon,
+  "api-google-docs": ApiGoogleDocsIcon,
+  "api-google-sheets": ApiGoogleSheetsIcon,
+  "api-google-slides": ApiGoogleSlidesIcon,
+  "api-google-cloud": ApiGoogleCloudIcon,
+  "api-notion": ApiNotionIcon,
+  "api-posthog": ApiPosthogIcon,
+  "api-posthog-eu": ApiPosthogEuIcon,
+  posthog: ApiPosthogIcon,
+  "posthog-eu": ApiPosthogEuIcon,
+  "api-github": ApiGithubIcon,
+  "api-github-pat": ApiGithubPatIcon,
+  "api-facebook": ApiFacebookIcon,
+  "api-linkedin": ApiLinkedinIcon,
+  "api-discord": ApiDiscordIcon,
+  "api-discord-bot": ApiDiscordBotIcon,
+  "api-spotify": ApiSpotifyIcon,
+  "api-slack": ApiSlackIcon,
+  "api-slack-bot": ApiSlackBotIcon,
+  "api-microsoft": ApiMicrosoftIcon,
+  "api-tiktok": ApiTiktokIcon,
+  "api-twitch": ApiTwitchIcon,
+  "api-reddit": ApiRedditIcon,
+  "api-lark": ApiLarkIcon,
+  "api-lark-bot": ApiLarkBotIcon,
+  "api-feishu": ApiFeishuIcon,
+  "api-feishu-bot": ApiFeishuBotIcon,
+  "api-telegram-bot": ApiTelegramBotIcon,
+  "api-whatsapp-business": ApiWhatsappBusinessIcon,
+  "api-supabase": ApiSupabaseIcon,
+  "api-supabase-management": ApiSupabaseManagementIcon,
+  "supabase-management": ApiSupabaseManagementIcon,
+  "api-cloudflare": ApiCloudflareIcon,
+  cloudflare: ApiCloudflareIcon,
+  "api-railway": ApiRailwayIcon,
+  railway: ApiRailwayIcon,
+  "api-elevenlabs": ApiElevenLabsIcon,
+  "api-telnyx": ApiTelnyxIcon,
+  telnyx: ApiTelnyxIcon,
+  "platform-telnyx": ApiTelnyxIcon,
+  "api-twilio": ApiTwilioIcon,
+  "api-aurinko": ApiAurinkoIcon,
+  aurinko: ApiAurinkoIcon,
+  "api-ifttt": ApiIftttIcon,
+  "api-ifttt-mcp": ApiIftttMcpIcon,
+  "api-zoho-mail": ApiZohoMailIcon,
+
+  "api-airtable": ApiAirtableIcon,
+  "api-asana": ApiAsanaIcon,
+  "api-attio": ApiAttioIcon,
+  "api-bitbucket": ApiBitbucketIcon,
+  "api-box": ApiBoxIcon,
+  "api-calendly": ApiCalendlyIcon,
+  "api-capsule-crm": ApiCapsuleCrmIcon,
+  "api-clickup": ApiClickupIcon,
+  "api-crowdin": ApiCrowdinIcon,
+  "api-dialpad": ApiDialpadIcon,
+  "api-dropbox": ApiDropboxIcon,
+  "api-eventbrite": ApiEventbriteIcon,
+  "api-figma": ApiFigmaIcon,
+  "api-gitlab": ApiGitlabIcon,
+  "api-hubspot": ApiHubspotIcon,
+  "api-intercom": ApiIntercomIcon,
+  "api-jira": ApiJiraIcon,
+  "api-linear": ApiLinearIcon,
+  "api-miro": ApiMiroIcon,
+  "api-pagerduty": ApiPagerdutyIcon,
+  "api-productboard": ApiProductboardIcon,
+  "api-sentry": ApiSentryIcon,
+  "api-shippo": ApiShippoIcon,
+  "api-square": ApiSquareIcon,
+  "api-todoist": ApiTodoistIcon,
+  "api-zoom": ApiZoomIcon,
+
+  "aws-cost-explorer": AwsCostExplorerIcon,
+  aevatar: AevatarIcon,
+  cma: CmaIcon,
+  cmaeg: AgentEventGatewayIcon,
+  "cma-trigger-github-observer-staging": CmaTriggerGithubObserverStagingIcon,
+  "chrono-llm": ChronoLlmIcon,
+  "chrono-llm-public": ChronoLlmPublicIcon,
+  "chrono-sandbox": ChronoSandboxIcon,
+  "chrono-storage-service": ChronoStorageServiceIcon,
+  "llm-nyx": LlmNyxIcon,
+  "ornn-api": OrnnApiIcon,
+  talos: TalosIcon,
+} satisfies Readonly<
+  Record<
+    | Slug
+    | CustomSlug
+    | "telnyx"
+    | "platform-telnyx"
+    | "aurinko"
+    | "supabase-management"
+    | "cloudflare"
+    | "railway"
+    | "posthog"
+    | "posthog-eu",
+    IconComponent
+  >
+>;
+
+// Provider slugs omit the catalog's api-/llm- prefix. Share the same glyph
+// across both surfaces, while preserving explicitly registered aliases.
+export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
+  ...Object.fromEntries(
+    Object.entries(CATALOG_ICONS)
+      .filter(([slug]) => slug.startsWith("api-") || slug.startsWith("llm-"))
+      .map(([slug, Icon]) => [slug.replace(/^(api|llm)-/, ""), Icon]),
+  ),
+  ...CATALOG_ICONS,
+  "tools-elevenlabs": ApiElevenLabsIcon,
+  "tools-firecrawl": ApiFirecrawlIcon,
+};
+
+export function FallbackIcon({ size = 20, color }: ServiceIconProps) {
+  return (
+    <Globe
+      size={size}
+      color={color}
+      testID="service-icon-fallback"
+      accessible={false}
+    />
+  );
+}

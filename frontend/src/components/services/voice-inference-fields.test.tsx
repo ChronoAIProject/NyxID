@@ -31,6 +31,9 @@ it("edits catalog choices and moves the single default without seeding prices", 
     target: { value: "catalog-new-model" },
   });
   fireEvent.click(screen.getByLabelText("Default model 2"));
+  fireEvent.change(screen.getByLabelText("Responses delegation model"), {
+    target: { value: "catalog-task-model" },
+  });
   const saved = voiceMetadataSchema.parse(
     JSON.parse(screen.getByTestId("value").textContent!),
   );
@@ -38,6 +41,7 @@ it("edits catalog choices and moves the single default without seeding prices", 
     { id: "model-a", label: "A", default: false },
     { id: "catalog-new-model", label: "B", default: true },
   ]);
+  expect(saved.delegation_model).toBe("catalog-task-model");
   fireEvent.change(screen.getByLabelText("Voice protocol"), {
     target: { value: "none" },
   });
@@ -53,6 +57,13 @@ it("rejects duplicate choices, multiple defaults, endpoints and incompatible usa
     { ...metadata, voices: [{ id: "https://evil.example", label: "URL" }] },
     { ...metadata, usage_source: "server_measured" },
     { ...metadata, billing_metrics: ["tokens"] },
+    { ...metadata, delegation_model: "https://evil.example" },
+    {
+      ...metadata,
+      protocol: "xai_realtime",
+      usage_source: "server_measured",
+      delegation_model: "model-a",
+    },
   ])
     expect(voiceMetadataSchema.safeParse(invalid).success).toBe(false);
 });

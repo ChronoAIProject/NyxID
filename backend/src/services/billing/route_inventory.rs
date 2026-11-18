@@ -140,6 +140,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::credential_verification::check",
+        route: "/api/v1/keys/{key_id}/verify",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::codex_connection::verify",
         route: "/api/v1/providers/codex-connection/verify",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
@@ -155,6 +160,16 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmProvider),
     },
     BillingRouteSpec {
+        handler: "handlers::platform_models::certified_contracts",
+        route: "/api/v1/admin/platform-models/contracts",
+        policy: BillingRoutePolicy::Exempt("Certified contract metadata; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_models::public_list",
+        route: "/api/v1/llm/models",
+        policy: BillingRoutePolicy::Exempt("Platform model metadata; no downstream request"),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::pool_aliases",
         route: "/api/v1/llm/pools",
         policy: BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request"),
@@ -163,6 +178,21 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         handler: "handlers::llm_gateway::llm_status",
         route: "/api/v1/llm/status",
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_request",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}",
+        policy: BillingRoutePolicy::Exempt("Voice runtime owns call usage and settlement"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_root",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}",
+        policy: BillingRoutePolicy::Exempt("Voice service root has no operation"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_root",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}/",
+        policy: BillingRoutePolicy::Exempt("Voice service root has no operation"),
     },
     BillingRouteSpec {
         handler: "handlers::proxy::proxy_request",
@@ -175,6 +205,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::proxy::proxy_request_root",
+        route: "/api/v1/proxy/{service_id}/",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::proxy::proxy_request_by_slug",
         route: "/api/v1/proxy/s/{slug}/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
@@ -182,6 +217,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
         handler: "handlers::proxy::proxy_request_by_slug_root",
         route: "/api/v1/proxy/s/{slug}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::proxy::proxy_request_by_slug_root",
+        route: "/api/v1/proxy/s/{slug}/",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
@@ -284,6 +324,13 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
         handler: "handlers::public_proxy::public_proxy_request_root",
         route: "/public/s/{slug}",
+        policy: BillingRoutePolicy::Exempt(
+            "block-not-meter; billable anonymous services are invalid",
+        ),
+    },
+    BillingRouteSpec {
+        handler: "handlers::public_proxy::public_proxy_request_root",
+        route: "/public/s/{slug}/",
         policy: BillingRoutePolicy::Exempt(
             "block-not-meter; billable anonymous services are invalid",
         ),

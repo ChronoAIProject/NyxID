@@ -6,6 +6,7 @@ export interface DataTableSearchField<Key extends string> {
 export interface DataTableSearchGroup<Key extends string> {
   readonly field: Key;
   readonly values: readonly string[];
+  readonly operator?: "is" | "contains";
 }
 
 /**

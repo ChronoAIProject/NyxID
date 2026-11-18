@@ -382,7 +382,8 @@ async fn optional_auto_provision_requirements(
         return Err(unavailable());
     }
     // With no provider credentials to inherit, preserve ordinary no-auth
-    // routing, including existing endpoints after a catalog URL edit.
+    // routing. Catalog-owned endpoints follow the current catalog URL; this
+    // early return grants no optional credential authority to any destination.
     if requirements.is_empty() {
         return Ok(vec![]);
     }

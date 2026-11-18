@@ -168,36 +168,39 @@ pub async fn ssh_web_terminal(
     )
     .await?;
 
+    // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| async move {
-            let work = async {
-                handle_web_terminal(
-                    state,
-                    auth_user,
-                    service_id,
-                    auth_context.service_slug,
-                    ssh_svc,
-                    principal,
-                    auth_context.mode,
-                    cols,
-                    rows,
-                    socket,
-                    session_guard,
-                    client_meta,
-                    tele,
-                    auth_context.owner_user_id,
-                    billing_egress_permit,
-                    session_admission,
-                )
-                .await;
-                Ok(())
-            };
-            if let Some(lease) = concurrency {
-                let _ = lease.run(work).await;
-            } else {
-                let _ = work.await;
-            }
-        })
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
+            Box::pin(async move {
+                let work = Box::pin(async {
+                    handle_web_terminal(
+                        state,
+                        auth_user,
+                        service_id,
+                        auth_context.service_slug,
+                        ssh_svc,
+                        principal,
+                        auth_context.mode,
+                        cols,
+                        rows,
+                        socket,
+                        session_guard,
+                        client_meta,
+                        tele,
+                        auth_context.owner_user_id,
+                        billing_egress_permit,
+                        session_admission,
+                    )
+                    .await;
+                    Ok(())
+                });
+                if let Some(lease) = concurrency {
+                    let _ = lease.run(work).await;
+                } else {
+                    let _ = work.await;
+                }
+            })
+        }))
         .into_response())
 }
 
@@ -244,8 +247,15 @@ async fn handle_web_terminal(
         return;
     }
     let ephemeral = if auth_mode == SshAuthMode::Cert {
-        match generate_ephemeral_credentials(&state, &ssh_svc, &service_id, &user_id, &principal)
-            .await
+        match generate_ephemeral_credentials(
+            &state,
+            &ssh_svc,
+            &service_id,
+            &user_id,
+            &principal,
+            true,
+        )
+        .await
         {
             Ok(creds) => Some(creds),
             Err(error) => {
@@ -352,7 +362,7 @@ async fn handle_node_web_terminal(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &billing_resolution_user_id,
             &resource_owner_id,
             credential_class,
@@ -754,6 +764,7 @@ pub(crate) async fn generate_ephemeral_credentials(
     service_id: &str,
     user_id: &str,
     principal: &str,
+    permit_pty: bool,
 ) -> AppResult<EphemeralSshCredentials> {
     let mut rng = rand::rngs::OsRng;
     let ephemeral_key = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
@@ -783,6 +794,7 @@ pub(crate) async fn generate_ephemeral_credentials(
         &user.email,
         &public_key_openssh,
         principal,
+        permit_pty,
     )
     .await?;
 

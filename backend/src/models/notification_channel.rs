@@ -77,6 +77,10 @@ pub struct NotificationChannel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_required: Option<bool>,
 
+    /// Push alerts for collaboration-group mentions. Missing on legacy rows means on.
+    #[serde(default = "default_group_mentions_enabled")]
+    pub group_mentions_enabled: bool,
+
     // -- Push Notifications --
     /// Whether push notifications (FCM/APNs) are enabled
     #[serde(default)]
@@ -91,6 +95,10 @@ pub struct NotificationChannel {
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_group_mentions_enabled() -> bool {
+    true
 }
 
 fn default_approval_timeout() -> u32 {
@@ -128,6 +136,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),

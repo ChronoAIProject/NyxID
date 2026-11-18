@@ -64,6 +64,10 @@ pub enum Mutation {
         inputs: Vec<EndpointInput>,
         authoritative: bool,
     },
+    SpecSync {
+        inputs: Vec<EndpointInput>,
+        require_empty: bool,
+    },
 }
 
 fn route_shape_changed(fields: &bson::Document) -> bool {
@@ -79,8 +83,11 @@ fn only_withdraws_operation(fields: &bson::Document) -> bool {
         })
 }
 
-/// Bind every publication decision to the same live parent/authority snapshot
-/// as the operation write. Background sync uses the same kind fence.
+enum CommitOutcome {
+    Complete(Vec<ServiceEndpoint>, Vec<String>),
+    ParentChanged,
+}
+
 pub async fn commit_mutation(
     db: &mongodb::Database,
     observed: &crate::models::downstream_service::DownstreamService,
@@ -88,6 +95,48 @@ pub async fn commit_mutation(
     mutation: Mutation,
     audit_key: &[u8],
 ) -> AppResult<(Vec<ServiceEndpoint>, Vec<String>)> {
+    match commit_mutation_inner(db, observed, authority, mutation, audit_key).await? {
+        CommitOutcome::Complete(rows, withdrawn) => Ok((rows, withdrawn)),
+        CommitOutcome::ParentChanged => Err(AppError::Conflict(
+            "Service changed during spec sync".into(),
+        )),
+    }
+}
+
+/// False means the fetched parent was superseded and the caller should reload it.
+/// Existing legacy endpoints are a completed no-op, not a retry.
+pub(super) async fn commit_spec_sync(
+    db: &mongodb::Database,
+    observed: &crate::models::downstream_service::DownstreamService,
+    inputs: Vec<EndpointInput>,
+    require_empty: bool,
+    audit_key: &[u8],
+) -> AppResult<bool> {
+    Ok(matches!(
+        commit_mutation_inner(
+            db,
+            observed,
+            None,
+            Mutation::SpecSync {
+                inputs,
+                require_empty
+            },
+            audit_key
+        )
+        .await?,
+        CommitOutcome::Complete(..)
+    ))
+}
+
+/// Bind every publication decision to the same live parent/authority snapshot
+/// as the operation write. Background sync uses the same kind fence.
+async fn commit_mutation_inner(
+    db: &mongodb::Database,
+    observed: &crate::models::downstream_service::DownstreamService,
+    authority: Option<&super::catalog_mutation_service::Authority>,
+    mutation: Mutation,
+    audit_key: &[u8],
+) -> AppResult<CommitOutcome> {
     use crate::models::{downstream_service::OfferingKind, service_endpoint::PublicationState};
     let db = db.clone();
     let observed = observed.clone();
@@ -96,10 +145,23 @@ pub async fn commit_mutation(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result = async {
-            let (parent, admin) = super::catalog_mutation_service::validate_parent(&db, session, &observed, authority.as_ref()).await?;
+            let (parent, admin) = match super::catalog_mutation_service::validate_parent(&db, session, &observed, authority.as_ref()).await {
+                Err(AppError::Conflict(_)) if matches!(&mutation, Mutation::SpecSync { .. }) => return Ok(CommitOutcome::ParentChanged),
+                result => result?,
+            };
             let tool = parent.offering_kind == OfferingKind::Tool;
             let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
             let rows: Vec<ServiceEndpoint> = coll.find(doc! {"service_id": &parent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+            if let Mutation::SpecSync { require_empty, .. } = &mutation {
+                if *require_empty && !rows.is_empty() {
+                    return Ok(CommitOutcome::Complete(rows, Vec::new()));
+                }
+                if parent.openapi_spec_url != observed.openapi_spec_url
+                    || parent.updated_at.timestamp_millis() != observed.updated_at.timestamp_millis()
+                {
+                    return Ok(CommitOutcome::ParentChanged);
+                }
+            }
             let mut inserts = Vec::new();
             let mut updates = Vec::new();
             let mut deleted = None;
@@ -119,13 +181,14 @@ pub async fn commit_mutation(
                     deleted = Some(rows.iter().find(|row| &row.id == id).ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?);
                     contract_changed = true;
                 }
-                Mutation::Reconcile {inputs, authoritative} => {
+                Mutation::Reconcile {inputs, ..} | Mutation::SpecSync {inputs, ..} => {
+                    let authoritative = matches!(&mutation, Mutation::Reconcile {authoritative: true, ..});
                     let mut names = std::collections::HashSet::new();
                     for input in inputs {
                         if !names.insert(input.name.as_str()) { return Err(AppError::ValidationError("Spec contains duplicate operation names".into())); }
                         if let Some(row) = rows.iter().find(|row| row.name == input.name) {
                             let mut update = update_from_input(input.clone());
-                            if !tool && *authoritative { update.is_active = Some(true); }
+                            if !tool && authoritative { update.is_active = Some(true); }
                             let mut fields = endpoint_update_fields(row, update)?;
                             if row.async_operation != input.async_operation {
                                 fields.insert("async_operation", bson::to_bson(&input.async_operation).map_err(|e| AppError::Internal(e.to_string()))?);
@@ -133,7 +196,7 @@ pub async fn commit_mutation(
                             if !fields.is_empty() { contract_changed |= route_shape_changed(&fields); updates.push((row, fields)); }
                         } else { inserts.push(endpoint_from_input(&parent.id, input.clone(), initial)); }
                     }
-                    if *authoritative {
+                    if authoritative {
                         for row in rows.iter().filter(|row| !names.contains(row.name.as_str())) {
                             if (tool && row.publication == PublicationState::Published) || (!tool && row.is_active) {
                                 let mut fields = doc! {"is_active": false};
@@ -144,7 +207,7 @@ pub async fn commit_mutation(
                     }
                 }
             }
-            if inserts.is_empty() && updates.is_empty() && deleted.is_none() { return Ok((rows, withdrawn)); }
+            if inserts.is_empty() && updates.is_empty() && deleted.is_none() { return Ok(CommitOutcome::Complete(rows, withdrawn)); }
             super::catalog_mutation_service::fence(&db, session, &observed, authority.as_ref()).await?;
             // Validate targets and names against the transaction's parent.
             for target in inserts.iter().filter_map(|row| row.target_id.as_deref())
@@ -191,10 +254,10 @@ pub async fn commit_mutation(
                 coll.delete_one(doc! {"_id": &row.id}).session(&mut *session).await?;
                 if tool { super::audit_service::log_actor_event_in_session(&db, session, &key, actor, "tool_operation_deleted", serde_json::json!({"service_id":parent.id,"endpoint_id":row.id,"name":row.name})).await?; }
             } else if tool {
-                let event = if matches!(mutation, Mutation::Reconcile { .. }) {"tool_operations_discovered"} else {"tools_manager_operations_updated"};
+                let event = if matches!(mutation, Mutation::Reconcile { .. } | Mutation::SpecSync { .. }) {"tool_operations_discovered"} else {"tools_manager_operations_updated"};
                 super::audit_service::log_actor_event_in_session(&db, session, &key, actor, event, serde_json::json!({"service_id":parent.id,"authority":if admin {"admin"} else if authority.is_some() {"tools_manager"} else {"system"}})).await?;
             }
-            Ok((coll.find(doc! {"service_id": &parent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?, withdrawn))
+            Ok(CommitOutcome::Complete(coll.find(doc! {"service_id": &parent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?, withdrawn))
         }.await;
         super::api_key_mutation_service::transaction_result(result)
     }).await.map_err(super::api_key_mutation_service::map_transaction_error)

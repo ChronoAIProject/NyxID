@@ -22,6 +22,7 @@ pub mod lark_permission;
 pub(crate) mod machine_native_update;
 pub mod mcp;
 pub mod mfa;
+pub mod monitoring;
 pub mod node;
 pub mod node_credential;
 pub mod notification;
@@ -155,3 +156,5 @@ pub mod billing_executions;
 pub(crate) mod billing_support;
 mod managed_billing;
 pub mod nyxbot;
+
+pub mod models;

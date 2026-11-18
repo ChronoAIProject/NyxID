@@ -1,7 +1,12 @@
 mod bills;
+pub(crate) mod hold_release;
 mod operations;
+mod org_wallet;
 mod taxes;
 mod usage;
+pub(crate) mod usage_checkpoints;
+mod wallet_snapshot;
+mod wallet_view;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -204,15 +209,19 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 
 #[derive(Default)]
 pub(crate) struct FakeLago {
+    pub(crate) recorded_events: AtomicUsize,
     tax_rate: Option<String>,
     tax_unavailable: bool,
     tax_delay: Option<std::time::Duration>,
     tax_fetches: AtomicUsize,
+    tax_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     bill_data: Option<serde_json::Value>,
     invoice_data: Option<serde_json::Value>,
     invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
+    topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
+    balance_read_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
@@ -241,7 +250,13 @@ impl LagoApi for FakeLago {
         _: &str,
         _: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoTaxConfig> {
-        self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.tax_fetches.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0
+            && let Some((entered, resume)) = &self.tax_read_gate
+        {
+            entered.notify_one();
+            resume.notified().await;
+        }
         if let Some(delay) = self.tax_delay {
             tokio::time::sleep(delay).await;
         }
@@ -293,13 +308,30 @@ impl LagoApi for FakeLago {
         })
     }
 
+    async fn create_wallet_topup(
+        &self,
+        wallet_id: &str,
+        _: &crate::services::billing::lago_client::WalletTopUpInput,
+    ) -> AppResult<crate::services::billing::lago_client::WalletTopUpCheckout> {
+        self.topup_wallets.lock().unwrap().push(wallet_id.into());
+        Ok(crate::services::billing::lago_client::WalletTopUpCheckout {
+            wallet_transaction_id: format!("{wallet_id}:topup"),
+            lago_invoice_id: Some(format!("{wallet_id}:invoice")),
+            payment_url: "https://pay.example/checkout".into(),
+            payment_provider: Some("stripe".into()),
+        })
+    }
+
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        self.recorded_events.fetch_add(1, Ordering::SeqCst);
         Ok(LagoAck {
             transaction_id: event.transaction_id.clone(),
         })
     }
 
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
+        self.recorded_events
+            .fetch_add(events.len(), Ordering::SeqCst);
         Ok(events
             .iter()
             .map(|event| LagoAck {
@@ -313,6 +345,7 @@ impl LagoApi for FakeLago {
         customer_id: &str,
         subscription_id: &str,
     ) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
@@ -321,6 +354,10 @@ impl LagoApi for FakeLago {
     }
 
     async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+        if let Some((entered, resume)) = &self.balance_read_gate {
+            entered.notify_one();
+            resume.notified().await;
+        }
         Ok(10_000)
     }
 
@@ -604,6 +641,14 @@ async fn run_billing_route_coverage_smoke() {
             format!("/api/v1/proxy/{}", proxy_catalog.id),
             "/api/v1/proxy/{service_id}",
         ),
+        (
+            format!("/api/v1/proxy/s/{}/", proxy.slug),
+            "/api/v1/proxy/s/{slug}/",
+        ),
+        (
+            format!("/api/v1/proxy/{}/", proxy_catalog.id),
+            "/api/v1/proxy/{service_id}/",
+        ),
     ] {
         call_mounted_route(
             &app,
@@ -612,7 +657,7 @@ async fn run_billing_route_coverage_smoke() {
         .await;
         exercised_routes.insert(mounted_route);
     }
-    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 5).await;
+    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 7).await;
 
     let node = insert_route_node(&state, &owner_id, "billing-route-node").await;
     let node_proxy = insert_route_service(
@@ -697,6 +742,9 @@ async fn run_billing_route_coverage_smoke() {
     ))
     .await;
     exercised_routes.insert("/api/v1/providers/codex-connection/verify");
+
+    Box::pin(exercise_credential_verification_route(&state, &app)).await;
+    exercised_routes.insert("/api/v1/keys/{key_id}/verify");
 
     let mcp = insert_route_service(
         &db,
@@ -876,6 +924,9 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: request_id.clone(),
             user_id: owner_id.clone(),
@@ -1607,6 +1658,154 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
         .await
         .expect("call mounted Lago webhook with invalid signature");
     assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn exercise_credential_verification_route(state: &crate::AppState, app: &Router) {
+    use crate::models::credential_verification::CredentialVerificationCheck;
+    use crate::models::credits::Credits;
+    use crate::models::service_endpoint::EndpointRisk;
+    use futures::TryStreamExt;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    let db = &state.db;
+    let owner = insert_owner(db).await;
+    let token = route_access_token(state, &owner);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header(
+            "authorization",
+            "Bearer verification-billing-fixture",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data":[]})))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "billing-verification-fixture".into();
+    catalog.base_url = server.uri();
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.requires_user_credential = true;
+    catalog.credential_verification = Some(CredentialVerificationCheck {
+        operation: "models_list".into(),
+        query: Default::default(),
+    });
+    catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
+        platform_metric: Some(BillingMetric::Requests),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut operation =
+        crate::test_utils::test_service_endpoint(&catalog.id, "models_list", "GET", "/models");
+    operation.risk = Some(EndpointRisk::Read);
+    db.collection("service_endpoints")
+        .insert_one(operation)
+        .await
+        .unwrap();
+
+    // Saving and explicitly checking both cross the mounted routes and normal
+    // proxy transport. Neither is a purchased request even on a priced service.
+    let saved = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            "/api/v1/keys",
+            &token,
+            Body::from(
+                serde_json::json!({
+                    "service_slug": catalog.slug,
+                    "label": "Billing verification fixture",
+                    "credential": "verification-billing-fixture",
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(saved["credential_verification"]["state"], "verified");
+    let id = saved["id"].as_str().unwrap();
+    // Advance the durable attempt fence without sleeping ten seconds.
+    db.collection::<bson::Document>(USER_SERVICES).update_one(doc! {"_id":id},
+        doc! {"$set":{"credential_verification.started_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(11))}})
+        .await.unwrap();
+    let checked = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/keys/{id}/verify"),
+            &token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+    assert_eq!(checked["state"], "verified");
+    let slug = saved["slug"].as_str().unwrap();
+    assert_route_settled_count(db, slug, BillingMetric::Requests, 2).await;
+    let rows: Vec<UsageMeterRow> = db
+        .collection(USAGE_METER)
+        .find(doc! {"billing_owner_id":&owner})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(row.metric, BillingMetric::Requests);
+        assert_eq!(row.quantity, Some(1));
+        assert_eq!(row.reserved_credits, Credits::ZERO);
+        assert!(row.wallet_id.is_none());
+        assert!(
+            row.funding.is_none(),
+            "checks cannot consume wallets, grants or allowances"
+        );
+    }
+    assert_eq!(
+        db.collection::<bson::Document>(BILLING_WALLET)
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<bson::Document>("billing_ledger")
+            .count_documents(doc! {"owner_id":&owner})
+            .await
+            .unwrap(),
+        0
+    );
+
+    // The internal check context must not exempt an ordinary request through
+    // the very same connection. This control would fail if pricing were off.
+    call_mounted_route(
+        app,
+        route_request(
+            Method::GET,
+            &format!("/api/v1/proxy/{}/models?_nyxid_via={id}", catalog.id),
+            &token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    wait_for_charged_usage(
+        db,
+        doc! {"billing_owner_id":&owner,"wallet_id":{"$type":"string"}},
+        1,
+    )
+    .await;
+    server.verify().await;
 }
 
 async fn exercise_codex_verification_route(
@@ -2673,6 +2872,49 @@ async fn insert_llm_route_service(
 
 async fn assert_route_settled(db: &mongodb::Database, service_slug: &str, metric: BillingMetric) {
     assert_route_settled_count(db, service_slug, metric, 1).await;
+}
+
+/// Provider completion precedes the asynchronous wallet release and journal
+/// append. Return only durable charged settlements, with a bounded test wait.
+pub(crate) async fn wait_for_charged_usage(
+    db: &mongodb::Database,
+    filter: bson::Document,
+    expected: usize,
+) -> Vec<UsageMeterRow> {
+    use futures::TryStreamExt;
+    let started = Instant::now();
+    loop {
+        let rows: Vec<UsageMeterRow> = db
+            .collection(USAGE_METER)
+            .find(filter.clone())
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let mut settled = rows.len() == expected;
+        for row in &rows {
+            settled &= row.status == UsageStatus::Finalized
+                && row.forwarded
+                && row.released
+                && row.wallet_id.is_some()
+                && row.funding.as_ref().is_some_and(|funding| funding.settled);
+            settled &= db
+                .collection::<bson::Document>("billing_ledger")
+                .find_one(doc! {"reference_id": &row.id, "owner_id": &row.billing_owner_id})
+                .await
+                .unwrap()
+                .is_some();
+        }
+        if settled {
+            return rows;
+        }
+        assert!(
+            started.elapsed() < SETTLEMENT_DEADLINE,
+            "expected {expected} charged settlements, got {rows:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 async fn assert_route_settled_count(

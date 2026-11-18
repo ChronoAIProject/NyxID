@@ -1,10 +1,11 @@
+import { getPublicOrigin } from "./public-origin.mjs";
 import assert from "node:assert/strict";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 
 // Independent CommonMark parser and manually selected published-content
 // obligations: this does not compare the converter with its own output.
-export function verifyMarkdownContract(path, markdown) {
+export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin()) {
   const ast = unified()
     .use(remarkParse)
     .parse(markdown.replace(/^---\n[\s\S]*?\n---\n/, ""));
@@ -102,12 +103,12 @@ export function verifyMarkdownContract(path, markdown) {
     route === "/agents"
       ? [
           "https://github.com/ChronoAIProject/NyxID",
-          "https://nyx.chrono-ai.fun/docs/ai/guides/mcp-proxy",
-          "https://nyx.chrono-ai.fun/docs/ai/guides/agent-isolation",
+          `${origin}/docs/ai/guides/mcp-proxy`,
+          `${origin}/docs/ai/guides/agent-isolation`,
         ]
       : route === "/"
         ? ["/how-it-works", "/security", "/solutions"].map(
-            (value) => `https://nyx.chrono-ai.fun${prefix}${value}`,
+            (value) => `${origin}${prefix}${value}`,
           )
         : [];
   for (const target of targets)

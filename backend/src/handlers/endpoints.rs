@@ -237,6 +237,7 @@ pub async fn list_endpoints(
 ) -> AppResult<Json<EndpointListResponse>> {
     // Verify service exists
     let service = fetch_service(&state, &service_id).await?;
+    crate::services::platform_key_service::require_ordinary_use(&service)?;
     require_http_service(&service)?;
 
     let may_write =
@@ -298,6 +299,7 @@ pub async fn create_endpoint(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -386,6 +388,7 @@ pub async fn update_endpoint(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -479,6 +482,7 @@ pub async fn delete_endpoint(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -525,6 +529,7 @@ pub async fn discover_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -967,6 +972,7 @@ pub async fn change_publication(
         &state.db,
         &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
@@ -1013,6 +1019,7 @@ pub async fn change_publication_bulk(
         &state.db,
         &service,
         &crate::services::catalog_mutation_service::Authority {
+            catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
             catalog_base_url: state.config.base_url.clone(),
             actor: crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)

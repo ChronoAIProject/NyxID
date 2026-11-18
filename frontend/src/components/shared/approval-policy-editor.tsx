@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
+import { useId, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -57,6 +60,8 @@ export function ApprovalPolicyEditor({
   rules,
   onSave,
 }: ApprovalPolicyEditorProps) {
+  useUiTranslation();
+  const defaultId = useId();
   const [draftRules, setDraftRules] = useState<readonly ApprovalRule[]>(rules);
   const [draftDefaultEffect, setDraftDefaultEffect] =
     useState<ApprovalEffect>(defaultEffect ?? "auto_allow");
@@ -113,30 +118,26 @@ export function ApprovalPolicyEditor({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-muted-foreground">Default:</span>
+        <Label htmlFor={defaultId}>{translateUi("Default")}</Label>
         <Select
           value={draftDefaultEffect}
           onValueChange={(value) =>
             setDraftDefaultEffect(value as ApprovalEffect)
           }
         >
-          <SelectTrigger className="h-8 w-[190px] text-xs">
+          <SelectTrigger id={defaultId} className="h-8 w-[190px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="auto_allow">Auto allow unmatched</SelectItem>
-            <SelectItem value="require_approval">
-              Require approval unmatched
-            </SelectItem>
-            <SelectItem value="deny">Deny unmatched</SelectItem>
+            <SelectItem value="auto_allow">{translateUi("Auto allow unmatched")}</SelectItem>
+            <SelectItem value="require_approval">{translateUi("Require approval unmatched")}</SelectItem>
+            <SelectItem value="deny">{translateUi("Deny unmatched")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       {draftRules.length === 0 ? (
-        <div className="rounded-lg bg-overlay px-3 py-2 text-xs text-muted-foreground">
-          No advanced rules configured.
-        </div>
+        <div className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground">{translateUi("No advanced rules configured.")}</div>
       ) : (
         <div className="space-y-3">
           {draftRules.map((rule, index) => (
@@ -145,27 +146,26 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-12 font-medium">
-                  Rule {index + 1}
+                <span className="type-row-title">{translateUi("Rule ")}{index + 1}
                 </span>
                 <Button
                   variant="ghost"
                   size="icon"
                   onClick={() => removeRule(index)}
                   disabled={disabled}
-                  title="Remove rule"
+                  title={translateUi("Remove rule")}
                 >
                   <Trash2 className="h-4 w-4 text-muted-foreground" />
                 </Button>
               </div>
 
               <div className="space-y-2">
-                <span className="text-xs text-muted-foreground">Methods</span>
+                <span className="text-13 text-muted-foreground">{translateUi("Methods")}</span>
                 <div className="flex flex-wrap gap-2">
                   {approvalMethods.map((method) => (
-                    <label
+                    <Label
                       key={method}
-                      className="flex items-center gap-2 text-xs text-muted-foreground"
+                      className="flex items-center gap-2 text-muted-foreground"
                     >
                       <Checkbox
                         checked={rule.methods.includes(method)}
@@ -175,15 +175,13 @@ export function ApprovalPolicyEditor({
                         disabled={disabled}
                       />
                       {method}
-                    </label>
+                    </Label>
                   ))}
                 </div>
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs text-muted-foreground">
-                  Resource pattern
-                </label>
+                <Label className="text-muted-foreground">{translateUi("Resource pattern")}</Label>
                 <Input
                   value={rule.resource_pattern}
                   onChange={(event) =>
@@ -198,9 +196,9 @@ export function ApprovalPolicyEditor({
 
               <div className="flex flex-wrap gap-3">
                 {approvalVerbs.map((verb) => (
-                  <label
+                  <Label
                     key={verb}
-                    className="flex items-center gap-2 text-xs text-muted-foreground"
+                    className="flex items-center gap-2 text-muted-foreground"
                   >
                     <Checkbox
                       checked={rule.verbs.includes(verb)}
@@ -210,7 +208,7 @@ export function ApprovalPolicyEditor({
                       disabled={disabled}
                     />
                     {approvalVerbLabels[verb]}
-                  </label>
+                  </Label>
                 ))}
               </div>
 
@@ -221,7 +219,7 @@ export function ApprovalPolicyEditor({
                     updateRule(index, { effect: value as ApprovalEffect })
                   }
                 >
-                  <SelectTrigger className="h-8 w-[170px] text-xs">
+                  <SelectTrigger className="h-8 w-[170px] text-14">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -239,12 +237,12 @@ export function ApprovalPolicyEditor({
                       updateRule(index, { mode: value as ApprovalMode })
                     }
                   >
-                    <SelectTrigger className="h-8 w-[170px] text-xs">
+                    <SelectTrigger className="h-8 w-[170px] text-14">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="per_request">Per request</SelectItem>
-                      <SelectItem value="grant">Time-based grant</SelectItem>
+                      <SelectItem value="per_request">{translateUi("Per request")}</SelectItem>
+                      <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                     </SelectContent>
                   </Select>
                 )}
@@ -257,23 +255,19 @@ export function ApprovalPolicyEditor({
       <div className="flex flex-wrap gap-2">
         <Button
           variant="outline"
-          className="h-8 text-xs"
+          className="h-8 text-14"
           onClick={addRule}
           disabled={disabled || draftRules.length >= 50}
         >
           <ButtonIcon>
             <Plus className="h-3.5 w-3.5" />
-          </ButtonIcon>
-          Add Rule
-        </Button>
+          </ButtonIcon>{translateUi("Add Rule")}</Button>
         <Button
           variant="primary"
-          className="h-8 text-xs"
+          className="h-8 text-14"
           onClick={() => onSave(draftRules, draftDefaultEffect)}
           disabled={disabled}
-        >
-          Save Rules
-        </Button>
+        >{translateUi("Save Rules")}</Button>
       </div>
     </div>
   );

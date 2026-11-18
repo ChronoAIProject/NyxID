@@ -35,6 +35,10 @@ function makeEntry(overrides: Partial<CatalogEntry>): CatalogEntry {
 }
 
 describe("deriveConnectorItems", () => {
+  it("uses a proxy description when the catalog and connection descriptions are empty", () => {
+    const { added } = deriveConnectorItems([makeKey({ description: " " })], [makeEntry({ description: "" })]);
+    expect(added[0]?.description).toContain("Connected through the NyxID proxy");
+  });
   it("joins on catalog_service_slug, never the user-facing proxy slug", () => {
     const { added, available } = deriveConnectorItems(
       [
@@ -89,7 +93,7 @@ describe("deriveConnectorItems", () => {
     expect(added[0]?.description).toBe("GPT models.");
   });
 
-  it("does not expose an auto-connected endpoint in fallback copy", () => {
+  it("hides automatic custom connections", () => {
     const { added } = deriveConnectorItems(
       [
         makeKey({
@@ -102,8 +106,56 @@ describe("deriveConnectorItems", () => {
       [],
     );
 
-    expect(added[0]?.description).toBe("Connected through the NyxID proxy.");
-    expect(added[0]?.description).not.toContain("platform.internal.example");
+    expect(added).toEqual([]);
+  });
+
+  it("hides an automatic catalog connection from both sections", () => {
+    const { added, available } = deriveConnectorItems(
+      [makeKey({ auto_connected: true })],
+      [makeEntry({})],
+    );
+
+    expect(added).toEqual([]);
+    expect(available).toEqual([]);
+  });
+
+  it("counts and manages only manual connections when a service also has automatic ones", () => {
+    const { added, available } = deriveConnectorItems(
+      [
+        makeKey({ id: "automatic", auto_connected: true, is_active: true }),
+        makeKey({ id: "manual", auto_connected: false, is_active: false }),
+      ],
+      [makeEntry({})],
+    );
+
+    expect(added).toHaveLength(1);
+    expect(added[0]?.manageKeyIds).toEqual(["manual"]);
+    expect(added[0]?.meta).toBe("api key");
+    expect(added[0]?.disabled).toBe(true);
+    expect(available).toEqual([]);
+  });
+
+  it("hides platform-bound manual rows, including custom and mixed services", () => {
+    const { added, available } = deriveConnectorItems([
+      makeKey({ id: "platform", credential_binding: "platform", auto_connected: false }),
+      makeKey({ id: "custom-platform", credential_binding: "platform", catalog_service_slug: null }),
+      makeKey({ id: "personal", credential_binding: "user", is_active: false }),
+    ], [makeEntry({})]);
+    expect(added).toHaveLength(1);
+    expect(added[0]?.manageKeyIds).toEqual(["personal"]);
+    expect(added[0]?.disabled).toBe(true);
+    expect(available).toEqual([]);
+  });
+
+  it("offers inference and Chrono LLM only as personal Models, retaining manual model keys", () => {
+    const inference = { protocol: "openai", models: [] } as unknown as NonNullable<CatalogEntry["inference"]>;
+    const { added, available, models } = deriveConnectorItems([
+      makeKey({ id: "auto", catalog_service_slug: "chrono-llm", auto_connected: true }),
+      makeKey({ id: "my-model", catalog_service_slug: "openai", credential_binding: "user" }),
+    ], [makeEntry({ inference }), makeEntry({ slug: "chrono-llm", name: "Chrono LLM" }), makeEntry({ slug: "hidden", platform_key: { available: true } as CatalogEntry["platform_key"] }), makeEntry({ slug: "github" })]);
+    expect(added[0]?.manageKeyIds).toEqual(["my-model"]);
+    expect(models.map((item) => item.connectSlug)).toEqual(["openai", "chrono-llm"]);
+    expect(available.map((item) => item.connectSlug)).toEqual(["github"]);
   });
 
   it("keeps a disabled connection in Added, flagged, rather than offering Connect", () => {
@@ -152,15 +204,20 @@ describe("deriveConnectorItems", () => {
       ],
     );
     expect(available.map((i) => i.meta)).toEqual([
-      "oauth",
-      "device code",
-      "no credential",
-      "token exchange",
-      "self-hosted",
-      "ssh",
-      "api key",
+      "OAuth",
+      "Device code",
+      "No credential required",
+      "Token exchange",
+      "Self-hosted",
+      "SSH",
+      "API key",
     ]);
     expect(available.map((i) => i.category)).toContain("Connector · SSH");
+    // SSH cannot use a hosted link: it links to Studio with its slug instead.
+    const ssh = available.find((i) => i.id === "catalog:f");
+    expect(ssh?.connectSlug).toBeUndefined();
+    expect(ssh?.advancedSetupSlug).toBe("f");
+    expect(available.find((i) => i.id === "catalog:g")?.connectSlug).toBe("g");
   });
 });
 

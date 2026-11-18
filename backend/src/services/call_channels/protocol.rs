@@ -113,6 +113,59 @@ pub fn verify_twilio(
     mac.verify_slice(&signature).map_err(|_| invalid())
 }
 
+/// Preserve signed bytes and try only explicitly configured API aliases.
+pub fn verify_twilio_configured(
+    config: &crate::config::AppConfig,
+    headers: &HeaderMap,
+    current_url: &str,
+    fields: &BTreeMap<String, String>,
+    secret: &str,
+) -> AppResult<()> {
+    let suffix = current_url
+        .strip_prefix(config.base_url.trim_end_matches('/'))
+        .ok_or_else(invalid)?;
+    if !suffix.starts_with('/') {
+        return Err(invalid());
+    }
+    for base in config.accepted_base_urls() {
+        if verify_twilio(
+            headers,
+            &format!("{}{suffix}", base.trim_end_matches('/')),
+            fields,
+            secret,
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err(invalid())
+}
+
+pub fn verify_twilio_upgrade_configured(
+    config: &crate::config::AppConfig,
+    headers: &HeaderMap,
+    current_url: &str,
+    secret: &str,
+) -> AppResult<()> {
+    let http_url = current_url
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let suffix = http_url
+        .strip_prefix(config.base_url.trim_end_matches('/'))
+        .filter(|s| s.starts_with('/'))
+        .ok_or_else(invalid)?;
+    for base in config.accepted_base_urls() {
+        let url = format!("{}{suffix}", base.trim_end_matches('/'))
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        if verify_twilio_upgrade(headers, &url, secret).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(invalid())
+}
+
 /// The endpoint comes from server configuration. Preserve every byte except
 /// the upgrade scheme; never derive an alternate URL from request headers.
 pub fn verify_twilio_upgrade(
@@ -520,4 +573,88 @@ pub fn twiml(url: &str, voice: &str, language: &str) -> String {
         xml(voice),
         xml(language)
     )
+}
+
+#[cfg(test)]
+mod domain_alias_tests {
+    use super::*;
+
+    fn signed(url: &str, fields: &BTreeMap<String, String>, secret: &str) -> HeaderMap {
+        let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(url.as_bytes());
+        for (key, value) in fields {
+            mac.update(key.as_bytes());
+            mac.update(value.as_bytes());
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-twilio-signature",
+            STANDARD
+                .encode(mac.finalize().into_bytes())
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn domain_alias_twilio_signatures_preserve_exact_url_and_body() {
+        let secret = uuid::Uuid::new_v4().to_string();
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let fields = BTreeMap::from([("CallSid".into(), uuid::Uuid::new_v4().to_string())]);
+        let path = "/api/v1/channels/twilio/callback?status=received";
+        let current = format!("{}{path}", config.base_url);
+        let headers = signed(&current, &fields, &secret);
+        assert!(verify_twilio_configured(&config, &headers, &current, &fields, &secret).is_ok());
+        let alias_headers = signed(&format!("https://old.example{path}"), &fields, &secret);
+        assert!(
+            verify_twilio_configured(&config, &alias_headers, &current, &fields, &secret).is_err()
+        );
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        assert!(
+            verify_twilio_configured(&config, &alias_headers, &current, &fields, &secret).is_ok()
+        );
+        let foreign = signed(&format!("https://evil.example{path}"), &fields, &secret);
+        assert!(verify_twilio_configured(&config, &foreign, &current, &fields, &secret).is_err());
+        assert!(
+            verify_twilio_configured(&config, &alias_headers, &current, &BTreeMap::new(), &secret)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn domain_alias_twilio_websocket_upgrade_accepts_only_configured_bases() {
+        let secret = uuid::Uuid::new_v4().to_string();
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        config.domain_aliases.base_urls = vec!["https://old.example".into()];
+        let fields = BTreeMap::new();
+        for base in [
+            "wss://old.example",
+            "https://old.example",
+            "wss://new.example",
+        ] {
+            let headers = signed(&format!("{base}/stream"), &fields, &secret);
+            assert!(
+                verify_twilio_upgrade_configured(
+                    &config,
+                    &headers,
+                    "wss://new.example/stream",
+                    &secret
+                )
+                .is_ok()
+            );
+        }
+        let headers = signed("https://foreign.example/stream", &fields, &secret);
+        assert!(
+            verify_twilio_upgrade_configured(
+                &config,
+                &headers,
+                "wss://new.example/stream",
+                &secret
+            )
+            .is_err()
+        );
+    }
 }

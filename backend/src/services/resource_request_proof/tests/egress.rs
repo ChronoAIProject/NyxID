@@ -34,6 +34,10 @@ pub(super) async fn call(
         crate::services::assistant_acknowledgement_service::for_key(&state.db, &f.subject, key_id)
             .await?;
     let context = mcp_service::McpExecContext {
+        strict_response_utf8: false,
+        execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&f.subject),

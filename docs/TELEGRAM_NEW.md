@@ -15,7 +15,13 @@ The modal updates automatically, closes on connection, and opens the connected b
 
 These are two application steps, not a guarantee of two physical taps. Telegram controls its Start prompt and creation form. The direct `t.me/newbot/...` form link cannot carry an arbitrary setup identifier, and `ManagedBotCreated` does not echo the keyboard’s `request_id`. The private `/start` handoff is retained to correlate the Telegram sender with the saved NyxID request. It does not establish a verified Telegram login identity for the NyxID account.
 
-The manager sends the setup instructions and destination in an ordinary text message before sending a separate **Create bot** keyboard message. The instructions have no reply keyboard attached, so displaying them does not require support for Telegram's managed-bot keyboard. They explain how to retry with `/start` or continue in the latest Telegram app if the next message is blank or the button is missing. Both the website handoff and plain `/start` use this sequence; a bound request keeps its account and bot-name suggestions when restarted. The website link still includes the setup challenge, and creation still uses the native keyboard to preserve the verified creation-event handoff. An instruction-send failure remains retryable. Once the instructions are delivered, a keyboard-send failure is logged and the webhook is acknowledged so Telegram does not repeatedly send the instructions or keep the manager queue pending; the user can retry with `/start`.
+The manager sends ordinary setup instructions and the saved destination before a separate **Create bot** keyboard. The website reports sending, rejected, unknown, or accepted delivery when an attempt was recorded; absent delivery metadata is shown as unavailable rather than an unconfirmed send. If the button is missing, the instructions advise updating Telegram and sending `/start` again. **Accepted** means Telegram returned a valid message ID; it does not prove the client displayed a button, a bot was created, or an agent replied. A rejected or unknown message leaves the page waiting for verified creation, with an explicit recovery action where eligible. There is no client-upgrade claim inferred from an API error.
+
+An instruction-send rejection remains retryable. After accepted instructions, keyboard failure or an uncertain response is acknowledged and recorded so Telegram does not repeatedly dispatch it. Duplicate webhook updates cannot replay a started keyboard; a new explicit `/start` can retry the same live request after the current attempt finishes or its current phase’s 45-second dispatch horizon passes. `attempted_at` records the current phase start: instructions and keyboard each renew it transactionally only while the exact claim is still live. Before sending, NyxID requires the full 20-second provider-call budget to fit inside that phase’s horizon; a slow write or commit cannot dispatch on an aged claim. This preserves the original sender, creation boundary, destination, revision and expiry. Database-only admission, phase and outcome transactions retry definite transient conflicts without replaying Telegram sends. A lost outcome write leaves delivery unconfirmed; no automatic send worker replays it. An explicit start for an expired setup receives an expiry reply. If the live setup context has closed, the reply directs the user to review the setup without authorizing a new destination.
+
+**Open creation form** opens Telegram's documented native `https://t.me/newbot/{manager}/{suggested_username}?name=...` form for the saved request after its private sender handoff. Use the same Telegram account and check the saved NyxID destination. The instruction message offers an explicit **Open creation form** button and two alternative usernames when eligible. This action creates no NyxID bot, assistant, request or route. It cannot authorize an expired, cancelled, terminal, unbound, legacy consent, Telegram-first claim, or platform-installation setup request. New website requests explicitly record standalone origin or the exact hosted link/watch provenance. Legacy rows without that origin keep their existing handoff but cannot use the new recovery. Hosted recovery refuses a deleted, replaced, expired or retargeted link, watch, specialist or source; it never chooses a replacement. Hidden group-member sources retain their original visible group return path.
+
+The provider form URL is not a revocable NyxID capability and carries neither the setup challenge nor a request ID. A copied URL may still open Telegram after NyxID expiry. The UI removes known-expired recovery actions and cached links, and server admission still requires fresh original private `managed_bot_created` proof, the already-bound sender, update/time/manager observation and live authority. `managed_bot`, username lookup, `/recover`, API acceptance and browser navigation do not substitute for creation proof. A person submitting multiple provider forms can create remote extra bots; NyxID consumes at most one bot per request. Direct-link event semantics and actual replies require the live verification gates below.
 
 Starting from the Telegram manager chat also has two application steps:
 
@@ -88,7 +94,7 @@ A claim arrives in the link’s `claim` query parameter, which is removed with `
 
 The open Telegram flow polls active requests every two seconds while visible, refreshes on focus, and offers **Check progress**. Closing the modal or choosing another platform stops its polling; the list's resume banner refreshes on focus and after setup actions. **Reopen Telegram** issues a fresh launch link for the same saved request. A blocked popup has an **Open Telegram** fallback link. Neither returning nor polling creates a new request.
 
-After a fresh creation event, a database-backed worker completes the connection independently of the browser. Every backend replica scans due requests; atomic scheduling claims and the existing per-bot renewable lease coordinate attempts. Connection work is deferred from the webhook response so Telegram can acknowledge the creation delivery before the worker checks for pending updates. Temporary failures retry with backoff. Setup retains its 15-minute expiry until a pending channel bot is saved; provisioning then survives expiry and reuses the saved bot ID, encrypted token, and webhook secret. It cannot reactivate a deleted/suspended bot. Cancellation before provisioning releases the request, but does not delete a bot already created inside Telegram.
+After a fresh creation event, a database-backed worker completes the connection independently of the browser. Every backend replica scans due requests; atomic scheduling claims and the existing per-bot renewable lease coordinate attempts. Connection work is deferred from the webhook response so Telegram can acknowledge the creation delivery before the worker checks for pending updates. Temporary failures retry with backoff. Standalone setup retains its 15-minute expiry until a pending channel bot is saved. A new hosted request records the pinned link deadline (nominal expiry plus the existing 30-minute grace), capped by its captured specialist watch deadline when present. Prompt admission, recovery and fresh creation consumption use that stored deadline together with the live context checks; existing requests keep their stored expiry. Provisioning then survives expiry and reuses the saved bot ID, encrypted token, and webhook secret. It cannot reactivate a deleted/suspended bot. Cancellation before provisioning releases the request, but does not delete a bot already created inside Telegram.
 
 New automatic requests accept only a fresh `managed_bot_created` event from the private sender bound by their start challenge. They reject recovery commands and creation updates preceding that handoff. An expired or cancelled request must be restarted to create a new bot; an existing bot can be connected through **Telegram bot token**. With no bound website request, `/recover @YourBotUsername` issues a fresh claim for the creator’s unconsumed creation and invalidates the previous code. Duplicate creation deliveries do not rotate a successfully delivered code. An unstarted redeemed request must be cancelled before a fresh claim can be issued. Once a pending channel bot has been saved, the creation is permanently retired: deleting that bot does not reopen it. Retry the saved connection or use the manual token path. `/recover` reports when there is already a saved connection.
 
@@ -106,6 +112,8 @@ All request routes require a person session or ordinary person access token; API
 | POST | `/channel-bots/telegram-new` | Save `{label, target_org_id?, auto_connect?}` and return a Telegram launch URL; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read an actor-owned request with destination access |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Replace the start challenge and return a fresh link |
+| POST | `/channel-bots/telegram-new/requests/{id}/creation-link` | Issue the eligible saved request's primary creation URL and two username alternatives; empty body |
+| POST | `/channel-bots/telegram-new/requests/{id}/regenerate-username` | Refresh the saved request's cosmetic username suggestions without changing its creation context; empty body |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning |
 | POST | `/channel-bots/telegram-new/claims/preview` | Preview `{code}` without mutation or Telegram API calls; return `{bot_username, expires_at}` |
 | POST | `/channel-bots/telegram-new/claims/redeem` | Redeem `{code, label, target_org_id?}`; return HTTP 202 with the saved safe request response |
@@ -134,7 +142,19 @@ For website-first automatic requests, the initiating authenticated action author
 
 Registration atomically checks active identity and owner quota before inserting. Both Telegram platform IDs share the same remote identity check. Pending bot insertion and the request's provisioning transition happen in one MongoDB transaction. The transaction also checks the expected initial management revision (or the revision approved in Telegram for a legacy request) and permanently marks that creation as claimed. Before acquiring a token, NyxID verifies the creation is at most 60 minutes old, belongs to the current manager observation period, and has no pending manager updates or Telegram-reported delivery error since creation. The observation start is saved only after the manager webhook is verified. Clearing and reconfiguring the manager starts a new observation period, so old provenance does not become eligible again. Pending manager updates cause a retryable refusal. A Telegram delivery error after creation disqualifies that creation for automatic connection, even after delivery recovers; create a new bot or use the current token through the Telegram bot token option. An update received after an error does not prove that every earlier management event was delivered. Per-child renewable leases serialize setup and deletion. A separate identity lease coordinates manager configuration with channel registration without blocking unrelated manual Telegram bots.
 
+## Delivery diagnostics and recovery API
+
+`POST /api/v1/channel-bots/telegram-new/requests/{id}/creation-link` requires the initiating human account, an empty body and the existing shared mutation limit of five requests per minute. It returns `{request, creation_url}` with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. No destination, agent, source, manager or redirect parameter is accepted. Issuance uses conditional transaction writes against the current request and live lifecycle rows; repeating it does not renew the deadline or creation boundary.
+
+Request DTOs add optional `prompt_delivery` and advisory `can_open_creation_form`. Delivery includes an attempt UUID, phase (`instructions`/`keyboard`), outcome (`sending`/`accepted`/`rejected`/`unknown`), timestamps and optional bounded numeric HTTP/error/retry-after fields. A stopped `sending` attempt projects as `unknown` 45 seconds after the current phase’s `attempted_at`, using the same deadline as dispatch deduplication. Safe failure classes are `network`, `timeout`, `http_rejected`, `provider_rejected`, `invalid_response`, and `response_too_large`; safe reasons are `rate_limited`, `unauthorized`, `forbidden`, `bad_request`, `provider_unavailable`, and `unknown`. Raw Telegram descriptions, private payloads and token-bearing URLs are never persisted, returned or logged. Retry-after is diagnostic only. Calls use the application-configured HTTP client. Responses are streamed with a 1 MiB limit and 20-second call timeout. The application redirect policy refuses redirects only when the original URL has the production Telegram API origin (`https://api.telegram.org`, effective port 443) and a Bot API path (`/bot{credential}/{method}`); other origins retain the ordinary ten-redirect limit even when their paths have that shape.
+
+An administrator investigating a missing button should verify the dedicated manager's numeric identity, `can_manage_bots`, ready webhook, observation period, allowed updates and pending/error state. Inspect the bounded delivery outcome separately from the actual named client/app/OS version. Reopening Telegram and explicit recovery retain the existing destination; creating another assistant or granting broad gateway roles is unnecessary.
+
 ## Deployment and staging validation
+
+The prompt/context changes require a coordinated writer boundary. Pause new manager/request admission and drain old manager-webhook and creation-request writers before admitting new context-bearing requests or exposing recovery. Old binaries ignore both prompt deduplication metadata and modern hosted-context consumption fences. Upgrade every relevant API/webhook replica and creation worker, verify the serving versions, then resume this flow and release the frontend recovery controls. One upgraded replica does not establish these invariants. This is a release procedure; it introduces no environment variable or feature flag and authorizes no production action.
+
+For rollback, hide the frontend recovery controls first, pause admission and drain in-flight prompt/request writers. Before old backend code resumes, finish or terminally cancel/expire pending context-bearing creation requests through the supported reviewed lifecycle. Settle or fence uncertain prompt attempts while preserving their observations. Retain request, deduplication, provenance, release and continuity records; never clear metadata to force another send. Issued Telegram form URLs remain remotely usable, so rollback must not reauthorize a closed request. Existing unbound claims retain their separate human redemption authority. Resume old code only after verifying that no modern pending request or uncertain dispatch can be processed by it. Do not delete or recreate remote bots; preserve the #1991 release-worker drain boundary.
 
 Use the repository's existing transaction-capable MongoDB topology. Deploy all backend replicas with this version and drain old writers before configuring Telegram bot creation: older replicas do not participate in the new registration transaction fence. Startup installs the request, event, and claim indexes; MongoDB TTL alone does not release active requests. Reads, new initiation, and the automatic worker perform logical expiry cleanup. Upgrade backend replicas before releasing the new frontend: older backends reject the new request flag and cannot run the automatic worker. No migration upgrades old requests into automatic authorization. There are no new environment variables.
 
@@ -312,6 +332,22 @@ still require multiple provider messages. Saved manager replies and automation
 results use the larger delivery bound below, with their saved thread as the
 source for any overflow link.
 
+New Discord/WhatsApp assistant text plans use renderer v2. URLs retain their
+original bytes, with trailing sentence punctuation outside the URL. Discord
+escapes only active literal syntax; unsafe masked-link targets become visible
+label-plus-URL text. WhatsApp uses its native style markers and `label (URL)`;
+unsafe literal markers use the smallest code span. Colliding backticks that its
+documented code syntax cannot represent pass through unchanged. Formatting never
+adds a refusal; URLs exceeding one message retain the existing split behavior.
+Slack and Telegram output remain unchanged.
+
+The journal pins the renderer version with its fingerprint and notice inputs.
+An absent version means v1, retained only to finish recorded plans. New workers
+resume each version's pending suffix without replaying accepted parts. An old
+worker encountering v2 refuses its different fingerprint before claiming a part;
+the recipient keeps the accepted prefix. Normal source-specific failure/recovery
+reporting still applies. Never reset a journal to change its renderer.
+
 Each text delivery is bounded to 64 messages, matching ordinary channel relay's
 amplification bound. An oversized result sends 63 content messages and a final
 plain notice linking the exact saved thread for the remainder. Ordinary replies
@@ -331,8 +367,28 @@ on refusal or uncertainty. Proactive tool results include `text_delivery` counts
 for sent, uncertain, refused and unattempted parts. A fully delivered status
 requires a confirmed receipt for every text part.
 
+Saved manager replies (personal, public and FAQ) and scheduled chat results keep
+text parts `pending` while preparing. An additive preparation holds an exact
+attempt and a 180-second MongoDB-time lease. Immediately before the first provider
+effect, a transaction checks the live parent claim and changes that exact part to
+`sending`. Reclaiming preparation fences a slow predecessor. Each later effect
+still checks live authority; neither an accepted prefix nor an earlier authority
+check authorizes the next part. The same attempt may perform the adapter's
+existing documented-refusal fallback within a fixed 120-second send bound.
+
+Existing manager and schedule workers recover only pending preparations. They
+reload the saved reply and its pinned plan; no bodies enter the delivery journal.
+Manager recovery waits for its existing two-minute stale-parent bound. Scheduled
+results keep their existing six-minute parent lease and 30-minute retry window.
+Receipt-less `sending`, old `dispatching` without multipart evidence, and ambiguous
+provider outcomes stay terminal. Public-manager recovery keeps the original
+expiry and authority and adds no transcript, link or readback surface. Ephemeral
+command/signup output keeps its existing single-attempt behaviour.
+
 The manager pins action-card IDs and media outcome counts, and proactive plans
-pin numeric media-notice inputs. Deciding a card or revisiting an image claim
+pin numeric media-notice inputs. Concurrent initialization accepts the same ordered
+card-ID snapshot; a different or malformed existing snapshot remains a conflict.
+Deciding a card or revisiting an image claim
 cannot alter a partially accepted plan. Live manager identity, binding generation,
 Stop/revocation and destination authority are checked between provider effects.
 Native receipt/token expiry remains an upper bound; each provider call is bounded.
@@ -342,15 +398,27 @@ the existing source/audience `nyxbot_image_deliveries_v2` claims, including lega
 claim reads across the owner's channel aliases. Manager uploads retain the same
 Telegram content protection as private text replies. The loader checks owner,
 conversation, turn, retention, MIME and size
-before upload. Ambiguous uploads are never retried. Successful attachments have
+before upload. New attachment claims retain a versioned, MongoDB-time preparation
+lease until the first possible upload. A survivor reloads the existing private
+saved result and current manager authority, then acquires the exact image attempt;
+it does not replay parent text or alter its pinned media counts. This works even
+if an older parent worker has already finished with a missing-media note. Public
+manager replies gain no new content or readback surface. Ambiguous uploads are
+never retried. Successful attachments have
 no placeholder; only unavailable/unconfirmed items get a fallback note. The
 turn's existing eight-attachment capture bound and media byte limit still apply.
 
-Rollout: drain manager/proactive writers before upgrading their API replicas and
-workers together. Old binaries do not understand multipart receipts and must not
-resume new pending rows. Before rollback, stop/drain these writers and terminally
-fence every unfinished multipart parent/job; preserve the journals and v2 image
-claims. Do not delete a journal to force a resend. Text journals have no TTL so a
+This preparation change needs no operator action in an ordinary rolling update
+from the multipart-capable build. Older writers ignore the additive lease, but
+must still claim `pending -> sending` with their own attempt before sending; that
+claim fences the preparing new writer. New writers never reclaim `sending`.
+Rolling back to that build needs no data change and preserves accepted-prefix
+and uncertainty barriers, but loses preparation recovery for its own new claims.
+
+Upgrading from a build that predates multipart receipts still requires draining
+manager/proactive writers and upgrading API replicas and workers together. Before
+rolling back that far, stop/drain these writers and terminally fence unfinished
+multipart parent/jobs; preserve the journals and v2 image claims. Do not delete a journal to force a resend. Text journals have no TTL so a
 later retry cannot forget acceptance; owner deletion purges them. Existing v1
 image rollout and sunset requirements remain in force.
 
@@ -471,3 +539,150 @@ onboarding proof contract. Keep old binaries out of serving/restart paths. Befor
 rollback, pause managers, drain deliveries and expire pending pairing requests;
 use a compatible binary that enforces the new proof and credential boundaries.
 Do not rewrite scoped rows into the default provider to force compatibility.
+
+## Telegram #2045/#1974 live acceptance record
+
+The [retained source-review signoff](plans/2026-10-27-telegram-signoff.md) records the historical review snapshot and preserved evidence locations. Local HTTP, MongoDB and browser fixtures do not establish Telegram client rendering or creation-event semantics. L1 (named supported client creation), L2 (same intended specialist, owner link and an actual unique-message reply), and L3 (same-account/source live retry/recovery) remain **OPEN**. No live account, token, remote bot creation or production message was used for this implementation. Deployment and live effects require their own authorized destination and version checks.
+
+## Setup status and `/start` recovery (#2257)
+
+A payload-bearing `/start` resolves the current launch hash within the receiving
+manager's identity. A repeated command keeps the original sender and creation
+boundary. Bare `/start` resumes pending creation or consent, reports saved
+connection progress/completion, and preserves an opted-in manager's normal
+public/personal entry. It never offers another unbound creation keyboard for a
+completed or cancelled request. Forwarded/quoted controls cannot bind a setup.
+
+The manager and the authenticated web request projection share a live explanation:
+
+| Reason | Meaning and recovery |
+| --- | --- |
+| `expired` | Request or hosted authority expired; start a new setup. |
+| `completed` | The request or tracked link completed; review the saved bot or open the agent. |
+| `cancelled` | Request or tracked link cancelled; start a new setup. |
+| `superseded` | Launch link replaced or captured destination retargeted; use the current setup link. |
+| `missing` | Unknown/invalid launch or removed request/context; start a new setup. |
+| `account_mismatch` | A different Telegram sender already bound the setup; use that original account or start your own. |
+| `manager_changed` | Saved manager identity/observation is no longer ready; review setup. |
+| `access_changed` | Initiating account no longer has destination access; review access in NyxID. |
+| `context_changed` | Captured agent, source, watch or reviewed platform authority closed; review setup. |
+| `in_progress` | A saved bot is awaiting connection; check status without creating another bot. |
+| `suspended` | Telegram management changed; review the saved connection. |
+| `retry` | A concurrent change prevented admission; check current status and reopen Telegram. |
+
+Replies contain direct browser links built with `AssistantPage` for checking
+status, starting a new setup and, when authorized, opening the saved
+agent. Mismatched senders and revoked owners receive only generic destinations,
+never another account's request/agent identifiers. These links grant no authority.
+The additive `setup_notice` response explains unavailable context even when the
+underlying request still has its original `waiting_bot` status; it does not
+rewrite terminal events or authorize a replacement destination. Older browser
+clients ignore this field. Existing persisted status enums remain unchanged.
+
+Launch renewal retains at most four previous SHA-256 hashes, indexed by manager,
+only to recognize replaced links. They cannot bind or resume a request. Old
+replicas ignore this optional metadata; launches renewed by old replicas, older
+hashes beyond the bound and TTL-deleted requests can only report `missing`.
+Server diagnostics log one fixed reason code, request UUID, saved status and
+sender-match boolean per recovery reply; no challenges, tokens, content, labels
+or URLs are logged. Existing `config.same_base_url` callback checks continue to
+accept configured API aliases and reject unrelated hosts.
+
+
+## Username suggestions (#2239)
+
+Saved setups offer three usernames derived from the saved bot label using ASCII
+letters and digits, with separators normalized to underscores. Names without an
+ASCII stem use `nyx`; numeric stems get a `nyx_` prefix. Each suggestion appends a
+six-hex suffix and `_bot`, keeping the entire name within 5–32 characters and
+starting with a letter. The original Unicode bot name remains unchanged in the
+Telegram `name` parameter and native creation keyboard. No transliteration
+package is added.
+
+The initial suggestions are deterministic per request. **Regenerate username**
+changes only an optional cosmetic `username_seed`; it does not renew expiry,
+change the sender/start boundary, increment the authority revision, or replace
+the account, bot name, captured link/watch, or target agent. Both the manager
+message and eligible web setup offer two alternative usernames. Every native
+creation keyboard and generated form URL uses the same suggestion function.
+Telegram-first creation without a saved request gets a fresh neutral suggestion
+batch; its regeneration button cannot bypass a subsequently bound request or an
+opted-in platform-manager route.
+
+The manager's instruction message now has **Open creation form**, two **Use
+@username** URL buttons, and **Regenerate username**, alongside the existing
+separate native **Create bot** keyboard. Legacy/platform-bound flows retain their
+existing form-access restrictions; they can refresh suggestions without gaining
+a direct form recovery URL. Callback regeneration verifies the manager's original
+private message, matching sender/request, current cosmetic seed, live setup
+fences, and a five-per-minute sender/manager limit. Stale buttons only acknowledge;
+forwarded, quoted and mismatched controls cannot change or disclose a setup.
+
+`POST /api/v1/channel-bots/telegram-new/requests/{id}/regenerate-username` is a
+human-only, empty-body action using the existing shared five-per-minute mutation
+limit and private response headers. Its response is the existing request DTO
+with additive `username_suggestions` (three strings). The creation-link response
+adds three `{username, creation_url}` alternatives while retaining `creation_url`
+as the primary. Opening an alternative still uses the existing live issuance
+fences. The browser discards stale results after account/context/expiry or
+suggestion changes and clears cached form links on regeneration.
+
+The official Telegram Bot API documents `suggested_username` for
+`KeyboardButtonRequestManagedBot` but exposes no managed-bot username availability
+precheck. Suggestions are **not verified available**: Telegram checks uniqueness
+in its creation form. The UI states the format, uniqueness requirement and lack
+of a check. A short suffix reduces collisions but does not guarantee availability;
+users can select an alternative, regenerate, or edit the name in Telegram.
+
+Compatibility is additive: absent seeds derive initial suggestions from the
+request ID; older replicas ignore the cosmetic seed, and older clients ignore the
+new response fields. New clients accept responses without suggestions and keep
+the existing creation control. An old backend may still suggest its old name or
+not support regeneration; no authorization/identity format changes or writer
+drain are required for this cosmetic enhancement. Existing creation-authority
+rollout requirements above still apply. No setup secrets, usernames, labels or
+seed values are added to logs or audit.
+
+## Assistant Markdown and formatting refusals (#2317 / #2310)
+
+NyxID-owned Telegram replies use CommonMark display text plus native Telegram
+entities. Headings become bold; code retains literal content; lists retain
+readable markers. Offsets and budgets count UTF-16 units. Fitting entities stay
+whole at boundaries; oversized spans become independent continuation entities.
+The shared `channel_reply_plan` / `channel_text` planner owns splitting.
+
+A definite HTTP 400, `ok:false`, code 400 entity-parsing refusal can retry the
+same rendered text once with entities removed. This stays inside the original
+part claim. Before fallback, metadata-only receipts record
+`telegram_formatting_fallback`; channel health retains the same notice separately
+from a terminal error. Manager retry after a confirmed rate refusal remembers
+plain-text fallback. Timeout, malformed response and 5xx never trigger fallback.
+A final definite refusal stops the suffix with an incomplete delivery, retaining
+accepted prefix IDs. A bound non-guest NyxBot relay event also gets an idempotent
+notice in its saved thread. Execution completion remains separate from delivery.
+
+Gateway `nyxid_relay` text is still rendered by CMA before returning to NyxID.
+CMA must send original unescaped CommonMark to the explicit
+`/api/v1/channel-relay/reply/commonmark`, `/thread-reply/commonmark`, or
+`/reply/update/commonmark` endpoint. Authentication and receipt semantics match
+the corresponding ordinary endpoint. Keep routing metadata; do not
+supply `entities` or `parse_mode` with CommonMark. Old replicas return 404 at
+these paths, with no send; never retry on the old path after an uncertain send.
+Legacy relay text is not heuristically unescaped. Legacy public wire payloads remain unchanged, including the historical
+Markdown default: this base ignores metadata.parse_mode. The new contract does
+not silently reinterpret an external caller's syntax. Formatting opt-in changes
+only rendered text and entities, not the existing request controls: manager
+sends keep numeric chat IDs, protected content and disabled previews; relay and
+proactive sends keep string chat IDs and their existing thread/reply fields.
+Edits keep only chat/message IDs and text or caption plus formatting. The legacy
+adapter's ignored `reply_markup`, `reply_parameters` and preview metadata remain
+ignored; CommonMark does not add new keyboard or preview behavior.
+Until CMA adopts this contract, its escaped gateway output can still show raw
+Markdown/backslashes; this NyxID change alone does not close that production case.
+
+Rendering changes preserve logical keys, immutable hashes and attempt fences.
+A changed plan under an existing key fails closed rather than restarting a
+prefix. Drain in-flight manager/proactive rows and writers before switching
+renderer versions and before rollback, as required by the multipart contract
+above. Mixed binaries may refuse a changed plan; they must never delete/rekey
+receipts or replay a sending/uncertain part. No new environment variable.

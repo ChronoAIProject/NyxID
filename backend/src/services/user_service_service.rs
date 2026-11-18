@@ -75,8 +75,10 @@ pub struct IdentityConfig {
 }
 
 fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
-    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-        || service.credential_binding.as_deref() == Some("platform")
+    if matches!(
+        service.source.as_deref(),
+        Some(AUTO_PROVISION_SOURCE | crate::services::voice::access::BOUND_SOURCE)
+    ) || service.credential_binding.as_deref() == Some("platform")
     {
         return Err(AppError::Forbidden(
             "Auto-connected services are platform managed and cannot be modified".to_string(),
@@ -91,6 +93,15 @@ pub fn ensure_service_fields_editable(
     service: &UserService,
     routing_fields: &[(&str, bool)],
 ) -> AppResult<()> {
+    if service.source.as_deref() == Some(crate::services::voice::access::BOUND_SOURCE) {
+        if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
+            return Err(AppError::Forbidden(format!(
+                "Bot voice connections have a fixed binding; cannot change {field}"
+            )));
+        }
+        // Owners may disable/delete a connection normally. This is not auto-provisioned.
+        return Ok(());
+    }
     if service.credential_binding.as_deref() == Some("platform")
         && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
     {
@@ -147,7 +158,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -184,7 +195,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {
@@ -1226,6 +1237,7 @@ pub async fn create_user_service_with_id(
         updated_at: now,
         state_version: 1,
         rotation_predecessor_id: None,
+        credential_verification: None,
     };
 
     crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
@@ -1952,29 +1964,9 @@ pub async fn validate_update_inputs(
         )?;
     }
 
-    // Reject injection-param AND node_id changes on services whose
-    // backing key is `node_managed` — the credential lives entirely
-    // on the node agent, so the server can't re-push when the caller
-    // changes `auth_method` / `auth_key_name` / `endpoint_url` (target
-    // URL) or rebinds/clears `node_id`. Without this guard:
-    //   * `auth_method`/`auth_key_name`/`endpoint_url` edits would
-    //     leave the node serving the stale injection config with no
-    //     path back to sync (twenty-eighth-round Codex P1).
-    //   * `node_id` moves / clears skip the push path (no server-held
-    //     credential to send) but still trigger the post-commit
-    //     `credential_remove` on the old node — the only holder of the
-    //     secret — leaving the service unusable until the user
-    //     re-enters the credential on the new target
-    //     (thirty-third-round Codex P1).
-    // Users must instead run `nyxid node credentials add` on the node
-    // directly, or promote the record first.
-    //
-    // Exception: when the caller supplies a non-empty `credential` in the
-    // same request, `ensure_user_api_key_for_update` promotes the
-    // node_managed record to a server-held credential type and the
-    // subsequent push rewrites the new node's config with the fresh
-    // secret + injection params. Blocking here would make the combined
-    // migrate-and-update flow unusable (twenty-ninth-round Codex P2).
+    // Node-local credentials cannot be rewritten or moved without promotion.
+    // Endpoint-only edits are routing metadata, synchronized separately without
+    // sending a credential. Preserve the auth/node guard for combined edits.
     let node_id_actually_changes = match node_id {
         None => false,
         Some(new_raw) => {
@@ -1989,8 +1981,8 @@ pub async fn validate_update_inputs(
     };
     let changes_injection_params = auth_method.is_some()
         || auth_key_name.is_some()
-        || new_endpoint_url.is_some()
-        || node_id_actually_changes;
+        || node_id_actually_changes
+        || (new_endpoint_url.is_some() && node_id.is_some());
     let caller_is_promoting = credential.is_some_and(|c| !c.is_empty());
     if changes_injection_params
         && !caller_is_promoting
@@ -2000,11 +1992,7 @@ pub async fn validate_update_inputs(
         && ak.credential_type == "node_managed"
     {
         return Err(AppError::BadRequest(
-            "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
-                 node-managed service via `PUT /keys` without also supplying a \
-                 new `credential` to promote the key to a server-held record. \
-                 Either include `credential` in the same request, or run \
-                 `nyxid node credentials add <slug> …` on the node directly."
+            "Cannot change auth_method/auth_key_name/node_id on a node-managed service without a new credential to promote it to a server-held record. To keep the secret on the node, change only endpoint_url via PUT /keys/{id}, or run nyxid node credentials set-url --service <slug> --url <URL> on the node; change injection settings locally on the node."
                 .to_string(),
         ));
     }
@@ -2940,6 +2928,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -4185,6 +4175,7 @@ mod tests {
             .unwrap();
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4266,6 +4257,7 @@ mod tests {
         public_catalog.id = uuid::Uuid::new_v4().to_string();
         public_catalog.slug = "cleanup-public".to_string();
         public_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4282,6 +4274,7 @@ mod tests {
         restricted_catalog.id = uuid::Uuid::new_v4().to_string();
         restricted_catalog.slug = "cleanup-restricted".to_string();
         restricted_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org_id.clone()],

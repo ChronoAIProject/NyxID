@@ -86,6 +86,43 @@ pub enum EventDecodeError {
 }
 
 impl BoundedEventDecoder {
+    /// Append ordinary byte runs in one copy; only line endings need the
+    /// incremental framing state machine. Retain the same bound and CRLF rules.
+    pub fn push(&mut self, mut bytes: &[u8]) -> Vec<Result<SseEvent, EventDecodeError>> {
+        let mut events = Vec::new();
+        while !bytes.is_empty() {
+            let end = bytes
+                .iter()
+                .position(|b| matches!(b, b'\r' | b'\n'))
+                .unwrap_or(bytes.len());
+            if end > 0 {
+                self.previous_cr = false;
+                self.line_has_content = true;
+                if !self.discarding {
+                    let remaining = self
+                        .max_bytes
+                        .unwrap_or(512 * 1024)
+                        .saturating_sub(self.buffer.len());
+                    if end >= remaining {
+                        self.buffer.clear();
+                        self.discarding = true;
+                        events.push(Err(EventDecodeError::TooLarge));
+                    } else {
+                        self.buffer.extend_from_slice(&bytes[..end]);
+                    }
+                }
+            }
+            bytes = &bytes[end..];
+            if let Some((&ending, rest)) = bytes.split_first() {
+                if let Some(event) = self.push_byte(ending) {
+                    events.push(event);
+                }
+                bytes = rest;
+            }
+        }
+        events
+    }
+
     pub fn with_max_bytes(max_bytes: usize) -> Self {
         Self {
             max_bytes: Some(max_bytes),
@@ -139,6 +176,30 @@ impl BoundedEventDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_decoder_matches_byte_decoder_at_every_boundary() {
+        let inputs: &[&[u8]] = &[
+            b"data: one\n\ndata: two\r\n\r\ndata: three\r\r",
+            b": keepalive\n\nevent: test\ndata: {\"usage\":{}}\n\ntrailing",
+            b"data: \xff\r\rdata: valid\n\n",
+            b"data: this frame exceeds the small configured bound\n\ndata: ok\n\n",
+        ];
+        for input in inputs {
+            for limit in [8, 32, 512 * 1024] {
+                for split in 1..=input.len() {
+                    let mut bytes = BoundedEventDecoder::with_max_bytes(limit);
+                    let mut chunks = BoundedEventDecoder::with_max_bytes(limit);
+                    for chunk in input.chunks(split) {
+                        let expected: Vec<_> =
+                            chunk.iter().filter_map(|b| bytes.push_byte(*b)).collect();
+                        assert_eq!(format!("{:?}", chunks.push(chunk)), format!("{expected:?}"));
+                        assert_eq!(chunks.has_incomplete_event(), bytes.has_incomplete_event());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_event_with_type_and_data() {

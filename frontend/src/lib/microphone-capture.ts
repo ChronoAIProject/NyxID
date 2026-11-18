@@ -92,6 +92,7 @@ export function microphoneDevice(ownerId: string): string | undefined {
 /** Created by the original gesture, then transferred to a voice client after
  * thread/options preparation. No provider work or microphone monitoring. */
 export class PreparedMicrophone {
+  readonly startedAt = performance.now();
   readonly capture: MicrophoneCapture;
   readonly meter: AudioActivityMeter;
   readonly ready: Promise<MediaStream>;

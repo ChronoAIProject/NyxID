@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+import { getPublicOrigin } from "./scripts/public-origin.mjs";
 export default defineConfig({
+  define: { __NYXID_PUBLIC_ORIGIN__: JSON.stringify(getPublicOrigin()) },
   plugins: [react()],
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "src") } },
   build: {

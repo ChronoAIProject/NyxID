@@ -21,6 +21,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Discover entitled public platform models and retail prices
+    Models {
+        #[command(subcommand)]
+        command: crate::commands::models::ModelCommands,
+    },
     /// Control NyxBot with the owner's first-party session (API keys are rejected)
     Nyxbot {
         #[command(subcommand)]
@@ -82,6 +87,11 @@ pub enum Commands {
     Pool {
         #[command(subcommand)]
         command: PoolCommands,
+    },
+    /// Inspect optional secondary evidence for a failed service invocation
+    Monitoring {
+        #[command(subcommand)]
+        command: MonitoringCommands,
     },
     /// Manage inbound event triggers
     Trigger {
@@ -213,7 +223,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
-    /// Call ChatGPT Pro (and other browser oracles) through NyxID
+    /// DEPRECATED: NyxID's built-in oracle is permanently retired; every call is refused with HTTP 410
     Oracle {
         #[command(subcommand)]
         command: OracleCommands,
@@ -227,6 +237,17 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum MonitoringCommands {
+    /// Redeem a short-lived diagnostic handle from a failed invocation
+    Diagnose {
+        /// Opaque handle returned by NyxID with the original failure
+        handle: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -331,6 +352,11 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Manage public models, private routes, access and exact price revisions
+    Models {
+        #[command(subcommand)]
+        command: crate::commands::models::AdminModelCommands,
+    },
     /// Configure billing, exact rates and ledger integrity
     Billing {
         #[command(subcommand)]
@@ -1099,6 +1125,11 @@ pub enum MfaCommands {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// Show the current account session's rolling and absolute expiry
+    Status {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List active sessions
     List {
         #[command(flatten)]
@@ -1159,6 +1190,17 @@ pub enum CatalogCommands {
         /// Publication state to apply atomically to all selected operations
         #[arg(long, default_value = "published", value_parser = ["published", "paused", "draft", "validated"])]
         state: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Overwrite identity-forwarding settings on every connection to a service with the
+    /// service's current settings, including customized ones (Admin or the service creator)
+    ResyncIdentity {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1539,8 +1581,10 @@ pub enum ServiceCommands {
         /// Desired scope set, declared up front (repeatable, comma- or
         /// space-separated). Pre-seeds the wizard picker with exactly these
         /// scopes so the whole change is driven from one command — ideal for
-        /// AI/CLI use. Omit to open the picker seeded with the connection's
-        /// current scopes. The upstream provider still re-consents in the
+        /// AI/CLI use. Providers with add-only scope management (GitHub)
+        /// retain their current grants even if omitted here. Removals on
+        /// other providers require confirmation. Omit to open the picker
+        /// seeded with the connection's current scopes. The provider re-consents in the
         /// browser. Example: --set "tweet.read,media.write"
         #[arg(long = "set", value_name = "SCOPES")]
         set_scopes: Vec<String>,
@@ -4319,6 +4363,83 @@ mod tests {
     }
 
     #[test]
+    fn node_credentials_add_url_retains_interactive_add_arguments() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "add",
+            "--service",
+            "monitor",
+            "--url",
+            "http://new-monitor",
+        ])
+        .unwrap();
+        let Commands::Node {
+            command:
+                NodeCommands::Credentials {
+                    command:
+                        NodeCredentialCommands::Add {
+                            service,
+                            url,
+                            header,
+                            query_param,
+                            secret_format,
+                            value,
+                        },
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("add must retain the local credential flow");
+        };
+        assert_eq!(service, "monitor");
+        assert_eq!(url.as_deref(), Some("http://new-monitor"));
+        assert!(header.is_none() && query_param.is_none() && value.is_none());
+        assert_eq!(secret_format, CredentialSecretFormat::Raw);
+    }
+
+    #[test]
+    fn node_credentials_set_url_parses_explicit_target_and_clear() {
+        for target in ["http://new-monitor", ""] {
+            let cli = Cli::try_parse_from([
+                "nyxid",
+                "node",
+                "credentials",
+                "set-url",
+                "--service",
+                "monitor",
+                "--url",
+                target,
+            ])
+            .unwrap();
+            let Commands::Node {
+                command:
+                    NodeCommands::Credentials {
+                        command: NodeCredentialCommands::SetUrl { service, url },
+                        ..
+                    },
+            } = cli.command
+            else {
+                panic!("set-url must select the explicit migration flow");
+            };
+            assert_eq!(service, "monitor");
+            assert_eq!(url, target);
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "node",
+                "credentials",
+                "set-url",
+                "--service",
+                "monitor",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn node_credentials_accept_accepts_value_env() {
         let cli = Cli::try_parse_from([
             "nyxid",
@@ -4559,6 +4680,15 @@ pub enum NodeCredentialCommands {
         /// Inline secret value (skips interactive prompt; NOT recommended)
         #[arg(long, hide = true)]
         value: Option<String>,
+    },
+    /// Change a node-managed service's endpoint using your owner login, preserving its secret
+    SetUrl {
+        /// Existing service slug on this node
+        #[arg(long)]
+        service: String,
+        /// New endpoint URL; an empty string clears it only after the node acknowledges
+        #[arg(long)]
+        url: String,
     },
     /// Add an OAuth credential for a service (runs device code or authorization code flow)
     AddOauth {

@@ -1,5 +1,6 @@
 //! Shared post-parse channel routing and callback dispatch.
 
+use super::channel_inbound_diagnostics::{self as diagnostics, Outcome};
 use crate::AppState;
 use crate::services::{channel_relay_service, channel_routing_service};
 use crate::telemetry::{
@@ -45,22 +46,88 @@ pub(crate) fn hash_conversation_id(id: &str) -> String {
     hex::encode(&digest[..8])
 }
 
+/// The authenticated receive path, never inferred from a registration snapshot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundSource {
+    Webhook,
+    Poll,
+    DiscordGateway,
+}
+
+impl InboundSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Webhook => "webhook",
+            Self::Poll => "poll",
+            Self::DiscordGateway => "discord_gateway",
+        }
+    }
+}
+
 pub(crate) async fn process_inbound_messages(
+    source: InboundSource,
     state: InboundDeps<'_>,
     bot: &crate::models::channel_bot::ChannelBot,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
     messages: &[crate::services::channel_platform::InboundMessage],
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    process_messages(source, state, bot, adapter, messages, None).await
+}
+
+pub(crate) async fn process_discord_gateway_message(
+    state: &AppState,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    inbound: &super::channel_platform::InboundMessage,
+    fence: &super::discord_gateway::Fence,
+    facts: &crate::models::channel_thread::ChannelThreadFacts,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if bot.id != fence.bot.id
+        || bot.user_id != fence.bot.user_id
+        || !super::channel_thread_service::valid_facts(facts, inbound)
+        || facts
+            .discord_gateway
+            .as_ref()
+            .is_none_or(|d| d.version != 1 || d.bot_id != bot.platform_bot_id)
+    {
+        return Err(Box::new(crate::errors::AppError::ValidationError(
+            "Discord Gateway facts do not match the source".into(),
+        )));
+    }
+    process_messages(
+        InboundSource::DiscordGateway,
+        InboundDeps::from(state),
+        bot,
+        adapter,
+        std::slice::from_ref(inbound),
+        Some((fence, facts)),
+    )
+    .await
+}
+
+async fn process_messages(
+    source: InboundSource,
+    state: InboundDeps<'_>,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    messages: &[super::channel_platform::InboundMessage],
+    gateway: Option<(
+        &super::discord_gateway::Fence,
+        &crate::models::channel_thread::ChannelThreadFacts,
+    )>,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     if messages.is_empty() {
         return Ok(true);
     }
 
     // Parse bot owner UUID once (used for relay token generation per-message)
-    let bot_owner_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
-        |e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("invalid bot owner user_id: {e}").into()
-        },
-    )?;
+    let bot_owner_uuid = diagnostics::checked(
+        state.db,
+        bot,
+        Outcome::AuthorityChanged,
+        bot.user_id.parse::<uuid::Uuid>(),
+    )
+    .await?;
 
     let mut complete = true;
     let mut stamped = false;
@@ -69,6 +136,21 @@ pub(crate) async fn process_inbound_messages(
         let notification = activity
             .as_ref()
             .is_some_and(|value| !value.reply_supported);
+        if activity
+            .as_ref()
+            .is_some_and(|value| value.kind == "encrypted_chat")
+        {
+            diagnostics::record(state.db, bot, Outcome::EncryptedChatUnsupported).await;
+        } else if notification {
+            diagnostics::record(state.db, bot, Outcome::NotificationOnly).await;
+        } else if inbound
+            .text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+            && inbound.attachments.is_empty()
+        {
+            diagnostics::record(state.db, bot, Outcome::EmptyContent).await;
+        }
         if let Some(billing) = super::channel_billing_service::ChannelBilling::for_bot(
             state.db,
             state.billing,
@@ -84,6 +166,7 @@ pub(crate) async fn process_inbound_messages(
         } else {
             billing.received(&inbound.platform_message_id).await
         } {
+            diagnostics::record(state.db, bot, Outcome::BillingRefused).await;
             tracing::warn!(bot_id = %bot.id, stage = "billing", error_code = error.error_code(), "channel webhook billing admission failed");
             if super::channel_billing_service::blocks_channel(&error)
                 && super::channel_billing_service::suspend(&state, bot, adapter)
@@ -97,19 +180,30 @@ pub(crate) async fn process_inbound_messages(
         // Liveness is stamped once per batch, only after billing admitted the
         // delivery; a diagnostics write failure never blocks processing.
         if !stamped {
-            super::channel_bot_service::record_inbound_success(state.db, bot).await;
+            if let Some((fence, _)) = gateway {
+                fence.record_inbound(state.db).await?;
+            } else {
+                super::channel_bot_service::record_inbound_success(state.db, bot, source).await;
+            }
             stamped = true;
         }
         if adapter.dedup_inbound_by_platform_message_id()
             && !adapter.atomic_inbound_admission()
-            && channel_relay_service::inbound_platform_message_exists(
+            && diagnostics::checked(
                 state.db,
-                &bot.id,
-                &bot.platform,
-                &inbound.platform_message_id,
+                bot,
+                Outcome::StorageUnavailable,
+                channel_relay_service::inbound_platform_message_exists(
+                    state.db,
+                    &bot.id,
+                    &bot.platform,
+                    &inbound.platform_message_id,
+                )
+                .await,
             )
             .await?
         {
+            diagnostics::record(state.db, bot, Outcome::Duplicate).await;
             continue;
         }
         // Resolve which agent should handle this message
@@ -124,6 +218,8 @@ pub(crate) async fn process_inbound_messages(
         {
             Ok(Some(r)) => r,
             Ok(None) => {
+                diagnostics::record(state.db, bot, Outcome::NoRoute).await;
+                super::channel_bot_service::record_inbound_route(state.db, bot, "no_route").await;
                 if bot.platform == "x" {
                     tracing::warn!(bot_id = %bot.id, stage = "routing", "X webhook has no eligible agent route");
                 }
@@ -135,6 +231,9 @@ pub(crate) async fn process_inbound_messages(
                 continue;
             }
             Err(e) => {
+                diagnostics::record(state.db, bot, Outcome::RouteUnavailable).await;
+                super::channel_bot_service::record_inbound_route(state.db, bot, "unavailable")
+                    .await;
                 tracing::warn!(
                     bot_id = %bot.id,
                     error_code = e.error_code(),
@@ -146,10 +245,19 @@ pub(crate) async fn process_inbound_messages(
         };
 
         if route.conversation.user_id != bot.user_id {
+            diagnostics::record(state.db, bot, Outcome::AuthorityChanged).await;
+            super::channel_bot_service::record_inbound_route(state.db, bot, "unavailable").await;
             complete = false;
             continue;
         }
-        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+        diagnostics::checked(
+            state.db,
+            bot,
+            Outcome::AuthorityChanged,
+            super::ownership_transfer_service::require_current_bot(state.db, bot).await,
+        )
+        .await?;
+        super::channel_bot_service::record_inbound_route(state.db, bot, "matched").await;
 
         let mut metadata = channel_relay_service::inbound_metadata(
             &bot.id,
@@ -161,9 +269,11 @@ pub(crate) async fn process_inbound_messages(
             &uuid::Uuid::new_v4().to_string(),
         );
         metadata.activity = activity.clone();
-        // Additive facts are dormant by default and limited to direct NyxBot
-        // routes. Metadata failure must not change legacy message delivery.
-        if !notification {
+        // Socket-derived Discord facts accompany every admitted route. Other
+        // adapters retain the existing flag-gated direct NyxBot projection.
+        if let Some((_, facts)) = gateway {
+            metadata.thread_context = Some(facts.clone());
+        } else if !notification {
             match super::channel_thread_service::inbound_facts(
                 state.db,
                 bot,
@@ -182,15 +292,43 @@ pub(crate) async fn process_inbound_messages(
             metadata.thread_id = None;
             metadata.content_type = "unknown".into();
         }
-        let stored = if adapter.atomic_inbound_admission() {
+        let stored = if let Some((fence, _)) = gateway {
+            super::channel_admission_service::store_discord(state.db, metadata, fence).await
+        } else if adapter.atomic_inbound_admission() {
             super::channel_admission_service::store(state.db, metadata).await
         } else {
             super::channel_admission_service::store_current_owner(state.db, metadata).await
         };
         let stored_message = match stored {
             Ok(Some(message)) => message,
-            Ok(None) => continue,
+            Ok(None) => {
+                if bot.platform != "x" {
+                    continue;
+                }
+                let collection = if notification {
+                    crate::models::channel_activity::NOTIFICATIONS_COLLECTION
+                } else {
+                    crate::models::channel_message::COLLECTION_NAME
+                };
+                let existing = state
+                    .db
+                    .collection::<bson::Document>(collection)
+                    .find_one(bson::doc! {
+                        "channel_bot_id":&bot.id,"user_id":&bot.user_id,"platform":&bot.platform,
+                        "direction":"inbound","platform_message_id":&inbound.platform_message_id,
+                    })
+                    .projection(bson::doc! {"_id":1})
+                    .await;
+                let outcome = match existing {
+                    Ok(Some(_)) => Outcome::Duplicate,
+                    Ok(None) => Outcome::AdmissionRefused,
+                    Err(_) => Outcome::StorageUnavailable,
+                };
+                diagnostics::record(state.db, bot, outcome).await;
+                continue;
+            }
             Err(error) => {
+                diagnostics::record(state.db, bot, Outcome::StorageUnavailable).await;
                 tracing::error!(bot_id = %bot.id, stage = "storage", error_code = error.error_code(), "failed to admit inbound message");
                 complete = false;
                 continue;
@@ -236,6 +374,7 @@ pub(crate) async fn process_inbound_messages(
         {
             Ok(k) if route.conversation.platform == bot.platform => k,
             _ => {
+                diagnostics::record(state.db, bot, Outcome::CallbackKeyUnavailable).await;
                 tracing::warn!(
                     api_key_id = %route.api_key_id,
                     "API key not found for callback signing"
@@ -258,10 +397,16 @@ pub(crate) async fn process_inbound_messages(
             )
         });
         if notification && !extended {
-            super::channel_activity_service::update_callback_status(
+            diagnostics::checked(
                 state.db,
-                &stored_message,
-                "not_enabled",
+                bot,
+                Outcome::StorageUnavailable,
+                super::channel_activity_service::update_callback_status(
+                    state.db,
+                    &stored_message,
+                    "not_enabled",
+                )
+                .await,
             )
             .await?;
             continue;
@@ -273,6 +418,14 @@ pub(crate) async fn process_inbound_messages(
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
+            || diagnostics::checked(
+                state.db,
+                bot,
+                Outcome::StorageUnavailable,
+                channel_relay_service::is_linked_org_nyxbot_route(state.db, &bot.id, &api_key.id)
+                    .await,
+            )
+            .await?
         {
             None
         } else {
@@ -284,8 +437,12 @@ pub(crate) async fn process_inbound_messages(
             let agent_scope = crate::crypto::jwt::RelayAgentScope {
                 api_key_id: api_key.id.clone(),
                 api_key_name: api_key.name.clone(),
-                allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(
-                    state.db, &api_key,
+                allowed_service_ids: diagnostics::checked(
+                    state.db,
+                    bot,
+                    Outcome::StorageUnavailable,
+                    crate::services::key_service::effective_allowed_service_ids(state.db, &api_key)
+                        .await,
                 )
                 .await?,
                 allowed_node_ids: api_key.allowed_node_ids.clone(),
@@ -316,9 +473,10 @@ pub(crate) async fn process_inbound_messages(
             ) {
                 Ok(token) => Some(token),
                 Err(e) => {
+                    diagnostics::record(state.db, bot, Outcome::ReplyTokenUnavailable).await;
                     tracing::error!(
                         message_id = %stored_message.id,
-                        error = %e,
+                        error_code = e.error_code(),
                         "failed to generate relay reply token"
                     );
                     let _ = super::channel_activity_service::update_callback_status(
@@ -370,8 +528,9 @@ pub(crate) async fn process_inbound_messages(
                     current.state_version == api_key.state_version
                         && current.key_hash == api_key.key_hash
                 });
-        let current_route = state.db.collection::<crate::models::channel_conversation::ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME)
-            .find_one(bson::doc! {"_id": &route.conversation.id, "user_id": &bot.user_id, "is_active": true, "agent_api_key_id": &api_key.id, "retired_by_transfer": {"$ne": true}}).await?;
+        let current_route = diagnostics::checked(state.db,bot,Outcome::StorageUnavailable,
+            state.db.collection::<crate::models::channel_conversation::ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(bson::doc! {"_id": &route.conversation.id, "user_id": &bot.user_id, "is_active": true, "agent_api_key_id": &api_key.id, "retired_by_transfer": {"$ne": true}}).await).await?;
         let route_is_current = current_route.as_ref().is_some_and(|current| {
             !extended
                 || activity.as_ref().is_some_and(|value| {
@@ -383,6 +542,7 @@ pub(crate) async fn process_inbound_messages(
                 })
         });
         if !key_is_current || !route_is_current {
+            diagnostics::record(state.db, bot, Outcome::AuthorityChanged).await;
             let _ = super::channel_activity_service::update_callback_status(
                 state.db,
                 &stored_message,
@@ -391,7 +551,27 @@ pub(crate) async fn process_inbound_messages(
             .await;
             continue;
         }
-        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+        diagnostics::checked(
+            state.db,
+            bot,
+            Outcome::AuthorityChanged,
+            super::ownership_transfer_service::require_current_bot(state.db, bot).await,
+        )
+        .await?;
+        if let Some((fence, _)) = gateway
+            && !fence.current(state.db).await?
+        {
+            return Ok(false);
+        }
+        if !notification
+            && (inbound
+                .text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+                || !inbound.attachments.is_empty())
+        {
+            diagnostics::record(state.db, bot, Outcome::CallbackPending).await;
+        }
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,
@@ -425,6 +605,15 @@ pub(crate) async fn process_inbound_messages(
         // reflects delivery of the webhook to the agent's callback URL.
         match delivery.result {
             Ok(()) => {
+                let outcome = if matches!(
+                    delivery.disposition,
+                    Some(crate::models::channel_message::CallbackDisposition::Refused { .. })
+                ) {
+                    Outcome::CallbackRefused
+                } else {
+                    Outcome::CallbackAccepted
+                };
+                diagnostics::record(state.db, bot, outcome).await;
                 let _ = super::channel_activity_service::update_callback_status(
                     state.db,
                     &stored_message,
@@ -433,10 +622,11 @@ pub(crate) async fn process_inbound_messages(
                 .await;
             }
             Err(e) => {
+                diagnostics::record(state.db, bot, Outcome::CallbackFailed).await;
                 tracing::warn!(
                     message_id = %stored_message.id,
                     upstream_status = ?delivery.http_status,
-                    error = %e,
+                    error_code = e.error_code(),
                     "callback delivery failed"
                 );
                 let _ = super::channel_activity_service::record_callback_failure(

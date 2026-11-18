@@ -663,3 +663,106 @@ async fn native_ssh_final_refusal_clears_only_presend_meter_bookkeeping() {
         Some("assistant_authority_changed")
     );
 }
+
+#[tokio::test]
+async fn invisible_card_2072_sheets_write_ask_history_allow_and_single_dispatch() {
+    use crate::handlers::assistant_nyxagent as web;
+    use axum::{
+        body::{Body, to_bytes},
+        extract::{Path, Query, State},
+        http::Request,
+    };
+    let mut f = orchestrator_fixture("card2072_sheets_write").await;
+    mode(&f, AccessMode::AskEveryTime).await;
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(
+            "/v4/spreadsheets/ledger/values:batchUpdate",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(json!({"totalUpdatedCells":2})),
+        )
+        .mount(&server)
+        .await;
+    let id = connected(&f.state.db, &f.owner, "google-sheets", &server.uri()).await;
+    grant_service(&mut f, &id).await;
+    async fn send(f: &Fixture, ack: Option<&str>) -> (axum::http::StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/v1/proxy/s/google-sheets/v4/spreadsheets/ledger/values:batchUpdate")
+            .header("content-type", "application/json");
+        if let Some(id) = ack {
+            builder = builder.header(ACK_HEADER, id);
+        }
+        let mut request=builder.body(Body::from(json!({"valueInputOption":"USER_ENTERED","data":[{"range":"A1:B1","values":[["Ledger","=SUM(B2:B10)"]]}]}).to_string())).unwrap();
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        let mut auth = f.auth.clone();
+        auth.assistant_chat = Some(Arc::new(f.chat.clone()));
+        let response = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+            State(f.state.clone()),
+            auth,
+            Default::default(),
+            Path((
+                "google-sheets".into(),
+                "v4/spreadsheets/ledger/values:batchUpdate".into(),
+            )),
+            request,
+        ))
+        .await
+        .unwrap();
+        let status = response.status();
+        let value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        (status, value)
+    }
+    let (status, card) = send(&f, None).await;
+    assert_eq!(status, 409, "{card}");
+    assert_eq!(card["status"], "pending");
+    assert_eq!(card["code"], "acknowledgement_required");
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    assert_eq!(
+        card["review_path"],
+        format!("/assistant?c={}&card={ack}", f.row.id)
+    );
+    assert!(
+        card["review_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(&f.state.config.frontend_url)
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    // Real web-history response, including a fresh reload, contains the exact card.
+    for _ in 0..2 {
+        let Json(page) = web::history(
+            State(f.state.clone()),
+            test_utils::test_auth_user(&f.owner),
+            Path(f.row.id.clone()),
+            Query(web::HistoryQuery::default()),
+        )
+        .await
+        .unwrap();
+        let page = serde_json::to_value(page).unwrap();
+        assert_eq!(page["acknowledgements"][0]["id"], ack);
+        assert_eq!(page["acknowledgements"][0]["status"], "pending");
+        assert_eq!(
+            page["acknowledgements"][0]["review_path"],
+            card["review_path"]
+        );
+    }
+    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
+        .await
+        .unwrap();
+    let (status, result) = send(&f, Some(ack)).await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["totalUpdatedCells"], 2);
+    let (status, result) = send(&f, Some(ack)).await;
+    assert_eq!(status, 409, "{result}");
+    assert_eq!(result["status"], "used");
+    assert_eq!(result["code"], "acknowledgement_used");
+    assert!(result.get("confirm_phrase").is_none());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}

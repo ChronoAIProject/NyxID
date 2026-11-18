@@ -126,6 +126,9 @@ pub struct UpdateEndpointRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EndpointResponse {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub node_target_sync: Vec<crate::services::node_target_service::TargetSync>,
     pub id: String,
     pub label: String,
     /// Omitted when the endpoint belongs to an auto-connected service.
@@ -315,16 +318,43 @@ pub async fn update_endpoint(
         Some(skills) if skills.is_empty() => user_endpoint_service::RecommendedSkillsUpdate::Clear,
         Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
     };
-    user_endpoint_service::update_endpoint(
-        &state.db,
-        &owner_id,
-        &endpoint_id,
+    // Validate all fields before a strict clear can touch local metadata.
+    user_endpoint_service::build_endpoint_update(
         body.url.as_deref(),
         body.label.as_deref(),
         spec_update,
-        skills_update,
-    )
-    .await?;
+        skills_update.clone(),
+    )?;
+    let migration = if let Some(url) = body.url.as_deref() {
+        let migration = crate::services::node_target_service::Migration::prepare(
+            &state.db,
+            &actor,
+            &owner_id,
+            &endpoint_id,
+            url,
+        )
+        .await?;
+        migration.before_commit(&state.node_ws_manager).await?;
+        Some(migration)
+    } else {
+        None
+    };
+    if let Some(migration) = &migration {
+        migration
+            .commit(&state.db, body.label.as_deref(), spec_update, skills_update)
+            .await?;
+    } else {
+        user_endpoint_service::update_endpoint(
+            &state.db,
+            &owner_id,
+            &endpoint_id,
+            body.url.as_deref(),
+            body.label.as_deref(),
+            spec_update,
+            skills_update,
+        )
+        .await?;
+    }
 
     let ep = user_endpoint_service::get_endpoint(&state.db, &owner_id, &endpoint_id).await?;
 
@@ -347,7 +377,17 @@ pub async fn update_endpoint(
     )
     .await;
 
-    Ok(Json(endpoint_response(ep, false)))
+    let mut response = endpoint_response(ep, false);
+    if let Some(migration) = migration {
+        response.node_target_sync = migration
+            .after_commit(
+                &state.db,
+                &state.node_ws_manager,
+                crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+            )
+            .await;
+    }
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -454,6 +494,7 @@ pub async fn get_endpoint_authorization(
 
 fn endpoint_response(ep: UserEndpoint, auto_connected: bool) -> EndpointResponse {
     EndpointResponse {
+        node_target_sync: Vec::new(),
         id: ep.id,
         label: ep.label,
         url: (!auto_connected).then_some(ep.url),
@@ -1097,6 +1138,7 @@ mod tests {
 
     fn poisoned_endpoint_response() -> EndpointResponse {
         EndpointResponse {
+            node_target_sync: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             label: "Bearer nyxid_ag_abcdefghijklmnopqrst".to_string(),
             url: Some("https://user:secret@api.example.com/v1#token".to_string()),

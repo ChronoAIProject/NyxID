@@ -105,7 +105,7 @@ async fn supersede_operation(
     Ok(())
 }
 
-fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
+pub(crate) fn owner_ineligibility(user: Option<&Document>) -> Option<&'static str> {
     let Some(user) = user else {
         return Some("owner_not_found");
     };
@@ -1114,6 +1114,11 @@ async fn request_action_inner(
         .await?
         .ok_or_else(|| AppError::NotFound("managed machine not found".into()))?;
     validate_current_contract(&prior)?;
+    if input.action == LifecycleAction::Resume && prior.native_uncertainty.is_some() {
+        return Err(AppError::Conflict(
+            "native_runtime_investigation_required".into(),
+        ));
+    }
     let prepared = if input.action == LifecycleAction::Resume {
         super::remote_machine_runtime::prepare_start(
             billing.as_deref(),
@@ -1168,6 +1173,9 @@ async fn request_action_inner(
                     && machine.resource_state != ResourceState::Paused
                 {
                     return Err(AppError::Conflict("managed_machine_is_not_paused".into()));
+                }
+                if input_owned.action == LifecycleAction::Resume && machine.native_uncertainty.is_some() {
+                    return Err(AppError::Conflict("native_runtime_investigation_required".into()));
                 }
                 if input_owned.action == LifecycleAction::Rekey && (machine.runtime_generation == 0 || machine.resource_state == ResourceState::Deleting) {
                     return Err(AppError::Conflict("managed_machine_cannot_rekey_before_runtime_or_during_delete".into()));
@@ -1542,10 +1550,13 @@ pub async fn advance_runtime_generation(
             ));
         }
     }
+    // Retain the predecessor Node as the current health target until an owned
+    // successor Pod binds its Node. Clearing runtime proof and Pod identity
+    // below still prevents that health target from granting execution authority.
     db.collection::<ManagedMachine>(MACHINES)
         .find_one_and_update(
             doc! {"_id": machine_id, "revision": expected_revision, "runtime_generation": expected_generation, "resource_state": {"$in": ["provisioning", "resuming", "reconciling", "stopping", "ready", "degraded"]}},
-            doc! {"$set": {"pod_uid": pod_uid, "native_observation": bson::Bson::Null, "native_pod_name": bson::Bson::Null, "native_node_name": bson::Bson::Null, "native_node_uid": bson::Bson::Null, "native_run_not_after": bson::Bson::Null, "writer_fence": Uuid::new_v4().to_string(), "writer_admitted": false, "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null, "bootstrap_digest": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now), "resource_state": ResourceState::Resuming.as_str()}, "$inc": {"revision": 1, "runtime_generation": 1, "credential_epoch": 1}},
+            doc! {"$set": {"pod_uid": pod_uid, "native_observation": bson::Bson::Null, "native_pod_name": bson::Bson::Null, "native_run_not_after": bson::Bson::Null, "writer_fence": Uuid::new_v4().to_string(), "writer_admitted": false, "runtime_submission_started_at": bson::Bson::Null, "bootstrap_delivery_id": bson::Bson::Null, "bootstrap_digest": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now), "resource_state": ResourceState::Resuming.as_str()}, "$inc": {"revision": 1, "runtime_generation": 1, "credential_epoch": 1}},
         )
         .return_document(ReturnDocument::After)
         .await?
@@ -1657,7 +1668,7 @@ pub async fn finalize_unallocated_delete(
             if !deletion_authorized_in_session(&db_owned, session, &machine_id).await? {
                 return Err(AppError::Conflict("machine_owner_deletion_basis_required".into()));
             }
-            if !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
+            if !super::remote_machine_operation_service::delete_creation_responsibilities_terminal_in_session(&db_owned,session,&machine).await? {return Ok(None);}
             super::remote_machine_runtime::require_accounting_final_in_session(&db_owned,session,&machine).await?;
             let node = db_owned.collection::<Document>(crate::models::node::COLLECTION_NAME).find_one(doc! {"_id": &machine_id, "is_active": false, "signing_secret_encrypted": bson::Bson::Null}).session(&mut *session).await?;
             if node.is_none() { return Ok(None); }
@@ -1793,6 +1804,42 @@ pub async fn entitlement(db: &Database, owner_id: &str) -> AppResult<MachineEnti
     })
 }
 
+/// Immutable account-safety provenance is shared by the producer and the
+/// first-claim cancellation validator. Progress may replace the error code.
+pub(crate) struct AccountSafetyIdentity {
+    pub idempotency_key_hash: String,
+    pub request_digest: String,
+    pub effect_digest: String,
+}
+
+pub(crate) fn account_safety_identity(
+    machine: &ManagedMachine,
+    action: LifecycleAction,
+    retained_recovery_operation: Option<&str>,
+) -> AccountSafetyIdentity {
+    let key = if let Some(operation) = retained_recovery_operation {
+        format!(
+            "account-safety:retained-recovery:{}:{operation}",
+            machine.runtime_generation
+        )
+    } else {
+        format!(
+            "account-safety:{}:{}",
+            action.as_str(),
+            machine.runtime_generation
+        )
+    };
+    AccountSafetyIdentity {
+        idempotency_key_hash: format!("system:{}", idempotency_key_hash(&key)),
+        request_digest: request_digest(
+            &json!({"source":"account_safety","generation":machine.runtime_generation}),
+        ),
+        effect_digest: request_digest(
+            &json!({"machine_id":machine.node_id,"safety_generation":machine.runtime_generation}),
+        ),
+    }
+}
+
 /// Bounded, fair account-safety sweep. A lost account qualification closes
 /// authority and queues a physical pause. Only a durable, policy-bound owner
 /// deletion basis permits irreversible cleanup, including already paused disks.
@@ -1901,12 +1948,13 @@ async fn suspend_ineligible_filtered(
                     if touched.matched_count!=1{return Err(AppError::Conflict("owner_safety_state_changed".into()));}
                 }
                 let action=if deletion {LifecycleAction::Delete} else {LifecycleAction::Pause};
+                let identity=account_safety_identity(&current,action,unauthorized_replay.then(||current.active_operation_id.as_deref().unwrap_or("unbound")));
                 let now = Utc::now();
                 let operation = MachineOperation {
                     id: operation_id.clone(), owner_id: current.owner_id.clone(), machine_id: Some(current.node_id.clone()),
                     action,
-                    idempotency_key_hash: format!("system:{}", idempotency_key_hash(&if unauthorized_replay {format!("account-safety:retained-recovery:{}:{}",current.runtime_generation,current.active_operation_id.as_deref().unwrap_or("unbound"))} else {format!("account-safety:{}:{}",action.as_str(),current.runtime_generation)})),
-                    request_digest: request_digest(&json!({"source":"account_safety","generation":current.runtime_generation})),
+                    idempotency_key_hash: identity.idempotency_key_hash,
+                    request_digest: identity.request_digest,
                     expected_revision: Some(current.revision), desired_runtime_generation: Some(current.runtime_generation),
                     state: OperationState::Accepted, cleanup_state: CleanupState::Pending, effect_id: Some(effect_id.clone()),
                     error_code: Some(reason.into()), error_message: None, evidence_digest: None, retry_count: 0, delete_retry: None,
@@ -1914,7 +1962,7 @@ async fn suspend_ineligible_filtered(
                 };
                 let outbox = MachineEffectOutbox {
                     id: effect_id.clone(), operation_id: operation_id.clone(), machine_id: current.node_id.clone(), owner_id: current.owner_id.clone(),
-                    kind: EffectKind::for_action(action), effect_digest: request_digest(&json!({"machine_id":current.node_id,"safety_generation":current.runtime_generation})),
+                    kind: EffectKind::for_action(action), effect_digest: identity.effect_digest,
                     namespace: current.sandbox_namespace.clone(), sandbox_name: current.sandbox_name.clone(), desired_mode: "suspended".into(),
                     state: EffectState::Pending, attempts: 0, claim_id: None, undispatched_claim_id: None, claimed_until: None, last_error: None, available_at: Some(now),
                     submission: None, created_at: now, updated_at: now,

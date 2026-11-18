@@ -63,12 +63,9 @@ impl SessionAdmission {
                         &self.chat.api_key_id,
                     )
                     .await?;
-                    let access = super::org_agent_service::resolve_key_access(
-                        &state.db,
-                        &key.user_id,
-                        key.assistant_agent_owner_id.as_deref(),
-                    )
-                    .await?;
+                    let access =
+                        super::org_agent_service::resolve_credential_access(&state.db, &key)
+                            .await?;
                     let (all, nodes) =
                         super::org_agent_service::key_nodes(&state.db, &key, access.as_deref())
                             .await?;

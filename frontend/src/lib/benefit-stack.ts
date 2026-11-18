@@ -176,22 +176,6 @@ export function equalShareStack(inputs: readonly StackInput[]): Stack {
   );
 }
 
-/**
- * Credit grants: each grant's consumed credits as a share of all the grants'
- * original credits, so the total fill is the row's overall utilization.
- */
-export function proportionalStack(inputs: readonly StackInput[]): Stack {
-  const total = inputs.reduce((sum, input) => sum + input.limit, 0);
-  return build(
-    inputs,
-    inputs.map((input) =>
-      total > 0
-        ? (Math.min(Math.max(0, input.used), input.limit) / total) * 100
-        : 0,
-    ),
-  );
-}
-
 /** Screen-reader breakdown: overall, then every input's own utilization. */
 export function stackValueText(stack: Stack): string {
   return [

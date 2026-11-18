@@ -75,9 +75,9 @@ e.g. `https://nyx-api.chrono-ai.fun`):
   `PUT {BASE}/api/v1/user-services/{user_service_id}` — for example,
   `{"forward_access_token": true}`. A catalog service ID is a different
   identity and must never be used here. Read `GET {BASE}/api/v1/keys`
-  afterward and verify the same UserService ID. Platform-wide catalog
-  recovery is the separate admin-only
-  `POST {BASE}/api/v1/services/{catalog_service_id}/resync-identity` API.
+  afterward and verify the same UserService ID. Catalog-wide recovery is
+  the separate `POST {BASE}/api/v1/services/{catalog_service_id}/resync-identity`
+  API (Admin or the catalog service's creator, human session only).
 - **Call the target service through the proxy**
   (`nyxid proxy request <slug> ...`):
   `M {BASE}/api/v1/proxy/s/{slug}/<path>` — NyxID injects the stored

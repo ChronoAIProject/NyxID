@@ -19,6 +19,66 @@ The catalog integration must propagate a signed person identity (`jwt` or
 Shared master credentials are forbidden, including legacy fallback and platform
 bindings. Missing identity fails closed. No cross-person package cache exists.
 
+The internal bound-skill reader may read the agent's attached root or pinned
+dependency through the owner's concrete Ornn connection without an ordinary
+Ornn service grant. This exception applies only to the exact version's GET
+download; content is hash-checked before use. Signed identity, live key/turn,
+owner or organization connection access, revocation, and explicit operation
+restrictions still apply. Other Ornn calls receive no exception.
+
+For an organization specialist, attached **Test** previews, runtime reads and
+preloads use an accessible, active Ornn connection owned by that organization.
+Selection is deterministic by connection ID among eligible rows; personal,
+other-organization and shared-master fallbacks are forbidden. Ornn decides
+content visibility for the signed acting person: organization grants, creator
+access and direct-user grants retain their existing semantics. Revoking an org
+grant refuses an org-only reader; a creator or direct grantee remains eligible
+when Ornn admits them. NyxID imposes no additional org-grant requirement and
+performs no extra metadata request for runtime downloads. It still enforces the
+exact bound GUID/version path and verifies the returned bytes against the pin's
+SHA-256. A downstream refusal does not trigger a second credential attempt.
+A successful preview certifies that person's access now, not another member's
+access or a future turn's key/policy state.
+
+Ornn resolves private organization grants through a bearer-authenticated NyxID
+`GET /orgs` callback. The internal reader supplies a 60-second, purpose-limited
+capability (JWT type `nyxid-ornn-org-read+jwt`, audience
+`nyxid:ornn-org-membership`), not a browser token or raw conversation key. Only
+`GET /api/v1/orgs` accepts it, returning the single bound organization after live
+person/org membership, agent, pins-digest and connection checks. Runtime tokens
+also recheck the key, conversation, turn and invocation; guests are refused.
+It has no access-token scope and cannot authorize other account or execution
+routes. No token row or persistent grant is written. The internal projection
+forwards this bearer without changing stored connection settings. Ornn must use
+signed identity authentication; a separate credential header may coexist, but
+other credential injection methods (including bearer/basic and Authorization
+headers) are incompatible with this callback and fail with `owner_connection_unavailable`. Platform bindings
+and connections configured to inject a general delegation token remain unavailable. Upgrade all API replicas serving callbacks before relying on
+this path; old replicas reject the new purpose and fail closed.
+
+Callback live-authority database/dependency failures and the bounded lookup
+timeout return the existing `oauth_authority_unavailable` response (503,
+`Retry-After: 1`), never a successful empty membership list. Key selection uses
+only the exact active/retained `kid`; missing or unknown keys refuse, with no
+fallback. Ornn currently collapses all callback HTTP/network errors into an
+unresolved empty list for reads, memoized only within that request. Preserving
+503 end to end on Ornn reads requires an Ornn change; the NyxID callback's 503
+must not be interpreted as a confirmed membership revocation.
+
+Attached read failures add `details.reason`: `skill_not_bound`,
+`owner_connection_unavailable`, `ornn_principal_denied` (Ornn 401/403/404), or
+`pinned_version_mismatch`. Access failures retain forbidden/1002; integrity
+failures use validation_error. Upstream 5xx and transport failures do not claim
+a principal denial. No upstream prose, package content or credentials appear
+in these diagnostics.
+
+Runtime refusals emit the metadata-only `assistant_skill_read_refused` audit
+event with `skill_not_bound`, `grant_refused`, or `operation_restriction`.
+Catalog availability and transport failures use `service_unavailable`,
+`proxy_error`, or `upstream_error` rather than claiming a grant denial. Missing
+organization connections use `owner_connection_unavailable`.
+No package or message content is recorded.
+
 ## Packages and disclosure
 
 Search uses Ornn's mixed-visibility keyword search. Version discovery and exact
@@ -160,6 +220,24 @@ the agent/skill IDs, revision, file count and byte count, never file content.
 
 Upgrade all backend replicas before configuring preloads; older replicas omit
 the new context and can replace skill metadata without the new settings.
+
+## Skill outlines (NYX template)
+
+Behind the default-off, per-person `assistant:skill-runs` flag, skills written in
+the [NYX skill template](SKILL_TEMPLATES.md) expose an author-written outline:
+`## Overview`, numbered `## Approach` steps with optional `Uses:` and `Asks you`
+tags, and `## Needs and produces`. `skill_read` accepts `section: "outline"` for
+an attached root or pinned dependency, and NyxBot's `preview_agent_skill` adds an
+`outline` page for a verified, not-yet-attached version. Both reuse the reader,
+hash checks and tool-response paging above; `Uses` resolves only to a pin in the
+root's verified closure that the frontmatter also declares. Malformed or
+oversized sections yield no outline, never a truncated one. Outlines are
+untrusted guidance; nothing is stored on the agent and nothing enters audit.
+With the flag on, owner turns get guidance to explain a skill's outline before
+multi-step work, NyxBot drafts get advisory `outline_warnings`, and the app's
+catalog preview adds the structured `outline` and the Ornn `author` for the Find
+skills card. With the flag off, tool lists, results, instructions and the
+catalog preview are unchanged.
 
 ## Owner-requested authoring
 
@@ -321,6 +399,12 @@ that outbox delivers owner-allowed `kind: skills` requests as
 turn. The publication event does not duplicate that request notification.
 
 ## Editable pin controls and routes
+
+The page's **Test skill** verifies the attached version and package integrity as
+the signed-in owner, without starting a turn. It does not simulate the agent's
+live thread key, operation restrictions, or execution confirmations, so page
+success alone is not proof of runtime access. Its `readable` field describes
+the enabled pin's availability to the signed-in owner.
 
 Agent pin references include `disabled` (default `false`, omitted while false); disabled pins are excluded from `skill_read` and prompt injection. Writing one requires the default-off `assistant:skill-pin-disable` flag; deploy every backend replica, then the frontend, then enable the flag. Re-enabling a pin through NyxBot follows its effective permission mode. Under `/assistant/nyxagent/agents/{id}`: `GET skills/{skill_id}/preview` tests an attached pin (exact version check plus a SKILL.md read through the agent's reader; `readable: false` while disabled); `POST skills/{skill_id}/improve` starts an authored improve draft from the exact package; `GET skills/history` lists the agent's newest 50 pin changes (with each pin's disabled state) and learning/authoring events to anyone who can read the agent; `POST learning/proposals/{proposal_id}/validate` with `{draft}` dry-runs the proposal's own validator. Proposal edits use `{revision, draft}` with the top-level revision canonical. Draft refusals carry field diagnostics `{rule, field, line?, limit?, actual?, unit?}`. All NyxAgent routes enforce the engine flag and first-party human sessions; writes require maintain access to the agent.
 

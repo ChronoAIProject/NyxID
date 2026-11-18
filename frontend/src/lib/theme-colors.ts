@@ -16,6 +16,8 @@ export const EDITABLE_COLORS = [
   { key: "sidebar", label: "Sidebar", vars: ["sidebar"] },
   { key: "card", label: "Cards and menus", vars: ["card", "popover", "surface"] },
   { key: "muted", label: "Subtle fills", vars: ["muted"] },
+  { key: "chat-bubble", label: "Chat bubble background", vars: ["chat-bubble"] },
+  { key: "chat-bubble-foreground", label: "Chat bubble text", vars: ["chat-bubble-foreground"] },
   {
     key: "foreground",
     label: "Primary text",
@@ -41,9 +43,11 @@ export type CustomColors = Record<ColorMode, ColorOverrides>;
 export const DEFAULT_COLORS: Record<ColorMode, Record<ColorKey, string>> = {
   dark: {
     background: "#17171A",
-    sidebar: "#141416",
+    sidebar: "#1C1C1F",
     card: "#222225",
     muted: "#2C2C30",
+    "chat-bubble": "#2C2C30",
+    "chat-bubble-foreground": "#EFEFF1",
     foreground: "#EFEFF1",
     "muted-foreground": "#BABAC1",
     "text-tertiary": "#95959F",
@@ -54,9 +58,11 @@ export const DEFAULT_COLORS: Record<ColorMode, Record<ColorKey, string>> = {
   },
   light: {
     background: "#F4F4F5",
-    sidebar: "#F4F4F5",
+    sidebar: "#FFFFFF",
     card: "#FFFFFF",
     muted: "#F4F4F5",
+    "chat-bubble": "#E0E0E5",
+    "chat-bubble-foreground": "#18181B",
     foreground: "#18181B",
     "muted-foreground": "#3F3F46",
     "text-tertiary": "#5B5B63",
@@ -143,6 +149,7 @@ export const CONTRAST_CHECKS: readonly {
   readonly label: string;
 }[] = [
   { fg: "foreground", bg: "background", target: 4.5, label: "Primary text on page" },
+  { fg: "chat-bubble-foreground", bg: "chat-bubble", target: 4.5, label: "Chat bubble text" },
   { fg: "muted-foreground", bg: "card", target: 4.5, label: "Secondary text on cards" },
   { fg: "text-tertiary", bg: "background", target: 4.5, label: "Tertiary text on page" },
   { fg: "text-tertiary", bg: "card", target: 4.5, label: "Tertiary text on cards" },

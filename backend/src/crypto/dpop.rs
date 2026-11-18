@@ -43,6 +43,7 @@ pub fn htu_from_base_and_path(base_url: &str, path: &str) -> AppResult<String> {
 
 /// Validate a DPoP proof JWT against the request method and URI.
 /// Returns the JWK thumbprint (RFC 7638) on success.
+#[cfg(test)]
 pub async fn validate_proof(
     dpop_header: &str,
     expected_method: &str,
@@ -54,6 +55,31 @@ pub async fn validate_proof(
         return Err(AppError::Unauthorized("DPoP replay detected".to_string()));
     }
     Ok(validated.thumbprint)
+}
+
+/// Validate against configured API origins without trusting forwarded hosts.
+/// Replay state is consumed only once, after a complete successful verification.
+pub async fn validate_configured_proof(
+    proof: &str,
+    method: &str,
+    path: &str,
+    config: &crate::config::AppConfig,
+    db: &mongodb::Database,
+) -> AppResult<String> {
+    let mut error = AppError::Unauthorized("DPoP htu mismatch".into());
+    for base in config.accepted_base_urls() {
+        let htu = htu_from_base_and_path(base, path)?;
+        match validate_proof_claims(proof, method, &htu) {
+            Ok(validated) => {
+                if !dpop_jti_cache::claim_jti(db, &validated.jti).await? {
+                    return Err(AppError::Unauthorized("DPoP replay detected".into()));
+                }
+                return Ok(validated.thumbprint);
+            }
+            Err(failure) => error = failure,
+        }
+    }
+    Err(error)
 }
 
 struct ValidatedDpopProof {
@@ -242,6 +268,57 @@ mod tests {
             jwk_thumbprint(&jwk),
             "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
         );
+    }
+
+    #[tokio::test]
+    async fn domain_alias_dpop_accepts_only_configured_origin_and_claims_replay_once() {
+        let db = crate::test_utils::connect_test_database("domain_alias_dpop")
+            .await
+            .unwrap();
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        let (key, jwk) = test_dpop_keypair();
+        for path in ["/oauth/token", "/api/v1/users/me"] {
+            let proof = sign_test_proof(
+                &key,
+                &jwk,
+                "POST",
+                &format!("https://old.example{path}"),
+                Utc::now().timestamp(),
+                &Uuid::new_v4().to_string(),
+            );
+            assert!(
+                validate_configured_proof(&proof, "POST", path, &config, &db)
+                    .await
+                    .is_err()
+            );
+            config.domain_aliases.base_urls = vec!["https://old.example".into()];
+            assert_eq!(
+                validate_configured_proof(&proof, "POST", path, &config, &db)
+                    .await
+                    .unwrap(),
+                jwk_thumbprint(&jwk)
+            );
+            assert!(
+                validate_configured_proof(&proof, "POST", path, &config, &db)
+                    .await
+                    .is_err()
+            );
+            let foreign = sign_test_proof(
+                &key,
+                &jwk,
+                "POST",
+                &format!("https://evil.example{path}"),
+                Utc::now().timestamp(),
+                &Uuid::new_v4().to_string(),
+            );
+            assert!(
+                validate_configured_proof(&foreign, "POST", path, &config, &db)
+                    .await
+                    .is_err()
+            );
+            config.domain_aliases.base_urls.clear();
+        }
     }
 
     #[tokio::test]

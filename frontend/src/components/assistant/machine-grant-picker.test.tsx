@@ -13,7 +13,8 @@ it.each([
 ] as const)("tells the owner how to get a %s grant candidate instead of deferring to NyxBot", (kind, legend, hint) => {
   render(<MachineGrantPicker kind={kind} value={[]} onChange={vi.fn()} />);
   const group = screen.getByRole("group", { name: legend });
-  expect(group).toHaveTextContent(`None available. ${hint}`);
+  expect(group).toHaveTextContent("None available.");
+  expect(group).toHaveTextContent(hint);
   // A specialist you talk to directly reports missing access to you; nothing here says NyxBot steps in.
   expect(group).not.toHaveTextContent(/NyxBot/);
 });

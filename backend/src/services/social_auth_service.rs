@@ -44,14 +44,24 @@ pub struct SocialProfile {
     pub avatar_url: Option<String>,
 }
 
+fn configured_callback_base<'a>(config: &'a AppConfig, origin: Option<&str>) -> &'a str {
+    // Callers pass a server-selected request origin, never a client redirect URL.
+    config
+        .accepted_base_urls()
+        .find(|base| Some(*base) == origin)
+        .unwrap_or(&config.base_url)
+        .trim_end_matches('/')
+}
+
 /// Build the OAuth authorization URL for the given provider.
 pub fn build_authorization_url(
     provider: SocialProvider,
     state: &str,
     nonce: Option<&str>,
     config: &AppConfig,
+    callback_origin: Option<&str>,
 ) -> AppResult<String> {
-    let base_url = config.base_url.trim_end_matches('/');
+    let base_url = configured_callback_base(config, callback_origin);
 
     match provider {
         SocialProvider::GitHub => {
@@ -146,8 +156,9 @@ pub async fn exchange_code(
     code: &str,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    callback_origin: Option<&str>,
 ) -> AppResult<String> {
-    let base_url = config.base_url.trim_end_matches('/');
+    let base_url = configured_callback_base(config, callback_origin);
 
     match provider {
         SocialProvider::GitHub => {
@@ -560,6 +571,7 @@ fn resolve_social_login(
     let email_lower = profile.email.to_lowercase();
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id,
         email: email_lower,
         password_hash: None,
@@ -639,6 +651,15 @@ pub async fn find_or_create_user(
     profile: &SocialProfile,
     allow_new_users: bool,
 ) -> AppResult<FindOrCreateUserResult> {
+    find_or_create_user_with_invite(db, profile, allow_new_users, None).await
+}
+
+pub async fn find_or_create_user_with_invite(
+    db: &mongodb::Database,
+    profile: &SocialProfile,
+    allow_new_users: bool,
+    reservation: Option<&super::invite_code_service::InviteReservation>,
+) -> AppResult<FindOrCreateUserResult> {
     let users = db.collection::<User>(USERS);
 
     let existing_social = users
@@ -702,14 +723,24 @@ pub async fn find_or_create_user(
                 return Err(AppError::SocialAuthRegistrationClosed);
             }
 
-            // Gate disabled (public launch): create the new social user.
+            // A reserved invitation or public registration permits a new account.
             let default_role_ids = crate::services::role_service::get_default_role_ids(db).await?;
             new_user.role_ids = default_role_ids;
 
-            users
-                .insert_one(&new_user)
-                .await
-                .map_err(map_social_link_error)?;
+            if let Some(reservation) = reservation {
+                new_user.invite_code_id = Some(reservation.invite_code_id.clone());
+                super::invite_code_service::commit_signup(db, reservation, &new_user)
+                    .await
+                    .map_err(|error| match error {
+                        AppError::DatabaseError(error) => map_social_link_error(error),
+                        error => error,
+                    })?;
+            } else {
+                users
+                    .insert_one(&new_user)
+                    .await
+                    .map_err(map_social_link_error)?;
+            }
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
@@ -770,9 +801,12 @@ mod tests {
     ) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
+            chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
@@ -780,6 +814,7 @@ mod tests {
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -843,6 +878,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -850,6 +888,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -931,7 +970,8 @@ mod tests {
     fn build_github_url() {
         let config = make_test_config(Some("gh_id"), Some("gh_secret"), None, None);
         let url =
-            build_authorization_url(SocialProvider::GitHub, "test_state", None, &config).unwrap();
+            build_authorization_url(SocialProvider::GitHub, "test_state", None, &config, None)
+                .unwrap();
         assert!(url.starts_with("https://github.com/login/oauth/authorize"));
         assert!(url.contains("client_id=gh_id"));
         assert!(url.contains("state=test_state"));
@@ -943,7 +983,8 @@ mod tests {
     fn build_google_url() {
         let config = make_test_config(None, None, Some("goog_id"), Some("goog_secret"));
         let url =
-            build_authorization_url(SocialProvider::Google, "test_state", None, &config).unwrap();
+            build_authorization_url(SocialProvider::Google, "test_state", None, &config, None)
+                .unwrap();
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("client_id=goog_id"));
         assert!(url.contains("state=test_state"));
@@ -954,9 +995,9 @@ mod tests {
     #[test]
     fn build_url_errors_when_not_configured() {
         let config = make_test_config(None, None, None, None);
-        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config);
+        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config, None);
         assert!(result.is_err());
-        let result = build_authorization_url(SocialProvider::Google, "state", None, &config);
+        let result = build_authorization_url(SocialProvider::Google, "state", None, &config, None);
         assert!(result.is_err());
     }
 
@@ -964,7 +1005,7 @@ mod tests {
     fn build_url_errors_when_secret_missing() {
         // Has client_id but not secret
         let config = make_test_config(Some("gh_id"), None, None, None);
-        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config);
+        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config, None);
         assert!(result.is_err());
     }
 
@@ -976,9 +1017,54 @@ mod tests {
         config.apple_key_id = Some("KEY123".to_string());
         config.apple_private_key_path = Some("keys/apple.p8".to_string());
 
-        let err = build_authorization_url(SocialProvider::Apple, "state", None, &config)
+        let err = build_authorization_url(SocialProvider::Apple, "state", None, &config, None)
             .expect_err("apple url should require nonce");
         assert!(matches!(err, AppError::SocialAuthFailed(_)));
+    }
+
+    #[test]
+    fn domain_alias_social_callback_base_is_shared_by_authorization_and_exchange() {
+        let mut config = crate::test_utils::test_app_config();
+        config.base_url = "https://new.example".into();
+        config.github_client_id = Some(uuid::Uuid::new_v4().to_string());
+        config.github_client_secret = Some(uuid::Uuid::new_v4().to_string());
+        for enabled in [false, true] {
+            config.domain_aliases.base_urls = if enabled {
+                vec!["https://old.example".into()]
+            } else {
+                vec![]
+            };
+            let expected = if enabled {
+                "https://old.example"
+            } else {
+                "https://new.example"
+            };
+            assert_eq!(
+                configured_callback_base(&config, Some("https://old.example")),
+                expected
+            );
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let url = build_authorization_url(
+                SocialProvider::GitHub,
+                &nonce,
+                None,
+                &config,
+                Some("https://old.example"),
+            )
+            .unwrap();
+            let url = url::Url::parse(&url).unwrap();
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(k, _)| k == "redirect_uri")
+                    .unwrap()
+                    .1,
+                format!("{expected}/api/v1/auth/social/github/callback")
+            );
+        }
+        assert_eq!(
+            configured_callback_base(&config, Some("https://evil.example")),
+            config.base_url
+        );
     }
 
     #[test]
@@ -994,6 +1080,7 @@ mod tests {
             "test_state",
             Some("test_nonce"),
             &config,
+            None,
         )
         .unwrap();
         assert!(url.starts_with("https://appleid.apple.com/auth/authorize"));
@@ -1012,6 +1099,7 @@ mod tests {
     ) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: Uuid::new_v4().to_string(),
             email: email.to_string(),
             password_hash: Some("hashed".to_string()),

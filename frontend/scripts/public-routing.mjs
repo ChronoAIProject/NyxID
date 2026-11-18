@@ -1,3 +1,4 @@
+import { getPublicOrigin } from "./public-origin.mjs";
 import fs from "node:fs/promises";
 import ts from "typescript";
 
@@ -69,7 +70,7 @@ export async function writeRouting(root, dist, pages) {
   ).filter(
     (p) =>
       p !== "/" &&
-      !/^\/(?:zh|nyxbot$|solutions|how-it-works|security|agents|integrations|pricing|contact|blog|docs|preview|privacy|terms)(?:\/|$)/.test(
+      !/^\/(?:zh|nyxbot$|solutions|how-it-works|security|agents|integrations|pricing|contact|blog|docs|preview|privacy|terms|data-deletion)(?:\/|$)/.test(
         p,
       ),
   );
@@ -86,7 +87,7 @@ export async function writeRouting(root, dist, pages) {
       )
       .join("/"),
   );
-  const maps = `map $host $nyxid_preview_robots { nyx.chrono-ai.fun ""; default "noindex, nofollow"; }
+  const maps = `map $host $nyxid_preview_robots { ${JSON.stringify(new URL(getPublicOrigin()).hostname)} ""; default "noindex, nofollow"; }
 map $args $nyxid_repeated_lang { default 0; ~*(^|&)lang=[^&]*(&[^&]*)*&lang= 1; }
 map $args $nyxid_clean_args {
  default $args;
@@ -117,10 +118,10 @@ ${pages
  ${p.translated ? "if ($nyxid_repeated_lang) { return 400; }\n if ($nyxid_public_redirect) { return 301 $nyxid_public_redirect$nyxid_locale_query; }" : ""}
  if ($request_method !~ ^(GET|HEAD)$) { return 405; }
  default_type text/html;
- ${["/privacy", "/terms"].includes(p.path) ? 'etag off;\n if_modified_since off;\n if ($http_if_none_match = $nyxid_legal_etag) { return 304; }\n add_header ETag $nyxid_legal_etag;' : ''}
+ ${["/privacy", "/terms", "/data-deletion"].includes(p.path) ? 'etag off;\n if_modified_since off;\n if ($http_if_none_match = $nyxid_legal_etag) { return 304; }\n add_header ETag $nyxid_legal_etag;' : ''}
  add_header X-Robots-Tag $nyxid_preview_robots always;
  ${headers}
- add_header Cache-Control "${["/privacy", "/terms"].includes(p.path) ? "public, max-age=86400, must-revalidate" : "no-cache"}" always;
+ add_header Cache-Control "${["/privacy", "/terms", "/data-deletion"].includes(p.path) ? "public, max-age=86400, must-revalidate" : "no-cache"}" always;
  try_files /${p.file} =404;
 }
 ${
@@ -141,6 +142,7 @@ ${
       .map((p) => `${p.path}.md`),
     "/legal/privacy.md",
     "/legal/terms.md",
+    "/legal/data-deletion.md",
     "/read/en/index.md",
     "/read/zh/index.md",
   ];
@@ -149,6 +151,7 @@ ${
     `${locations}
 location = /privacy.html { return 301 /privacy$is_args$args; }
 location = /terms.html { return 301 /terms$is_args$args; }
+location = /data-deletion.html { return 301 /data-deletion$is_args$args; }
 location ^~ /__public/ { internal; }
 location = /public-routing.conf { return 404; }
 location = /public-routing-maps.conf { return 404; }

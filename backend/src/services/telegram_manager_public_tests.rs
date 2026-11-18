@@ -54,7 +54,8 @@ async fn telegram_manager_public_start_welcomes_chat_without_hiding_creation() {
     let messages = sent_messages(&server).await;
     assert_eq!(messages.len(), 2);
     let creation_only = &messages[0];
-    assert!(creation_only.get("reply_markup").is_none());
+    assert!(creation_only["reply_markup"]["keyboard"].is_null());
+    assert!(creation_only["reply_markup"]["inline_keyboard"].is_array());
     assert!(
         creation_only["text"]
             .as_str()
@@ -62,6 +63,12 @@ async fn telegram_manager_public_start_welcomes_chat_without_hiding_creation() {
             .starts_with("<b>Create your Telegram bot</b>")
     );
 
+    assert!(
+        creation_only["text"]
+            .as_str()
+            .unwrap()
+            .contains("update Telegram to the latest version")
+    );
     register_manager_channel(&state, &actor, &server).await;
     for start in ["/start", "/start@NyxSetupBot", " /start@nyxsetupbot "] {
         let before = sent_messages(&server).await.len();
@@ -74,12 +81,13 @@ async fn telegram_manager_public_start_welcomes_chat_without_hiding_creation() {
         assert_eq!(messages.len(), before + 2);
         let welcome = &messages[before];
         assert_eq!(welcome["chat_id"], 700);
-        assert!(welcome.get("reply_markup").is_none());
+        assert!(welcome["reply_markup"]["keyboard"].is_null());
+        assert!(welcome["reply_markup"]["inline_keyboard"].is_array());
         let text = welcome["text"].as_str().unwrap();
         assert!(text.starts_with("<b>Welcome</b>"), "{text}");
         assert!(text.contains("Send a message here to chat"));
         assert!(text.contains("/recover @YourBotUsername"));
-        assert!(text.contains("latest Telegram app"));
+        assert!(text.contains("If no Create bot button appears, update Telegram to the latest version, then send /start to try again."));
         let keyboard = &messages[before + 1];
         assert_eq!(keyboard["chat_id"], 700);
         assert!(keyboard["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());

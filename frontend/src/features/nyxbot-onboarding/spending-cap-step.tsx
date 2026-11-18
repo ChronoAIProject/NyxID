@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -29,13 +30,13 @@ export function SpendingCapStep({ onBack }: { readonly onBack: () => void }) {
         {t("capDescription")} <StepHelp>{t("capHelp")}</StepHelp>
       </p>
       <fieldset className="nb-cap-options">
-        <legend className="sr-only">{t("capTitle")}</legend>
+        <Label asChild><legend className="sr-only">{t("capTitle")}</legend></Label>
         {[
           { value: "120", title: "cap120" },
           { value: "250", title: "cap250" },
           { value: "none", title: "capNone" },
         ].map((option) => (
-          <label
+          <Label
             key={option.value}
             className="nb-cap-option"
             data-selected={cap === option.value}
@@ -49,7 +50,7 @@ export function SpendingCapStep({ onBack }: { readonly onBack: () => void }) {
             />
             <span>{t(option.title)}</span>
             {option.value === "120" && <small>{t("recommended")}</small>}
-          </label>
+          </Label>
         ))}
       </fieldset>
       <OnboardingNotice>{t("capUnavailable")}</OnboardingNotice>

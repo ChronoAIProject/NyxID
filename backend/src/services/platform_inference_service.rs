@@ -568,7 +568,7 @@ impl Drop for TurnGuard {
         let db = self.db.clone();
         let id = self.id.clone();
         let forwarded = self.forwarded;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             let _ = release(&db, &id, forwarded).await;
         });
     }
@@ -644,7 +644,7 @@ async fn guide_text_inner(
             state
                 .billing
                 .owner_resolver()
-                .resolve_for_execution(
+                .resolve_for_ordinary_execution(
                     &installation.owner_user_id,
                     &installation.owner_user_id,
                     CredentialClass::NyxidManagedMaster,
@@ -1496,6 +1496,7 @@ mod tests {
             .await
             .unwrap();
         service.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -1509,6 +1510,7 @@ mod tests {
         let code = format!("platform_svc_{}_pk", service.slug);
         service.billing = Some(ServiceBilling {
             platform_key_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::Requests,
                 credits_per_unit: "0.001".into(),
                 lago_metric_code: code.clone(),

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   useCallback,
   useEffect,
@@ -9,7 +11,7 @@ import {
   type ReactNode,
   type PointerEvent,
 } from "react";
-import { ArrowUp, AudioLines, FileText, ImageIcon, Square } from "lucide-react";
+import { ArrowUp, AudioLines, FileText, ImageIcon, Square, UserRound } from "lucide-react";
 import { ComposerEditor, type ComposerEditorHandle, type ComposerSelection } from "./composer-editor";
 import { tokenSegments, type ComposerToken } from "./composer-editor-model";
 import { Button } from "@/components/ui/button";
@@ -31,10 +33,10 @@ import type { AudioActivity } from "@/lib/microphone-capture";
 import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { COMPOSER_MAX_HEIGHT, useThemeStore } from "@/stores/theme-store";
 
 const DRAFT_DEBOUNCE_MS = 300;
-const MAX_ROWS = 4;
-const MIN_TEXT_HEIGHT = 64;
+const MIN_TEXT_HEIGHT: number = COMPOSER_MAX_HEIGHT.min;
 
 function composerHeightLimit(
   surface: HTMLElement | null,
@@ -43,7 +45,7 @@ function composerHeightLimit(
   const viewport = window.visualViewport;
   const viewportHeight = viewport?.height ?? window.innerHeight;
   const chromeHeight = surface && editor
-    ? surface.offsetHeight - editor.offsetHeight
+    ? Math.ceil(surface.getBoundingClientRect().height - editor.getBoundingClientRect().height)
     : 0;
   // Keep the grip below the chat header, including on short/mobile viewports.
   const visibleTop = Math.max(
@@ -136,6 +138,7 @@ export function ChatComposer({
   draftKey,
   ...props
 }: ChatComposerProps) {
+  useUiTranslation();
   return (
     <DraftedChatComposer
       {...props}
@@ -154,13 +157,15 @@ type MentionOption =
       readonly attachment: AttachmentMention;
     };
 
-/** An agent that can be `@mentioned` from the composer (group chats). */
+/** A group member that can be `@mentioned` from the composer (group chats). */
 export interface ComposerMention {
   readonly id: string;
   /** The @handle that is inserted. */
   readonly name: string;
-  readonly kind: AssistantAgentKind;
+  readonly kind: AssistantAgentKind | "person";
   readonly display_name?: string | null;
+  readonly shared?: boolean;
+  readonly owner_name?: string | null;
 }
 
 interface ChatComposerProps {
@@ -262,8 +267,9 @@ function DraftedChatComposer({
   voiceActive = false,
   voiceActivity,
 }: ChatComposerProps) {
+  useUiTranslation();
   const tokens: ComposerToken[] = [
-    ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: "agent" as const })),
+    ...(mentions ?? []).map((agent) => ({ id: agent.id, handle: agent.name, label: agent.display_name?.trim() || agent.name, kind: agent.kind === "person" ? "person" as const : "agent" as const })),
     ...(attachmentMentions ?? []).map((file) => ({ id: `attachment:${file.handle}`, handle: file.handle, label: file.handle, kind: file.kind })),
   ];
   const locked = active && !allowActiveInput;
@@ -305,10 +311,19 @@ function DraftedChatComposer({
     readOwnedDraft(ownerUserId, draftKey),
   );
   const [multiline, setMultiline] = useState(false);
+  const savedMaxHeight = useThemeStore((state) => state.composerMaxHeight);
+  const setMaxTextHeight = useThemeStore((state) => state.setComposerMaxHeight);
+  const [previewHeight, setPreviewHeight] = useState<number | null>(null);
+  const maxTextHeight = previewHeight ?? savedMaxHeight;
   const [resizedTextHeight, setResizedTextHeight] = useState<number>();
   const [resizing, setResizing] = useState(false);
   const [heightRange, setHeightRange] = useState({ current: 92, min: MIN_TEXT_HEIGHT, max: 480 });
-  const resizeStartRef = useRef<{ y: number; height: number } | null>(null);
+  const resizeStartRef = useRef<{ pointer: number; y: number; height: number; current: number } | null>(null);
+  function cancelHeightResize() {
+    resizeStartRef.current = null;
+    setPreviewHeight(null);
+    setResizing(false);
+  }
   const expanded = multiline;
   const hasDraftContent = Boolean(
     content.trim() || hasAttachments || attachmentMentions?.length,
@@ -549,31 +564,6 @@ function DraftedChatComposer({
     };
   }, [flushDraft]);
 
-  useLayoutEffect(() => {
-    const composer = composerRef.current;
-    const controls = controlsRef.current;
-    const textMeasure = textMeasureRef.current;
-    if (
-      !composer ||
-      !controls ||
-      !textMeasure ||
-      typeof ResizeObserver === "undefined"
-    ) {
-      return;
-    }
-
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => syncComposerLayout());
-    });
-    observer.observe(composer);
-    observer.observe(controls);
-    observer.observe(textMeasure);
-    if (settingsRef.current) observer.observe(settingsRef.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [syncComposerLayout]);
-
   // Auto-size until the user resizes. A multiline draft then follows the chosen
   // visible height, including empty space; single-line drafts remain compact.
   const syncEditorHeight = useCallback(() => {
@@ -586,7 +576,7 @@ function DraftedChatComposer({
       Number.parseFloat(styles.paddingTop) +
       Number.parseFloat(styles.paddingBottom);
     const oneRow = lineHeight + padding;
-    const limit = composerHeightLimit(surfaceRef.current, element);
+    const limit = Math.min(COMPOSER_MAX_HEIGHT.max, composerHeightLimit(surfaceRef.current, element));
     if (bandRef.current) {
       // Extra height overlays the transcript instead of growing its bottom inset.
       bandRef.current.style.maxHeight = `${Math.min(480, (window.visualViewport?.height ?? window.innerHeight) / 2)}px`;
@@ -600,8 +590,8 @@ function DraftedChatComposer({
     void element.offsetHeight;
 
     const minHeight = Math.min(MIN_TEXT_HEIGHT, Math.max(natural, oneRow), limit);
-    const maxHeight = Math.max(oneRow, Math.min(resizedTextHeight ?? lineHeight * MAX_ROWS + padding, limit));
-    const height = resizedTextHeight !== undefined && expanded
+    const maxHeight = Math.max(oneRow, Math.min(maxTextHeight, limit));
+    const height = (previewHeight !== null || resizedTextHeight === savedMaxHeight) && expanded
       ? Math.max(minHeight, maxHeight)
       : Math.max(Math.min(natural, maxHeight), oneRow);
     setHeightRange((current) => current.current === Math.round(height) && current.min === minHeight && current.max === limit
@@ -610,7 +600,29 @@ function DraftedChatComposer({
     element.style.height = `${String(height)}px`;
     element.style.overflowY = natural > height ? "scroll" : "hidden";
     setScrollEdges(getScrollEdges(element));
-  }, [resizedTextHeight, expanded]);
+  }, [resizedTextHeight, expanded, maxTextHeight, previewHeight, savedMaxHeight]);
+
+  useLayoutEffect(() => {
+    const composer = composerRef.current;
+    const controls = controlsRef.current;
+    const textMeasure = textMeasureRef.current;
+    if (!composer || !controls || !textMeasure || typeof ResizeObserver === "undefined") return;
+
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        syncComposerLayout();
+        // Text and spacing changes can alter line height without changing width.
+        syncEditorHeight();
+      });
+    });
+    observer.observe(composer);
+    observer.observe(controls);
+    observer.observe(textMeasure);
+    if (settingsRef.current) observer.observe(settingsRef.current);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [syncComposerLayout, syncEditorHeight]);
 
   useLayoutEffect(() => {
     syncComposerLayout(content);
@@ -947,28 +959,26 @@ function DraftedChatComposer({
       ref={bandRef}
       className="relative flex shrink-0 flex-col justify-end bg-background"
       style={{
-        width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
+        width: "calc(100% - var(--assistant-content-inset, 0px))",
         maxHeight: "min(50dvh, 480px)",
       }}
     >
-      <div ref={surfaceRef} data-composer-surface className="relative shrink-0 bg-background">
+      <div ref={surfaceRef} data-composer-surface className="relative shrink-0 bg-background px-4 sm:px-6">
         <div
           aria-hidden="true"
           data-composer-fade
           className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
         />
         <div
-          className="mx-auto w-full max-w-[758px] px-3 pt-2 sm:px-6"
+          className="mx-auto w-full max-w-[var(--chat-content-width,758px)] pt-2"
           style={{ paddingBottom: "max(1rem, var(--sab))" }}
         >
           {controls}
           {active && allowActiveInput ? (
             <p
               data-steering-hint
-              className="mb-1.5 text-11 text-muted-foreground sm:ml-[30px]"
-            >
-              Still replying. What you send now steers this reply; Stop ends it.
-            </p>
+              className="mb-1.5 text-13 text-muted-foreground"
+            >{translateUi("Still replying. What you send now steers this reply; Stop ends it.")}</p>
           ) : null}
           <div
             data-composer-input
@@ -1050,7 +1060,7 @@ function DraftedChatComposer({
             data-audio-input={voiceActivity?.input ?? dictation.activity.input}
             data-audio-output={voiceActivity?.output ?? 0}
             className={cn(
-              "composer-audio-surface relative sm:ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
+              "composer-audio-surface relative rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong",
               dragging ? "border-primary ring-1 ring-primary" : "border-hairline",
             )}
           >
@@ -1058,71 +1068,54 @@ function DraftedChatComposer({
             {expanded && (
               <div
                 role="separator"
-                aria-label="Resize composer"
+                aria-label={translateUi("Resize composer")}
                 aria-orientation="horizontal"
                 aria-valuemin={heightRange.min}
                 aria-valuemax={heightRange.max}
                 aria-valuenow={heightRange.current}
                 tabIndex={0}
-                title="Drag up to show more text. Double-click to reset."
+                title={translateUi("Drag to set maximum height for all chats. Double-click to reset.")}
                 className="group absolute -top-1.5 left-1/2 z-20 flex h-3 w-12 -translate-x-1/2 touch-none cursor-ns-resize items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onPointerDown={(event) => {
-                  if (event.button !== 0) return;
+                  if (event.button !== 0 || resizeStartRef.current) return;
                   event.preventDefault();
                   resizeStartRef.current = {
+                    pointer: event.pointerId,
                     y: event.clientY,
-                    height:
-                      editorRef.current?.element.getBoundingClientRect().height ??
-                      MIN_TEXT_HEIGHT,
+                    height: editorRef.current?.element.getBoundingClientRect().height ?? MIN_TEXT_HEIGHT,
+                    current: savedMaxHeight,
                   };
                   event.currentTarget.setPointerCapture(event.pointerId);
                   setResizing(true);
                 }}
                 onPointerMove={(event) => {
                   const start = resizeStartRef.current;
-                  if (
-                    !start ||
-                    !event.currentTarget.hasPointerCapture(event.pointerId)
-                  )
-                    return;
-                  setResizedTextHeight(
-                    Math.max(
-                      heightRange.min,
-                      Math.min(
-                        composerHeightLimit(surfaceRef.current, editorRef.current?.element),
-                        start.height + start.y - event.clientY,
-                      ),
-                    ),
-                  );
+                  if (!start || start.pointer !== event.pointerId) return;
+                  start.current = Math.round(Math.max(heightRange.min, Math.min(heightRange.max, start.height + start.y - event.clientY)));
+                  setPreviewHeight(start.current);
                 }}
-                onLostPointerCapture={() => {
-                  resizeStartRef.current = null;
-                  setResizing(false);
-                }}
+                onPointerCancel={cancelHeightResize}
+                onLostPointerCapture={cancelHeightResize}
                 onPointerUp={(event) => {
-                  if (event.currentTarget.hasPointerCapture(event.pointerId))
-                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  if (resizeStartRef.current?.pointer !== event.pointerId) return;
+                  setMaxTextHeight(resizeStartRef.current.current);
+                  setResizedTextHeight(resizeStartRef.current.current);
+                  cancelHeightResize();
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
-                onDoubleClick={() => setResizedTextHeight(undefined)}
+                onDoubleClick={() => {
+                  setMaxTextHeight(COMPOSER_MAX_HEIGHT.default);
+                  setResizedTextHeight(undefined);
+                }}
                 onKeyDown={(event) => {
-                  if (
-                    !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)
-                  )
-                    return;
+                  if (event.key === "Escape") { cancelHeightResize(); return; }
+                  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
                   const current = heightRange.current;
-                  const next =
-                    event.key === "Home"
-                      ? heightRange.min
-                      : event.key === "End"
-                        ? composerHeightLimit(surfaceRef.current, editorRef.current?.element)
-                        : current + (event.key === "ArrowUp" ? 24 : -24);
-                  setResizedTextHeight(
-                    Math.max(
-                      heightRange.min,
-                      Math.min(composerHeightLimit(surfaceRef.current, editorRef.current?.element), next),
-                    ),
-                  );
+                  const next = event.key === "Home" ? heightRange.min : event.key === "End" ? heightRange.max : current + (event.key === "ArrowUp" ? 24 : -24);
+                  const height = Math.max(heightRange.min, Math.min(heightRange.max, next));
+                  setMaxTextHeight(height);
+                  setResizedTextHeight(height);
                 }}
               >
                 <span
@@ -1134,10 +1127,8 @@ function DraftedChatComposer({
             {dragging && (
               <div
                 role="status"
-                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
-              >
-                Drop files to attach
-              </div>
+                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 type-row-title"
+              >{translateUi("Drop files to attach")}</div>
             )}
             {attachments}
             {dictation.review}
@@ -1166,9 +1157,11 @@ function DraftedChatComposer({
                     id={mentionListId}
                     role="listbox"
                     aria-label={
-                      attachmentMentions?.length
-                        ? "Mention an agent or attachment"
-                        : "Mention an agent"
+                      mentions?.some((m) => m.kind === "person")
+                        ? translateUi("Mention a person, agent or attachment")
+                        : attachmentMentions?.length
+                        ? translateUi("Mention an agent or attachment")
+                        : translateUi("Mention an agent")
                     }
                     className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
                   >
@@ -1184,25 +1177,25 @@ function DraftedChatComposer({
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => chooseMention(option.name)}
                           className={cn(
-                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-14 text-foreground",
                             selected ? "bg-overlay-strong" : "hover:bg-overlay",
                           )}
                         >
                           {option.type === "agent" ? (
                             <>
-                              <AgentAvatar agent={option.agent} size="sm" />
+                              {option.agent.kind === "person" ? <UserRound aria-hidden className="h-5 w-5 text-muted-foreground" /> : <AgentAvatar agent={{ ...option.agent, kind: option.agent.kind }} size="sm" />}
                               <span className="min-w-0 flex-1 truncate">
                                 {option.agent.display_name?.trim() || option.name}
                                 {option.agent.display_name?.trim() ? (
-                                  <span className="ml-1.5 text-11 text-text-tertiary">
+                                  <span className="ml-1.5 text-13 text-text-tertiary">
                                     @{option.name}
                                   </span>
                                 ) : null}
                               </span>
-                              <span className="shrink-0 text-10 text-text-tertiary">
-                                {option.agent.kind === "nyxbot"
-                                  ? "Personal agent"
-                                  : "Specialist"}
+                              <span className="shrink-0 text-12 text-text-tertiary">
+                                {option.agent.kind === "person" ? translateUi("Person") : option.agent.shared ? translateUi("Shared agent{{value1}}", { value1: option.agent.owner_name ? ` · ${option.agent.owner_name}` : "" }) : option.agent.kind === "nyxbot"
+                                  ? translateUi("Personal agent")
+                                  : translateUi("Specialist")}
                               </span>
                             </>
                           ) : (
@@ -1220,7 +1213,7 @@ function DraftedChatComposer({
                               )}
                               <span className="min-w-0 flex-1 truncate">
                                 <span className="font-mono">@{option.name}</span>
-                                <span className="ml-1.5 text-11 text-text-tertiary">
+                                <span className="ml-1.5 text-13 text-text-tertiary">
                                   {option.attachment.label}
                                 </span>
                               </span>
@@ -1235,7 +1228,7 @@ function DraftedChatComposer({
                   ref={textMeasureRef}
                   data-composer-text-measure
                   aria-hidden
-                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-base sm:text-13 leading-relaxed"
+                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre type-composer"
                 >
                   {tokenSegments(content, tokens).map((part, index) =>
                     part.token ? (
@@ -1244,7 +1237,7 @@ function DraftedChatComposer({
                         className="composer-mention"
                         data-composer-mention={part.token.kind}
                       >
-                        {part.token.kind === "agent" ? "@" : ""}
+                        {(part.token.kind === "agent" || part.token.kind === "person") ? "@" : ""}
                         {part.token.label}
                       </span>
                     ) : (
@@ -1300,14 +1293,14 @@ function DraftedChatComposer({
                     style={{ transitionDuration: resizing ? "0ms" : undefined }}
                     placeholder={
                       locked
-                        ? "Assistant is working..."
+                        ? translateUi("Assistant is working...")
                         : disabled
-                          ? "This conversation is read-only."
+                          ? translateUi("This conversation is read-only.")
                           : allowActiveInput
-                            ? (activePlaceholder ?? "Steer active task...")
-                            : (placeholder ?? "Message NyxID Assistant...")
+                            ? (activePlaceholder ?? translateUi("Steer active task..."))
+                            : (placeholder ?? translateUi("Message NyxID Assistant..."))
                     }
-                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-base sm:text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 type-composer text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
                   />
                   <div
                     aria-hidden
@@ -1373,14 +1366,14 @@ function DraftedChatComposer({
                     <div
                       data-composer-settings
                       ref={settingsRef}
-                      className="min-w-0 max-w-[72px] sm:max-w-[160px]"
+                      className="min-w-0 max-w-[4.5rem] sm:max-w-[10rem]"
                     >
                       {footerControls}
                     </div>
                   )}
                   <div
                     ref={controlsRef}
-                    className={`flex shrink-0 items-center gap-1.5 ${expanded ? "self-end" : ""}`}
+                    className="flex shrink-0 items-center gap-1.5"
                   >
                     {dictation.button}
                     {showVoice && (
@@ -1403,7 +1396,7 @@ function DraftedChatComposer({
                           flushDraft();
                           onVoice?.();
                         }}
-                        aria-label="Open voice call"
+                        aria-label={translateUi("Open voice call")}
                         aria-pressed={voiceActive}
                       >
                         <AudioLines />
@@ -1416,8 +1409,8 @@ function DraftedChatComposer({
                         size="icon"
                         onClick={() => void onStop()}
                         disabled={stopDisabled}
-                        aria-label="Stop assistant turn"
-                        title="Stop this reply"
+                        aria-label={translateUi("Stop assistant turn")}
+                        title={translateUi("Stop this reply")}
                       >
                         <Square className="fill-current" />
                       </Button>
@@ -1429,7 +1422,7 @@ function DraftedChatComposer({
                         size="icon"
                         onClick={() => void onStop()}
                         disabled={stopDisabled}
-                        aria-label="Stop assistant turn"
+                        aria-label={translateUi("Stop assistant turn")}
                       >
                         <Square className="fill-current" />
                       </Button>
@@ -1444,7 +1437,7 @@ function DraftedChatComposer({
                         }
                         title={
                           active && allowActiveInput
-                            ? "Steer this reply"
+                            ? translateUi("Steer this reply")
                             : undefined
                         }
                         disabled={
@@ -1458,12 +1451,12 @@ function DraftedChatComposer({
                         aria-label={
                           sendLabel ??
                           (allowActiveInput
-                            ? "Send steering instruction"
-                            : "Send message")
+                            ? translateUi("Send steering instruction")
+                            : translateUi("Send message"))
                         }
                       >
                         <ArrowUp />
-                        {active && allowActiveInput ? "Steer" : null}
+                        {active && allowActiveInput ? translateUi("Steer") : null}
                       </Button>
                     ) : null}
                   </div>

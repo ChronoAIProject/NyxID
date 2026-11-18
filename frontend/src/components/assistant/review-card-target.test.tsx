@@ -1,6 +1,7 @@
+import { StrictMode } from "react";
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { ReviewCardTarget } from "./review-card-target";
+import { ReviewCardNavigation, ReviewCardTarget } from "./review-card-target";
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -36,4 +37,31 @@ it("starts the highlight timeout when a delayed animation frame becomes visible"
   expect(screen.getByText("Delayed draft").parentElement).toHaveClass("ring-2");
   act(() => vi.advanceTimersByTime(4000));
   expect(screen.getByText("Delayed draft").parentElement).not.toHaveClass("ring-2");
+});
+
+it("reveals a pending card once per navigation, including StrictMode and row remounts", async () => {
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+  const tree = (show: boolean, card = "first") => <StrictMode>
+    <ReviewCardNavigation selectionKey={card}>
+      {show ? <ReviewCardTarget selected><p>Review this action</p></ReviewCardTarget> : null}
+    </ReviewCardNavigation>
+  </StrictMode>;
+  const frame = async () => act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  try {
+    const view = render(tree(true));
+    await frame();
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(view.container.querySelector(".ring-input-focus")).not.toBeNull();
+    view.rerender(tree(false));
+    view.rerender(tree(true));
+    await frame();
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(view.container.querySelector(".ring-input-focus")).toBeNull();
+    view.rerender(tree(true, "second"));
+    await frame();
+    expect(scroll).toHaveBeenCalledTimes(2);
+    view.rerender(tree(true, "first"));
+    await frame();
+    expect(scroll).toHaveBeenCalledTimes(3);
+  } finally { scroll.mockRestore(); }
 });

@@ -64,6 +64,7 @@ vi.mock("@/hooks/use-services", () => ({
     error: null,
   }),
 }));
+vi.mock("@/hooks/use-cma-rate-cards", () => ({ useCmaRateCards: () => ({ data: [], isLoading: false, error: null }) }));
 vi.mock("@/hooks/use-admin-billing", () => ({
   useAdminBillingOverview: () => ({
     data: mock.overview,

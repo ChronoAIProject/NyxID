@@ -29,9 +29,7 @@ test.describe("explicit conversation repair", () => {
       faults: { historyErrorStatus: 404 },
     });
 
-    await expect(
-      page.locator("header").getByText("New chat", { exact: true }),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(page).toHaveTitle("nyxid - New chat", { timeout: 5_000 });
     await expect(
       thread(page).getByText(
         "Ask NyxID to help with services, access, and account operations.",

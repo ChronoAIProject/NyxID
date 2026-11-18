@@ -3,6 +3,143 @@ use super::transcript::{Segment, Speaker};
 use crate::errors::AppResult;
 use std::collections::VecDeque;
 
+/// Read-back presentation is server-owned and separate from the original card
+/// summary/digest. The exact card remains the authorization record.
+pub async fn spoken_summary(
+    db: &mongodb::Database,
+    card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+) -> AppResult<String> {
+    use mongodb::bson::{Document, doc};
+    if card.tool_name.as_deref() == Some("nyxid.service_execution") {
+        let binding=db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+            .find_one(doc!{"_id":&card.id,"kind":"card_binding","user_id":&card.user_id,"conversation_id":&card.conversation_id}).await?;
+        let op = binding
+            .as_ref()
+            .and_then(|b| b.get_document("operation").ok());
+        let method = op.and_then(|o| o.get_str("method").ok());
+        let path = op.and_then(|o| o.get_str("path").ok());
+        return Ok(service_summary(
+            card.confirmation.as_ref().map(|c| c.risk.as_str()),
+            card.summary.starts_with("Organization connection "),
+            method,
+            path,
+            &card.summary,
+        ));
+    }
+    // Non-service cards already contain server-authored business details (for
+    // example the repository or file being deleted). Keep those details, strip
+    // only protocol identifiers; never send raw arguments to a language model.
+    Ok(public_details(&card.summary))
+}
+
+fn service_summary(
+    risk: Option<&str>,
+    org: bool,
+    method: Option<&str>,
+    path: Option<&str>,
+    summary: &str,
+) -> String {
+    let scope = if org {
+        // The server-generated wrapper already contains the bounded display
+        // label. Preserve the organization scope, never its fallback UUID.
+        let label = summary
+            .split_once(") in ")
+            .and_then(|(_, tail)| tail.split_once(": "))
+            .map(|(label, _)| label)
+            .filter(|label| !label.is_empty() && !has_uuid(label));
+        label.map_or_else(
+            || "your organization's connected account".to_owned(),
+            |label| format!("your organization's connected account for {label}"),
+        )
+    } else {
+        "your connected account".to_owned()
+    };
+    let action = match (risk, method, path.map(|p| p.trim_matches('/'))) {
+        (Some("read"), Some("GET"), Some("user")) => "Read the account identity",
+        (Some("read"), _, _) => "Read information for this task",
+        _ => {
+            // Preserve the action/resource details for writes and destructive
+            // operations. Only remove the known server connection wrapper.
+            let details = if org {
+                summary.split_once(": ").map_or(summary, |(_, s)| s)
+            } else {
+                summary
+            };
+            let details = if has_protocol_prefix(details) {
+                details
+                    .rsplit_once(" using ")
+                    .or_else(|| details.rsplit_once(" on "))
+                    .map_or(details, |(s, _)| s)
+            } else {
+                details
+            };
+            let mut details = public_details(details);
+            // The classified effect wins over the HTTP verb (including GET
+            // operations with a destructive override). Never narrate it as an
+            // ordinary read just because the transport method is GET.
+            if let Some(rest) = details.strip_prefix("Read ") {
+                details = format!("Perform {rest}");
+            }
+            let caution = match risk {
+                Some("destructive") => "This action may delete data. ",
+                Some("sensitive") => "This action involves sensitive information or access. ",
+                Some("change") => "This action changes information. ",
+                _ => "",
+            };
+            return format!(
+                "{caution}{details} using {scope}. This approval covers only this one operation"
+            );
+        }
+    };
+    format!("{action} using {scope}. This approval covers only this one operation")
+}
+
+fn has_protocol_prefix(summary: &str) -> bool {
+    summary
+        .split_whitespace()
+        .next()
+        .is_some_and(|w| matches!(w, "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"))
+}
+
+static UUID_TEXT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+        .expect("constant UUID presentation pattern")
+});
+
+pub(super) fn has_uuid(text: &str) -> bool {
+    UUID_TEXT.is_match(text)
+}
+
+fn public_details(summary: &str) -> String {
+    let protocol = has_protocol_prefix(summary);
+    let summary = UUID_TEXT.replace_all(summary, "the selected item");
+    summary
+        .split_whitespace()
+        .enumerate()
+        .map(|(index, word)| {
+            if uuid::Uuid::parse_str(
+                word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'),
+            )
+            .is_ok()
+            {
+                "the selected item".into()
+            } else if protocol && index == 1 && !word.contains('/') && word.contains('_') {
+                word.replace('_', " ")
+            } else {
+                match word {
+                    "GET" | "HEAD" => "Read",
+                    "DELETE" => "Delete",
+                    "POST" => "Submit",
+                    "PUT" | "PATCH" => "Update",
+                    _ => word,
+                }
+                .into()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Approve,
@@ -241,6 +378,10 @@ impl Readback {
     }
 }
 
+pub(super) fn same_speech(a: &str, b: &str) -> bool {
+    literal(a) == literal(b)
+}
+
 fn literal(text: &str) -> String {
     normalized(text)
         .chars()
@@ -298,6 +439,13 @@ pub async fn fence_decision(
         models::{assistant_voice::REQUESTS, assistant_voice_session::COLLECTION_NAME},
     };
     use mongodb::bson::doc;
+    // A Bot Voice service grant authorizes invoking the Bot, never acting as
+    // its human owner. Device audio cannot satisfy owner action cards.
+    if fence.session.client_key.is_some() {
+        return Err(AppError::Forbidden(
+            "Review and confirm this action on its NyxID owner card".into(),
+        ));
+    }
     if chrono::Utc::now().timestamp_millis() >= fence.until_ms
         || card_digest(card) != fence.authority_digest
         || card.user_id != fence.session.user_id
@@ -345,4 +493,73 @@ pub async fn fence_decision(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn voice_2083_readback_uses_business_purpose_and_org_scope_without_identifiers() {
+        let raw = "Organization connection api-github-pat (f47ac10b-58cc-4372-a567-0e02b2c3d479) in Example: GET get_authenticated_user on api-github-pat";
+        let summary = service_summary(Some("read"), true, Some("GET"), Some("/user"), raw);
+        assert!(summary.contains("Read the account identity"));
+        assert!(summary.contains("organization's connected account"));
+        assert!(summary.contains("for Example"));
+        for internal in [
+            "api-github-pat",
+            "f47ac10b",
+            "GET",
+            "get_authenticated_user",
+            "Organization connection",
+        ] {
+            assert!(!summary.contains(internal));
+        }
+        let question =
+            Readback::new("card".into(), 1, summary, "digest".into(), 100_000, 0).question;
+        assert_eq!(question.matches("should I go ahead?").count(), 1);
+    }
+    #[test]
+    fn voice_2083_readback_keeps_destructive_target_and_never_weakens_risk() {
+        let summary = service_summary(
+            Some("destructive"),
+            false,
+            Some("DELETE"),
+            Some("/repos/acme/demo"),
+            "DELETE /repos/acme/demo using api-github-pat",
+        );
+        assert!(summary.contains("Delete /repos/acme/demo"));
+        assert!(!summary.contains("api-github-pat"));
+        assert!(summary.contains("only this one operation"));
+        let overridden = service_summary(
+            Some("destructive"),
+            false,
+            Some("GET"),
+            Some("/user"),
+            "GET get_authenticated_user on api-github-pat",
+        );
+        assert!(overridden.contains("may delete data"));
+        assert!(!overridden.contains("Read "));
+        assert_eq!(
+            public_details("Delete repository my_repo"),
+            "Delete repository my_repo"
+        );
+        assert_eq!(
+            public_details("DELETE /repos/acme/my_repo"),
+            "Delete /repos/acme/my_repo"
+        );
+        assert_eq!(
+            public_details("Delete /resources/f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+            "Delete /resources/the selected item"
+        );
+        assert!(
+            service_summary(
+                Some("destructive"),
+                false,
+                None,
+                None,
+                "Delete repository my_repo on production"
+            )
+            .contains("my_repo on production")
+        );
+    }
 }

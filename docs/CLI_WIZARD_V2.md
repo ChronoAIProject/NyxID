@@ -116,22 +116,26 @@ Step 2 renders dynamically based on the catalog entry's shape. Every form shares
 
 #### OAuth — sub-step A (conditional)
 
-When the catalog entry's `credential_mode` is `user` or `both`, the wizard inserts a pre-sign-in step asking for the user's OAuth app credentials:
+The wizard inserts a pre-sign-in step asking for the user's own OAuth app credentials when sign-in must or may use that app:
+
+- `credential_mode: "user"`, or `"both"` without NyxID's own app (`has_platform_oauth_credentials` false or absent): always.
+- `"both"` with NyxID's own app (e.g. GitHub, Google): the confirm form offers **Which OAuth app authorizes this?** with **NyxID managed** selected (one click, as on the dashboard and connect links; scopes gated to `platform_scope_allowlist`) and **Your own OAuth app**. Only the latter shows this step; switching back to NyxID managed drops scopes outside the allowlist.
+- `"admin"` / `"system"`: never; the wizard jumps straight to sub-step B.
+
+The step collects:
 
 - Client ID (required)
 - Client Secret (required, password input, purple primary accent)
 - "📖 How to create an OAuth app" link pulled from the catalog entry's `documentation_url`
 
-On Connect, `PUT /api/v1/providers/:provider_id/credentials` with `{client_id, client_secret, label}`. On success the form re-renders as sub-step B. Back button returns from B → A so the user can edit.
-
-When `credential_mode === "admin"` or `system`, sub-step A is skipped — the wizard jumps straight to sub-step B.
+The credentials ride on the placeholder `POST /api/v1/keys` (`oauth_client_id` / `oauth_client_secret`, or `copy_oauth_client_from` an existing connection) so each connection keeps its own client; the legacy `PUT /api/v1/providers/:provider_id/credentials` is not called.
 
 #### OAuth — sub-step B (sign-in)
 
 A short info panel ("Sign in with X") + the same docs link. On Connect:
 1. `POST /api/v1/keys` to create a placeholder (status `pending_auth` if the admin hasn't pre-authorized; `active` immediately if `credential_mode=admin`).
 2. If the placeholder came back `active` (admin-mode), skip straight to Step 3 confirmation.
-3. Otherwise, `GET /api/v1/providers/:provider_id/connect/oauth?redirect_path=/keys/:key_id` → returns `{authorization_url}`.
+3. Otherwise, `GET /api/v1/providers/:provider_id/connect/oauth?redirect_path=/keys/:key_id&flow=wz` → returns `{authorization_url}`. `flow=wz` makes the provider callback land on the standalone `/oauth-complete` page ("Return to your terminal") instead of the web app; `redirect_path` is the destination only for servers that predate it. Scripted `nyxid service add <slug> --oauth` sends the same pair.
 4. `window.open(authorization_url, "_blank")` in a new tab so the wizard tab stays alive.
 5. Poll `GET /api/v1/keys/:key_id` every 2 s until `status === "active"` (5-min deadline).
 
@@ -438,3 +442,20 @@ The "Custom / self-hosted…" card on Step 1 currently shows a fallback notice p
 ### 10.7 Agent-binding step
 
 Earlier drafts proposed a post-creation "bind to specific NyxID API keys" step. Not built in v2.0 — default behavior (any NyxID key routes to any of the user's services) is good enough for most users, and per-agent isolation is handled by the existing `nyxid api-key bind` command. **Lands in:** a later PR if demand emerges.
+
+
+### Scope management transport parity (#2367)
+
+Local bootstrap and remote pairing serialize AI-key prefill through the same
+serializer, including `reconnect_key_id` and `scope_override`. The browser loads
+`GET /keys/{id}` for `granted_scopes` and `oauth_app_source`, then the canonical
+catalog slug for the scope menu and shared-app allowlist. Never derive app source
+from `credential_source` (that describes personal/organization ownership).
+
+Without `--set` the current grant seeds the picker; with `--set`, providers that
+support narrowing use the desired set and require a removal acknowledgement.
+Unsupported-removal providers retain their grants in both presentation and request.
+A blocked requested scope remains visible and prevents reauthorization; it is never
+silently filtered. The local wizard must reconnect the existing key, not create a
+new placeholder. Changes to the shared picker or confirm panel require rebuilding
+the embedded wizard bundle and passing its freshness test.

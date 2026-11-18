@@ -7,6 +7,7 @@ use crate::{
         channel_platform::{InboundAttachment, InboundMessage},
     },
 };
+use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
 static INGESTION_ORIGINS: std::sync::LazyLock<
@@ -280,6 +281,119 @@ async fn channel_media_authority_refusal_matrix_never_downloads() {
             .is_err()
     );
     assert!(provider.received_requests().await.unwrap().len() == requests_before_refusal);
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_telegram_new_guest_alias_uses_canonical_authority() {
+    let (state, mut row, _, _, server) = media_fixture("media_telegram_new_alias", "direct").await;
+    guest_media_tests::enable_guest(&state).await;
+    row.platform = "telegram".into();
+    row.owner_sender_ids = vec!["owner".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.channel_bot_id},
+            doc! {"$set": {"platform": "telegram-new"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": row.route_id.as_deref().unwrap()},
+            doc! {"$set": {"platform": "telegram-new"}},
+        )
+        .await
+        .unwrap();
+
+    let id = "telegram-new-guest-image";
+    let mut source = media_source(&state, &row, id, "native", "receipt").await;
+    source.platform = "telegram-new".into();
+    source.sender_platform_id = Some("visitor".into());
+    state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .replace_one(doc! {"_id": id}, &source)
+        .await
+        .unwrap();
+    let mut request = media_request(&row, &source);
+    request.sender_id = "visitor".into();
+    assert_eq!(
+        authority::source(&state.db, &request)
+            .await
+            .unwrap()
+            .platform,
+        "telegram-new"
+    );
+    assert!(authority::supported_source(&source));
+    assert_eq!(
+        crate::services::channel_media_events::presence(&state.db, &request, true)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        crate::services::channel_media_events::admission(&state.db, &request)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_media_presence_text_does_not_refuse_foreign_source() {
+    let (state, mut row, _, _, server) = media_fixture("media_text_foreign_source", "direct").await;
+    enable_media(&state).await;
+    row.platform = "telegram".into();
+    row.owner_sender_ids = vec!["owner".into()];
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    let source = doc! {
+        "_id": "foreign-text-source", "channel_bot_id": &row.channel_bot_id,
+        "conversation_id": row.route_id.as_deref().unwrap(),
+        "platform_conversation_id": "other-chat", "user_id": OWNER,
+        "direction": "inbound", "platform": "telegram",
+        "sender_platform_id": "other-sender", "agent_api_key_id": &row.route_api_key_id,
+        "content_type": "text", "attachments": bson::Bson::Array(vec![]),
+        "embedded_attachments": bson::Bson::Array(vec![]),
+        "created_at": bson::DateTime::now(),
+    };
+    state
+        .db
+        .collection::<bson::Document>(MESSAGES)
+        .insert_one(source)
+        .await
+        .unwrap();
+    let request = MediaRequest {
+        channel: row,
+        source_message_id: "foreign-text-source".into(),
+        chat_id: "guest-chat".into(),
+        sender_id: "visitor".into(),
+        native_thread_id: None,
+        origin: None,
+        conversation_id: None,
+        agent_id: None,
+    };
+    assert_eq!(
+        crate::services::channel_media_events::presence(&state.db, &request, false)
+            .await
+            .unwrap(),
+        0
+    );
     server.abort();
 }
 
@@ -778,6 +892,8 @@ async fn interrupted_media_case(rebuilt: bool) {
         "no duplicate resend/remedy advice"
     );
     let origin = ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
         nyxbot_channel_id: row.id.clone(),
         partition: chat.partition.clone(),
         platform: "lark".into(),
@@ -1300,6 +1416,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             gateway_ready(&state, &key).await;
         }
         let provider = ingestion_provider(&state, &row, native_png()).await;
+        let mut owner_conversation = None;
         for (n, sender, text) in [
             (0, "human", ""),
             (1, "human", "yes 4821"),
@@ -1309,9 +1426,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let id = format!("media-{n}");
             let mut source = media_source(&state, &row, &id, &id, text).await;
             source.sender_platform_id = Some(sender.into());
-            if transport == "direct" {
-                source.platform_conversation_id = Some(format!("oc_{sender}"));
-            }
+            source.platform_conversation_id = Some(format!("oc_{sender}"));
             state
                 .db
                 .collection::<ChannelMessage>(MESSAGES)
@@ -1336,10 +1451,24 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     .unwrap()
                     .unwrap();
             } else {
-                let body = cma_media_event(text, sender, &id);
+                let mut body = cma_media_event(text, sender, &id);
+                body["event_context"]["activity"]["conversation"]["id"] =
+                    json!(format!("oc_{sender}"));
+                if sender == "guest" {
+                    // Match the gateway's conversation_and_sender partition:
+                    // another person's DM must never reuse the owner's home.
+                    let partition = "conv_00000000000000000000000000000009";
+                    ensure_partition(&state, &key, partition).await;
+                    body["conversation"] = json!(partition);
+                    body["event_context"]["conversation_id"] = json!(partition);
+                }
                 let response = respond(&state, &key, &body, &id).await;
                 assert_eq!(response.status(), StatusCode::OK);
-                assert!(body_text(response).await.contains("Here is your answer"));
+                let response = body_text(response).await;
+                assert!(
+                    response.contains("Here is your answer"),
+                    "{transport}/{n}: {response}"
+                );
             }
             let written = state
                 .db
@@ -1365,6 +1494,8 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let captured = calls.lock().await.last().unwrap().clone();
             assert!(current.active_turn.is_none());
             if sender == "guest" {
+                assert!(current.guest_turn);
+                assert_ne!(Some(&current.id), owner_conversation.as_ref());
                 assert!(written.media.is_none());
                 assert!(message.attachments.is_empty());
                 assert!(
@@ -1383,6 +1514,7 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     downloads_before
                 );
             } else {
+                owner_conversation = Some(current.id.clone());
                 assert!(written.media.is_some());
                 assert_eq!(
                     message.attachments.len(),
@@ -1822,18 +1954,21 @@ async fn channel_media_chunked_unknown_understated_bodies_retry_once_and_recheck
         } else {
             assert!(input.contains("input_image"), "{input}");
         }
-        let attempts = state
+        // Admission rows are keyed per wall-clock minute, so a slow retry can
+        // land in the next minute's row. Count every admitted attempt.
+        let attempts: i32 = state
             .db
             .collection::<bson::Document>("assistant_upload_limits")
-            .find_one(doc! {})
+            .find(doc! {})
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(
-            attempts.get_i32("attempts").unwrap(),
-            2,
-            "failed attempt and retry both admitted"
-        );
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get_i32("attempts").unwrap())
+            .sum();
+        assert_eq!(attempts, 2, "failed attempt and retry both admitted");
         provider.abort();
         server.abort();
     }
@@ -2164,17 +2299,48 @@ async fn channel_media_busy_mixed_queue_preserves_order_and_drains_after_flag_di
         .await
         .unwrap();
     finish_media_turn(&state, &blocked).await;
-    for expected_media in [false, true] {
-        let mut start: TurnStart = (&owner_turn_request(&home, "")).into();
-        start.origin = TurnOrigin::Event;
-        let started = start_server_turn(&state, OWNER, start, Pool::Channel { owner: OWNER })
-            .await
-            .unwrap();
-        let Started::Turn { receiver, .. } = started else {
-            panic!("queued turn was not started")
-        };
-        final_reply(receiver).await.unwrap();
-        let captured = calls.lock().await.last().unwrap().clone();
+    // Settlement wakes the next queued question automatically. Starting each
+    // turn here races that detached after_turn hook after turn.completed.
+    crate::handlers::assistant_team::wake(&state, OWNER, &home).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let thread = engine::get(&state.db, OWNER, &home).await.unwrap();
+            if calls.lock().await.len() == 3
+                && thread.pending_events.is_empty()
+                && thread.active_turn.is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("queued turns settled");
+    let messages = engine::messages(&state.db, OWNER, &home, 10, None)
+        .await
+        .unwrap();
+    let replies: Vec<_> = messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect();
+    assert_eq!(replies.len(), 4);
+    let queued_image = messages
+        .iter()
+        .find(|message| message.role == "event" && !message.attachments.is_empty())
+        .expect("queued channel media is exposed on its event message");
+    let history = serde_json::to_value(crate::handlers::assistant_nyxagent::MessageResponse::from(
+        queued_image.clone(),
+    ))
+    .unwrap();
+    assert_eq!(history["role"], "event");
+    assert_eq!(history["attachments"][0]["content_type"], "image/png");
+    for reply in &replies[2..] {
+        assert_eq!(reply.status, "completed");
+        assert_eq!(reply.text, "Here is your answer");
+    }
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 3);
+    for (captured, expected_media) in calls[1..].iter().zip([false, true]) {
         assert_eq!(
             captured.to_string().contains("input_image"),
             expected_media,
@@ -2229,6 +2395,7 @@ async fn channel_media_first_photo_org_bot_and_specialist_thread_bind_to_correct
                     description: "Receipts".into(),
                     display_name: None,
                     persona: None,
+                    voice_instructions: None,
                     targets: Default::default(),
                     account_read: false,
                     specialty: None,
@@ -2502,3 +2669,9 @@ async fn channel_media_follow_post_owner_guest_and_unaddressed_photo_preserve_fl
         server.abort();
     }
 }
+
+#[path = "nyxbot_relay_media_v2_tests.rs"]
+mod relay_v2_tests;
+
+#[path = "nyxbot_guest_media_tests.rs"]
+mod guest_media_tests;

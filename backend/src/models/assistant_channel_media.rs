@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UploadSource {
+    /// Server-authored guest scope. Absent on legacy and owner uploads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestSource>,
     /// Original turn; late commits can only be cleaned up, never adopted.
     #[serde(default)]
     pub turn_id: String,
@@ -10,6 +13,14 @@ pub struct UploadSource {
     pub index: usize,
     pub embedded: bool,
     pub declared: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GuestSource {
+    pub version: u8,
+    pub channel_id: String,
+    pub event_id: String,
+    pub sender_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -40,4 +51,4 @@ macro_rules! redacted {
         }
     )+};
 }
-redacted!(UploadSource, MediaOutcome, MediaBound);
+redacted!(UploadSource, GuestSource, MediaOutcome, MediaBound);

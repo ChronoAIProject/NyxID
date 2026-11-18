@@ -69,6 +69,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: [] } }),
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }));
 vi.mock("@/hooks/use-machines", () => ({
@@ -149,7 +150,7 @@ const show = (machine?: RemoteMachine) =>
   );
 const accept = () =>
   userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
 const submit = () =>
   userEvent.click(
@@ -173,8 +174,12 @@ it("shows the exact offered rate and requires explicit paid terms before real ac
     screen.getByText(/Account wallet available: 12.123456789012 Credits/),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   expect(state.accepted).not.toHaveBeenCalled();
   await accept();
   await submit();
@@ -203,8 +208,12 @@ it("rejects an expired quote and an unpriced legacy response", () => {
   const view = show();
   expect(screen.getByText(/This preflight has expired/)).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
   state.data = { ...offer, quote_id: null, credits_per_second: null };
   view.rerender(
     <RemoteMachineCreate initialFreeSlot={false} onCreated={state.accepted} />,
@@ -213,8 +222,12 @@ it("rejects an expired quote and an unpriced legacy response", () => {
     screen.getByText(/A synchronized, priced runtime quote is unavailable/),
   ).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
 });
 
 it("does not accept cached paid pricing after its live request failed", () => {
@@ -225,8 +238,12 @@ it("does not accept cached paid pricing after its live request failed", () => {
     screen.queryByText(/0.000040000001 Credits per/),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
 });
 
 it("replays exactly the original paid body and key after an unknown response", async () => {
@@ -294,7 +311,7 @@ it("requires a fresh review and a new intent after a revision conflict", async (
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(sessionStorage.length).toBe(0);
   await accept();
@@ -351,11 +368,15 @@ it("clears reviewed acceptance when the signed-in account changes", async () => 
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(
-    screen.getByRole("button", { name: "Accept quote and create" }),
-  ).toBeDisabled();
+    (
+      screen.queryByRole("button", {
+        name: "Accept quote and create",
+      }) as HTMLButtonElement | null
+    )?.disabled ?? true,
+  ).toBe(true);
 });
 
 it("never presents another owner's wallet as available funds", () => {
@@ -403,7 +424,7 @@ it("requires a fresh manual review after insufficient funds and never retries au
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(state.create).toHaveBeenCalledTimes(1);
 });
@@ -423,8 +444,12 @@ it.each(["remote-machine-mvp-v1", "remote-machine-mvp-v2"])(
     };
     show(current);
     expect(
-      screen.getByRole("button", { name: "Accept quote and resume" }),
-    ).toBeDisabled();
+      (
+        screen.queryByRole("button", {
+          name: "Accept quote and resume",
+        }) as HTMLButtonElement | null
+      )?.disabled ?? true,
+    ).toBe(true);
     expect(state.action).not.toHaveBeenCalled();
   },
 );

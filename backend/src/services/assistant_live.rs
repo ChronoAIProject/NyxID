@@ -36,6 +36,7 @@ const MACHINES: &str = crate::models::node::COLLECTION_NAME;
 const MACHINE_DESKTOPS: &str = crate::models::machine_desktop::COLLECTION_NAME;
 const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
 const CHANNEL_CONNECT_LINKS: &str = crate::models::channel_connect_link::COLLECTION_NAME;
+const NOTIFICATIONS: &str = crate::models::assistant_notification::COLLECTION_NAME;
 const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
@@ -94,6 +95,12 @@ pub enum LiveEvent {
         user_id: String,
         active: bool,
     },
+    /// A NyxBot notification row was created or its read/resolved state
+    /// changed; identifiers only.
+    Notification {
+        id: String,
+        user_id: String,
+    },
     /// Metadata-only machine capability/setup change.
     Machine {
         id: String,
@@ -135,7 +142,8 @@ impl LiveEvent {
             | Self::MachineUpdate { user_id, .. }
             | Self::MachineSetup { user_id, .. }
             | Self::MachineDesktop { user_id, .. }
-            | Self::TriggerCreated { user_id, .. } => Some(user_id),
+            | Self::TriggerCreated { user_id, .. }
+            | Self::Notification { user_id, .. } => Some(user_id),
             Self::Resync => None,
         }
     }
@@ -279,6 +287,28 @@ impl AssistantLive {
             else {
                 return Ok(());
             };
+            if group.collaboration.is_some() {
+                if super::assistant_group_kind::classify(&group)
+                    != super::assistant_group_kind::GroupKind::Collaboration
+                {
+                    return Ok(());
+                }
+                use futures::TryStreamExt;
+                let people: Vec<crate::models::user::User> = db
+                    .collection(crate::models::user::COLLECTION_NAME)
+                    .find(doc! {"_id":{"$in":&group.participant_user_ids},"is_active":true})
+                    .limit(16)
+                    .await?
+                    .try_collect()
+                    .await?;
+                for person in people.into_iter().filter(|u| u.user_type.is_person()) {
+                    self.publish(LiveEvent::OrgGroup {
+                        id: id.clone(),
+                        user_id: person.id,
+                    });
+                }
+                return Ok(());
+            }
             if !super::org_group_service::is_org(&group) {
                 return Ok(());
             }
@@ -320,7 +350,7 @@ impl AssistantLive {
         let mut workers = tokio::task::JoinSet::new();
         let live = self.clone();
         let worker_db = db.clone();
-        workers.spawn(async move {
+        crate::services::shutdown::process().spawn_worker_joined(&mut workers, async move {
             org_group_worker(pending, |id| {
                 live.publish_resolved(
                     &worker_db,
@@ -447,6 +477,14 @@ fn pipeline() -> Vec<Document> {
                 // Update watches still need the authenticated reconnect event.
                 {"ns.coll": MACHINES, "updateDescription.updatedFields.connected_at": {"$exists": true}},
                 {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
+                // Push bookkeeping writes only `push.*` and stays invisible.
+                {"ns.coll": NOTIFICATIONS, "$or": [
+                    {"operationType": "insert"},
+                    {"updateDescription.updatedFields.updated_at": {"$exists": true}},
+                    {"updateDescription.updatedFields.count": {"$exists": true}},
+                    {"updateDescription.updatedFields.unread": {"$exists": true}},
+                    {"updateDescription.updatedFields.resolved_at": {"$exists": true}},
+                ]},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
                 {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_CONNECT_LINKS, CHANNEL_BOTS, MACHINE_SETUPS, MACHINES, MACHINE_DESKTOPS]}, "$or": [
@@ -460,7 +498,7 @@ fn pipeline() -> Vec<Document> {
         doc! {"$project": {
             "operationType": 1, "ns": 1, "documentKey": 1,
             "fullDocument.user_id": 1, "fullDocument.group_id": 1,
-            "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
+            "fullDocument.collaboration": 1, "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
             "fullDocument.group_request_id": 1,
             "fullDocument.assistant_group.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
@@ -474,6 +512,10 @@ fn pipeline() -> Vec<Document> {
         }},
     ]
 }
+
+#[cfg(test)]
+#[path = "assistant_notification_live_tests.rs"]
+mod notification_tests;
 
 fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
     if !matches!(
@@ -502,13 +544,21 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             user_id,
         });
     }
-    if (collection == GROUPS && full.get_str("created_by_user_id").is_ok())
+    if ((collection == GROUPS || collection == GROUP_MESSAGES || collection == CONVERSATIONS)
+        && full.get_document("collaboration").is_ok())
+        || (collection == GROUPS && full.get_str("created_by_user_id").is_ok())
         || (collection == GROUP_MESSAGES && full.get_bool("org_group").unwrap_or(false))
         || (collection == CONVERSATIONS && full.get_str("group_request_id").is_ok())
     {
         return Some(LiveEvent::OrgGroup {
             id: if collection == GROUPS {
                 key
+            } else if collection == CONVERSATIONS && full.get_document("collaboration").is_ok() {
+                full.get_document("collaboration")
+                    .ok()?
+                    .get_str("group_id")
+                    .ok()?
+                    .into()
             } else {
                 full.get_str("group_id").ok()?.into()
             },
@@ -565,6 +615,7 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             user_id,
             active: full.get_bool("is_active").unwrap_or(false),
         },
+        NOTIFICATIONS => LiveEvent::Notification { id: key, user_id },
         _ => return None,
     })
 }
@@ -668,6 +719,26 @@ mod tests {
                 .unwrap()
                 .contains_key("fullDocument.author_user_id")
         );
+    }
+
+    #[test]
+    fn collaboration_hidden_thread_routes_to_group_not_credential_owner() {
+        for version in [1, 99] {
+            let change: ChangeStreamEvent<Document> = mongodb::bson::from_document(doc! {
+                "_id":{"_data":"token"},"operationType":"insert",
+                "ns":{"db":"test","coll":CONVERSATIONS},"documentKey":{"_id":"hidden"},
+                "fullDocument":{"user_id":"guest-credential-owner","collaboration":{"version":version,"group_id":"group"}}
+            }).unwrap();
+            assert_eq!(
+                decode(&change),
+                Some(LiveEvent::OrgGroup {
+                    id: "group".into(),
+                    user_id: "guest-credential-owner".into()
+                })
+            );
+        }
+        // Resolution rechecks the stored classifier/ACL; no direct Conversation
+        // event may expose a hidden thread ID even for an unknown marker version.
     }
 
     #[tokio::test]

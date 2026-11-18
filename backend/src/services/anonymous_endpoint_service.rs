@@ -550,6 +550,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

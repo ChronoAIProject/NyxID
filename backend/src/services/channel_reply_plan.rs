@@ -4,9 +4,61 @@ use super::{
 };
 use crate::errors::{AppError, AppResult};
 
+#[path = "channel_reply_format.rs"]
+mod format;
+
+#[cfg(test)]
+#[path = "channel_reply_format_tests.rs"]
+pub(crate) mod format_tests;
+
 /// Fully plan before the first provider effect. Routing metadata is copied;
 /// interactive content cannot be duplicated across multiple messages.
 pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
+    if commonmark(reply.metadata.as_ref()) && matches!(platform, "telegram" | "telegram-new") {
+        if reply
+            .metadata
+            .as_ref()
+            .is_some_and(|m| m.get("entities").is_some() || m.get("parse_mode").is_some())
+        {
+            return Err(AppError::ValidationError(
+                "CommonMark cannot be combined with parse_mode or entities".into(),
+            ));
+        }
+        let mut parts = assistant_parts(reply.text.as_deref().unwrap_or_default(), platform, "");
+        if parts.last().is_some_and(|p| {
+            p.metadata
+                .as_ref()
+                .is_some_and(|m| m["text_overflow"] == true)
+        }) {
+            return Err(AppError::ValidationError(
+                "Reply exceeds the 64-part limit".into(),
+            ));
+        }
+        if parts.len() > 1
+            && (!reply.attachments.is_empty()
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| m.get("reply_markup").is_some()))
+        {
+            return Err(AppError::ValidationError(
+                "Long interactive replies require a separate complete text reply".into(),
+            ));
+        }
+        for part in &mut parts {
+            let entities = part.metadata.take().unwrap_or_default()["entities"].clone();
+            let mut metadata = reply
+                .metadata
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            metadata["text_format"] = "telegram_entities".into();
+            metadata["entities"] = entities;
+            part.metadata = Some(metadata);
+            part.attachments = reply.attachments.clone();
+            part.reply_to_platform_message_id = reply.reply_to_platform_message_id.clone();
+        }
+        return Ok(parts);
+    }
     let text = reply.text.as_deref().unwrap_or_default();
     let chunks: Vec<_> = TextLimit::for_platform(platform)
         .chunks(text)
@@ -42,6 +94,16 @@ pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<Outbou
     Ok(parts)
 }
 
+/// Explicit opt-in: public relay callers retain their existing syntax otherwise.
+pub fn commonmark(metadata: Option<&serde_json::Value>) -> bool {
+    metadata.is_some_and(|m| m["text_format"] == "commonmark")
+}
+
+pub fn assistant_metadata(platform: &str) -> Option<serde_json::Value> {
+    matches!(platform, "telegram" | "telegram-new")
+        .then(|| serde_json::json!({"text_format":"commonmark"}))
+}
+
 pub fn has_structured_content(reply: &OutboundReply) -> bool {
     reply.metadata.as_ref().is_some_and(|metadata| {
         [
@@ -72,6 +134,11 @@ pub fn ordinary(
         return Ok(None);
     }
     let parts = text_parts(reply, platform)?;
+    // Telegram text (including a single entities/keyboard payload) shares the
+    // same per-part receipts and formatting-fallback diagnostics.
+    if matches!(platform, "telegram" | "telegram-new") && reply.attachments.is_empty() {
+        return Ok(Some(parts));
+    }
     if !reply.attachments.is_empty() || has_structured_content(reply) {
         let limit = TextLimit::for_platform(platform);
         if reply
@@ -93,16 +160,52 @@ pub fn ordinary(
 /// parsing fragments of Markdown. One entity can continue across messages;
 /// offsets and lengths are clipped in UTF-16 units for each part.
 pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<OutboundReply> {
+    assistant_parts_impl(
+        text,
+        platform,
+        overflow_url,
+        renderer_version(platform).is_some(),
+    )
+}
+
+pub fn renderer_version(platform: &str) -> Option<u32> {
+    matches!(platform, "discord" | "whatsapp").then_some(2)
+}
+
+pub fn recorded_assistant_parts(
+    text: &str,
+    platform: &str,
+    overflow_url: &str,
+    version: Option<u32>,
+) -> AppResult<Vec<OutboundReply>> {
+    match version {
+        // Replay only: v1 Discord/WhatsApp rendering finishes already-recorded plans.
+        None | Some(1) => Ok(assistant_parts_impl(text, platform, overflow_url, false)),
+        Some(2) => Ok(assistant_parts(text, platform, overflow_url)),
+        _ => Err(AppError::Conflict("Multipart delivery plan changed".into())),
+    }
+}
+
+fn assistant_parts_impl(
+    text: &str,
+    platform: &str,
+    overflow_url: &str,
+    modern: bool,
+) -> Vec<OutboundReply> {
     let telegram = matches!(platform, "telegram" | "telegram-new");
     let markdown = matches!(platform, "discord" | "slack" | "whatsapp");
-    let (mut body, mut entities) = if telegram || markdown {
+    let (mut body, mut entities) = if modern {
+        format::parse(text)
+    } else if telegram || markdown {
         telegram_text(text)
     } else {
         (text.to_owned(), Vec::new())
     };
     let limit = TextLimit::for_platform(platform);
     let slack_plain = platform == "slack" && body.contains('`');
-    if telegram || markdown {
+    if modern {
+        format::expand_links(&mut body, &mut entities, limit, platform);
+    } else if telegram || markdown {
         expand_long_links(&mut body, &mut entities, limit, markdown, slack_plain);
     }
     let mut rest = body.as_str();
@@ -111,18 +214,55 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
     while !rest.is_empty() && parts.len() <= MAX_REPLY_PARTS {
         let mut budget = limit.budget();
         let (chunk, rendered, local) = loop {
-            let chunk = limit
-                .with_budget(budget)
-                .display_chunks(rest)
-                .next()
-                .unwrap_or_default();
+            let minimum = if telegram || modern {
+                entities
+                    .iter()
+                    .filter_map(|e| {
+                        if modern && e["type"] != "url" && e["type"] != "text_link" {
+                            return None;
+                        }
+                        let start = e["offset"].as_u64()? as usize;
+                        let size = e["length"].as_u64()? as usize;
+                        (start <= offset && size <= budget)
+                            .then_some((start + size).saturating_sub(offset))
+                    })
+                    .max()
+                    .unwrap_or_default()
+            } else {
+                0
+            };
+            let chunk = limit.with_budget(budget).display_prefix(rest, minimum);
             let length = chunk.encode_utf16().count();
+            // Keep a fitting entity whole. Oversized spans are intentionally
+            // represented by independent continuation entities in each part.
+            if (telegram || modern)
+                && let Some(start) = entities
+                    .iter()
+                    .filter_map(|e| {
+                        if modern && e["type"] != "url" && e["type"] != "text_link" {
+                            return None;
+                        }
+                        let start = e["offset"].as_u64()? as usize;
+                        let size = e["length"].as_u64()? as usize;
+                        (start > offset
+                            && start < offset + length
+                            && start + size > offset + length
+                            && size <= limit.budget())
+                        .then_some(start)
+                    })
+                    .min()
+            {
+                budget = start - offset;
+                continue;
+            }
             let mut local = local_entities(&entities, offset, length);
             if telegram && local.len() > 100 && budget > 8 {
                 budget = (budget / 2).max(8);
                 continue;
             }
-            let mut rendered = if markdown && !slack_plain {
+            let mut rendered = if modern {
+                format::render(chunk, &local, platform)
+            } else if markdown && !slack_plain {
                 render_markdown(chunk, &local, platform)
             } else {
                 chunk.to_owned()
@@ -152,9 +292,13 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
                 // scalar. Retain the link; long/nested targets were expanded.
                 let links: Vec<_> = local
                     .into_iter()
-                    .filter(|e| e["type"] == "text_link")
+                    .filter(|e| e["type"] == "text_link" || (modern && e["type"] == "url"))
                     .collect();
-                let rendered = render_markdown(chunk, &links, platform);
+                let rendered = if modern {
+                    format::render(chunk, &links, platform)
+                } else {
+                    render_markdown(chunk, &links, platform)
+                };
                 break (chunk, rendered, links);
             }
             budget = next;
@@ -166,7 +310,7 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
             attachments: vec![],
             reply_to_platform_message_id: None,
             metadata: if telegram {
-                Some(serde_json::json!({"entities":local}))
+                Some(serde_json::json!({"entities":local,"text_format":"telegram_entities"}))
             } else if slack_plain {
                 Some(serde_json::json!({"mrkdwn":false}))
             } else {
@@ -183,8 +327,14 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
             text: Some(limit.chunks(&notice).next().unwrap_or_default().into()),
             attachments: vec![],
             reply_to_platform_message_id: None,
-            metadata: telegram.then(|| serde_json::json!({"entities":[]})),
+            metadata: Some(if telegram { serde_json::json!({"entities":[],"text_format":"telegram_entities","text_overflow":true}) } else { serde_json::json!({"text_overflow":true}) }),
         });
+    }
+    if modern {
+        for part in &mut parts {
+            part.metadata.get_or_insert_with(|| serde_json::json!({}))["nyxid_text_renderer"] =
+                2.into();
+        }
     }
     parts
 }
@@ -196,7 +346,7 @@ fn expand_long_links(
     markdown: bool,
     expand_all: bool,
 ) {
-    let mut links = entities
+    let links = entities
         .iter()
         .enumerate()
         .filter(|(index, e)| {
@@ -226,6 +376,15 @@ fn expand_long_links(
         })
         .map(|(_, link)| link.clone())
         .collect::<Vec<_>>();
+    expand_selected_links(body, entities, links, false);
+}
+
+fn expand_selected_links(
+    body: &mut String,
+    entities: &mut Vec<serde_json::Value>,
+    mut links: Vec<serde_json::Value>,
+    preserve_urls: bool,
+) {
     links.sort_by_key(|e| std::cmp::Reverse(e["offset"].as_u64().unwrap_or(0)));
     for planned in links {
         // Inner expansion changes an enclosing link's length. Reload it before
@@ -275,6 +434,9 @@ fn expand_long_links(
             } else if start + length >= end {
                 entity["length"] = (length + added).into();
             }
+        }
+        if preserve_urls && !target.is_empty() {
+            entities.push(serde_json::json!({"type":"url", "offset":if label_is_target { link["offset"].as_u64().unwrap_or(0) } else {end + 2}, "length":target.encode_utf16().count(), "url":target}));
         }
     }
 }
@@ -422,7 +584,7 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
         match event {
             Event::Start(tag) => {
                 let kind = match &tag {
-                    Tag::Strong => Some("bold"),
+                    Tag::Strong | Tag::Heading { .. } => Some("bold"),
                     Tag::Emphasis => Some("italic"),
                     Tag::Strikethrough => Some("strikethrough"),
                     Tag::CodeBlock(_) => Some("pre"),
@@ -490,11 +652,7 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
             Event::Code(value) => {
                 let offset = text.encode_utf16().count();
                 text.push_str(&value);
-                // Telegram forbids code nested inside another entity. The
-                // enclosing emphasis/link still preserves the display text.
-                if stack.is_empty() {
-                    entities.push(serde_json::json!({"type":"code", "offset":offset,"length":value.encode_utf16().count()}));
-                }
+                entities.push(serde_json::json!({"type":"code", "offset":offset,"length":value.encode_utf16().count()}));
             }
             Event::SoftBreak | Event::HardBreak => text.push('\n'),
             Event::Rule => text.push_str("───\n"),
@@ -520,7 +678,50 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
         entity["length"] = length.min(total.saturating_sub(start)).into();
     }
     entities.retain(|e| e["length"].as_u64().unwrap_or(0) > 0);
-    (text, entities)
+    // Telegram forbids code overlapping any other entity. Preserve code and
+    // partition surrounding emphasis/links, rather than losing code styling.
+    let code: Vec<_> = entities
+        .iter()
+        .filter(|e| matches!(e["type"].as_str(), Some("code" | "pre")))
+        .map(|e| (e["offset"].as_u64().unwrap(), e["length"].as_u64().unwrap()))
+        .collect();
+    let mut compatible = Vec::new();
+    for entity in entities {
+        let mut spans = vec![(
+            entity["offset"].as_u64().unwrap(),
+            entity["length"].as_u64().unwrap(),
+        )];
+        if !matches!(entity["type"].as_str(), Some("code" | "pre")) {
+            for &(start, length) in &code {
+                spans = spans
+                    .into_iter()
+                    .flat_map(|(from, size)| {
+                        let to = from + size;
+                        if to <= start || from >= start + length {
+                            return vec![(from, size)];
+                        }
+                        let mut remaining = Vec::new();
+                        if from < start {
+                            remaining.push((from, start - from));
+                        }
+                        if to > start + length {
+                            remaining.push((start + length, to - start - length));
+                        }
+                        remaining
+                    })
+                    .collect();
+            }
+        }
+        for (offset, length) in spans {
+            let mut part = entity.clone();
+            part["offset"] = offset.into();
+            part["length"] = length.into();
+            if !compatible.contains(&part) {
+                compatible.push(part);
+            }
+        }
+    }
+    (text, compatible)
 }
 
 pub fn fingerprint(parts: &[OutboundReply]) -> String {
@@ -892,3 +1093,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "channel_reply_plan_telegram_tests.rs"]
+mod telegram_tests;

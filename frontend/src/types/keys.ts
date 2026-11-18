@@ -6,6 +6,7 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly credential_verification?: import("@/schemas/credential-verification").CredentialVerification | null;
   readonly offering_kind?: "ai_service" | "tool";
   readonly can_edit_configuration?: boolean;
   readonly preference_rank?: number | null;
@@ -59,6 +60,8 @@ export interface KeyInfo {
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly node_status?: string | null;
+  /** Advisory availability; does not limit configuring durable grants. */
+  readonly execution_unavailable_reason?: string | null;
   readonly node_last_heartbeat_at?: string | null;
   readonly connected?: boolean;
   readonly requires_connection?: boolean;

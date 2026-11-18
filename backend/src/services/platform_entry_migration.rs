@@ -185,6 +185,8 @@ tokio::task_local! {
     static TEST_READY_PUBLICATION_STALL: std::sync::Arc<OperationStall>;
     static TEST_RELEASE_STALL: std::sync::Arc<OperationStall>;
     static TEST_MAINTENANCE_TIMEOUT: std::time::Duration;
+    static TEST_LEASE_NOW: std::cell::Cell<chrono::DateTime<chrono::Utc>>;
+    static TEST_HEARTBEAT_TICK: std::sync::Arc<tokio::sync::Notify>;
 }
 
 #[cfg(test)]
@@ -192,6 +194,7 @@ struct OperationStall {
     entered: std::sync::atomic::AtomicBool,
     cancelled: std::sync::atomic::AtomicBool,
     duration: std::time::Duration,
+    release: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(test)]
@@ -238,7 +241,28 @@ async fn operation_stall(stall: std::sync::Arc<OperationStall>) {
     stall
         .entered
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    tokio::time::sleep(stall.duration).await;
+    if let Some(release) = &stall.release {
+        release.notified().await;
+    } else {
+        tokio::time::sleep(stall.duration).await;
+    }
+}
+
+fn lease_now() -> chrono::DateTime<chrono::Utc> {
+    #[cfg(test)]
+    if let Ok(now) = TEST_LEASE_NOW.try_with(std::cell::Cell::get) {
+        return now;
+    }
+    chrono::Utc::now()
+}
+
+async fn heartbeat_tick(period: std::time::Duration) {
+    #[cfg(test)]
+    if let Ok(tick) = TEST_HEARTBEAT_TICK.try_with(std::sync::Arc::clone) {
+        tick.notified().await;
+        return;
+    }
+    tokio::time::sleep(period).await;
 }
 
 fn lease_until(now: chrono::DateTime<chrono::Utc>) -> AppResult<bson::DateTime> {
@@ -258,7 +282,7 @@ async fn while_owned<T>(
     let heartbeat = async {
         let period = lease_duration() / 3;
         loop {
-            tokio::time::sleep(period).await;
+            heartbeat_tick(period).await;
             // A stuck Mongo renewal cannot leave mutation work running beyond
             // the lease. Losing either storage or ownership cancels the work.
             match tokio::time::timeout(period, renew(db, lease)).await {
@@ -277,7 +301,7 @@ async fn while_owned<T>(
 }
 
 async fn renew(db: &Database, lease: &str) -> AppResult<()> {
-    let now = chrono::Utc::now();
+    let now = lease_now();
     let changed = db
         .collection::<Document>(MIGRATIONS)
         .update_one(
@@ -322,7 +346,7 @@ async fn ensure_until(db: &Database, stop_before_retire: bool) -> AppResult<()> 
         if native_writes_ready(db).await? {
             return Ok(());
         }
-        let now = chrono::Utc::now();
+        let now = lease_now();
         let acquired = markers.find_one_and_update(doc! {
             "_id":VERSION,"schema_version":2,"state":"preparing",
             "$or":[{"lease_until":Bson::Null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]
@@ -339,7 +363,7 @@ async fn ensure_until(db: &Database, stop_before_retire: bool) -> AppResult<()> 
     let result = while_owned(db, &lease, async {
         prepare_and_retire(db, &lease, stop_before_retire).await?;
         renew(db, &lease).await?;
-        let now = chrono::Utc::now();
+        let now = lease_now();
         // Publication can become visible to renewal before this await resolves.
         #[cfg(test)]
         let publication = TEST_READY_PUBLICATION_STALL
@@ -721,6 +745,7 @@ mod tests {
             entered: std::sync::atomic::AtomicBool::new(false),
             cancelled: std::sync::atomic::AtomicBool::new(false),
             duration,
+            release: None,
         })
     }
 
@@ -739,59 +764,89 @@ mod tests {
         let db =
             crate::test_utils::connect_transaction_test_database("native_entry_lease_heartbeat")
                 .await;
-        let stall = stall(std::time::Duration::from_millis(2700));
-        let run = TEST_LEASE_DURATION.scope(
-            std::time::Duration::from_millis(900),
-            TEST_INITIAL_OPERATION_STALL.scope(stall.clone(), ensure(&db)),
-        );
-        let observe = async {
-            entered(&stall).await;
-            let first = db
-                .collection::<Document>(MIGRATIONS)
-                .find_one(doc! {"_id":VERSION})
-                .await
-                .unwrap()
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            let current = db
-                .collection::<Document>(MIGRATIONS)
-                .find_one(doc! {"_id":VERSION})
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                first.get_str("lease_id").unwrap(),
-                current.get_str("lease_id").unwrap()
-            );
-            assert!(
-                current.get_datetime("lease_until").unwrap()
-                    > first.get_datetime("lease_until").unwrap()
-            );
-            assert!(current.get_datetime("lease_until").unwrap().to_chrono() > chrono::Utc::now());
-            assert!(!native_writes_ready(&db).await.unwrap());
-        };
-        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            tokio::join!(run, observe)
-        })
-        .await
-        .unwrap();
-        result.unwrap();
-        assert!(native_writes_ready(&db).await.unwrap());
-        let ready = db
-            .collection::<Document>(MIGRATIONS)
-            .find_one(doc! {"_id":VERSION})
-            .await
-            .unwrap()
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-        assert_eq!(
-            db.collection::<Document>(MIGRATIONS)
-                .find_one(doc! {"_id":VERSION})
-                .await
-                .unwrap()
-                .unwrap(),
-            ready
-        );
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let ticks = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut stalled = stall(std::time::Duration::ZERO);
+        std::sync::Arc::get_mut(&mut stalled).unwrap().release = Some(release.clone());
+        // Keep production's lease duration and renewal timeout. The test owns
+        // the clock and tick delivery, so runner stalls cannot expire the lease
+        // and the operation cannot finish before its observer gets scheduled.
+        let start = chrono::Utc::now();
+        TEST_LEASE_NOW
+            .scope(std::cell::Cell::new(start), async {
+                let run = TEST_HEARTBEAT_TICK.scope(
+                    ticks.clone(),
+                    TEST_INITIAL_OPERATION_STALL.scope(stalled.clone(), ensure(&db)),
+                );
+                let observe = async {
+                    entered(&stalled).await;
+                    let markers = db.collection::<Document>(MIGRATIONS);
+                    let first = markers
+                        .find_one(doc! {"_id": VERSION})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let lease = first.get_str("lease_id").unwrap().to_owned();
+                    let initial_expiry = *first.get_datetime("lease_until").unwrap();
+                    // Four real renewals take logical time past the initial lease.
+                    for step in 1..=4 {
+                        let now = start + chrono::Duration::seconds(step * LEASE_SECONDS / 3);
+                        TEST_LEASE_NOW.with(|clock| clock.set(now));
+                        ticks.notify_one();
+                        let expected = lease_until(now).unwrap();
+                        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                            loop {
+                                let current = markers
+                                    .find_one(doc! {"_id": VERSION})
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                assert_eq!(current.get_str("lease_id").unwrap(), lease);
+                                assert_eq!(current.get_str("state").unwrap(), "preparing");
+                                if current.get_datetime("lease_until").unwrap() == &expected {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                        })
+                        .await
+                        .expect("owned operation must renew at every heartbeat");
+                        assert!(expected > initial_expiry);
+                        assert!(expected.to_chrono() > now);
+                        assert!(!native_writes_ready(&db).await.unwrap());
+                    }
+                    assert!(lease_now() > initial_expiry.to_chrono());
+                    release.notify_one();
+                    lease
+                };
+                let (result, lease) =
+                    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                        tokio::join!(run, observe)
+                    })
+                    .await
+                    .unwrap();
+                result.unwrap();
+                assert!(native_writes_ready(&db).await.unwrap());
+                let markers = db.collection::<Document>(MIGRATIONS);
+                let ready = markers
+                    .find_one(doc! {"_id": VERSION})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!ready.contains_key("lease_id"));
+                assert!(!ready.contains_key("lease_until"));
+                // A late renewal from the completed owner must not change readiness.
+                assert!(renew(&db, &lease).await.is_err());
+                assert_eq!(
+                    markers
+                        .find_one(doc! {"_id": VERSION})
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ready
+                );
+            })
+            .await;
         db.drop().await.unwrap();
     }
 

@@ -1,7 +1,7 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { billingRow } from "@/test/billing-fixture";
 import { billingUsageRowSchema } from "@/schemas/billing";
-import { groupRows } from "./billing-usage";
+import { groupRows, metricFamily, usageStatus } from "./billing-usage";
 
 it("groups usage by service operation and labels base-priced requests", () => {
   const catalog = [{ slug: "api-twitter", name: "X", inference: null }];
@@ -34,4 +34,63 @@ it("groups usage by service operation and labels base-priced requests", () => {
     groupRows(catalog, [billingUsageRowSchema.parse(older)], "operation")[0]!
       .name,
   ).toBe("X · Base price");
+});
+
+it("identifies org-funded channel guest usage without exposing the sender", () => {
+  const base = billingUsageRowSchema.parse(
+    billingRow({ api_key_id: "member-key", api_key_name: "Member agent" }),
+  );
+  const guest = billingUsageRowSchema.parse({
+    ...base,
+    api_key_id: "guest-key",
+    org_channel_guest: {
+      channel_id: "12345678-binding",
+      sender_hash: "private-sender-hash",
+    },
+  });
+  const groups = groupRows(
+    [],
+    [base, guest, { ...guest, api_key_id: "setup-key" }],
+    "agent",
+  );
+  expect(groups.map((group) => group.name)).toContain("Member agent");
+  const visitors = groups.find(
+    (group) => group.name === "Channel guests · 12345678",
+  );
+  expect(visitors?.rows).toHaveLength(2);
+  expect(
+    groups.every((group) => !group.name.includes("private-sender-hash")),
+  ).toBe(true);
+});
+
+it("shows strict model token units in the token usage and allowance group", () => {
+  for (const metric of [
+    "reasoning_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+  ]) {
+    expect(metricFamily(metric)).toBe("Tokens");
+  }
+});
+
+it("labels platform-model usage with the exact public model ID", () => {
+  const rows = ["nyxid/gemini-3-pro", "nyxid/claude-opus-5-5"].map((model) => billingUsageRowSchema.parse(billingRow({ model, service_slug: "logical-model-offering" })));
+  expect(groupRows([], rows, "model").map((g) => g.name).sort()).toEqual(["nyxid/claude-opus-5-5", "nyxid/gemini-3-pro"]);
+});
+
+
+describe("permanent usage rows", () => {
+  it("keeps an older rollup row separate from retained detail", () => {
+    const catalog = [] as Parameters<typeof groupRows>[0];
+    const current = billingUsageRowSchema.parse({ service_slug: "svc", metric: "requests", lago_metric_code: "m", layer: "platform", quantity: 1, requests: 1, bytes: 0, events: 1, lago_acked: true, detail_retained: true });
+    const older = billingUsageRowSchema.parse({ ...current, detail_retained: false, lago_acked: false, quantity: 9, events: 9 });
+    const groups = groupRows(catalog, [current, older], "service");
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.name).some((name) => name.includes("Older than 30 days"))).toBe(true);
+    expect(usageStatus([older]).label).toBe("Unavailable");
+    expect(groupRows(catalog, [older], "operation")[0]!.name).toBe("svc · Older than 30 days");
+    expect(groupRows(catalog, [older], "agent")[0]!.name).toBe("Unavailable · Older than 30 days");
+  });
 });

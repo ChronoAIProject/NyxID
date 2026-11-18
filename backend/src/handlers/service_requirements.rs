@@ -115,6 +115,7 @@ fn requirement_authority(
     auth: &AuthUser,
 ) -> crate::services::catalog_mutation_service::Authority {
     crate::services::catalog_mutation_service::Authority {
+        catalog_base_aliases: state.config.domain_aliases.base_urls.clone(),
         catalog_base_url: state.config.base_url.clone(),
         actor: audit_service::AuditActor::from_auth_user(auth),
         first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),

@@ -1130,8 +1130,7 @@ fn authoring_guidance_uses_three_parts_and_existing_skills_first() {
         "NyxID resumes you when they finish; never ask them to reply that they are done or connected.",
         "Service approvals wait for the owner in the app, phone or Telegram and continue automatically; report timeouts.",
         "After posting work, end your turn; NyxID wakes you with replies when the group is quiet so you can report back.",
-        "Link existing personal or organization bots from nyxid__list_channel_bots to yourself or a specialist with nyxid__connect_channel_bot by id or label.",
-        "Create Telegram, Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
+        "Link existing personal or organization bots from nyxid__list_channel_bots to yourself or a personal specialist with nyxid__connect_channel_bot. Create Telegram, Discord, Slack, Lark or other bots with nyxid__channel_bot_setup_link; share its link, never request bot secrets in chat or send the user to Studio.",
         "and ask the owner when unsure.",
         "When work is specialized or parallel, or the user asks for an agent",
         "Never tell the user to create an agent themselves. An agent key is different: a raw API key the user creates on its settings page.",
@@ -3728,6 +3727,12 @@ async fn draft_tool_result_keeps_its_shape() {
         "proposal_id",
         "agent_id",
         "source",
+        "code",
+        "status",
+        "message",
+        "expires_at",
+        "conversation_id",
+        "review_path",
     ]
     .into();
     assert_eq!(keys, expected);
@@ -3735,6 +3740,8 @@ async fn draft_tool_result_keeps_its_shape() {
     assert!(matches!(review_url.scheme(), "http" | "https"));
     assert!(review_url.host_str().is_some());
     assert_eq!(result["error"], "acknowledgement_required");
+    assert_eq!(result["code"], "acknowledgement_required");
+    assert_eq!(result["status"], "pending");
     assert_eq!(result["kind"], "action");
     assert_eq!(result["source"], "authored");
     assert_eq!(result["agent_id"], f.chat.agent_id.as_str());
@@ -4446,9 +4453,80 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
         .await
         .unwrap();
     f.chat.turn_id = Some(turn);
-    let (again, same_card) = make(&f, input(&f.chat.agent_id)).await;
+    let activity = super::super::assistant_nyxagent::activity_started_for_turn(
+        &f.state.db,
+        &f.owner,
+        &f.chat.conversation_id,
+        f.chat.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (again, same_card) = super::super::machine_activity_service::ACTIVITY_ID
+        .scope(Some(activity.clone()), make(&f, input(&f.chat.agent_id)))
+        .await;
     assert_eq!(again.id, proposal.id);
     assert_eq!(same_card.id, card.id);
+    let mut activities = super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activities;
+    super::super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    assert!(activities.iter().any(|a| {
+        a.id == activity
+            && a.decision
+                .as_ref()
+                .is_some_and(|d| d.id == card.id && d.state == "waiting")
+    }));
+    // Recovery from another thread retains the review origin, but links the
+    // caller's own activity and exposes only that trusted card's state.
+    let other = another_authoring_chat(&f).await;
+    let other_activity = super::super::assistant_nyxagent::activity_started_for_turn(
+        &f.state.db,
+        &f.owner,
+        &other.conversation_id,
+        other.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let result = super::super::machine_activity_service::ACTIVITY_ID
+        .scope(Some(other_activity.clone()), draft_in_chat(&f, &other))
+        .await
+        .unwrap();
+    assert_eq!(result["acknowledgement_id"], card.id);
+    let mut activities =
+        super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &other.conversation_id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activities;
+    super::super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &other.conversation_id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    assert!(activities.iter().any(|a| {
+        a.id == other_activity
+            && a.decision
+                .as_ref()
+                .is_some_and(|d| d.id == card.id && d.state == "waiting")
+    }));
     f.state.db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
         .update_one(doc! {"_id":&card.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}).await.unwrap();
     let reader = crate::handlers::agent_skills::Reader {
@@ -4604,7 +4682,7 @@ async fn allowed_unstarted_drafts_join_the_original_publication_without_another_
         proposal.publication.as_ref().unwrap(),
         proposal.agent_skills_revision,
     );
-    let finalized = claims::finalize(&f.state, &reservation, &binding)
+    let finalized = claims::finalize(&f.state, &reservation, &binding, f.chat.approval_options())
         .await
         .unwrap();
     assert_eq!(finalized.id, card.id);
@@ -4690,6 +4768,39 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
             .unwrap(),
         1
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn noninteractive_retry_cannot_request_an_interrupted_drafts_review() {
+    let f = fixture("authoring_noninteractive_recovery").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let cards = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    cards.delete_one(doc! {"_id":&card.id}).await.unwrap();
+    let mut caller = another_authoring_chat(&f).await;
+    assert!(f.chat.approval_options().allow_request);
+    caller.execution_voice_task = true;
+    assert!(matches!(
+        draft_in_chat(&f, &caller).await,
+        Err(AppError::ApprovalUnsupported)
+    ));
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), 0);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    caller.execution_voice_task = false;
+    let recovered = draft_in_chat(&f, &caller).await.unwrap();
+    assert_eq!(recovered["proposal_id"], proposal.id);
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), 1);
     f.state.db.drop().await.unwrap();
 }
 
@@ -4805,7 +4916,7 @@ async fn stale_preparation_cannot_finalize_after_origin_replacement() {
     let current = draft_in_chat(&f, &other).await.unwrap();
     assert_ne!(current["proposal_id"], proposal.id);
     assert!(matches!(
-        claims::finalize(&f.state, &stale, &binding).await,
+        claims::finalize(&f.state, &stale, &binding, f.chat.approval_options()).await,
         Err(AppError::Conflict(_))
     ));
     assert_eq!(
@@ -4901,7 +5012,7 @@ async fn destroyed_or_deleted_target_fences_stale_reservation_and_finalization()
             Err(AppError::NotFound(_))
         ));
         assert!(matches!(
-            claims::finalize(&f.state, &stale, &binding).await,
+            claims::finalize(&f.state, &stale, &binding, f.chat.approval_options()).await,
             Err(AppError::NotFound(_))
         ));
         assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 0);

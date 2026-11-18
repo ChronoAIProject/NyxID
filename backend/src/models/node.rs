@@ -91,7 +91,11 @@ pub struct NodeConnectionOwner {
     #[serde(default)]
     pub credential_ack_correlation: bool,
     #[serde(default)]
+    pub credential_target_update_v1: bool,
+    #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub machine_execution_approval_v1: bool,
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
     #[serde(default)]
@@ -374,7 +378,9 @@ mod tests {
             renewed_at: now,
             expires_at: now + chrono::Duration::seconds(30),
             credential_ack_correlation: true,
+            credential_target_update_v1: false,
             remote_credential_crypto_v1: true,
+            machine_execution_approval_v1: false,
             proxy_max_body_size: Some(1024),
             capabilities_resolved: true,
         };

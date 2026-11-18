@@ -5,7 +5,32 @@ import {
   automationPreferencesSchema,
   automationRequest,
   scheduleSchema,
+  runSchema,
 } from "./automations";
+
+it("reads optional metadata-only run failures without breaking legacy history", () => {
+  const run = {
+    id: "run",
+    scheduled_at: "2026-10-31T00:00:00Z",
+    started_at: null,
+    finished_at: null,
+    outcome: "failed",
+    reason: "assistant_unavailable",
+    thread_id: null,
+    duration_ms: null,
+  };
+  expect(runSchema.parse(run).failure_reason).toBeUndefined();
+  const failure = {
+    source: "nyxid",
+    stage: "model_proxy",
+    code: "api_key_scope_forbidden",
+    http_status: 403,
+    nyxid_error_code: 9000,
+  };
+  expect(
+    runSchema.parse({ ...run, failure_reason: failure }).failure_reason,
+  ).toEqual(failure);
+});
 
 describe("automation forms", () => {
   const valid = () => ({
@@ -105,4 +130,10 @@ describe("automation forms", () => {
           .success,
       ).toBe(false);
   });
+});
+
+it("keeps execution and push receipt metadata separate and accepts legacy rows", () => {
+  const run = { id: "run", scheduled_at: "2026-11-07T00:00:00Z", started_at: null, finished_at: null, outcome: "failed", reason: "push_disabled", thread_id: "thread", duration_ms: null };
+  expect(runSchema.parse(run).notification_delivery).toBeUndefined();
+  expect(runSchema.parse({ ...run, execution_outcome: "completed", notification_delivery: { state: "retrying", attempts: 1, retry_at: "2026-11-07T00:01:00Z", http_status: 429, reason: "push_temporarily_refused", message: "Retrying the saved report." } })).toMatchObject({ execution_outcome: "completed", notification_delivery: { state: "retrying", http_status: 429 } });
 });

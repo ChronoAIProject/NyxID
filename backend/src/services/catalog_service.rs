@@ -360,6 +360,7 @@ async fn provider_platform_secret_nonempty(
 /// Public services and legacy documents without a visibility field are visible to all.
 pub(crate) fn visibility_filter(user_id: &str, owner_ids: &[&str]) -> mongodb::bson::Document {
     doc! {
+        "platform_key.purpose": {"$nin":["model_route","model_offering"]},
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
@@ -423,6 +424,19 @@ pub async fn list_catalog(
         },
     )
     .await
+}
+
+/// A public discovery entry whose slug may be included in diagnostic metadata.
+/// Mirrors `list_catalog_all`; `shutdown_public_catalog_listing_parity` checks
+/// the real discovery response. Explicit owners are excluded even though public
+/// owned rows can be listed. Creator attribution does not affect discovery.
+pub(crate) fn is_public_unowned_discovery_entry(service: &DownstreamService) -> bool {
+    service.visibility == "public"
+        && service.owner_user_id.is_none()
+        && service.is_active
+        && matches!(service.service_category.as_str(), "connection" | "internal")
+        && !(service.service_category == "internal" && service.slug.starts_with("platform-"))
+        && !super::platform_key_service::model_only(service)
 }
 
 /// List ALL active catalog entries for discovery (includes system services without auth).
@@ -623,6 +637,11 @@ pub(crate) async fn enforce_catalog_read_access(
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
+    if super::platform_key_service::model_only(svc) {
+        // The dedicated first-party admin surface owns private model records.
+        // Ordinary catalog readers carry no such authenticated purpose.
+        return Err(AppError::NotFound("Catalog entry not found".into()));
+    }
     if svc.visibility != "private"
         || catalog_owner(svc) == user_id
         || super::platform_key_service::available(db, svc, user_id).await?
@@ -976,6 +995,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 

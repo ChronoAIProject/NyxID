@@ -1,4 +1,7 @@
-import { useState, useSyncExternalStore, type ComponentProps } from "react";
+import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
+import { GroupInviteDialog } from "./collaboration-group-controls";
+import { useConnectionDown } from "@/hooks/use-connection-down";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -7,8 +10,15 @@ import {
   type SidebarGroups,
 } from "@/components/assistant/assistant-sidebar";
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
+import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { NewGroupDialog } from "@/components/assistant/nyxbot-group-forms";
 import { useFeature } from "@/hooks/use-feature-flag";
+import {
+  unreadSources,
+  useNotificationSourceRead,
+  useNotificationSummary,
+  useNotificationsEnabled,
+} from "@/hooks/use-assistant-notifications";
 import { useNyxAgentThreads } from "@/hooks/use-assistant-nyxagent";
 import { selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
@@ -40,8 +50,17 @@ export function AssistantEngineSidebar({
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const groups = useNyxBotGroups(nyxagentEnabled);
-  const [creatingAgent, setCreatingAgent] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState<"personal" | "org">();
+  const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const [inviteToken, setInviteToken] = useState(readGroupInvite);
+  useEffect(() => {
+    const change = () => setInviteToken(readGroupInvite());
+    window.addEventListener("hashchange", change);
+    return () => window.removeEventListener("hashchange", change);
+  }, []);
+  const closeInvite = () => { clearGroupInvite(); setInviteToken(null); };
+  const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const openThread = search.draft ? undefined : search.c;
   const openGroup = onChatRoute ? search.g : undefined;
   const home = onChatRoute && !search.c && !search.draft && !search.agent && !search.g;
@@ -50,6 +69,16 @@ export function AssistantEngineSidebar({
     () => nyxAgentTransport.getConversation(openThread)?.agent?.id,
   );
   const agents = useNyxBotAgents(nyxagentEnabled);
+  // Unread markers come from the notification summary; opening a thread or
+  // crew reports it read once the tab has shown it for a moment.
+  const notificationsEnabled = useNotificationsEnabled();
+  const notificationSummary = useNotificationSummary(notificationsEnabled);
+  const unread = useMemo(() => unreadSources(notificationSummary.data), [notificationSummary.data]);
+  useNotificationSourceRead({
+    conversationId: openThread,
+    groupId: openGroup,
+    enabled: notificationsEnabled,
+  });
   // An open group expands no agent; otherwise the open thread's agent, the
   // agent in the URL, or NyxBot.
   const selectedAgent = openGroup
@@ -108,15 +137,24 @@ export function AssistantEngineSidebar({
   const agentsModel: SidebarAgents | undefined = nyxagentEnabled
     ? {
         agents: agents.data?.agents ?? [],
+        destroyedTruncated: agents.data?.destroyed_truncated,
+        loading: agents.isPending || agents.isFetching,
+        loadError: agents.error
+          ? (agents.data ? "Could not refresh agents." : "Could not load agents.")
+          : undefined,
+        onRetry: () => { void agents.refetch(); },
         selectedAgentId: selectedAgent?.id,
         threads: nyx.conversations,
         threadsLoading: Boolean(selectedAgent) && !nyx.threadsLoaded,
         // An agent lands on its latest thread (or a new one when it has none).
         onSelectAgent: (agentId) => goTo({ agent: agentId }),
         onNewThread: (agentId) => goTo({ draft: true, agent: agentId }),
-        onNewAgent: () => setCreatingAgent(true),
+        onAgentDetails: setDetailsAgentId,
+        onNewAgent: setCreatingAgent,
+        canCreateOrgAgent: orgAgentsEnabled,
         homeActive: home,
         onHome: () => goTo({}),
+        unreadThreadIds: unread.conversationIds,
       }
     : undefined;
   const groupsModel: SidebarGroups | undefined = nyxagentEnabled
@@ -129,13 +167,21 @@ export function AssistantEngineSidebar({
         loading: groups.isPending,
         onSelectGroup: (groupId) => goTo({ g: groupId }),
         onNewGroup: () => setCreatingGroup(true),
+        unreadGroupIds: unread.groupIds,
       }
     : undefined;
-  const loadError = agents.error
-    ? `Could not load agents. ${agents.error.message}`
+  // Offline, the window's banner says it once; the lists refresh when the
+  // connection returns. A dropped connection is not a sent message here.
+  const online = !useConnectionDown();
+  const loadFailure = (what: string, error: Error) =>
+    error.message.startsWith("Connection interrupted")
+      ? `Could not load ${what}. Check your connection; they reload when it's back.`
+      : `Could not load ${what}. ${error.message}`;
+  const loadError = !online
+    ? undefined
     : groups.error
-      ? `Could not load groups. ${groups.error.message}`
-      : undefined;
+        ? loadFailure("crews", groups.error)
+        : undefined;
 
   return (
     <>
@@ -165,6 +211,7 @@ export function AssistantEngineSidebar({
           if (id === props.activeConversationId) props.onNewChat();
         }}
       />
+      {inviteToken && nyxagentEnabled ? <GroupInviteDialog token={inviteToken} onClose={closeInvite} onJoined={(group) => {closeInvite(); goTo({ g: group.id });}} /> : null}
       {creatingGroup ? (
         <NewGroupDialog
           agents={agents.data?.agents ?? []}
@@ -177,13 +224,26 @@ export function AssistantEngineSidebar({
       ) : null}
       {creatingAgent ? (
         <NewAgentDialog
-          onClose={() => setCreatingAgent(false)}
+          owner={creatingAgent}
+          onClose={() => setCreatingAgent(undefined)}
           onCreated={(created) => {
-            setCreatingAgent(false);
+            setCreatingAgent(undefined);
             goTo({ c: created.home_conversation_id });
           }}
         />
       ) : null}
+      <AgentDetailsSheet
+        agentId={detailsAgentId}
+        agents={agents.data?.agents ?? []}
+        open={detailsAgentId !== undefined}
+        onOpenChange={(open) => {
+          if (!open) setDetailsAgentId(undefined);
+        }}
+        onDeleted={() => {
+          setDetailsAgentId(undefined);
+          goTo({});
+        }}
+      />
     </>
   );
 }

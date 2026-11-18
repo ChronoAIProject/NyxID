@@ -21,6 +21,9 @@ Approved product decisions (see §12):
   `reply_mode` remains `mention` by default. Following starts only on positive
   adapter evidence of a mention/direct address or reply to this bot. The current
   `addressed == None => owner` fallback may answer as before but cannot subscribe.
+  Discord accepts an exact bot-user mention or the bot's own managed integration
+  role proven by `tags.bot_id`; other roles and @everyone/@here stay broadcasts.
+  See the [Discord facts contract](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md#discord-relay-facts).
 - No migration subscribes anything. An existing platform thread can acquire a
   new follow on its first explicit address after activation; its creation date
   need not be after the upgrade. Existing NyxID conversations remain intact.

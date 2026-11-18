@@ -282,7 +282,7 @@ describe("live grouped services", () => {
         usage: null,
       });
     }
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     const card = within(
       screen.getByRole("region", { name: "Unpriced service" }),
@@ -389,7 +389,7 @@ describe("live grouped services", () => {
         }),
         usage: null,
       });
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       render(preview());
       const card = within(screen.getByRole("region", { name }));
       const summary = card.getByRole("button", {
@@ -478,7 +478,7 @@ describe("live grouped services", () => {
         usage: null,
       });
     }
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     const card = within(screen.getByRole("region", { name: "Twitter" }));
     const summary = card.getByRole("button", {
@@ -641,7 +641,7 @@ describe("live grouped services", () => {
         usage: null,
       });
     }
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(
       screen.queryByRole("region", { name: "Platform-only service" }),
@@ -740,7 +740,7 @@ describe("live grouped services", () => {
         },
       },
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(screen.getByText("1+ agent key")).toBeVisible();
     expect(screen.getByText("Last use not reported")).toBeVisible();
@@ -763,7 +763,7 @@ describe("live grouped services", () => {
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });
   it("keeps last-used layer and billing visible when the card is expanded and opens row details", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     insightConnections.set("mine", {
       service_id: "mine",
       billing: configuredBilling(records[0]!),
@@ -832,6 +832,19 @@ describe("live grouped services", () => {
   });
   it("keeps scroll height stable when compacting at the bottom of a short filtered view", () => {
     const callbacks: ResizeObserverCallback[] = [];
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = ++frameId;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const flushFrame = () => act(() => {
+      const pending = [...frames.values()];
+      frames.clear();
+      pending.forEach((callback) => callback(0));
+    });
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -865,6 +878,9 @@ describe("live grouped services", () => {
       act(() =>
         callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
       );
+      expect(container.style.getPropertyValue("--service-filters-height")).not.toBe("240px");
+      flushFrame();
+      expect(container.style.getPropertyValue("--service-filters-height")).toBe("240px");
       main.scrollTop = 100;
       fireEvent.scroll(main);
       for (let frame = 0; frame < 4; frame++) {
@@ -879,6 +895,7 @@ describe("live grouped services", () => {
         act(() =>
           callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
         );
+        flushFrame();
         fireEvent.scroll(main);
         expect(main.scrollTop).toBe(100);
         expect(filters).toHaveAttribute("data-stuck", "true");
@@ -896,7 +913,7 @@ describe("live grouped services", () => {
     }
   });
   it("covers the gap above a pinned service header and clears it on return or collapse", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<main>{preview()}</main>);
     const main = screen.getByRole("main");
     main.scrollTo = vi.fn();
@@ -947,7 +964,7 @@ describe("live grouped services", () => {
         slug: `openai-${index}`,
       });
     }
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<main>{preview()}</main>);
     const main = screen.getByRole("main");
     main.scrollTo = vi.fn();
@@ -1011,7 +1028,7 @@ describe("live grouped services", () => {
       },
       savedViewId: undefined,
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const connect = vi.fn();
     render(
       <main>
@@ -1155,7 +1172,7 @@ describe("live grouped services", () => {
         catalog_service_slug: "org-only",
       },
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     const filters = screen.getByRole("region", { name: "Service filters" });
     expect(
@@ -1219,7 +1236,7 @@ describe("live grouped services", () => {
   });
 
   it("starts collapsed and compares connections in a table inside one service", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     const group = screen.getByRole("region", { name: "OpenAI" });
     const scroll = vi.fn();
@@ -1290,7 +1307,7 @@ describe("live grouped services", () => {
       catalog_service_name: "Twilio",
       catalog_service_slug: "twilio",
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     const openai = screen.getByRole("region", { name: "OpenAI" });
     const twilio = screen.getByRole("region", { name: "Twilio" });
@@ -1330,7 +1347,7 @@ describe("live grouped services", () => {
   });
 
   it("searches a nested connection and shows only matching rows with the group total", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     await user.type(
       screen.getByRole("textbox", { name: "Search services and connections" }),
@@ -1346,7 +1363,7 @@ describe("live grouped services", () => {
   });
 
   it("filters by actual organizations without the extra Filters menu", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(
       screen.queryByRole("button", { name: "Filters" }),
@@ -1367,7 +1384,7 @@ describe("live grouped services", () => {
       accountId: account.id,
       filters: { ...DEFAULT_SERVICE_FILTERS, state: "disabled" },
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(
       screen.queryByRole("button", { name: "Filters" }),
@@ -1407,7 +1424,7 @@ describe("live grouped services", () => {
         catalog_service_slug: "twilio",
       },
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     await user.click(screen.getByRole("button", { name: "Organization" }));
     await user.click(screen.getByRole("checkbox", { name: "Chrono" }));
@@ -1542,7 +1559,7 @@ describe("live grouped services", () => {
         },
       },
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
@@ -1560,7 +1577,7 @@ describe("live grouped services", () => {
   });
 
   it("lets the user clear an empty filter result", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     await user.type(
       screen.getByRole("textbox", { name: "Search services and connections" }),
@@ -1572,7 +1589,7 @@ describe("live grouped services", () => {
   });
 
   it("omits nonexistent platform sources and never invents a routing decision", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
@@ -1591,7 +1608,7 @@ describe("live grouped services", () => {
       label: "Platform account",
       auto_connected: true,
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(screen.getByText("3 connections")).toBeVisible();
     await user.click(
@@ -1615,7 +1632,7 @@ describe("live grouped services", () => {
       catalog_service_slug: null,
       label: "OpenAI custom",
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(preview());
     expect(screen.getByRole("region", { name: "OpenAI" })).toBeVisible();
     expect(screen.getByRole("region", { name: "OpenAI custom" })).toBeVisible();
@@ -1628,7 +1645,7 @@ describe("live grouped services", () => {
   });
 
   it("restores expansion after detail navigation and isolates it when accounts change", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const mounted = render(preview());
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),

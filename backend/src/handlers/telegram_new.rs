@@ -78,15 +78,89 @@ pub struct RequestResponse {
     pub channel_bot_id: Option<String>,
     pub auto_connect: bool,
     pub connection_error: Option<String>,
+    pub prompt_delivery: Option<PromptDeliveryResponse>,
+    pub can_open_creation_form: bool,
+    pub setup_notice: Option<SetupNoticeResponse>,
+    pub username_suggestions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SetupNoticeResponse {
+    pub reason: &'static str,
+    pub message: &'static str,
+    pub status_url: String,
+    pub new_setup_url: String,
+    pub agent_url: Option<String>,
+}
+
+impl From<crate::services::telegram_new_service::SetupNotice> for SetupNoticeResponse {
+    fn from(notice: crate::services::telegram_new_service::SetupNotice) -> Self {
+        Self {
+            reason: notice.reason,
+            message: notice.message,
+            status_url: notice.status_url,
+            new_setup_url: notice.new_setup_url,
+            agent_url: notice.agent_url,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PromptDeliveryResponse {
+    pub attempt_id: String,
+    pub phase: crate::models::telegram_bot_request::PromptPhase,
+    pub outcome: crate::models::telegram_bot_request::PromptOutcome,
+    pub attempted_at: String,
+    pub completed_at: Option<String>,
+    pub failure: Option<crate::models::telegram_bot_request::TelegramFailure>,
+    pub reason: Option<crate::models::telegram_bot_request::TelegramReason>,
+    pub http_status: Option<u16>,
+    pub error_code: Option<i32>,
+    pub retry_after: Option<u32>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
     fn from(request: TelegramBotRequest) -> Self {
+        let username_suggestions =
+            crate::services::telegram_new_service::username_suggestions(&request);
         let approved = matches!(
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
+        // Live hosted context cannot be established by a request-only conversion.
+        // HTTP responses opt in through projected_request below.
+        let can_open_creation_form = false;
+        let prompt_delivery = request.prompt_delivery.map(|prompt| {
+            use crate::models::telegram_bot_request::PromptOutcome;
+            let outcome = if prompt.outcome == PromptOutcome::Sending
+                && prompt.attempted_at
+                    + chrono::Duration::seconds(
+                        crate::services::telegram_new_service::PROMPT_HORIZON_SECS,
+                    )
+                    <= chrono::Utc::now()
+            {
+                PromptOutcome::Unknown
+            } else {
+                prompt.outcome
+            };
+            PromptDeliveryResponse {
+                attempt_id: prompt.attempt_id,
+                phase: prompt.phase,
+                outcome,
+                attempted_at: prompt.attempted_at.to_rfc3339(),
+                completed_at: prompt.completed_at.map(|time| time.to_rfc3339()),
+                failure: prompt.diagnostic.as_ref().map(|d| d.failure),
+                reason: prompt.diagnostic.as_ref().map(|d| d.reason),
+                http_status: prompt.diagnostic.as_ref().and_then(|d| d.http_status),
+                error_code: prompt.diagnostic.as_ref().and_then(|d| d.error_code),
+                retry_after: prompt.diagnostic.as_ref().and_then(|d| d.retry_after),
+            }
+        });
         Self {
+            username_suggestions,
+            setup_notice: None,
+            prompt_delivery,
+            can_open_creation_form,
             auto_connect: request.auto_connect,
             connection_error: request.connection_error,
             channel_bot_id: matches!(
@@ -107,6 +181,18 @@ impl From<TelegramBotRequest> for RequestResponse {
             bot_username: request.bot_username.filter(|_| approved),
         }
     }
+}
+
+pub(crate) async fn projected_request(
+    state: &AppState,
+    request: TelegramBotRequest,
+) -> AppResult<RequestResponse> {
+    let eligible = service(state).can_open_creation_form(&request).await?;
+    let notice = service(state).setup_notice(&request).await?;
+    let mut response = RequestResponse::from(request);
+    response.can_open_creation_form = eligible && notice.is_none();
+    response.setup_notice = notice.map(Into::into);
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -196,7 +282,7 @@ pub async fn redeem_claim(
     Ok((
         StatusCode::ACCEPTED,
         private_headers(),
-        Json(request.into()),
+        Json(projected_request(&state, request).await?),
     ))
 }
 
@@ -224,7 +310,10 @@ pub async fn configuration(
         Json(ConfigurationResponse {
             available,
             manager_username: row.and_then(|row| row.fields.get("manager_username").cloned()),
-            request: request.map(Into::into),
+            request: match request {
+                Some(request) => Some(projected_request(&state, request).await?),
+                None => None,
+            },
         }),
     ))
 }
@@ -251,7 +340,7 @@ pub async fn begin(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: request.into(),
+            request: projected_request(&state, request).await?,
             launch_url,
         }),
     ))
@@ -265,7 +354,7 @@ pub async fn get(
     let actor = human(&auth)?;
     Ok((
         private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
+        Json(projected_request(&state, service(&state).get(&actor, &id).await?).await?),
     ))
 }
 
@@ -280,9 +369,74 @@ pub async fn launch(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: service(&state).get(&actor, &id).await?.into(),
+            request: projected_request(&state, service(&state).get(&actor, &id).await?).await?,
             launch_url,
         }),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct CreationLinkResponse {
+    pub request: RequestResponse,
+    pub creation_url: String,
+    pub username_suggestions: Vec<UsernameSuggestionResponse>,
+}
+
+#[derive(Serialize)]
+pub struct UsernameSuggestionResponse {
+    pub username: String,
+    pub creation_url: String,
+}
+
+pub async fn creation_link(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<CreationLinkResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    let username_suggestions =
+        crate::services::telegram_new_service::creation_suggestions(&request, &creation_url)?
+            .into_iter()
+            .map(|(username, creation_url)| UsernameSuggestionResponse {
+                username,
+                creation_url,
+            })
+            .collect();
+    Ok((
+        private_headers(),
+        Json(CreationLinkResponse {
+            request: projected_request(&state, request).await?,
+            creation_url,
+            username_suggestions,
+        }),
+    ))
+}
+
+pub async fn regenerate_username(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<RequestResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let request = service(&state).regenerate_username(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
     ))
 }
 
@@ -323,7 +477,10 @@ pub async fn connect(
             ),
         );
     }
-    Ok((private_headers(), Json(request.into())))
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
+    ))
 }
 
 pub async fn webhook(
@@ -486,11 +643,12 @@ pub(crate) async fn relay_manager_channel(
     let deadline = std::time::Duration::from_secs(
         u64::from(state.config.channel_relay_callback_timeout_secs) + 10,
     );
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         match tokio::time::timeout(
             deadline,
             crate::services::channel_inbound_service::process_inbound_messages(
+                crate::services::channel_inbound_service::InboundSource::Webhook,
                 (&state).into(),
                 &bot,
                 adapter.as_ref(),

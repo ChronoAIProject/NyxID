@@ -164,6 +164,7 @@ async fn admit(
             .await?;
     let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#)?);
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),

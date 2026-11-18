@@ -1,5 +1,6 @@
-//! Owner-only authority for native channel media. Provider handles come solely
+//! Source authority for relay channel media. Provider handles come solely
 //! from authenticated NyxID ingress metadata, never from a gateway attachment.
+use super::channel_platform::canonical_platform;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -13,6 +14,26 @@ use crate::{
     },
 };
 use mongodb::{Database, bson::doc};
+
+pub const READINESS: &str = "assistant:channel-media-v2";
+
+pub fn expanded_relay(platform: &str) -> bool {
+    matches!(platform, "discord" | "slack" | "whatsapp" | "x")
+}
+
+pub fn supported_relay(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu") || expanded_relay(platform)
+}
+
+/// Lark/Feishu audio and video keep their pre-v2 behavior. The new adapters
+/// retain originals even when the document parser cannot interpret them.
+pub fn supported_source(source: &ChannelMessage) -> bool {
+    expanded_relay(canonical_platform(&source.platform))
+        || source
+            .attachments
+            .iter()
+            .all(|item| matches!(item.content_type.as_str(), "image" | "file"))
+}
 
 /// Captured routing facts. Reuse the original request on every fetch/retry so a
 /// relink cannot silently replace the admitted authority.
@@ -36,6 +57,7 @@ impl std::fmt::Debug for MediaRequest {
 pub struct AuthorizedMedia {
     pub source: ChannelMessage,
     pub bot: ChannelBot,
+    pub guest: bool,
 }
 impl std::fmt::Debug for AuthorizedMedia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,30 +73,41 @@ fn refused() -> AppError {
 /// decision. It does not authorize downloads.
 pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelMessage> {
     let channel = &request.channel;
-    if !matches!(channel.platform.as_str(), "lark" | "feishu") {
+    if !(supported_relay(canonical_platform(&channel.platform))
+        || canonical_platform(&channel.platform) == "telegram")
+        || channel.gateway_source.is_some()
+    {
         return Err(refused());
     }
     let mut filter = doc! {
         "_id": &request.source_message_id, "direction": "inbound",
         "channel_bot_id": &channel.channel_bot_id,
         "user_id": channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
-        "platform": &channel.platform, "agent_api_key_id": &channel.route_api_key_id,
+        "agent_api_key_id": &channel.route_api_key_id,
         "platform_conversation_id": &request.chat_id, "sender_platform_id": &request.sender_id,
         "thread_id": &request.native_thread_id,
     };
     if let Some(route) = &channel.route_id {
         filter.insert("conversation_id", route);
     }
-    db.collection::<ChannelMessage>(MESSAGES)
+    let source = db
+        .collection::<ChannelMessage>(MESSAGES)
         .find_one(filter)
         .await?
-        .ok_or_else(refused)
+        .ok_or_else(refused)?;
+    if canonical_platform(&source.platform) != canonical_platform(&channel.platform) {
+        return Err(refused());
+    }
+    Ok(source)
 }
 
 /// All live checks precede credential materialization and provider I/O. Call
 /// immediately before each fetch, including a larger-limit retry.
 pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<AuthorizedMedia> {
     let source = source(db, request).await?;
+    if expanded_relay(canonical_platform(&source.platform)) {
+        super::security_readiness_service::require_serving(db, READINESS).await?;
+    }
     let captured = &request.channel;
     let channel = db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -82,16 +115,63 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         .await?
         .ok_or_else(refused)?;
     if channel.channel_bot_id != captured.channel_bot_id
-        || channel.platform != captured.platform
+        || canonical_platform(&channel.platform) != canonical_platform(&captured.platform)
         || channel.bot_owner_id != captured.bot_owner_id
         || channel.route_api_key_id != captured.route_api_key_id
         || channel.route_id != captured.route_id
         || channel.agent_id != captured.agent_id
         || channel.follow_binding_generation != captured.follow_binding_generation
-        || !channel.owner_sender_ids.contains(&request.sender_id)
+        || channel.org_specialist != captured.org_specialist
+        || channel.gateway_source.is_some()
     {
         return Err(refused());
     }
+    let guest =
+        channel.org_specialist.is_none() && !channel.owner_sender_ids.contains(&request.sender_id);
+    let member = if channel.org_specialist.is_some() {
+        super::org_channel_service::enabled(db, &channel.user_id).await?;
+        let (identity, _) = super::org_channel_service::sender(
+            db,
+            &channel,
+            &request.sender_id,
+            true,
+            request
+                .agent_id
+                .as_ref()
+                .or(channel.agent_id.as_ref())
+                .ok_or_else(refused)?,
+        )
+        .await?;
+        if identity.guest {
+            return Err(refused());
+        }
+        if let Some(origin) = &request.origin {
+            if origin.org_execution.as_deref() != Some(&identity) {
+                return Err(refused());
+            }
+            let access = super::org_channel_service::validate(
+                db,
+                origin,
+                &identity.actor_id,
+                &identity.agent_id,
+            )
+            .await?;
+            let conversation = db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id":request.conversation_id.as_deref().ok_or_else(refused)?,"user_id":&identity.actor_id}).await?.ok_or_else(refused)?;
+            access
+                .channel()
+                .ok_or_else(refused)?
+                .check_conversation(&conversation)?;
+        } else if request.conversation_id.is_some() {
+            return Err(refused());
+        }
+        Some(identity)
+    } else {
+        if guest && !super::assistant_channel_media::guest::enabled(db, &channel.user_id).await? {
+            return Err(refused());
+        }
+        None
+    };
     if db
         .collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
         .find_one(doc! {"_id": &channel.user_id, "is_active":true})
@@ -113,8 +193,11 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     super::platform_bot_authority::require_personal_routes(db, &channel.channel_bot_id).await?;
     let bot = db.collection::<ChannelBot>(BOTS).find_one(doc! {
         "_id": &channel.channel_bot_id, "user_id": channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
-        "platform": &channel.platform, "is_active":true, "status":"active"
+        "is_active":true, "status":"active"
     }).await?.ok_or_else(refused)?;
+    if canonical_platform(&bot.platform) != canonical_platform(&channel.platform) {
+        return Err(refused());
+    }
     let route = super::channel_routing_service::resolve_agent(
         db,
         &bot.id,
@@ -131,7 +214,9 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     }
     let mut requires_nyxbot = false;
     if let Some(origin) = &request.origin {
-        if origin.nyxbot_channel_id != channel.id || origin.platform != channel.platform {
+        if origin.nyxbot_channel_id != channel.id
+            || canonical_platform(&origin.platform) != canonical_platform(&channel.platform)
+        {
             return Err(refused());
         }
         let chat = db.collection::<NyxbotThread>(THREADS).find_one(doc! {
@@ -152,7 +237,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             requires_nyxbot = effective.is_none();
         }
         if let Some(binding) = origin.thread.as_deref() {
-            if binding.guest
+            if binding.guest != guest
                 || request.agent_id.as_deref() != Some(binding.agent_id.as_str())
                 || binding.source_message_id != source.id
                 || binding.sender_id != request.sender_id
@@ -161,7 +246,9 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             }
             super::channel_thread_follow_service::validate_delivery(
                 db,
-                &channel.user_id,
+                member
+                    .as_ref()
+                    .map_or(channel.user_id.as_str(), |m| m.actor_id.as_str()),
                 origin,
                 request.conversation_id.as_deref().ok_or_else(refused)?,
             )
@@ -169,15 +256,27 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         }
     }
     if let Some(id) = request.agent_id.as_ref().or(channel.agent_id.as_ref()) {
-        let agent = super::assistant_team_service::agent(db, &channel.user_id, id).await?;
+        let actor = member
+            .as_ref()
+            .map_or(channel.user_id.as_str(), |m| m.actor_id.as_str());
+        let agent = if let Some(member) = &member {
+            db.collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":id,"user_id":&member.org_id,"kind":"specialist"})
+            .await?
+            .ok_or_else(refused)?
+        } else {
+            super::assistant_team_service::agent(db, actor, id).await?
+        };
         if agent.destroyed_at.is_some()
             || (requires_nyxbot && !agent.is_nyxbot())
             || !super::org_agent_service::can_use(
-                &super::org_agent_service::access(db, &channel.user_id, &agent.user_id).await?,
+                &super::org_agent_service::access(db, actor, &agent.user_id).await?,
             )
         {
             return Err(refused());
         }
     }
-    Ok(AuthorizedMedia { source, bot })
+    Ok(AuthorizedMedia { source, bot, guest })
 }

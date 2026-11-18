@@ -1,18 +1,22 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { z } from "zod";
 import type { remoteMachinePlatformReadinessSchema } from "@/schemas/machines";
 
 export function RemoteMachinePlatformReadiness({
   platform,
+  grouped = false,
 }: {
+  readonly grouped?: boolean;
   readonly platform?: z.infer<typeof remoteMachinePlatformReadinessSchema>;
 }) {
+  useUiTranslation();
   return (
-    <div className="space-y-2 text-12 text-muted-foreground" role="status">
-      <p>
-        Platform configuration:{" "}
+    <div className={grouped ? "space-y-1" : "space-y-2 text-14 text-muted-foreground"} role="status">
+      <p>{translateUi("Platform configuration:")}{" "}
         {platform?.configuration_ready === true
-          ? "Ready for admission checks"
-          : "Unavailable or not verified"}
+          ? translateUi("Ready for admission checks")
+          : translateUi("Unavailable or not verified")}
         .
       </p>
       {platform?.blockers.length ? (
@@ -22,11 +26,7 @@ export function RemoteMachinePlatformReadiness({
           ))}
         </ul>
       ) : null}
-      <p>
-        Kubernetes native lifecycle observations confirm normal operations.
-        Uncertain prior runtime state keeps recovery pending. This does not
-        guarantee physical shutdown during a control-plane or node partition.
-      </p>
+      <p>{translateUi("Kubernetes native lifecycle observations confirm normal operations. Uncertain prior runtime state keeps recovery pending. This does not guarantee physical shutdown during a control-plane or node partition.")}</p>
     </div>
   );
 }

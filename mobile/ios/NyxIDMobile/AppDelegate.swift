@@ -1,6 +1,7 @@
 internal import Expo
 import React
 import ReactAppDependencyProvider
+import WebRTC
 
 @main
 class AppDelegate: ExpoAppDelegate {
@@ -13,6 +14,12 @@ class AppDelegate: ExpoAppDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    // Keep WebRTC voice processing and headset routing; use the loudspeaker
+    // when no external audio route is selected, including after interruptions.
+    let voiceConfiguration = RTCAudioSessionConfiguration.webRTC()
+    voiceConfiguration.categoryOptions.insert(.defaultToSpeaker)
+    RTCAudioSessionConfiguration.setWebRTC(voiceConfiguration)
+
     let delegate = ReactNativeDelegate()
     let factory = ExpoReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()

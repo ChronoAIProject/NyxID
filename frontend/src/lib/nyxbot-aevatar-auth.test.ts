@@ -26,6 +26,11 @@ let authorizationParams: URLSearchParams;
 let redirectOverride: ((url: URL) => void) | undefined;
 let subject: string;
 let authError: string | undefined;
+let discovery: {
+  issuer: string;
+  token_endpoint: string;
+  nyxid_api_origins?: string[];
+};
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -41,8 +46,14 @@ beforeEach(() => {
   subject = "owner";
   redirectOverride = undefined;
   authError = undefined;
+  discovery = {
+    issuer: config.baseUrl,
+    token_endpoint: `${config.baseUrl}/oauth/token`,
+    nyxid_api_origins: [config.baseUrl, "https://api.nyxid.ai"],
+  };
   request.mockResolvedValue(config);
   network.mockImplementation(async (input: string, options?: RequestInit) => {
+    if (input === "/.well-known/openid-configuration") return json(discovery);
     if (input.startsWith("/oauth/authorize?")) {
       authorizationParams = new URL(input, "http://localhost").searchParams;
       if (authError) return json({ error: authError }, 403);
@@ -122,7 +133,7 @@ describe("Nyxbot Aevatar session authorization", () => {
   it("deduplicates concurrent authorization for the same account", async () => {
     await Promise.all([getAevatarAuthorization(), getAevatarAuthorization()]);
     expect(request).toHaveBeenCalledTimes(1);
-    expect(network).toHaveBeenCalledTimes(3);
+    expect(network).toHaveBeenCalledTimes(4);
   });
   it("obtains fresh authorization after bounded cache expiry", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -136,7 +147,7 @@ describe("Nyxbot Aevatar session authorization", () => {
     await expect(getAevatarAuthorization()).rejects.toMatchObject({
       code: "channelConsentRequired",
     });
-    expect(network).toHaveBeenCalledTimes(1);
+    expect(network).toHaveBeenCalledTimes(2);
   });
   it.each([
     (url: URL) => {
@@ -161,7 +172,7 @@ describe("Nyxbot Aevatar session authorization", () => {
       await expect(getAevatarAuthorization()).rejects.toMatchObject({
         code: "channelAuthRequired",
       });
-      expect(network).toHaveBeenCalledTimes(1);
+      expect(network).toHaveBeenCalledTimes(2);
     },
   );
   it("rejects tokens for another user", async () => {
@@ -201,6 +212,34 @@ describe("Nyxbot Aevatar session authorization", () => {
       message: "channelAuthRequired",
     });
   });
+  it.each(["https://api.nyxid.ai", config.baseUrl])(
+    "accepts a configured public API origin %s while the issuer stays pinned",
+    async (baseUrl) => {
+      request.mockResolvedValue({ ...config, baseUrl });
+      discovery.token_endpoint = "https://api.nyxid.ai/oauth/token";
+      redirectOverride = (url) => url.searchParams.set("iss", config.baseUrl);
+      expect(await getAevatarAuthorization()).toBe("Bearer test-access");
+      expect(authorizationParams.get("resource")).toBe(
+        `${baseUrl}/api/v1/proxy/s/aevatar`,
+      );
+    },
+  );
+  it("supports old discovery documents using the configured token endpoint origin", async () => {
+    delete discovery.nyxid_api_origins;
+    expect(await getAevatarAuthorization()).toBe("Bearer test-access");
+  });
+  it.each([
+    "https://api.nyxid.ai.evil.example",
+    "https://api.nyxid.ai@evil.example",
+    "https://api.nyxid.ai/path",
+    "https://api.nyxid.ai/",
+  ])("rejects an unconfigured API URL %s", async (baseUrl) => {
+    request.mockResolvedValue({ ...config, baseUrl });
+    await expect(getAevatarAuthorization()).rejects.toMatchObject({
+      code: "channelAuthRequired",
+    });
+    expect(network).toHaveBeenCalledTimes(1);
+  });
   it("rejects a different NyxID environment before using its OAuth client", async () => {
     request.mockResolvedValue({
       ...config,
@@ -209,6 +248,10 @@ describe("Nyxbot Aevatar session authorization", () => {
     await expect(getAevatarAuthorization()).rejects.toMatchObject({
       code: "channelAuthRequired",
     });
-    expect(network).not.toHaveBeenCalled();
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(network).toHaveBeenCalledWith(
+      "/.well-known/openid-configuration",
+      expect.anything(),
+    );
   });
 });

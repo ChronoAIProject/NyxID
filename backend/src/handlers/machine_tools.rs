@@ -300,13 +300,26 @@ pub fn call<'a>(
                     | Operation::JobCancel
             ) || (matches!(operation, Operation::Computer | Operation::Browser)
                 && !read_only),
+            delegation: false,
         };
-        let floor = job_plan
+        let org_required = job_plan
             .as_ref()
-            .is_some_and(|plan| !plan.org_labels.is_empty())
+            .is_some_and(|plan| !plan.unresolved_org_connections.is_empty());
+        let floor = job_plan.as_ref().is_some_and(|plan| plan.legacy_org_policy)
             || machines::confirmation(&node, operation, &arguments)
             || login.as_ref().is_some_and(|row| row.confirm_each_sign_in);
-        let gate = acks::confirmation_needed(&state.db, chat, facts, floor).await?;
+        let gate = acks::confirmation_needed_with_org(
+            &state.db,
+            chat,
+            facts,
+            floor,
+            if org_required {
+                acks::OrgInstructionRequirement::Required
+            } else {
+                acks::OrgInstructionRequirement::None
+            },
+        )
+        .await?;
         let confirmation_arguments = arguments.clone();
         let mut summary = format!(
             "Allow {name} on {}{}",
@@ -347,7 +360,7 @@ pub fn call<'a>(
             .await?
             {
                 if let Some(plan) = &job_plan {
-                    plan.bind_card(&state.db, &refusal).await?;
+                    return plan.bind_card(&state.db, chat, refusal).await;
                 }
                 return Ok(refusal);
             }

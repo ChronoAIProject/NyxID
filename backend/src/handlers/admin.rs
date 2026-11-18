@@ -42,9 +42,11 @@ pub struct UserListQuery {
 pub struct AuditLogQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub include_total: Option<bool>,
     /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    pub turn_id: Option<String>,
     pub search: Option<String>,
     pub search_filters: Option<String>,
     pub custom_filters: Option<String>,
@@ -55,6 +57,29 @@ pub struct AuditLogQuery {
     pub created_from: Option<String>,
     pub created_to: Option<String>,
     pub sort: Option<String>,
+}
+
+impl AuditLogQuery {
+    fn list_params(&self) -> admin_audit_service::AdminAuditLogListParams<'_> {
+        admin_audit_service::AdminAuditLogListParams {
+            page: self.page.unwrap_or(1).max(1),
+            per_page: self.per_page.unwrap_or(50).clamp(1, 100),
+            include_total: self.include_total.unwrap_or(true),
+            search: self.search.as_deref(),
+            search_filters: self.search_filters.as_deref(),
+            custom_filters: self.custom_filters.as_deref(),
+            event_type: self.event_type.as_deref(),
+            status: self.status.as_deref(),
+            actor: self.actor.as_deref(),
+            user_id: self.user_id.as_deref(),
+            api_key_id: self.api_key_id.as_deref(),
+            turn_id: self.turn_id.as_deref(),
+            created_dates: self.created_dates.as_deref(),
+            created_from: self.created_from.as_deref(),
+            created_to: self.created_to.as_deref(),
+            sort: self.sort.as_deref().unwrap_or("-created_at"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,11 +149,22 @@ pub struct AuditLogItem {
 
 #[derive(Debug, Serialize)]
 pub struct AuditLogListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
     pub entries: Vec<AuditLogItem>,
-    pub total: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    pub has_more: bool,
     pub page: u64,
     pub per_page: u64,
     pub filter_options: AuditLogFilterOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogCountResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
+    pub total: u64,
 }
 
 /// Describes the audit table's controls to the client, so the UI never hardcodes
@@ -353,6 +389,7 @@ pub async fn create_user(
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<CreateUserResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Validate email format
     let email = body.email.trim().to_string();
@@ -374,26 +411,17 @@ pub async fn create_user(
         ));
     }
 
-    let user = admin_user_service::create_user(
+    let user = admin_user_service::create_user_as(
         &state.db,
         &email,
         &body.password,
         body.display_name.as_deref(),
         &body.role,
+        &actor,
     )
     .await?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.created",
-        Some(serde_json::json!({
-            "target_user_id": &user.id,
-            "target_email": &user.email,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -521,30 +549,17 @@ pub async fn update_user(
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<AdminUserItem>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let updated = admin_user_service::update_user(
+    let updated = admin_user_service::update_user_as(
         &state.db,
         &user_id,
         body.display_name.as_deref(),
         body.email.as_deref(),
         body.avatar_url.as_deref(),
+        &actor,
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.updated",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "target_email": &updated.email,
-            "changes": {
-                "display_name": body.display_name,
-                "email": body.email,
-                "avatar_url": body.avatar_url,
-            }
-        })),
-    );
 
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
     Ok(Json(user_to_admin_item(updated, platform_role)))
@@ -561,6 +576,7 @@ pub async fn set_user_role(
     Json(body): Json<SetRoleRequest>,
 ) -> AppResult<Json<RoleUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
@@ -580,18 +596,9 @@ pub async fn set_user_role(
     };
 
     let updated =
-        admin_user_service::set_platform_role(&state.db, &admin_id, &user_id, &role).await?;
+        admin_user_service::set_platform_role_as(&state.db, &admin_id, &user_id, &role, &actor)
+            .await?;
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.role_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -618,20 +625,12 @@ pub async fn set_user_status(
     Json(body): Json<SetStatusRequest>,
 ) -> AppResult<Json<StatusUpdateResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.status_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "is_active": body.is_active,
-        })),
-    );
+    admin_user_service::set_user_active_as(&state.db, &admin_id, &user_id, body.is_active, &actor)
+        .await?;
 
     // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
     // There is no dedicated suspend/unsuspend route — this single endpoint
@@ -667,15 +666,9 @@ pub async fn force_password_reset(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.password_reset",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    let _token = admin_user_service::force_password_reset_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(AdminActionResponse {
         message: "Password reset initiated".to_string(),
@@ -948,7 +941,7 @@ pub async fn erasure_retry(
     Json(body): Json<ErasureDomainRetryRequest>,
 ) -> AppResult<Json<AdminActionResponse>> {
     crate::handlers::admin_helpers::require_reconciliation_operator(&state, &auth).await?;
-    crate::services::personal_erasure_service::retry_domain(
+    let message = crate::services::personal_erasure_service::retry_domain(
         &state.db,
         &auth.user_id.to_string(),
         &user,
@@ -961,7 +954,7 @@ pub async fn erasure_retry(
     )
     .await?;
     Ok(Json(AdminActionResponse {
-        message: "Erasure domain queued for evidence re-evaluation".into(),
+        message: message.into(),
     }))
 }
 pub async fn erasure_reconcile(
@@ -1057,15 +1050,9 @@ pub async fn verify_user_email(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
-    admin_user_service::verify_email(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.email_verified",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    admin_user_service::verify_email_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(VerifyEmailResponse {
         id: user_id,
@@ -1116,6 +1103,7 @@ pub async fn revoke_user_sessions(
     Path(user_id): Path<String>,
 ) -> AppResult<Json<RevokeSessionsResponse>> {
     require_admin(&state, &auth_user).await?;
+    let actor = audit_service::AuditActor::from_auth_user(&auth_user);
 
     // Verify user exists
     let _target = state
@@ -1125,17 +1113,8 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.sessions_revoked",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "revoked_count": revoked_count,
-        })),
-    );
+    let revoked_count =
+        admin_user_service::revoke_all_user_sessions_as(&state.db, &user_id, &actor).await?;
 
     Ok(Json(RevokeSessionsResponse {
         revoked_count,
@@ -1306,34 +1285,16 @@ pub async fn list_audit_log(
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 100);
-    let sort = query.sort.as_deref().unwrap_or("-created_at");
 
     // Summarize the applied controls as an opaque marker list rather than the raw
     // values (which are PII-adjacent). `None` when nothing was applied.
     let filter_marker = audit_log_filter_marker(&query);
 
-    let ((entries, total), event_types) = tokio::try_join!(
-        admin_audit_service::list_entries(
-            &state.db,
-            admin_audit_service::AdminAuditLogListParams {
-                page,
-                per_page,
-                search: query.search.as_deref(),
-                search_filters: query.search_filters.as_deref(),
-                custom_filters: query.custom_filters.as_deref(),
-                event_type: query.event_type.as_deref(),
-                status: query.status.as_deref(),
-                actor: query.actor.as_deref(),
-                user_id: query.user_id.as_deref(),
-                api_key_id: query.api_key_id.as_deref(),
-                created_dates: query.created_dates.as_deref(),
-                created_from: query.created_from.as_deref(),
-                created_to: query.created_to.as_deref(),
-                sort,
-            },
-        ),
+    let (result, event_types) = tokio::try_join!(
+        admin_audit_service::list_entries(&state.db, query.list_params()),
         state.audit_event_types.get(&state.db)
     )?;
+    let entries = result.entries;
 
     // Enrichment is best-effort display data: a lookup failure downgrades the
     // page to unenriched entries (fields are Option and simply stay absent)
@@ -1391,11 +1352,35 @@ pub async fn list_audit_log(
     .await;
 
     Ok(Json(AuditLogListResponse {
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
         entries: items,
-        total,
+        total: result.total,
+        has_more: result.has_more,
         page,
         per_page,
         filter_options: audit_log_filter_options(event_types),
+    }))
+}
+
+/// GET /api/v1/admin/audit-log/count
+pub async fn count_audit_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AuditLogQuery>,
+) -> AppResult<Json<AuditLogCountResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
+    let total = admin_audit_service::count_entries(&state.db, query.list_params()).await?;
+    Ok(Json(AuditLogCountResponse {
+        total,
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
     }))
 }
 
@@ -1404,6 +1389,7 @@ fn audit_log_filter_marker(query: &AuditLogQuery) -> Option<String> {
     let applied = [
         ("user_id", query.user_id.is_some()),
         ("api_key_id", query.api_key_id.is_some()),
+        ("turn_id", query.turn_id.is_some()),
         ("search", query.search.is_some()),
         ("search_filters", query.search_filters.is_some()),
         ("custom_filters", query.custom_filters.is_some()),
@@ -1462,6 +1448,10 @@ fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
         search_fields: admin_audit_service::ADMIN_SEARCH_FIELDS
             .iter()
             .map(|(key, label)| AuditLogSearchField { key, label })
+            .chain(std::iter::once(AuditLogSearchField {
+                key: "turn_id_exact",
+                label: "Turn ID (exact)",
+            }))
             .collect(),
         fields: vec![
             AuditLogFilterField {
@@ -1638,11 +1628,14 @@ pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
     pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
+    pub security_effects: crate::services::security_effect_service::SecurityEffectDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StartupDiagnosticItem {
     pub code: String,
+    pub severity: crate::models::startup_diagnostic::DiagnosticSeverity,
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -1665,6 +1658,8 @@ async fn active_startup_diagnostics(
         .into_iter()
         .map(|diagnostic| StartupDiagnosticItem {
             code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
             summary: diagnostic.summary,
             detail: diagnostic.detail,
             remediation: diagnostic.remediation,
@@ -1677,12 +1672,25 @@ async fn active_startup_diagnostics(
             .into_iter()
             .map(|diagnostic| StartupDiagnosticItem {
                 code: diagnostic.code,
+                severity: diagnostic.severity,
+                technical_details: diagnostic.technical_details,
                 summary: diagnostic.summary,
                 detail: diagnostic.detail,
                 remediation: diagnostic.remediation,
                 detected_at: diagnostic.detected_at,
             }),
     );
+    if let Some(diagnostic) = crate::services::org_service::diagnostics::diagnostic(db).await? {
+        items.push(StartupDiagnosticItem {
+            code: diagnostic.code,
+            severity: diagnostic.severity,
+            technical_details: diagnostic.technical_details,
+            summary: diagnostic.summary,
+            detail: diagnostic.detail,
+            remediation: diagnostic.remediation,
+            detected_at: diagnostic.detected_at,
+        });
+    }
     Ok(items)
 }
 
@@ -1740,6 +1748,7 @@ pub async fn get_chain_verification(
         chains: items,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
@@ -1770,6 +1779,7 @@ pub async fn run_chain_verification(
         chains,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+        security_effects: crate::services::security_effect_service::diagnostics(&state.db).await?,
     }))
 }
 
@@ -1800,6 +1810,7 @@ pub async fn update_broker_settings(
     require_admin(&state, &auth_user).await?;
 
     let changed_fields = broker_settings_changed_fields(&body);
+    let verified_at = tokio::time::Instant::now();
     let settings = platform_settings_service::update_broker_settings(
         &state.db,
         platform_settings_service::BrokerSettingsPatch {
@@ -1809,7 +1820,7 @@ pub async fn update_broker_settings(
     )
     .await?;
     let policy = platform_settings_service::BrokerPolicy::from_settings(&state.config, &settings);
-    state.set_broker_policy_if_fresh(policy);
+    state.set_broker_policy_verified_at(policy, verified_at);
 
     if !changed_fields.is_empty() {
         audit_service::log_for_user(
@@ -2325,7 +2336,7 @@ pub async fn create_oauth_client(
     Ok(Json(oauth_client_response(
         client,
         raw_secret,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -2456,7 +2467,7 @@ pub async fn update_oauth_client(
     Ok(Json(oauth_client_response(
         updated,
         None,
-        state.broker_require_admin_capability(),
+        state.broker_policy().broker_require_admin_capability,
     )))
 }
 
@@ -2559,6 +2570,16 @@ mod tests {
     use super::*;
     use crate::models::user::{PlatformRole, User, UserType};
     use chrono::Utc;
+
+    #[test]
+    fn audit_log_totals_remain_enabled_unless_explicitly_deferred() {
+        assert!(AuditLogQuery::default().list_params().include_total);
+        let deferred = AuditLogQuery {
+            include_total: Some(false),
+            ..Default::default()
+        };
+        assert!(!deferred.list_params().include_total);
+    }
 
     fn lookup_with(id: &str, slug: &str, name: &str) -> ServiceLookup {
         let resolved = ResolvedService {
@@ -2794,6 +2815,7 @@ mod tests {
     fn make_user(id: &str) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: id.to_string(),
             email: format!("{id}@example.com"),
             password_hash: Some("$argon2id$hash".to_string()),
@@ -3418,6 +3440,7 @@ mod operator_route_tests {
             owner_deletion_policy: None,
             status: ErasureStatus::OperatorAction,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![
                 DomainCheckpoint {
                     domain: "local_inventory".into(),
@@ -3426,6 +3449,7 @@ mod operator_route_tests {
                     last_retry_key_hash: None,
                     last_retry_request_digest: None,
                     consecutive_failures: 8,
+                    remote_wait_started_at: None,
                     reason: Some("fixture_retry".into()),
                     cursor: None,
                     completed_at: None,
@@ -3437,6 +3461,7 @@ mod operator_route_tests {
                     last_retry_key_hash: None,
                     last_retry_request_digest: None,
                     consecutive_failures: 8,
+                    remote_wait_started_at: None,
                     reason: Some("fixture_retry".into()),
                     cursor: None,
                     completed_at: None,
@@ -3542,6 +3567,80 @@ mod operator_route_tests {
     }
 
     #[tokio::test]
+    async fn operator_erasure_retry_explains_remote_cleanup_precondition() {
+        use crate::models::personal_erasure::{DomainStatus, ErasureStatus, PersonalErasureJob};
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let db =
+            crate::test_utils::connect_transaction_test_database("operator_remote_cleanup_retry")
+                .await;
+        let target = insert_user(&db, false, false).await;
+        let operator = insert_user(&db, false, true).await;
+        crate::services::personal_erasure_service::accept(&db, &target, &target, None)
+            .await
+            .unwrap();
+        let mut job = crate::services::personal_erasure_service::status(&db, &target)
+            .await
+            .unwrap()
+            .unwrap();
+        job.status = ErasureStatus::OperatorAction;
+        let domain = job
+            .domains
+            .iter_mut()
+            .find(|d| d.domain == "local_inventory")
+            .unwrap();
+        domain.status = DomainStatus::OperatorAction;
+        domain.reason = Some("remote_cleanup_wait_exceeded".into());
+        domain.remote_wait_started_at = Some(job.updated_at - chrono::Duration::hours(24));
+        db.collection::<PersonalErasureJob>("personal_erasure_jobs")
+            .replace_one(doc! {"_id":&job.id}, &job)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let key = Uuid::new_v4().to_string();
+        for _ in 0..2 {
+            let response = erasure_retry(
+                State(state.clone()),
+                test_auth_user(&operator),
+                Path(target.clone()),
+                Json(ErasureDomainRetryRequest {
+                    domain: "local_inventory".into(),
+                    job_id: job.id.clone(),
+                    expected_retry_generation: 0,
+                    idempotency_key: key.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.0.message,
+                "Erasure domain queued for evidence re-evaluation. Resolve the remaining remote cleanup dependencies. For a node-blocked Stop, bring the node online or, if permanently gone, have an administrator delete it via DELETE /api/v1/admin/nodes/{id}, then retry. Unresolved cleanup immediately returns to operator_action (remote_cleanup_wait_exceeded)"
+            );
+        }
+        let retried = crate::services::personal_erasure_service::status(&db, &target)
+            .await
+            .unwrap()
+            .unwrap();
+        let pending = retried
+            .domains
+            .iter()
+            .find(|d| d.domain == "local_inventory")
+            .unwrap();
+        assert_eq!(
+            pending.reason.as_deref(),
+            Some("remote_cleanup_verification_required")
+        );
+        assert_eq!(pending.status, DomainStatus::Pending);
+        assert_eq!(
+            db.collection::<bson::Document>("audit_log")
+                .count_documents(doc! {"event_type":"user.account.erasure_domain_retry"})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn operator_can_list_users() {
         let Some(db) = connect_test_database("admin_route_operator_read").await else {
             eprintln!("skipping operator_can_list_users: no local MongoDB available");
@@ -3566,6 +3665,60 @@ mod operator_route_tests {
             result.0.users.iter().any(|u| u.id == operator_id),
             "operator should see at least their own row in the list"
         );
+    }
+
+    #[tokio::test]
+    async fn audit_log_count_enforces_admin_or_operator_and_uses_exact_filters() {
+        let db = connect_test_database("audit_count_access")
+            .await
+            .expect("MongoDB required");
+        let operator = insert_user(&db, false, true).await;
+        let admin = insert_user(&db, true, false).await;
+        let ordinary = insert_user(&db, false, false).await;
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .insert_many([
+                doc! { "_id": "match", "event_type": "login", "user_id": &ordinary },
+                doc! { "_id": "other", "event_type": "login", "user_id": &admin },
+            ])
+            .await
+            .unwrap();
+        let turn = uuid::Uuid::new_v4().to_string();
+        crate::services::admin_audit_service::ensure_turn_trace_index(&db)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":"match"},
+                doc! {"$set":{"event_data.turn_id":&turn}},
+            )
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for actor in [&operator, &admin] {
+            let result = count_audit_log(
+                State(state.clone()),
+                test_auth_user(actor),
+                Query(AuditLogQuery {
+                    user_id: Some(ordinary.clone()),
+                    turn_id: Some(turn.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.0.total, 1);
+        }
+        let denied = count_audit_log(
+            State(state),
+            test_auth_user(&ordinary),
+            Query(AuditLogQuery {
+                turn_id: Some(turn),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Forbidden(_))));
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -4163,8 +4316,8 @@ mod operator_route_tests {
         .expect("admin can update broker settings");
         assert!(updated.0.broker_require_sender_constraint.effective);
         assert!(!updated.0.broker_require_admin_capability.effective);
-        assert!(state.broker_require_sender_constraint());
-        assert!(!state.broker_require_admin_capability());
+        assert!(state.broker_require_sender_constraint().await.unwrap());
+        assert!(!state.broker_require_admin_capability().await.unwrap());
         let current_policy = state.broker_policy();
         let stale_policy = platform_settings_service::BrokerPolicy {
             revision: current_policy.revision - 1,
@@ -4200,8 +4353,8 @@ mod operator_route_tests {
         .expect("admin can clear broker settings");
         assert!(!cleared.0.broker_require_sender_constraint.effective);
         assert!(cleared.0.broker_require_admin_capability.effective);
-        assert!(!state.broker_require_sender_constraint());
-        assert!(state.broker_require_admin_capability());
+        assert!(!state.broker_require_sender_constraint().await.unwrap());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let stored = db
             .collection::<mongodb::bson::Document>(PLATFORM_SETTINGS)
@@ -4283,7 +4436,7 @@ mod operator_route_tests {
         )
         .await
         .expect("admin can enable runtime admin-capability requirement");
-        assert!(state.broker_require_admin_capability());
+        assert!(state.broker_require_admin_capability().await.unwrap());
 
         let response = crate::handlers::oauth::register_client(
             State(state),
@@ -4396,3 +4549,7 @@ impl std::fmt::Debug for OAuthClientResponse {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "admin_integrity_tests.rs"]
+mod integrity_tests;

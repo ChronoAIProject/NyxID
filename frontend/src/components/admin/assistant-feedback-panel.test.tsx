@@ -4,7 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantFeedbackPanel } from "./assistant-feedback-panel";
 const { get } = vi.hoisted(() => ({ get: vi.fn() }));
-vi.mock("@/lib/api-client", () => ({ api: { get } }));
+vi.mock("@/lib/api-client", async (original) => ({
+  ...(await original<typeof import("@/lib/api-client")>()),
+  api: { get },
+}));
 const row = {
   message_id: "reply-id",
   vote: "up",
@@ -123,4 +126,109 @@ describe("AssistantFeedbackPanel", () => {
       "/admin/assistant/feedback?agent_kind=nyxbot",
     );
   });
+});
+
+it("requests a thread only on demand, prepends previous messages, and anchors the rated reply", async () => {
+  get.mockImplementation((path: string) =>
+    Promise.resolve(
+      path.includes("/thread")
+        ? {
+            unavailable: false,
+            messages: path.includes("cursor=")
+              ? [
+                  {
+                    id: "previous",
+                    role: "user",
+                    text: "Earlier question",
+                    created_at: row.created_at,
+                    rated: false,
+                    truncated: false,
+                  },
+                ]
+              : [
+                  {
+                    id: "rated",
+                    role: "assistant",
+                    text: "Rated answer",
+                    created_at: row.created_at,
+                    rated: true,
+                    truncated: false,
+                  },
+                ],
+            next_cursor: path.includes("cursor=") ? null : "bound-cursor",
+          }
+        : {
+            counts: [],
+            recent: [{ ...row, id: "feedback-1" }],
+            can_preview_threads: true,
+          },
+    ),
+  );
+  renderPanel();
+  await screen.findByText("Preview message thread");
+  expect(
+    get.mock.calls.some(([path]) => String(path).includes("/thread")),
+  ).toBe(false);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Preview message thread" }),
+  );
+  expect(await screen.findByText("Rated answer")).toBeVisible();
+  expect(screen.getByText("Assistant · Rated reply")).toBeVisible();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Load previous messages" }),
+  );
+  expect(await screen.findByText("Earlier question")).toBeVisible();
+  const messages = screen
+    .getByRole("region", { name: "Feedback message thread" })
+    .querySelectorAll("li");
+  expect(messages[0]).toHaveTextContent("Earlier question");
+  expect(messages[1]).toHaveTextContent("Rated answer");
+});
+it("keeps two ratings of the same group reply independent and hides previews from metadata-only readers", async () => {
+  get.mockResolvedValue({
+    counts: [],
+    recent: [
+      { ...row, id: "rater-1", comment: "Good" },
+      { ...row, id: "rater-2", comment: "Needs work" },
+    ],
+    can_preview_threads: false,
+  });
+  renderPanel();
+  expect(await screen.findByText("Good")).toBeVisible();
+  expect(screen.getByText("Needs work")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Preview message thread" }),
+  ).not.toBeInTheDocument();
+});
+it("clears matching totals and context when metadata authorization is revoked", async () => {
+  const { ApiError } = await import("@/lib/api-client");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  get.mockResolvedValue({
+    counts: [{ day: "2026-01-01", up: 2, down: 1 }],
+    recent: [{ ...row, id: "rating" }],
+    can_preview_threads: true,
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <AssistantFeedbackPanel />
+    </QueryClientProvider>,
+  );
+  await screen.findByLabelText("Matching feedback totals");
+  get.mockRejectedValue(
+    new ApiError(403, {
+      error: "forbidden",
+      error_code: 1003,
+      message: "Forbidden",
+    }),
+  );
+  await client.invalidateQueries();
+  await screen.findByRole("alert");
+  expect(
+    screen.queryByLabelText("Matching feedback totals"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Preview message thread" }),
+  ).not.toBeInTheDocument();
 });

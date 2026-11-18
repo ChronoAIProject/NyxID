@@ -32,11 +32,22 @@ User-side subcommands accept the common flags `--base-url`, `--access-token` / `
 The upstream secrets a node injects, held only on the node:
 
 - **`add --service <slug>`** — add a credential (prompts for the secret). `--header <name>` or `--query-param <name>`, `--url <target>`, `--secret-format raw|bearer|basic`.
+- **`set-url --service <slug> --url <url>`** — change an existing node-managed endpoint with an owner login, preserving its secret. `--url ""` requests an acknowledged clear.
 - **`add-oauth --service <slug>`** — run an OAuth / device-code flow for the service (`--from-catalog` to pull config from NyxID).
 - **`setup --service <slug>`** — auto-resolve a service's credential requirements from the catalog.
 - **`list`** — configured credentials. **`pending`** — pushed credentials awaiting acceptance.
 - **`accept <slug>`** / **`decline <slug>`** — act on a pushed credential.
 - **`remove --service <slug>`** — delete a credential.
+
+### Change a node-managed service's URL without replacing its secret
+
+```bash
+nyxid node credentials set-url --service monitor --url http://new-monitor:8080
+```
+
+The credential must already exist locally. `set-url` validates the URL locally and uses your owner login (`NYXID_PROFILE` / `NYXID_ACCESS_TOKEN`) to update the existing server service and request local routing metadata synchronization through the running node. It does not upload or replace the secret. The service, endpoint and key IDs remain the same.
+
+An owner can also run `nyxid service update <id> --endpoint-url <url>` from another machine. Nonempty server URLs take precedence over local URLs. Offline or older nodes do not block that change; the response reports local sync status. Upgrade/reconnect and repeat the edit to retry sync. `set-url --service <slug> --url ""` explicitly requests a clear, which requires an upgraded online node to acknowledge the local clear first. Injection/node changes still require the existing explicit credential-promotion flow. `credentials add --service <slug> --url <url>` retains its interactive auth-method/header/secret prompts and local credential replacement, including for an existing credential; no owner login is required.
 
 ## node ssh-credentials (local SSH keys)
 

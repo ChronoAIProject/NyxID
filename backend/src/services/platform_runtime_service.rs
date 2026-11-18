@@ -267,7 +267,7 @@ pub async fn activate_owned(
     let resolved = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             owner,
             owner,
             crate::models::usage_meter::CredentialClass::NyxidManagedMaster,

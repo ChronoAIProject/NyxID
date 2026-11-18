@@ -1,0 +1,160 @@
+# Native workspace routes
+
+The signed-in workspace has a base sidebar and one main content slab. Opening
+navigation translates the slab right by 77% of the window width; no scrim or
+panel covers it. The near-black dark sidebar and gray light sidebar sit behind
+the elevated content surface. The slab keeps its rounded left corners and shadow.
+
+On windows at least 900pt wide, the sidebar remains visible at 300pt beside the
+main content; both columns are interactive and available to accessibility. No
+modal focus, closing sliver or sidebar Back interception applies in this mode.
+Below 900pt, including narrow iPad Split View or Stage Manager windows, the push
+sidebar is retained with a maximum width of 360pt. Layout uses the current
+window width and keeps the navigator and chat drafts mounted through resize.
+Crossing the breakpoint cancels obsolete push/fade/focus callbacks; compact mode
+starts with the sidebar closed. Critical writes block sidebar destinations and
+Settings/QR/terminal shortcuts; dirty route editors keep their native leave guard.
+
+Only Settings, its account pages and the QR/terminal quick actions use the
+pull-up surface. The full-screen desktop viewer retains its own presentation.
+Other task-local pickers, confirmations, attachment preview and voice call are
+transient interactions, rather than workspace destinations.
+
+## Route inventory
+
+`navigationTypes.ts` is the authoritative registration list. All routes in
+`WorkspaceContentParamList` render in the slab; nested pages push horizontally.
+
+| Stack / routes                                                                       | Purpose                                                                                                                                    |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Content / Assistant                                                                  | Explicit NyxBot Home or a private chat. `home: true` selects Home; `home: false` and a fresh `draftId` select an empty normal chat.        |
+| Content / AssistantDetails, AssistantTitleEdit, AssistantHistory, AssistantWorkingContext | Grouped chat details with a guarded title edit page and delete, agent-scoped paged history, checkpoint and guarded context reset.      |
+| Content / AssistantContext, GroupChat                                                | Contextual private and crew chats, preserving the primary chat and draft.                                                                  |
+| Content / Automations, AutomationAgentFilter, AutomationDetail, AutomationRuns, AutomationRunDetail | Read-only configured tasks with an agent filter, details, cursor-paged run history and run detail, with exact conversation links. |
+| Content / Machines, MachineDetail, MachinePolicy, MachineActivity                    | Inventory, detail, owner policy, updates, saved logins and machine activity.                                                               |
+| Content / AgentMachines, AgentMachineEditor                                          | Guarded per-agent machine access.                                                                                                          |
+| Content / Plugins, PluginConnections, Services, ServiceSetup, ConnectionHistoryDetail | Plugins, connections, hosted service setup and one recorded connection change.                                                            |
+| Content / SshTerminal | Active certificate-mode SSH terminal opened from a connection, with an explicit principal picker when needed. `nyxid://ssh/:serviceId/terminal?principal=…` selects the connection; leaving closes the socket. |
+| Content / Agents, AgentCreate, AgentDetail, AgentProfileEdit, GroupEditor            | Agents, crews and their guarded editors; each agent profile value is edited on its own page.                                              |
+| Content / AgentSkills, SkillDetail, SkillVersions, SkillHistory, AuthoredSkillReview | Read-only skill files/history, exact version pinning and owner publication decisions.                                                      |
+| Content / Activity, ActivityDetail, ActiveGrants                                     | Incoming actionable approvals, date-grouped history, detail and the existing grants view. Canonical approval links still address Activity. |
+| Content / Notifications                                                              | The owner's durable NyxBot notification feed (`assistant:notifications` flag): filters All, Needs you, Automations and Chats, cursor paging (a page the server filtered empty but gave a cursor is followed automatically, one hop per distinct cursor and at most five, then Load more is offered; the final empty copy appears only once the server is exhausted), mark all read with the server `as_of` fence; a row opens its thread, crew or automation and is marked read. Canonical `/assistant?panel=notifications` and `/assistant/notifications` address it. |
+| Content / WorkspaceSearch, WorkspaceRecents                                          | Grouped local search and cursor-paged See all, with chat-title search and per-agent filtering.                                             |
+| Sheet / AccountSettings, AccountSecurity, UsageCredits                               | Settings, account/security, display, notifications and usage/credits.                                                                      |
+| Sheet / DeviceLogin, AgentKeyLogin                                                   | QR, terminal and Agent Key sign-in flows with existing write guards.                                                                       |
+| Sheet / TermsOfService, PrivacyPolicy                                                | Signed-in legal documents.                                                                                                                 |
+| Root / Workspace, WorkspaceSheet                                                     | Main signed-in shell and the account/quick-action sheet host above it.                                                                     |
+| Root / MachineDesktop                                                                | Full-screen native desktop; iPhone landscape while focused/active with portrait restoration on exit/background; iPad follows its resizable window without locks. No desktop web fallback.          |
+| Root / Auth, DeviceLogin, AgentKeyLogin, TermsOfService, PrivacyPolicy               | Signed-out authentication and shared canonical entries; signed-in wrappers resolve into the account sheet.                                 |
+
+Chat Details, History and Working context are nested content pages. History
+reuses the thread browser, initially filtered to the viewed agent; its New chat
+keeps that agent. Choosing Details/History from the agent picker first dismisses
+the native picker, then pushes the content page. Agent/permissions/options and
+recipients/connections pickers remain transient choices. Attachment preview
+retains its media presentation.
+
+## Sidebar and destination transitions
+
+The sidebar header contains the NyxID logo and circular Search control. Quick
+actions (Scan QR code and Terminal login code) precede Workspace. Workspace
+contains Notifications with its unread count (only while both the
+`assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
+count turns amber while a decision waits), Automations, Machines, Plugins,
+Activity with its live pending count, and Create new agent. Private chats also
+show the same bell in their header. Thread, crew, channel-bot and Recents rows
+carry the unread counts the one notification summary attributes to them.
+Opening a thread or crew marks its notifications read once it has stayed in
+front for 1.5 seconds. A notification row follows the server's canonical
+link first (`/assistant?c=<thread|crew>`, `?card=` focuses a decision,
+`?agent=<id>&details=<section>` opens the agent's details, where an
+organization bot's public transcript lives, `/assistant/automations` the
+list) and falls back to its own references; links on other origins open
+nothing. The same parser serves `?g=<crew>`, `?agent=` chats and
+`?panel=notifications` above them. All push taps use the single account-bound
+queue in `useNotificationNavigation`, including cold starts and the foreground
+toast's Open action. NyxBot taps carry their `notification_id` through that queue;
+after a supported canonical destination is dispatched, the feed controller marks
+that row read. Authentication, navigation readiness and guards can defer the tap.
+A newer tap or supported direct link supersedes it; leaving its account drops it.
+An Activity fallback for an unknown destination does not mark a feed row read. There are no disabled coming-soon destinations. Agents
+(personal, then organization), Crews and plain-text Recents follow. The pinned
+Chat pill opens NyxBot Home; the gear opens Settings. A measured bottom spacer
+keeps the last row above the bar at maximum scroll. A fade hides rows passing
+behind it during scrolling.
+
+The logo and bottom Chat pill select Home. Bare `/assistant` and a cold start
+without a restorable chat also select Home. Header compose and the agent
+picker's New chat retain the viewed agent and create an empty draft, including
+NyxBot. Home never substitutes for a new chat. Crew headers preserve their
+existing conversation/recipient semantics rather than exposing private compose.
+
+A sidebar destination first fades out the old root in 120ms, then swaps it with
+native-stack animation `none`. After the new page has laid out and painted,
+it fades in over 180ms while the slab closes once over 300ms. Programmatic
+transitions use timing; finger release uses a clamped spring. Reduced motion
+skips travel and fades. Rapid selection is fenced by transition identity.
+
+Closed root pages reveal navigation only from a 24pt left-edge zone with a
+rightward threshold and vertical failure range. Nested pages keep back-swipe.
+When open, only the visible slab sliver accepts a closing tap/drag. Composer,
+transcript and horizontal table/code scrolling do not start the sidebar pan.
+
+## Sheets, guards and accessibility
+
+Settings and quick actions animate over the current sidebar/slab state. Opening
+or dismissing them preserves the expanded offset and sidebar scroll position.
+Their host sits above the shell; the shell is pointer- and accessibility-hidden
+while the sheet is presented. Android Back dismisses the sheet first. A sheet
+owner waits for dismissal animation before unmounting. Reduced motion is instant.
+A main-content link chosen from a sheet dismisses it before selecting its page.
+
+A sheet shows Back only after an internal push, based on its local stack index.
+Settings root, direct QR/Terminal entry and cold account links have Close only.
+Signed-in page/sidebar headers share a 60pt row below the safe area. Main-page
+and Settings titles reserve equal control columns, center across the full width
+and cap scaling at 1.25×. Chat identity retains its avatar/name layout.
+
+The presentation-independent leave guard covers dirty/critical writes through
+Back, sidebar destination selection, edge gestures and Android Back. A pending
+critical write blocks dismissal; a dirty editor asks before discard. Settings
+retains its equivalent Close/backdrop/drag/Back/Escape guards. Sign-out clears
+account state and unmounts editors. `navigationHierarchy.test.ts`,
+`workspaceChatNavigation.test.ts` and the surface/guard tests cover route,
+restoration, transition and dismissal behavior.
+
+At window widths of at least 768pt, Settings and quick-action sheets use a
+centered card up to 720×860pt with 24pt plus safe-area margins. Narrow windows
+retain the bottom sheet. The measured host shrinks above the keyboard, retaining
+the same sheet navigator and guarded edits; rotation does not replay entrance
+animation. Settings content is centered up to 720pt and row wrapping follows
+measured row width and Dynamic Type.
+
+Accessibility exposure follows the shell's settled visual endpoint. While
+navigation is open the slab is hidden except for Close navigation; focus moves
+to the sidebar and restores to the current content control on close. During
+travel neither stale sidebar targets nor covered content are exposed.
+
+## Canonical links and native scope
+
+Canonical URLs remain stable. Content links resolve to ContentStack; cold links
+have Workspace/Home as the base. Settings/account links resolve to the sheet.
+Existing chat IDs, route keys and account-scoped drafts survive navigation.
+Current-thread reselection preserves unsent text; new chat never transfers it.
+
+Native skills are read-only by user decision 2026-10-28. Choosing a version pins
+its exact version and hash; Use latest resolves the newest non-deprecated
+package and pins it immediately. Remove from agent removes only that agent's
+pin. Owner approve/decline cards remain; native draft/editor/publish-from-draft
+routes are deleted. To change skill content, ask NyxBot.
+
+Native Automations are read-only by the same user decision. Editor, creation,
+preferences, invoke, toggle, delete and webhook setup paths are removed. The
+feature exposes GET only. Old authoring links resolve to the configured list or
+exact read-only detail. Guidance says “To create, run or change automations,
+ask NyxBot.” Its action opens an empty normal chat without sending text.
+
+Permission modes remain editable subject to the existing owner/agent-override
+contract. Chat and agent inference configuration is server-owned; native has no
+configuration picker, conversation configuration PATCH or new-turn override.
+Voice automatically selects the available server default without a selector.

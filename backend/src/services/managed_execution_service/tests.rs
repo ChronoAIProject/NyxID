@@ -39,6 +39,7 @@ impl LagoApi for FakeLago {
             .collect())
     }
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -70,6 +71,7 @@ fn config() -> ServiceBilling {
             tariff_verified_at: Utc::now() - Duration::minutes(1),
         }),
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::InputTokens,
             credits_per_unit: "0.000000000002".into(),
             lago_metric_code: "test_input".into(),

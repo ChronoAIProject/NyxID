@@ -244,6 +244,7 @@ impl Fixture {
             .await
             .unwrap();
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],

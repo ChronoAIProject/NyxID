@@ -1,5 +1,9 @@
+import { ApiError, apiErrorBody, responseApiError } from "@/lib/api-error";
 import { apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { assistantJson } from "@/lib/assistant/assistant-http";
+import { captureNyxbotError, httpErrorCode, responseCorrelation } from "./error-telemetry";
+import { getAssistantIdentityRevision } from "./identity";
+import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
 import {
   nyxAgentAttachmentSchema,
   type NyxAgentAttachment,
@@ -78,6 +82,8 @@ export function uploadFile(
   signal: AbortSignal,
   progress: (value: number) => void,
 ): Promise<NyxAgentAttachment> {
+  const identityRevision = getAssistantIdentityRevision();
+  const startedAt = Date.now();
   if (!file.size || file.size > 20 * 1024 * 1024)
     return Promise.reject(new Error("Choose a file between 1 byte and 20 MB."));
   // The preview fixture accepts raw files without sending them to a backend.
@@ -92,15 +98,37 @@ export function uploadFile(
       });
       if (signal.aborted) throw new Error("Upload cancelled.");
       if (!response) throw new Error("Preview upload route not found.");
+      if (!response.ok) throw await responseApiError(response);
       const body: unknown = await response.json();
-      if (!response.ok) throw new Error((body as { message?: string }).message ?? "Upload failed.");
       progress(100);
       return nyxAgentAttachmentSchema.parse(body);
     })();
   }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", apiUrl(attachmentPath(scope)));
+    const endpoint = attachmentPath(scope);
+    let settled = false;
+    const rejectFailure = (error: unknown, code: NyxbotErrorCode) => {
+      if (settled) return;
+      settled = true;
+      if (!signal.aborted && getAssistantIdentityRevision() === identityRevision) {
+        try {
+          const headers = new Headers();
+          for (const name of ["x-request-id", "x-correlation-id", "X-NyxID-Trace-Id", "x-trace-id"]) {
+            const value = xhr.getResponseHeader(name);
+            if (value) headers.set(name, value);
+          }
+          captureNyxbotError({
+            code, engine: "nyxagent", stage: "request", endpoint,
+            status: xhr.status || undefined,
+            ...responseCorrelation({ headers }),
+            durationMs: Date.now() - startedAt,
+          }, error);
+        } catch { /* Diagnostics cannot prevent the upload error from settling. */ }
+      }
+      reject(error);
+    };
+    xhr.open("POST", apiUrl(endpoint));
     xhr.withCredentials = true;
     xhr.timeout = 60_000;
     const config = buildFetchConfig({ method: "POST" });
@@ -118,34 +146,47 @@ export function uploadFile(
     signal.addEventListener("abort", abort, { once: true });
     xhr.onloadend = () => signal.removeEventListener("abort", abort);
     xhr.onerror = () =>
-      reject(new Error("Upload failed. Check your connection and try again."));
+      rejectFailure(new Error("Upload failed. Check your connection and try again."), "NYXBOT_NETWORK_ERROR");
     xhr.ontimeout = () =>
-      reject(new Error("Upload timed out. Try a smaller file."));
-    xhr.onabort = () => reject(new Error("Upload cancelled."));
+      rejectFailure(new Error("Upload timed out. Try a smaller file."), "NYXBOT_START_TIMEOUT");
+    xhr.onabort = () => {
+      settled = true;
+      reject(new Error("Upload cancelled."));
+    };
     xhr.onload = () => {
+      if (settled) return;
       try {
-        const body: unknown = JSON.parse(xhr.responseText);
         if (xhr.status < 200 || xhr.status >= 300) {
-          const error = body as { message?: unknown };
-          if (typeof error.message === "string" && /malformed or unsupported attachment/i.test(error.message)) {
-            throw new Error(UNSUPPORTED_FORMAT_MESSAGE);
-          }
-          throw new Error(
-            typeof error.message === "string"
-              ? error.message
-              : "Upload failed.",
-          );
+          let payload: unknown = null;
+          try { payload = JSON.parse(xhr.responseText); } catch { /* Never display a parser's body snippet. */ }
+          const body = apiErrorBody(payload, xhr.status);
+          throw new ApiError(xhr.status, /malformed or unsupported attachment/i.test(body.message)
+            ? { ...body, message: UNSUPPORTED_FORMAT_MESSAGE } : body, { get: (name) => xhr.getResponseHeader(name) });
         }
-        resolve(nyxAgentAttachmentSchema.parse(body));
+        let body: unknown;
+        try { body = JSON.parse(xhr.responseText); } catch {
+          throw new ApiError(xhr.status, apiErrorBody(null, xhr.status), { get: (name) => xhr.getResponseHeader(name) });
+        }
+        const attachment = nyxAgentAttachmentSchema.parse(body);
+        settled = true;
+        resolve(attachment);
       } catch (error) {
-        reject(error);
+        rejectFailure(error, xhr.status >= 200 && xhr.status < 300
+          ? "NYXBOT_PROTOCOL_ERROR" : httpErrorCode(xhr.status));
       }
     };
     if (signal.aborted) {
+      signal.removeEventListener("abort", abort);
+      settled = true;
       reject(new Error("Upload cancelled."));
       return;
     }
-    xhr.send(file);
+    try {
+      xhr.send(file);
+    } catch (error) {
+      signal.removeEventListener("abort", abort);
+      rejectFailure(error, "NYXBOT_NETWORK_ERROR");
+    }
   });
 }
 export function removeUpload(scope: UploadScope, id: string) {

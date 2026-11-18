@@ -151,7 +151,60 @@ Identity output includes the credential's hostname/profile label. `status` then 
 nyxid whoami     # who you're logged in as
 nyxid status     # session + instance summary
 nyxid doctor     # diagnose connectivity / config problems
+nyxid session status --output json # current session deadlines
+nyxid session list                 # account sessions and expiry warnings
 ```
+
+## Account-session lifetime and unattended work
+
+Account refresh tokens use a **7-day rolling TTL** by default (the server's
+`JWT_REFRESH_TTL_SECS`). Each successful rotation starts that TTL again.
+Commands, including Oracle account commands, use the common locked refresh path:
+they renew an expired access token, re-read the saved tokens while holding the
+profile lock, and save the replacement before releasing it. A still-valid access
+token does not cause rotation. Concurrent CLI processes on the same profile
+converge on the saved token; copying credentials to other profiles or computers
+is not coordinated by that lock.
+
+A separate **30-day absolute account-session cap** starts at login. Rotation
+updates activity but never moves that deadline. Active use can therefore require
+sign-in even when the latest refresh token has days left. `nyxid session refresh`
+renews tokens within this cap; it cannot extend or bypass it. The cap is unchanged.
+
+`nyxid session status` and `nyxid session list` show the rolling
+`refresh_expires_at` and fixed `session_expires_at`, in text and `--output json`.
+They include an `expiry_warning` within three days of the absolute deadline.
+`expires_at` on list rows remains the same session deadline for compatibility.
+Unknown values are `null` (for example, a browser-only session or an older server
+without refresh metadata); the CLI never invents a 30-day deadline from a rotated
+token. With an Agent Key or another credential that has no current account
+session, `session status` reports `unavailable` and null deadlines.
+
+For unattended jobs, prefer `nyxid login --agent-key`: authorize it once with the
+necessary scopes, resources, and a suitable key expiry. The resulting credential
+never refreshes and has no account-session cap. The key's own expiry, revocation,
+permissions and rate limits still apply; a human must explicitly authorize a
+replacement when needed. The CLI never silently logs in or switches identities.
+
+Refresh refusals use **exit 3** (explicit login required). Preflight renewal and
+`session refresh` keep **exit 4** for network/transient failures (retry later).
+JSON refusal codes are:
+
+| Code | Meaning |
+| --- | --- |
+| `refresh_token_expired` | The refresh token reached its TTL. |
+| `refresh_token_revoked` | The refresh token was revoked. |
+| `refresh_token_reused` | A rotated token was reused outside accepted retry recovery (additive). |
+| `session_expired` | The account session reached its absolute deadline (additive). |
+| `session_revoked` | The account session was revoked (additive). |
+| `session_unavailable` | The parent session no longer exists or is not an authenticated session (additive). |
+| `refresh_token_not_found` | No usable refresh token is available. |
+| `refresh_rejected` | Another refusal, or an older server's ambiguous "expired or revoked" response. |
+
+The CLI prefers the server's `details.reason` and falls back to legacy messages
+for old replicas. A missing session row may have been deleted after expiry, so
+`session_unavailable` cannot identify the historical cause. Refusal JSON never
+contains credential values.
 
 ## Profiles — multiple accounts or instances
 

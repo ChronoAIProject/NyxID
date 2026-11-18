@@ -148,6 +148,68 @@ separate Node 22.23.2 credential-accept bundle. Its Debian runtime runs as
 non-root `nyxid` and includes the standalone HTML, SRI assets and release
 manifest at `/app/frontend/dist/`; it also needs its private durable TUF volume.
 
+Backend builds accept `--build-arg NYXID_GIT_HASH=<commit>`. The final image sets
+that value as a runtime environment variable for `/health`; it is not an input
+to either Cargo layer. Without a nonempty runtime value, standalone server
+binaries retain their build-time stamp. CLI/node binaries retain their existing
+build-time identity. The credential-accept bundle still receives its own commit
+stamp and release-integrity manifest.
+
+A separate Python recipe stage copies only workspace manifests and `Cargo.lock`
+and normalizes the nine workspace packages to version `0.0.0` in both. It leaves
+third-party versions, checksums and requirements exact. The fresh `dependencies`
+stage copies only that normalized output and generates stub crate entry points;
+a version-only release changes the recipe stage but its output still has the
+same content hash. Normalizing in the compiler stage itself would not work: its
+parent COPY layer would already have changed. The real `builder` restores the
+original manifests/lock before compiling application code, preserving `/health`
+and every `CARGO_PKG_VERSION`. New versioned path constraints or inherited member
+versions fail the recipe explicitly until supported; they are never relaxed.
+Both Cargo invocations use `--locked` and the same release binary/features.
+Real source and embedded assets enter only after
+dependency compilation. With those inputs unchanged, a commit-only change now
+reuses the compiled server layer; source/embedded-input changes still rebuild
+the affected crates, and dependency/toolchain changes invalidate the dependency
+layer. Workspace package version bumps alone do not. This is layer reuse, not
+incremental Rust compilation.
+
+`CARGO_BUILD_JOBS` is a build argument with a default of **2**, used by both the
+amd64 smoke job and native amd64/arm64 publishing. Each backend image runner
+first provisions at least 24 GiB total swap. Two jobs permit bounded dependency
+and code-generation parallelism without using every runner CPU; the large
+server crate compiles after its dependencies, and the CLI/test binaries are not
+built. The swap reserve absorbs peaks rather than making sustained swapping
+fast. Smaller local builders can pass `--build-arg CARGO_BUILD_JOBS=1`. No change
+to optimization, release features or runtime resources is made.
+
+Publishing imports and exports registry caches at
+`ghcr.io/<owner>/nyxid/backend:buildcache-linux-{amd64,arm64}` with `mode=max`,
+including intermediate compiler layers. Both jobs retain the matching
+`backend-linux-<arch>` GHA import as a migration fallback. Smoke also imports the
+old `backend-pr-linux-amd64` scope, but exports no cache: in PR #2052 the release
+compile finished in 49m 23s, then even a `mode=min` GHA export stalled for nearly
+40 minutes until the 90-minute job timeout. That export did not retain
+intermediate compiler layers. PRs never overwrite the trusted registry cache
+or consume the shared Actions cache budget, where large image exports previously
+evicted Rust release caches. A missing/cold registry cache still requires a full
+compile. The first publish after this Dockerfile change repopulates it.
+
+For a bounded dependency-cache check, build with `--target dependencies`, then
+repeat after changing only workspace package versions in the manifests/lock.
+The dependency Cargo step must say `CACHED`. On small local builders add
+`--build-arg CARGO_BUILD_JOBS=1`; this target never compiles the real server.
+Local native arm64 validation on 2026-10-27 compiled dependencies in 8m 10s.
+Changing all nine local package versions to `9.8.7` then completed in 3s with
+the Cargo layer `CACHED`; both invocations retained `--locked`.
+
+For timings, use `docker buildx build --progress=plain` with the same registry
+`--cache-from` as publishing, then repeat with only `NYXID_GIT_HASH` changed.
+Both Cargo `RUN` steps should report `CACHED` on the second build; the credential
+bundle stamp and final image metadata still change. Backend source changes
+cannot get that complete compiler-layer hit. No fixed speedup is assumed for
+cold builds or the single large crate: compare Cargo's reported build duration
+and BuildKit's per-layer durations on each native runner.
+
 The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
 1. Node 22.23.2 builder with `npm ci` and `npm run build`
 2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer
@@ -342,6 +404,180 @@ groups and restarts to install the unique index.
 
 ---
 
+## Rolling deploys and graceful drain
+
+Server mode installs SIGTERM and ctrl-c receivers before configuration or database
+IO, and retains the same receivers through shutdown. Startup never cancels an
+awaited step on a signal. It checks at three safe points: after configuration,
+after the read-only database connection and transaction-capability check, and
+immediately before either listener binds. At the first two points it exits with
+status 0 without application writes or workers. After the database checkpoint,
+startup finishes through the bind checkpoint, including migrations and worker
+initialization. A pending signal there prevents both binds and the process-start
+audit, runs the existing drain for workers already started, then exits with
+status 0. A second signal is retained during startup and skips the drain wait
+once that checkpoint is reached; it never interrupts a startup step.
+
+For a startup signal, the configured drain budget starts at signal receipt.
+Remaining startup consumes that budget: with budget B and remaining startup S,
+at most max(B - S, 0) remains for drain and cleanup. This does not place a deadline
+on startup itself. If a startup operation stalls beyond B, the process reaches
+cleanup late, with no budget remaining; a platform kill can still interrupt it.
+Under the normal startup duration (less than ten seconds), the default 25-second
+budget includes the remaining startup and drain. One-shot commands install no
+server signal receivers; database command modes also start no billing or chain
+verification workers. After binding, shutdown follows the serving behavior below.
+
+SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
+returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
+Both public and internal replica listeners continue serving during the work wait,
+including ordinary requests and new turns that arrive while routing converges.
+There is no drain rejection on these request paths and no database lookup in
+`/ready`.
+
+The process stops taking new background queue claims, scheduled work and polls.
+Already claimed work finishes, with turn heartbeats, capacity renewal, node
+ownership renewal and security capability observations kept alive. The wait
+counts detached turns and delivery work as well as HTTP bodies and upgraded
+streams. Idle node management sockets are closed at handover; their pending
+operations keep the wait open. MCP notification subscriptions, assistant `/live`, and dedicated CMA agent/response
+event observers do not count as work. They end cleanly five seconds after
+drain starts, allowing readiness propagation before reconnecting. MCP clients
+resume the durable outbox with `Last-Event-ID`; assistant clients poll and refresh
+on `ready`/`resync` after reconnect. Dedicated CMA observers display Disconnected
+and retain the cursor for their existing Reconnect action; closing observation
+does not cancel the remote task. Generic proxy streams remain work because their
+upstream resume guarantees vary. An otherwise idle drain waits for those bodies
+to close. Turn/provider streams, downloads, managed setup results, native response
+replay delivery barriers and interactive sessions still wait for completion and
+can consume the full work-wait budget. Once work is idle, Axum finishes accepted connections while
+retaining the bound sockets. If an accepted request starts more work at that
+boundary, both listeners resume serving until that work finishes.
+
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to **25 seconds**. The default fits
+Kubernetes' default 30-second termination grace period and needs no setting.
+The budget includes cleanup and the finish audit: the smaller of five seconds
+or 10% is reserved for cleanup. At the default, subscriptions end at five seconds,
+the work wait ends at 22.5 seconds, and remaining turns are interrupted with
+`turn_lost` / `shutdown`. Remaining local execution and response streams stop
+after at most another 0.5 seconds of ordinary settlement. Fenced settlement,
+release and the finish audit share the 2.5-second cleanup reserve; the process
+exits by the 25-second deadline, leaving five seconds for signal delivery,
+scheduling and process teardown before Kubernetes kills it. The asynchronous
+start audit has its own 1.25-second bound within this budget, not extra exit time.
+A blocking preStop hook must not consume the five-second margin.
+
+Work that needs longer than the budget when a deploy starts is ended and recorded
+as interrupted by shutdown. To let that work finish across a deploy, raise both
+values together: for an extended budget, the termination grace period must exceed
+the drain budget by at least 30 seconds. For example, set
+`SHUTDOWN_DRAIN_TIMEOUT_SECS=600` and use this Deployment fragment:
+
+```yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 630
+      containers:
+        - name: nyxid
+          env:
+            - name: SHUTDOWN_DRAIN_TIMEOUT_SECS
+              value: "600"
+```
+
+The process exits earlier when work finishes. A second SIGTERM or ctrl-c skips
+the remaining wait and begins the same bounded cleanup. Explicit timeout values
+retain their existing behavior; `0` restores the old immediate-exit path,
+including its existing ten-second Discord cancellation allowance.
+
+At the end, runners settle remaining turns through the existing fenced path
+with stable code `turn_lost` and stage `shutdown`. Cleanup cancels remaining local
+execution, attempts settlement for this worker's remaining claims, closes node
+WebSockets with going-away code 1001, releases owned cluster leases and capacity
+slots without deleting polling checkpoints, and removes this generation's
+security observation after stopping its writer. Releases compare generations
+or exact claim tokens. One metadata-only `backend_shutdown_drain` chained audit
+and structured log describe the outcome, including the count of subscriptions
+ended by shutdown. Logs at drain start show the signal, budget and in-flight
+counts; another log records a second signal. Database failures and stuck cleanup
+have a shared deadline; they cannot extend the exit budget.
+
+The chained, metadata-only `backend_shutdown_drain_started` and
+`backend_shutdown_drain` events share the process's unique `generation`. The start
+records the budget, cleanup reserve and in-flight counts, including node operations.
+A start without a finish indicates the process was killed before the drain
+completed (a failed finish audit can also leave only a start); compare `budget_secs`
+with the platform's termination grace period. `0` emits no drain events.
+
+Start and finish records also include `open_http_at_start` and, at finish,
+`open_http_at_finish`: the largest 20 route-template/method/kind groups, their
+counts and oldest ages in whole seconds, plus `other_count` for omitted units.
+Groups also distinguish the resolved, unowned catalog `service` slug for active
+public `connection`/`internal` discovery entries regardless of creator (excluding
+internal `platform-*` and model-only rows, with empty/UUID-shaped slugs and every
+other resolved service reported as `custom`, omitted before resolution) on
+proxy/public/LLM routes and the fixed stream `content_type` family (`event-stream`,
+`json`, `other`), never private service slugs, user connection aliases or raw
+content-type headers.
+Kinds distinguish pending requests from response bodies/upgraded streams; age
+starts when that kind is registered. Raw paths, IDs, queries, headers and extension
+methods are never captured (`<unmatched>` / `OTHER` are fixed fallbacks).
+Detached/background guards have no static labels, so retain aggregate counts.
+While draining, `backend_shutdown_drain_progress` records elapsed time, counts,
+node operations and the same `open_http` summary at 10, 25, 60 and 300 seconds,
+skipping points at or beyond the budget (only 10 seconds applies by default).
+These at-most-four chained appends use
+the start audit's time bound and are cancelled before finish; they cannot keep
+work non-idle or extend cleanup. The last successful checkpoint bounds how far
+a killed drain got, though an audit failure can also explain a missing checkpoint.
+
+After both listeners bind, `backend_process_started` records the generation,
+build, bind time, and the latest other generation and heartbeat observed under
+the same instance name (if any), through the chained audit path; its background
+lookup is bounded to one second and the entire attempt to three seconds, without
+holding up serving. `previous_lookup` distinguishes `found`, `none`, and
+`unavailable`; a retained heartbeat is evidence of a prior process, not proof it
+was still alive, and gracefully retired observations are removed. Two process
+starts without an intervening drain for the earlier generation indicate an
+unobserved exit (including a crash or kill); a missing audit or a crash before
+listener binding can leave no start record, so one start alone does not prove a
+routing fault. Drain start, progress and finish records include `recent_traffic`:
+at most twelve five-second buckets with UTC boundaries and aggregate `received`
+and `responded` counts across both listeners, including probes and errors.
+`responded` counts middleware response-header completion, not body completion or
+confirmed client delivery; the newest bucket is partial and concurrent snapshots
+are approximate. Counting uses fixed process-local atomics and no request data or
+database calls; only those drain snapshots persist the rolling history.
+
+Cleanup does not clear uncertain provider-send barriers, wallet locks or
+purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
+retain their mutation locks; Discord identify rate windows retain their expiry. These records
+keep their existing recovery rules because releasing them could repeat an
+external effect. `billing:reconcile` uses its own cooperative stop and exact-token
+release after the current financial unit completes. If the deadline aborts that
+pass, its lease retains the default 30-second TTL; bulk shutdown release excludes
+it. Credit-schedule progress leases retain their existing 300-second expiry
+because they have no exact ownership token. Completion tasks, including detached audits, compensation and
+ledger appends, remain tracked while execution is stopped.
+
+Operators must match these settings in their platform's rollout configuration:
+
+- The default 25-second drain fits Kubernetes' default 30-second grace period.
+  For an extended drain budget, set the grace period at least 30 seconds higher;
+  allow the legacy Discord allowance when using `0`.
+- Readiness probe on `/ready`; liveness probe on `/health`.
+- Replace one replica at a time with surge capacity, allowing the successor to
+  become ready before terminating another replica.
+- Keep the draining replica's internal address reachable until it exits, because
+  peers forward node operations to the process that owns the socket.
+
+These are configuration requirements, not a description of production rollout
+tooling. That tooling is outside this repository. If the platform kills the
+process earlier, or MongoDB cannot confirm settlement within cleanup, peers use
+the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
+cadence. A worker loss never automatically replays execution. A fully drained
+turn has its complete reply and needs no recovery.
+
 ## Environment Configuration
 
 ### Required Variables
@@ -428,6 +664,18 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 ### Automatic Setup
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
+
+### Upgrading large databases
+
+Before rolling out this version to a large database, pre-build the 23 erasure
+and export indexes using the exact owner and export-selector commands in the
+[personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md).
+This is required for large collections such as `refresh_tokens`, `nyxbot_events`,
+`assistant_messages`, `trigger_deliveries`, and channel receipts. Startup awaits
+these builds before either listener binds, so a long first build can exhaust
+readiness/startup probe allowances. Pre-building lets the current replicas keep
+serving during the build; startup then reuses the compatible existing indexes.
+No existing index needs to be dropped, renamed, or rebuilt.
 
 ### Collections Created
 
@@ -523,6 +771,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 ## Reverse Proxy Configuration
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
+
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
 
 ### Caddy (Recommended)
 
@@ -675,6 +933,10 @@ npm run build
 
 ## Health Checks and Monitoring
 
+Publish Images may reuse successful CI jobs from an identical pull-request
+merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
+Any uncertainty runs the complete release gate.
+
 ### Health Endpoint
 
 ```bash
@@ -683,7 +945,7 @@ curl https://auth.example.com/health
 ```
 
 Use this for:
-- Load balancer health checks
+- Liveness monitoring (load balancer readiness uses `/ready`)
 - Container orchestration liveness probes
 - Uptime monitoring (Uptime Robot, Pingdom, etc.)
 
@@ -698,7 +960,7 @@ livenessProbe:
   periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: 3001
   initialDelaySeconds: 5
   periodSeconds: 5
@@ -729,6 +991,28 @@ NyxID maintains an internal audit log in the `audit_log` MongoDB collection. Que
 curl "https://auth.example.com/api/v1/admin/audit-log?page=1&per_page=50" \
   -H "Authorization: Bearer <admin_token>"
 ```
+
+The Audit Log page uses `include_total=false` to display filtered rows before
+their exact count completes. This mode returns `has_more` and fetches at most
+one extra row to determine whether another page exists. `total` is omitted
+when it would require a separate filtered count. Unfiltered totals still use
+collection metadata, and a complete first page can supply its total directly.
+The UI then requests `GET /api/v1/admin/audit-log/count` with the same filters;
+this endpoint returns `{ "total": 123 }` and requires the same admin/operator
+access. It performs no display-enrichment lookups. Omitting `include_total`
+preserves the existing listing response with its total.
+
+Frontend and backend can be upgraded independently. Existing clients keep their
+numeric `total` unless they explicitly opt into `include_total=false`; `has_more`
+is additive. The updated UI accepts older responses without `has_more` and uses
+their total without requesting the count endpoint. During a mixed-replica
+rollout, an unavailable count endpoint leaves the page usable with a retry for
+the total. Counts may be cached for 60 seconds; the current page's `has_more`
+controls forward pagination.
+
+For an indexed identity lookup, use the `user_id` or `api_key_id` query parameter,
+or select **User ID (exact)** / **API key ID (exact)** in the page's search field
+selector. Text searches retain substring matching and may scan many audit rows.
 
 New audit rows are HMAC hash-chained with a monotonically increasing `seq`. Verify the chain on demand:
 
@@ -1546,3 +1830,84 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 - Ensure SPA fallback is configured (serve `index.html` for all routes)
 - Check browser console for CORS errors
 - Verify the API URL in the frontend build matches the backend URL
+
+
+## MongoDB pool saturation
+
+Budget `DATABASE_MAX_CONNECTIONS` per process and per MongoDB server. A starting
+recommendation for bursty assistant workloads is 50 per replica: 50 primary
+application sockets for one replica, 100 for two. Include deployment surge,
+other clients, two monitoring sockets per server per replica, and the minimum
+pools on other members. Keep the projected peak below 80% of the database's
+per-node connection limit. Confirm the Atlas tier's actual limit before choosing
+a deployment setting. A larger pool supplies headroom but cannot repair a lock
+cycle. The current configuration default remains 10.
+
+Change-stream getMore calls use pooled connections while waiting. NyxID has
+assistant live, execution-enrollment and machine-access change-stream consumers.
+The HTTP requests-per-second limit and per-owner turn limits do not bound the
+number of concurrent operations across the process.
+
+NyxID warns when a server pool stays fully occupied for at least one second and
+when a completed or failed checkout took at least one second. The warnings share
+a 30-second rate limit per server pool. They contain the configured maximum and
+elapsed milliseconds, with no command contents or account identifiers. Full
+occupancy is not proof of queued requests or deadlock; correlate it with MongoDB
+transaction/operation and resource telemetry. It is deliberately not reported as
+an exact queue length because the driver's CMAP events cannot track cancellation
+of individual waiters.
+
+Rust MongoDB driver 3.5.2 does not apply a checkout-wait deadline. Its parsed
+`waitQueueTimeoutMS` is not connected to the checkout implementation, and
+`socketTimeoutMS` is unsupported. Server-selection and connection-establishment
+timeouts do not bound checkout. Do not rely on those settings to limit a saturated
+pool's wait. A future checkout-only timeout needs driver support and a reviewed
+retryable error contract; cancelling a write after dispatch can leave an unknown
+outcome.
+
+On normal replica sets, a transaction returns its connection between commands;
+load-balanced topology pins a physical connection, and sharded transactions pin
+a mongos address. Independently, a database operation waiting on an uncommitted
+write occupies a connection. Enough such operations can prevent the writer's
+COMMIT from acquiring a connection. Keep writes in the intended session and
+avoid nested writers against a fence already held by their caller.
+
+Ordinary chained audit appends serialize through one process-wide async gate,
+before any database work. Queued callers hold no connection. They share a
+120-second queue/retry budget, allowing the default 60-second server transaction
+lifetime plus 60 seconds for cleanup and recovery; conflicts retry with capped jittered
+backoff instead of an eight-attempt limit. This is a retry budget, not a general
+MongoDB timeout: it does not cancel a dispatched command or an uncertain commit.
+Existing shorter caller deadlines still apply. An awaited audit can delay its
+request or background job; the existing error handling remains in place.
+
+Each attempt still reads the tail and inserts in a short transaction: a plain
+unique insert under the gate can strand COMMIT with pool one and can wait beyond
+the retry deadline. Transactional conflicts release the socket so the holder
+and retry clock can progress. A successful append adds one COMMIT command.
+Caller-owned in-session appends do not take the process gate. Stored audit rows,
+UUID replay checks and hash bytes do not change; mixed versions remain readable,
+but old replicas retain the ordinary-insert starvation and eight-attempt loss
+risks. Rollback restores those risks.
+
+The queue is in memory. Deadline exhaustion, shorter caller timeouts or process
+loss can still drop best-effort ordinary audits. Required security-effect
+intents retain and retry their own payloads; chain verification cannot reconstruct
+an ordinary audit entry that was never saved. Serialization has a throughput
+ceiling set by database round-trip latency; compare observed audit volume with
+measured append throughput before considering ordered batching.
+
+An ordinary audit caller still waiting for the gate after one second emits a
+warning with `queue_wait_ms` and `waiting` (queued callers only, excluding the
+holder). The warning repeats at most once per 30 seconds per process across all
+waiters, including while the holder remains blocked. Cancellation and queue
+deadlines remove waiters from the count. No audit content is logged, and the
+warning does no database work.
+
+A 5 ms majority commit alone caps the serial appender below 200 entries/second
+per replica; 10 ms caps it below 100. Tail reads, inserts, network latency and
+conflict retries lower those ceilings further. Sustained arrivals above capacity
+grow the in-memory queue; each caller has at most its remaining 120-second
+queue/retry budget (or a shorter caller deadline) before failing. Best-effort
+entries can then be lost. The warning exposes queue pressure; it does not add a
+durable queue, admission limit or batching.

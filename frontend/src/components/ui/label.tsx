@@ -1,10 +1,11 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import * as LabelPrimitive from "@radix-ui/react-label";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const labelVariants = cva(
-  "text-xs font-medium leading-none text-muted-foreground peer-disabled:cursor-not-allowed peer-disabled:opacity-70",
+  `${TEXT_STYLES.fieldLabel} unthemed:leading-none text-muted-foreground peer-disabled:cursor-not-allowed peer-disabled:opacity-70 unthemed:text-xs`,
 );
 
 const Label = React.forwardRef<
@@ -14,10 +15,17 @@ const Label = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <LabelPrimitive.Root
     ref={ref}
+    data-field-label=""
     className={cn(labelVariants(), className)}
     {...props}
   />
 ));
 Label.displayName = LabelPrimitive.Root.displayName;
 
-export { Label };
+/** Explanatory text is separate from the field caption, even in a wrapping label. */
+function FieldHelp({ as: Component = "span", variant = "secondary", className, ...props }: React.ComponentPropsWithoutRef<"span"> & { as?: "span" | "p"; variant?: "secondary" | "body" | "emphasis" }) {
+  const role = { secondary: TEXT_STYLES.secondary, body: TEXT_STYLES.body, emphasis: TEXT_STYLES.secondaryEmphasis }[variant];
+  return <Component data-field-help="" className={cn(role, "text-muted-foreground", className)} {...props} />;
+}
+
+export { Label, FieldHelp };

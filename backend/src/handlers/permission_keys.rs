@@ -88,14 +88,9 @@ pub async fn create(
         &input.user_service_id,
         input.expires_at,
         input.policy,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_created",
-        Some(json!({"permission_key_id": binding.id, "user_service_id": binding.user_service_id})),
-    );
     let mut response = (
         StatusCode::CREATED,
         Json(CreatedResponse {
@@ -145,16 +140,9 @@ pub async fn pause(
         &id,
         input.revision,
         input.paused,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_pause_changed",
-        Some(
-            json!({"permission_key_id": id, "paused": input.paused, "revision": binding.revision}),
-        ),
-    );
     Ok(Json(binding.into()))
 }
 
@@ -165,13 +153,9 @@ pub async fn revoke(
 ) -> AppResult<StatusCode> {
     super::login_client_context::require_first_party_human(&auth)?;
     policies::get(&state.db, &auth.user_id.to_string(), &id).await?;
-    key_service::delete_api_key(&state.db, &auth.user_id.to_string(), &id).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_revoked",
-        Some(json!({"permission_key_id": id})),
-    );
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let intent = crate::services::api_key_audit_service::permission_revoked(&actor, &id)?;
+    key_service::delete_api_key_audited(&state.db, &actor.user_id, &id, &intent).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -187,6 +171,7 @@ impl BackendTransport {
         &self,
         request: &nyxid_permissions::Request,
         origin: Option<&str>,
+        auth: &AuthUser,
     ) -> AppResult<Response> {
         policies::check_live(&self.state.db, &self.binding).await?;
         let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
@@ -225,7 +210,7 @@ impl BackendTransport {
         proxy_request.extensions_mut().insert(self.billing);
         super::proxy::execute_permission_request(
             &self.state,
-            &self.auth,
+            auth,
             &self.binding,
             origin,
             resolved,
@@ -238,6 +223,59 @@ impl BackendTransport {
 
 #[async_trait]
 impl Transport for BackendTransport {
+    async fn send_verified(
+        &self,
+        verified: nyxid_permissions::VerifiedPlan<'_>,
+        dispatch: nyxid_permissions::DispatchMark,
+    ) -> Result<nyxid_permissions::Response, Error> {
+        let Some(context) = &self.auth.execution_permission else {
+            dispatch.dispatched();
+            return self
+                .send_to(&verified.plan().request, verified.plan().origin.as_deref())
+                .await;
+        };
+        let mut auth = self.auth.clone();
+        auth.execution_permission = Some(
+            context
+                .for_native(&self.binding, &verified, dispatch.clone())
+                .map_err(|_| Error::Denied("native admission refused"))?,
+        );
+        let result = self
+            .forward(
+                &verified.plan().request,
+                verified.plan().origin.as_deref(),
+                &auth,
+            )
+            .await;
+        let response = result.map_err(|error| {
+            if dispatch.was_dispatched() {
+                Error::Upstream
+            } else if let AppError::ApprovalRequired { request_id } = &error {
+                Error::ApprovalPending {
+                    request_id: request_id.clone(),
+                }
+            } else if let AppError::ApprovalFailed { reason, .. } = &error {
+                Error::Denied(match reason.as_str() {
+                    "Approval request was rejected" => {
+                        "Approval request was rejected; nothing was sent"
+                    }
+                    "Approval request expired" => "Approval request expired; nothing was sent",
+                    _ => "This call stopped waiting for approval and sent nothing",
+                })
+            } else if error.is_forbidden()
+                || matches!(
+                    error,
+                    AppError::ApprovalRequired { .. } | AppError::ApprovalFailed { .. }
+                )
+            {
+                Error::Denied("native execution approval is required or was refused")
+            } else {
+                Error::Upstream
+            }
+        })?;
+        native_response(response).await
+    }
+
     async fn send(
         &self,
         request: &nyxid_permissions::Request,
@@ -250,26 +288,37 @@ impl Transport for BackendTransport {
         request: &nyxid_permissions::Request,
         origin: Option<&str>,
     ) -> Result<nyxid_permissions::Response, Error> {
+        // Adapter verification reads keep their existing policy and approval
+        // checks, but cannot select or consume the primary execution permission.
+        let verification = self.auth.execution_permission.as_ref().map(|_| {
+            let mut auth = self.auth.clone();
+            crate::services::execution_permission_dispatch::exclude(&mut auth);
+            auth
+        });
         let response = self
-            .forward(request, origin)
+            .forward(request, origin, verification.as_ref().unwrap_or(&self.auth))
             .await
             .map_err(|_| Error::Upstream)?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        let body = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|_| Error::ResponseTooLarge)?;
-        Ok(nyxid_permissions::Response {
-            status,
-            content_type,
-            body,
-        })
+        native_response(response).await
     }
+}
+
+async fn native_response(response: Response) -> Result<nyxid_permissions::Response, Error> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let body = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| Error::ResponseTooLarge)?;
+    Ok(nyxid_permissions::Response {
+        status,
+        content_type,
+        body,
+    })
 }
 
 async fn prepare(
@@ -310,6 +359,9 @@ async fn prepare(
 }
 
 fn permission_error(error: Error) -> Response {
+    if let Error::ApprovalPending { request_id } = error {
+        return AppError::ApprovalRequired { request_id }.into_response();
+    }
     let status = match error {
         Error::Policy(_) => StatusCode::BAD_REQUEST,
         Error::Denied(_) | Error::HookDenied { .. } => StatusCode::FORBIDDEN,
@@ -337,7 +389,7 @@ pub async fn mcp(
     execute(state, auth, request, true).await
 }
 
-async fn execute(
+pub(crate) async fn execute(
     state: AppState,
     auth: AuthUser,
     request: Request<Body>,
@@ -348,6 +400,9 @@ async fn execute(
         Err(_) => return Ok(permission_error(Error::Busy)),
     };
     let cancellation = crate::downstream_disconnect::request_cancellation(&request);
+    if let Some(context) = &auth.execution_permission {
+        context.bind_cancellation(cancellation.clone());
+    }
     let result = crate::downstream_disconnect::until_client_disconnect(
         &cancellation,
         execute_inner(&state, &auth, request, mcp),
@@ -411,6 +466,36 @@ async fn execute_inner(
         Ok(result) => result?,
         Err(_) => return Ok(permission_error(Error::Timeout)),
     };
+    if let Some(context) = &auth.execution_permission {
+        use crate::models::execution_proposal::PreparedAdapter;
+        let adapter = if body.len() + 2048
+            <= crate::services::execution_permission_dispatch::proposals::MAX_PAYLOAD
+        {
+            std::str::from_utf8(&body)
+                .ok()
+                .map(|body| PreparedAdapter::Native {
+                    uri: parts.uri.to_string(),
+                    method: parts.method.to_string(),
+                    body: body.to_owned(),
+                    content_type: parts
+                        .headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned),
+                    mcp,
+                })
+        } else {
+            None
+        };
+        let adapter = adapter.unwrap_or_else(|| {
+            tracing::info!(
+                reason = "native_input_not_retainable",
+                "Execution proposal uses legacy prompts"
+            );
+            PreparedAdapter::Unsupported
+        });
+        context.retain_adapter(adapter, &parts.headers);
+    }
     if mcp {
         return Ok(nyxid_permissions::server::handle_mcp(&engine, body).await);
     }

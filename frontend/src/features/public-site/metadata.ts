@@ -1,5 +1,8 @@
 import { publicationPath, type Locale } from "./publication";
-export const PUBLIC_ORIGIN = "https://nyx.chrono-ai.fun";
+import { DEFAULT_PUBLIC_ORIGIN } from "../../../scripts/public-origin.mjs";
+export const PUBLIC_ORIGIN = typeof __NYXID_PUBLIC_ORIGIN__ === "string"
+  ? __NYXID_PUBLIC_ORIGIN__
+  : DEFAULT_PUBLIC_ORIGIN;
 export interface PublicMetadata {
   path: string;
   route: string;

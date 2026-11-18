@@ -16,6 +16,7 @@ export const BILLING_SERVICE_FILTER_LIMIT = 50;
 const billingServiceKeySchema = z.string().trim().min(1).max(200);
 
 export const billingSearchSchema = z.object({
+  ownerId: z.string().uuid().optional().catch(undefined),
   tab: z.enum(["billing", "usage"]).optional().catch(undefined),
   period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
   /** Legacy single-service filter; `services` wins when both are present. */
@@ -47,6 +48,7 @@ export function normalizeBillingSearch(search: Record<string, unknown>) {
       parsed.services ??
       (parsed.service && parsed.service !== "all" ? [parsed.service] : []),
     action: parsed.action,
+    ownerId: parsed.ownerId,
   };
 }
 export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
@@ -111,6 +113,9 @@ export const billingMachineUsageSchema = z.object({
 
 export const billingUsageRowSchema = z.object({
   ...fundingBreakdownShape,
+  org_channel_guest: z
+    .object({ channel_id: z.string(), sender_hash: z.string() })
+    .optional(),
   machine_usage: billingMachineUsageSchema.optional(),
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
@@ -129,6 +134,8 @@ export const billingUsageRowSchema = z.object({
   bytes: z.number().int(),
   events: z.number().int().nonnegative(),
   lago_acked: z.boolean(),
+  /** False when the row comes from a permanent summary without request detail. */
+  detail_retained: z.boolean().optional().default(true),
   billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
   token_breakdown: billingTokenBreakdownSchema.nullable().optional(),
@@ -150,6 +157,8 @@ export const billingUsageResponseSchema = z.object({
   job_id: z.string().uuid().nullable().optional(),
   owner_id: z.string().min(1),
   period: z.string().min(1),
+  /** Earliest source time covered by the answer. */
+  covers_from: z.string().optional(),
   rows: z.array(billingUsageRowSchema),
   totals: billingUsageTotalsSchema,
   billing: billingReadOnlyBlockSchema,

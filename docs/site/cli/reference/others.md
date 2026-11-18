@@ -111,8 +111,19 @@ nyxid mfa status
 ## session
 
 ```bash
-nyxid session list         # active sessions for your account
+nyxid session status       # current account session: rolling and absolute deadlines
+nyxid session list         # active sessions, with expiry warnings
+nyxid session status --output json
+nyxid session list --output json
+nyxid session refresh      # rotate tokens; cannot extend the absolute session cap
 ```
+
+Account sessions have a fixed 30-day cap even with active use. Refresh tokens
+roll for seven days by default, within that cap. Both status and list expose
+`refresh_expires_at`, `session_expires_at` and `expiry_warning`; unknown metadata
+is null. Text and JSON warn within three days of the absolute deadline. See
+[Account-session lifetime](/docs/cli/getting-started/authenticate#account-session-lifetime-and-unattended-work)
+for refusal codes and the `login --agent-key` unattended path.
 
 ## notification
 

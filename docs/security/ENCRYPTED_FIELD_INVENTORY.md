@@ -231,3 +231,23 @@ move the record-field API into the crypto module, make raw unbound
 to the record-field or dedicated recipient-sealed API. Enforce the boundary with
 compilation and a source scan. The existing rollout switches alone do not close
 this API or prove every encrypted field is context-bound.
+
+
+### Generated Sandbox files (#2037)
+
+`async_service_operation_artifacts.data_encrypted` uses contextual v3 envelope AAD:
+collection, pending record ID and owner, then `data_encrypted`, conversation,
+originating turn, watch, operation and source-result identity. Only pending rows
+retain ciphertext; materialized/expired/discarded/missing rows clear it and their
+context-version map. `assistant_attachments.data_encrypted` with generated origin
+uses the existing attachment/owner/conversation/completion-turn AAD plus originating
+turn, watch, operation and source-result identity. Legacy attachment AAD is unchanged.
+The selected metadata summary reuses `assistant_async_operations.result_encrypted`
+and its existing adapter. Delivery/content-series metadata contains no ciphertext;
+full source paths are never persisted.
+
+The pending adapter is appended to the normal encrypted-record registry. This
+changes its digest: existing observed or in-flight walks require a new explicit
+generation. No checkpoint/version migration is implied. Pending and mixed
+attachment walks and privileged lookups reserve bytes before fetching BSON and
+process one large record per batch, retaining the budget through decrypt/rewrap/CAS.

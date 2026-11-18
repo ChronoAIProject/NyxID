@@ -70,7 +70,11 @@ billing from either services or linked providers. See [Service configuration and
 vendor retirement](docs/SERVICE_CONFIGURATION.md). They can also give a role read-only
 access to platform-wide usage reports, for example with the seeded **Usage
 Viewer** role, without granting other admin access. See [Admin usage](docs/BILLING_UI_GLOSSARY.md#admin-usage).
-Admins and operators can open **Usage → NyxBot** for cost and billing, token
+**Usage → Dashboard / List** share top-level user, billing-owner organization,
+service, and time filters. Dashboard charts offer **Group by → Model** to inspect
+recorded model usage within a service. See [billing analytics](docs/BILLING_ANALYTICS.md#insight-controls-and-valid-data)
+for grouping, missing models, and filter semantics.
+Admins, operators and Usage Viewers can open **Usage → NyxBot** for cost and billing, token
 traffic, and top billing accounts split by model, alongside active-session
 counts, turn outcomes, and reply feedback. See [NyxBot model usage](docs/BILLING_ANALYTICS.md#nyxbot-model-usage)
 for exact values, attribution, and historical coverage, and
@@ -81,7 +85,14 @@ Feature flag access can be delegated to any user or group with
 `feature-flag-admin` (manage all flags, including built-ins). Both roles use
 Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
 
+NyxBot can retain generated Sandbox files privately in owner Web chats when
+`assistant:generated-artifacts` is enabled. Images and supported videos preview
+inline, other files download, and saved results recover onto the original reply
+without rerunning the Sandbox. See [generated files and rollout](docs/chat/10-uploads.md#generated-sandbox-files).
+
 ## What NyxID Does
+
+- **Track delegated automation work** — optional coordinator completion keeps scheduled and webhook assistant runs waiting for specialist assignments and group handoffs, resumes the coordinator with results, and shows a completion deadline and Cancel action in run history. Enrollment is disabled by default and requires fleet readiness. See [NyxBot schedules](docs/NYXBOT_SCHEDULES.md).
 
 - **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).
 
@@ -89,7 +100,11 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 - **Manage Oracle pool ownership and retirement** — transfer a pool between your account and organizations you manage while preserving its identity, or delete an idle pool through the API and CLI. See [Oracle pool lifecycle](docs/ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542) for credential renewal and coordinated rollout requirements. Available in the first tagged release containing these changes.
 
-- **Speak to NyxBot and specialists** — voice calls show live captions and audio activity in the composer. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+- **Adjust your chat layout** — resize the message column with the two desktop handles, or set shared chat width and maximum composer height in Settings → Display. Individual desktop threads include a message index for navigating long conversations, while scroll fades and compact conversation controls preserve reading space. Preferences apply to all chats in this browser. See [assistant UI](docs/chat/05-frontend-ui.md).
+
+- **Speak to NyxBot and specialists** — voice calls start with saved account preferences and show live captions and audio activity in the composer. Change the next call’s defaults through Voice settings in the composer chevron. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+
+- **Use Bot voice from an independent device** — publish one Voice connection for a personal Bot and grant that connection to the device's Agent Key. Devices retain their own login credentials while conversations use the selected Bot's existing tools, confirmations and billing. Remote speech notifications use the same authorized call. The feature is disabled by default; see [Agent Key voice](docs/chat/12-agent-key-voice.md).
 
 - **Display source images in NyxBot** — supported Notion reads return image references that NyxBot can retain as encrypted chat attachments and deliver through supported channels. The shared retrieval tool rechecks source access; see [source resources and image display](docs/chat/10-source-resources.md).
 
@@ -281,6 +296,7 @@ With a NyxID account, pick the workflow that matches what you want to build and 
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
+| Service Monitoring | [docs/SERVICE_MONITORING.md](docs/SERVICE_MONITORING.md) | Scoped chrono-probe status, owner configuration, and explicit checks |
 | API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
 | Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
 | MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |

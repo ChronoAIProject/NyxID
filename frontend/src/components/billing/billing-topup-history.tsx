@@ -1,3 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
+import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,34 +30,41 @@ import { useTopUpHistory, openInvoiceReceipt } from "@/hooks/use-billing";
 import { openExternal } from "@/lib/navigation";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Skeleton } from "@/components/ui/skeleton";
-const date = (value: string) => new Date(value).toLocaleDateString();
+const date = (value: string) => new Date(value).toLocaleDateString(getFormattingLocale());
 
-export function BillingTopUpHistory() {
+export function BillingTopUpHistory({ ownerId, presentation = "page" }: { ownerId?: string; presentation?: "page" | "panel" }) {
+  useUiTranslation();
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
-  return <TopUpHistory key={period} period={period} onPeriod={setPeriod} />;
+  return <TopUpHistory key={`${ownerId ?? "personal"}:${period}`} period={period} onPeriod={setPeriod} ownerId={ownerId} presentation={presentation} />;
 }
 
 function TopUpHistory({
   period,
   onPeriod,
+  ownerId,
+  presentation,
 }: {
   period: BillingUsagePeriod;
+  ownerId?: string;
+  presentation: "page" | "panel";
   onPeriod: (period: BillingUsagePeriod) => void;
 }) {
+  useUiTranslation();
+  const actorId = useAuthStore((state) => state.user?.id);
   const [page, setPage] = useState(1);
-  const historyQuery = useTopUpHistory(page, 10, period);
+  const historyQuery = useTopUpHistory(page, 10, period, ownerId);
   const visible = historyQuery.data?.topups ?? [];
   const total = historyQuery.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / 10));
   const currentPage = page;
   async function handleReceipt(invoiceId: string) {
     try {
-      await openInvoiceReceipt(invoiceId);
+      await openInvoiceReceipt(invoiceId, ownerId);
     } catch (error) {
       toast.error(
-        error instanceof Error
+        translateErrorMessage(error instanceof Error
           ? error.message
-          : "The receipt is not ready yet; try again shortly",
+          : "The receipt is not ready yet; try again shortly"),
       );
     }
   }
@@ -59,7 +72,7 @@ function TopUpHistory({
   if (historyQuery.isError)
     return (
       <ErrorBanner
-        message="Failed to load top-up history."
+        message={translateUi("Failed to load top-up history.")}
         onRetry={() => void historyQuery.refetch()}
       />
     );
@@ -76,18 +89,21 @@ function TopUpHistory({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => openExternal(payment.checkout_url!)}
-      >
-        Resume payment
-      </Button>
+        onClick={() => {
+          try {
+            rememberBillingCheckout(actorId, ownerId, presentation);
+            openExternal(payment.checkout_url!);
+          } catch (error) {
+            toast.error(translateErrorMessage(error instanceof Error ? error.message : "Unable to resume payment"));
+          }
+        }}
+      >{translateUi("Resume payment")}</Button>
     ) : payment.receipt_available && !!payment.lago_invoice_id ? (
       <Button
         variant="outline"
         size="sm"
         onClick={() => void handleReceipt(payment.lago_invoice_id!)}
-      >
-        Download receipt
-      </Button>
+      >{translateUi("Download receipt")}</Button>
     ) : (
       <span className="text-muted-foreground">—</span>
     );
@@ -111,10 +127,8 @@ function TopUpHistory({
     <Card className="topup-history-card">
       <CardHeader className="history-heading">
         <div>
-          <CardTitle>Top-up history</CardTitle>
-          <p className="mt-1 text-12 text-muted-foreground">
-            Payments, their status, and downloadable receipts.
-          </p>
+          <CardTitle>{translateUi("Top-up history")}</CardTitle>
+          <p className="mt-1 text-14 text-muted-foreground">{translateUi("Payments, their status, and downloadable receipts.")}</p>
         </div>
         <Select
           value={period}
@@ -124,7 +138,7 @@ function TopUpHistory({
           }}
         >
           <SelectTrigger
-            aria-label="Top-up history period"
+            aria-label={translateUi("Top-up history period")}
             className="w-[148px]"
           >
             <SelectValue />
@@ -143,12 +157,12 @@ function TopUpHistory({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead className="text-right">Credits</TableHead>
-                <TableHead>Credit expiry</TableHead>
-                <TableHead>Invoice</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead>{translateUi("Date")}</TableHead>
+                <TableHead className="text-right">{translateUi("Credits")}</TableHead>
+                <TableHead>{translateUi("Credit expiry")}</TableHead>
+                <TableHead>{translateUi("Invoice")}</TableHead>
+                <TableHead>{translateUi("Status")}</TableHead>
+                <TableHead className="text-right">{translateUi("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -172,9 +186,7 @@ function TopUpHistory({
                   <TableCell
                     colSpan={6}
                     className="py-8 text-center text-muted-foreground"
-                  >
-                    No top-ups yet.
-                  </TableCell>
+                  >{translateUi("No top-ups yet.")}</TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -185,20 +197,20 @@ function TopUpHistory({
             visible.map((payment) => (
               <div key={payment.id} className="mobile-topup">
                 <div>
-                  <strong>{number(payment.amount_credits)} credits</strong>
+                  <strong>{number(payment.amount_credits)}{translateUi(" credits")}</strong>
                   {status(payment)}
                 </div>
                 <dl className="split-facts">
                   <div>
-                    <dt>Date</dt>
+                    <dt>{translateUi("Date")}</dt>
                     <dd>{timestamp(payment.created_at)}</dd>
                   </div>
                   <div>
-                    <dt>Invoice</dt>
+                    <dt>{translateUi("Invoice")}</dt>
                     <dd>{payment.invoice_number ?? "—"}</dd>
                   </div>
                   <div>
-                    <dt>Credit expiry</dt>
+                    <dt>{translateUi("Credit expiry")}</dt>
                     <dd>{expiry(payment)}</dd>
                   </div>
                 </dl>
@@ -206,15 +218,12 @@ function TopUpHistory({
               </div>
             ))
           ) : (
-            <p className="py-8 text-center text-12 text-muted-foreground">
-              No top-ups yet.
-            </p>
+            <p className="py-8 text-center text-14 text-muted-foreground">{translateUi("No top-ups yet.")}</p>
           )}
         </div>
         {pageCount > 1 && (
           <div className="payments-controls mt-3">
-            <span>
-              Page {currentPage} of {pageCount}
+            <span>{translateUi("Page ")}{currentPage}{translateUi(" of ")}{pageCount}
             </span>
             <div>
               <Button
@@ -222,17 +231,13 @@ function TopUpHistory({
                 size="sm"
                 disabled={currentPage === 1 || historyQuery.isFetching}
                 onClick={() => setPage(currentPage - 1)}
-              >
-                Previous
-              </Button>
+              >{translateUi("Previous")}</Button>
               <Button
                 variant="outline"
                 size="sm"
                 disabled={currentPage === pageCount || historyQuery.isFetching}
                 onClick={() => setPage(currentPage + 1)}
-              >
-                Next
-              </Button>
+              >{translateUi("Next")}</Button>
             </div>
           </div>
         )}

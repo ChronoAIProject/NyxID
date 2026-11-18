@@ -1,136 +1,169 @@
+import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { ChevronRight } from "lucide-react-native";
+import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { StatusBadge } from "./StatusBadge";
+import { GroupedCell } from "./GroupedCell";
 import type { ChallengeDetail, ChallengeStatus } from "../lib/api/types";
 
 type HistoryCardProps = {
   item: ChallengeDetail;
+  /** Position in its date group, for the rounded corners and separators. */
+  first?: boolean;
+  last?: boolean;
   onPress?: () => void;
 };
 
-function decisionVariant(status: ChallengeStatus): "decisionApproved" | "decisionDenied" | "decisionExpired" {
-  if (status === "APPROVED") return "decisionApproved";
-  if (status === "DENIED") return "decisionDenied";
-  return "decisionExpired";
+function decisionColor(c: ThemeColors, status: ChallengeStatus): string {
+  if (status === "APPROVED") return c.success;
+  if (status === "DENIED") return c.danger;
+  return c.textMuted;
 }
 
 // DESIGN.md §Interaction Rules: status badges always Title Case.
 function decisionLabel(status: ChallengeStatus): string {
   if (status === "APPROVED") return "Approved";
   if (status === "DENIED") return "Denied";
+  if (status === "PENDING") return "Pending";
   return "Expired";
 }
 
-function decisionDescription(status: ChallengeStatus): string {
-  if (status === "APPROVED") return "You approved this";
-  if (status === "DENIED") return "You denied this";
-  return "This request expired";
+function channelLabel(channel?: string | null): string | undefined {
+  if (!channel?.trim()) return undefined;
+  if (channel === "web") return "Web";
+  if (channel === "telegram") return "Telegram";
+  if (channel === "mobile" || channel === "push") return "Mobile";
+  return channel;
 }
 
-function formatTime(dateStr: string): string {
+function formatTime(dateStr: string): string | undefined {
   const d = new Date(dateStr);
-  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (!Number.isFinite(d.getTime())) return undefined;
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
-export function HistoryCard({ item, onPress }: HistoryCardProps) {
+function recordedRequester(item: ChallengeDetail): string | undefined {
+  const requester = item.request_context.requester.trim();
+  if (requester && requester !== "Unspecified" && requester !== "Unknown")
+    return requester;
+  const client = item.request_context.client.trim();
+  return client && client !== "Unknown" && client !== "Unspecified"
+    ? client
+    : undefined;
+}
+
+/** A decided request: an inset-group row with its outcome as the trailing value. */
+export function HistoryCard({
+  item,
+  first = true,
+  last = true,
+  onPress,
+}: HistoryCardProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const modeLabel = item.approval_mode === "grant" ? "Grant" : "Per-request";
-
-  const riskVariant = item.risk_level === "high" ? "riskHigh" : item.risk_level === "medium" ? "riskMedium" : "riskLow";
-  const riskLabel = item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1);
+  const summary =
+    item.summary.trim() || `${item.action} ${item.resource}`.trim();
+  const channel = channelLabel(item.decision_channel);
+  const requester = recordedRequester(item);
+  const decidedAt = item.decided_at ? formatTime(item.decided_at) : undefined;
+  const requestedAt = formatTime(item.created_at);
+  const riskLabel =
+    item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1);
+  const decision = decisionLabel(item.status);
 
   return (
-    <Pressable style={styles.card} onPress={onPress}>
-      <View style={styles.chipRow}>
-        <StatusBadge variant={decisionVariant(item.status)} label={decisionLabel(item.status)} />
-        <StatusBadge variant={riskVariant} label={riskLabel} />
-      </View>
-      <Text style={styles.title} numberOfLines={1}>
-        {item.action} {item.resource}
-      </Text>
-      <Text style={styles.secondary} numberOfLines={1}>
-        {item.title} · {modeLabel}
-      </Text>
-      <Text style={styles.meta}>
-        {formatTime(item.created_at)} · {decisionDescription(item.status)}
-      </Text>
-    </Pressable>
+    <GroupedCell first={first} last={last}>
+      <Pressable
+        style={({ pressed }) => [
+          styles.row,
+          pressed && onPress && styles.pressed,
+        ]}
+        onPress={onPress}
+        accessibilityRole={onPress ? "button" : undefined}
+        accessibilityLabel={`${decision}: ${summary}`}
+        accessibilityHint={
+          onPress ? "View approval request details" : undefined
+        }
+      >
+        <View style={styles.tile}>
+          <ServiceIcon slug={item.service_slug} size="md" />
+        </View>
+        <View style={styles.body}>
+          <Text style={styles.title} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.secondary}>{summary}</Text>
+          {requester ? (
+            <Text style={styles.meta}>Requested by {requester}</Text>
+          ) : null}
+          <Text style={styles.meta}>
+            {channel ? `via ${channel} · ` : ""}
+            {decidedAt
+              ? `Decided ${decidedAt}`
+              : requestedAt
+                ? `Requested ${requestedAt}`
+                : "Time not recorded"}
+            {item.risk_level !== "unknown" ? ` · ${riskLabel} risk` : ""}
+          </Text>
+        </View>
+        <Text
+          style={[styles.value, { color: decisionColor(colors, item.status) }]}
+        >
+          {decision}
+        </Text>
+        {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
+      </Pressable>
+    </GroupedCell>
   );
 }
 
+/** A date group's title, in the small caps of an iOS grouped list. */
 export function HistorySectionHeader({ title }: { title: string }) {
-  const { colors, mode } = useTheme();
+  const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-
-  const inner = <Text style={styles.sectionHeader}>{title}</Text>;
-
   return (
-    <View style={styles.sectionHeaderRow}>
-      {mode === "dark" ? (
-        <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
-          {inner}
-        </BlurView>
-      ) : (
-        <View style={styles.sectionHeaderBlur}>
-          {inner}
-        </View>
-      )}
-    </View>
+    <Text accessibilityRole="header" style={styles.sectionHeader}>
+      {title.toUpperCase()}
+    </Text>
   );
 }
 
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
-    card: {
-      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border.
-      borderRadius: radius.lg,
-      backgroundColor: c.card,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      padding: spacing.xxl,
-      gap: spacing.xs,
-      opacity: 0.85,
-    },
-    chipRow: {
+    row: {
       flexDirection: "row",
-      gap: spacing.xs,
+      alignItems: "center",
+      gap: spacing.lg,
+      minHeight: 52,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.md,
     },
-    title: {
-      flex: 1,
-      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
-      ...typeScale.bodyStrong,
-      color: c.textPrimary,
+    pressed: { backgroundColor: c.navActive },
+    tile: {
+      width: 30,
+      alignSelf: "flex-start",
+      alignItems: "center",
+      paddingTop: 2,
     },
-    secondary: {
-      ...typeScale.label,
-      color: c.textSecondary,
-    },
-    meta: {
-      ...typeScale.small,
-      color: c.textMuted,
-    },
-    sectionHeaderRow: {
-      flexDirection: "row",
-      marginBottom: spacing.sm,
-      marginTop: spacing.xs,
-    },
-    sectionHeaderBlur: {
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs,
-      borderRadius: radius.pill,
-      overflow: "hidden",
-      backgroundColor: c.cardSoft,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-    },
+    body: { flex: 1, minWidth: 0, gap: 2 },
+    // DESIGN.md: Activity rows lead with the service name at 15px.
+    title: { ...typeScale.title, color: c.textPrimary },
+    secondary: { ...typeScale.label, color: c.textSecondary },
+    meta: { ...typeScale.small, color: c.textMuted },
+    value: { ...typeScale.label, flexShrink: 0 },
     sectionHeader: {
-      ...typeScale.overline,
-      color: c.textSecondary,
+      ...typeScale.small,
+      letterSpacing: 0.6,
+      color: c.textMuted,
+      paddingHorizontal: spacing.xxl,
     },
   });

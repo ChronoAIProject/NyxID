@@ -1,0 +1,47 @@
+[
+  {
+    "preferred": ["zh-Hans-CN", "en-US"],
+    "expected": "zh-CN",
+    "saved": null
+  },
+  {
+    "preferred": ["ja-JP"],
+    "expected": "ja-JP",
+    "saved": null
+  },
+  {
+    "preferred": ["zh-Hant-TW"],
+    "expected": "zh-TW",
+    "saved": null
+  },
+  {
+    "preferred": ["en-US", "zh-Hans-CN"],
+    "expected": "en-US",
+    "saved": null
+  },
+  {
+    "preferred": ["en-US"],
+    "expected": "en-US",
+    "saved": null
+  },
+  {
+    "preferred": ["xx-YY", "ja-JP"],
+    "expected": "ja-JP",
+    "saved": null
+  },
+  {
+    "preferred": ["zh-Hans-CN", "en-US"],
+    "expected": "ja-JP",
+    "saved": "ja-JP"
+  },
+  {
+    "preferred": ["ja-JP"],
+    "expected": "ja-JP",
+    "saved": "xx-YY"
+  },
+  {
+    "preferred": ["xx-YY"],
+    "expected": null,
+    "saved": null
+  }
+]

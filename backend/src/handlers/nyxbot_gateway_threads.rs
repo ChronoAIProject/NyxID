@@ -126,30 +126,80 @@ pub(super) async fn send(
     conversation: &str,
     text: &str,
 ) -> AppResult<()> {
-    let binding = origin
-        .thread
-        .as_ref()
-        .ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
+    let result = Box::pin(send_inner(state, channel, origin, conversation, text)).await;
+    if let Err(failure) = &result {
+        crate::services::channel_thread_service::gateway::record_failure(
+            &state.db,
+            &channel.channel_bot_id,
+            &channel.user_id,
+            origin
+                .thread
+                .as_ref()
+                .map_or("", |b| b.source_message_id.as_str()),
+            failure.class,
+            &failure.error,
+        )
+        .await;
+    }
+    result.map_err(|failure| failure.error)
+}
+
+fn missing_reply_source() -> crate::services::channel_thread_service::gateway::ReplyError {
+    crate::services::channel_thread_service::gateway::ReplyError::target(
+        crate::services::channel_thread_follow_service::not_found(),
+    )
+}
+
+async fn send_inner(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+) -> crate::services::channel_thread_service::gateway::ReplyResult<()> {
+    use crate::services::channel_thread_service::gateway::{ReplyError, ReplyFailure};
+    let binding = origin.thread.as_ref().ok_or_else(missing_reply_source)?;
     let event = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {
         "channel_id":&channel.id,"user_id":&channel.user_id,"event_id":&binding.source_message_id,
-        "resolved_conversation_id":conversation,"resolved_thread_id":&binding.child_id,
-    }).await?.ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
+        "resolved_thread_id":&binding.child_id,
+    }).await?.ok_or_else(missing_reply_source)?;
+    let (actor, admitted_origin, admitted_conversation) =
+        crate::services::channel_thread_service::gateway::admitted_reply(
+            &event,
+            channel,
+            &binding.source_message_id,
+        )
+        .map_err(ReplyError::target)?;
+    if admitted_conversation != conversation || !same_reply_identity(admitted_origin, origin) {
+        return Err(missing_reply_source());
+    }
+    crate::services::channel_thread_follow_service::validate_delivery(
+        &state.db,
+        actor,
+        admitted_origin,
+        admitted_conversation,
+    )
+    .await
+    .map_err(ReplyError::authority)?;
     if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
-        return Err(crate::services::channel_thread_follow_service::not_found());
+        return Err(ReplyError {
+            error: crate::services::channel_thread_follow_service::not_found(),
+            class: ReplyFailure::Expired,
+        });
     }
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
-        return Err(crate::services::channel_thread_follow_service::not_found());
+        return Err(missing_reply_source());
     };
     let context: Value = serde_json::from_slice(&Zeroizing::new(
         state.encryption_keys.decrypt(ciphertext).await?,
     ))
-    .map_err(|_| crate::services::channel_thread_follow_service::not_found())?;
+    .map_err(|_| missing_reply_source())?;
     let reference = context["event_ref"]
         .as_str()
-        .ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
+        .ok_or_else(missing_reply_source)?;
     let key = decrypt_agent_key(state, channel)
         .await?
-        .ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
+        .ok_or_else(missing_reply_source)?;
     let reply = gateway_call(
         state,
         reqwest::Method::POST,
@@ -160,7 +210,27 @@ pub(super) async fn send(
     )
     .await?;
     if !(200..300).contains(&reply.status) {
-        return Err(crate::services::channel_thread_follow_service::not_found());
+        // Preserve main's outward error and caller retry decisions for every
+        // non-success status; classify the observed gateway refusal separately.
+        return Err(ReplyError {
+            error: crate::services::channel_thread_follow_service::not_found(),
+            class: ReplyFailure::Delayed,
+        });
     }
     Ok(())
+}
+
+// Queue bookkeeping and the native transport reference are not reply authority.
+// Keep every source, actor, generation and policy identity comparison exact.
+pub(super) fn same_reply_identity(a: &ChannelOrigin, b: &ChannelOrigin) -> bool {
+    let (Some(a_thread), Some(b_thread)) = (&a.thread, &b.thread) else {
+        return false;
+    };
+    let mut a_thread = a_thread.clone();
+    a_thread.queued = b_thread.queued;
+    a.nyxbot_channel_id == b.nyxbot_channel_id
+        && a.partition == b.partition
+        && a.platform == b.platform
+        && a.org_execution == b.org_execution
+        && a_thread == *b_thread
 }

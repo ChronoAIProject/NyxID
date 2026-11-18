@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ComponentType, type ReactNode } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
@@ -45,6 +46,7 @@ function ManagedBotConnect({
   preferManual = false,
   fullPage = false,
 }: ChannelBotConnectProps) {
+  const { t } = useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const descriptor = getPlatform(platform);
   const managed = useManagedOnboarding(
@@ -60,12 +62,12 @@ function ManagedBotConnect({
     <>
       {renderFields({ disabled: false })}
       {descriptor.managedOnly && !available && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           {managed.isLoading
-            ? "Loading account connection..."
+            ? t("Loading account connection...")
             : managed.isError
-              ? "Unable to load account connection settings. Retry shortly."
-              : `Not available until an admin configures ${descriptor.label}.`}
+              ? t("Unable to load account connection settings. Retry shortly.")
+              : t("Not available until an admin configures {{label}}.", { label: descriptor.label })}
         </p>
       )}
       {available && managed.data && Connect && (
@@ -85,7 +87,7 @@ function ManagedBotConnect({
               onToggle={(event) => setAdvanced(event.currentTarget.open)}
               className="border-t border-border pt-4"
             >
-              <summary className="cursor-pointer text-xs text-muted-foreground">
+              <summary className="cursor-pointer text-13 text-muted-foreground">
                 {descriptor.advancedLabel}
               </summary>
             </details>

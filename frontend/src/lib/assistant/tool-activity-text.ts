@@ -1,6 +1,6 @@
 import { getProviderBrand } from "@/lib/provider-branding";
 
-export type ToolActivityStatus = "running" | "done" | "error";
+export type ToolActivityStatus = "running" | "done" | "error" | "unknown" | "skipped";
 
 /** [present participle, past, base] of a phrase, e.g. reading/read/read. */
 type Forms = readonly [string, string, string];
@@ -114,7 +114,7 @@ function forms(label: string): Forms | null {
  */
 export function describeToolActivity(label: string, status: ToolActivityStatus): string {
   const phrase = forms(label);
-  if (!phrase) return label;
+  if (!phrase || status === "unknown" || status === "skipped") return label;
   if (status === "running") return phrase[0];
   if (status === "error") return `Couldn't ${phrase[2]}`;
   return phrase[1];

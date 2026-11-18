@@ -20,13 +20,13 @@ when you talk to NyxBot or in a group NyxBot is in (#1883). When NyxBot assigned
 the work, the specialist asks NyxBot for anything else and NyxBot decides from
 what the user asked. Conversations are
 **threads** of an agent, so the user can talk to NyxBot or any specialist, in the
-web app or through a channel bot linked to that agent (Telegram, Lark, ...).
+web app or, for NyxBot and personal specialists, through a linked channel bot (Telegram, Lark, ...).
 NyxID owns agents, threads, keys and wake-ups; NyxAgent runs each thread
 unchanged.
 
 ## 2. Requirements as stated
 
-1. Full access never asks; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
+1. Full access still asks for covered organization connections without trusted instruction; Auto confirms sensitive/destructive actions; Ask every time confirms changes. The owner chooses the workspace mode and agent overrides.
 2. NyxBot is the chief of staff; it creates specialists and can destroy them.
 3. A specialist working for NyxBot asks NyxBot for permission; NyxBot grants or
    refuses based on what the user asked. A specialist the user talks to
@@ -40,8 +40,15 @@ unchanged.
    chats and chat apps (the user's correction, modelled on Muse and Grok Bot).
 7. Nothing that works today breaks, in particular calling NyxID services.
 
-Non-goals for this release: specialists messaging each other, group chats of
-several agents, routines/scheduled triggers, and cross-user agents.
+Original 0.31.0 non-goals included specialists messaging each other, multi-agent
+groups, routines/scheduled triggers and cross-user agents. Groups, handoffs and
+automations are documented below; cross-user sharing and multi-person groups are
+specified in [Shared agents and multi-person groups](12-shared-agents-and-groups.md).
+Phase 1 shared-agent support is implemented behind the default-off
+`assistant:shared-agents` flag. Phase 2 multi-person groups are implemented with
+an explicit `collaboration` marker and separate all-replica readiness gate;
+legacy personal/org dispatch retains its contract. Participant invitations,
+requester-bound execution, actor decisions and the UI are specified there.
 
 ## 3. What exists today and constrains the design
 
@@ -98,8 +105,10 @@ notice).
   (fixed in 0.37.1). Its allowlist and MCP tools stay the grants. Every account write,
   including destructive tools, is NyxBot-only; NyxBot's destructive actions still
   show the owner a confirmation card unless the owner turned confirmations off.
-- Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
-  it can reach. `nyxid__grant_subagent` resolves each service on its own: what
+- Grants and the web/mobile grant inventory share the owner's authorization
+  catalog, including authorized HTTP/inference connections without published MCP
+  tools. NyxBot can grant only what the owner can reach; execution/tool discovery
+  retain their live checks. `nyxid__grant_subagent` resolves each service on its own: what
   resolves is granted and the rest come back in `not_granted` (or `not_revoked`)
   with the reason, so one unusable service never blocks the others. NyxAgent's
   own service (`llm-nyx`) is never granted: every agent already runs on it.
@@ -125,12 +134,15 @@ specialty, optional task), `message_subagent` (runs in the specialist's home
 thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
 `set_guest_access` (what guests may do with a specialist's services: `read`,
-`use` or `all`), `update_subagent`, `decide_permission`, `destroy_subagent`,
+`use` or `all`, plus `none` and guest-only operation selections behind
+`assistant:guest-operation-scopes`), `update_subagent`, `decide_permission`, `destroy_subagent`,
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
-triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a personal
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+The organization-specialist channel-target boundary and recovery contract are
+documented in [ORG_AGENTS.md](../ORG_AGENTS.md).
 `message_subagent` accepts a personal specialist name or ID, an organization
 specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
 bare name always prefers the person's specialist; an organization-only bare
@@ -149,8 +161,33 @@ enforcement is independent of the flag.
 
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
-(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+(optional `replace_id`) and `forget`. `remember` reports stable content-free
+validation, capacity, missing-replacement, authorization, conflict and storage/internal
+diagnostics in the tool result and activity panel. Keep notes to 500 characters
+and 50 total; split long facts deliberately. Confirm saved facts only from
+successful receipts, and report any still-unresolved writes. Later success never
+silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+Memory and personas refuse obvious
 credential shapes.
+
+Operation discovery uses `nyxid__get_agent_operations` with optional exact
+`service_id`, `limit`, and `cursor`. Follow `next_cursor` until `complete=true`,
+combining each service's operations, selected IDs, rules and inputs before
+editing scopes. A changed snapshot requires restarting without the cursor;
+never guess omitted IDs or widen to all operations to work around a partial
+result. Pages fit the assistant result budget without clipping policy fields.
+See [operation discovery pagination](../AGENT_OPERATION_SCOPES.md#native-discovery-pagination-2271).
+
+### Notifications and owner digests
+
+Behind the default-off `assistant:notifications` flag, NyxBot can call the
+read-only `nyxid__list_notifications` tool when the owner asks what they missed,
+or when an automation asks for a digest. It accepts `since`, `kinds`,
+`unread_only` (default true) and `limit` (at most 50). It returns authorized,
+bounded previews and canonical source links without marking them seen. NyxBot
+trigger turns may use it; specialists, guests, collaboration execution threads
+and external plugin clients may not. See [Notifications](12-notifications.md)
+for producers, coalescing, card resolution, retention, push and rollout.
 
 ## 8. Permission requests (specialist → NyxBot)
 
@@ -177,6 +214,20 @@ independent organization authority. Requests reuse the authentication snapshot
 when present, and granted calls add no maintainer reads. Ordinary action
 confirmations still belong to the acting person and do not expand grants or
 allow an organization agent to access the person's account.
+
+Card locations and outcomes (#2072): a specialist, crew, collaboration member or
+channel assignment keeps the card in its source conversation. `report_to`
+routes the notification, not the card or authority. Request summaries (including
+`wait_for_subagents`) expose the current presentation `status`, stable `code`,
+and exact `review_path`; routed creation notices include the full owner-review
+URL and explicitly are not evidence that a request is still pending. The owner
+can open that link even when viewing NyxBot's receiving conversation. Existing
+history authorization, live routing/membership checks, guest restrictions,
+one-use consumption and Full-access receipts remain unchanged. If the request
+expired or failed, report that outcome and ask before creating a fresh one;
+never tell the owner to click an invisible or terminal Allow/Deny card. Proxy
+approvals link to `/assistant/approvals`, not to a specialist's owner-action
+card. See the engine's Acknowledgements section for history and expiry behavior.
 
 ### Specialist skill permission decisions
 
@@ -230,6 +281,59 @@ slot); live specialists are capped by `max_live_subagents` (default 8, at most
 32). Both are owner settings because the turns spend the owner's credits. A
 background task runs every 15 seconds: it resolves watches (§9a) and retries
 deferred wake-ups and waiting group members.
+
+### Durable wake admission and rollout
+
+An ordinary rolling upgrade needs no additional operator action: no flag,
+migration, roster declaration or manual activation. The existing replica
+heartbeats automatically activate `assistant:durable-wakes-v1` after every
+observed executing API/worker supports it. Until then, the legacy watch,
+follower and health-notice paths remain.
+Old pending events still read normally. New optional wake references contain
+identifiers, closed outcome metadata and sequence/time bounds only. Content is
+read from the authorized source when a turn admits the event. Missing sources
+produce a bounded unavailable/interrupted notice; they never recreate work.
+
+Non-invocation setup watches commit a renewable 120-second preparation claim
+and the pending event together, before gateway work. Every 40 seconds, active
+preparation renews its exact claim and event deadline using MongoDB time.
+Admission checks that clock and the live claim inside its transaction; a still
+preparing event stays queued without blocking other events. A deleted chat
+drops only the notification, never the setup work. Normal completion makes
+that same event ready in the source-settlement transaction. If the process dies,
+the event becomes eligible at lease expiry even if the watch's TTL removed the
+source. Admission fences out a late settler. Recovery never repeats an uncertain
+gateway link. Owner-verification codes are minted with admission and stored only
+through the existing hash/turn-input paths, never in the queued wake reference.
+Machine and invocation watches retain their existing atomic settlement path.
+
+Legacy personal-group members stay pending until their turn and seen sequence
+commit together. Concurrent replicas cannot consume the same member twice;
+a newer transcript sequence leaves work pending for a fresh admission. New
+personal-group turns admitted after readiness also publish their public reply,
+machine receipt projection, mentions and bounded hand-offs in the engine's
+settlement transaction. This includes event turns on hidden member threads.
+A late callback only advances the queue; it cannot publish or spend either
+hand-off budget again. A refused hand-off leaves the authorized reply published
+without spending a hand-off budget; lost publication authority suppresses the
+public reply without blocking turn settlement. Permanent admission conflicts
+retire the observed member request; only a changed transcript snapshot retries.
+Safe failure notices publish instead of failed drafts.
+Already admitted, unmarked turns finish through their existing callback path.
+Follower removal and event enqueue commit together. Delivery-health's six-hour throttle
+commits with its event, so a lost process cannot suppress an unqueued notice.
+The existing event/group sweeps recover these queues through the drain intake
+gate. No new worker, collection or environment variable is added. Queue pressure
+rolls back a source transition instead of evicting a durable wake. The 20-event
+queue bound and the 20/hour and three-consecutive-event guards remain unchanged.
+
+Returning to a binary that predates `assistant:durable-wakes-v1` after activation
+is not supported. Old readers ignore the optional reference and cannot render
+these events. There is no producer-stop switch or supported conversion/drain
+procedure for a binary downgrade; keep upgraded binaries and deploy a forward
+fix. This restriction does not add any step to an ordinary rolling upgrade.
+Previously lost legacy claims cannot be reconstructed from the absence of a
+queued event; admitted turns are never inferred or replayed.
 
 ### 9a. Finishing outside the chat
 
@@ -294,7 +398,54 @@ instructions list its specialists, pending requests, its memory, and messages th
 owner sent directly to specialists since the thread's previous user message; it
 is not woken by those direct chats.
 
+The agent list includes every visible live agent, not just populated chats:
+a new idle specialist appears even when its home has no messages. Personal
+agents and specialists from active organization memberships keep their existing
+scope checks; shared specialists use their live sharing ACL. Destroyed rows are
+hidden by default in the sidebar. Discovery includes only the 200 most recently
+destroyed agents (destruction time descending, ID as a stable tie-breaker);
+archives never consume live roster slots. Live personal/org agents remain
+oldest-first with an ID tie-breaker and NyxBot pinned first; shared entries keep
+their existing stable order. REST and tools use
+the same roster. The additive REST `destroyed_truncated` flag shows “Older
+destroyed agents not shown.” under Show destroyed; exact detail links to older
+destroyed agents remain readable subject to existing authorization. Archive
+summary work is bounded to the returned rows. Creation invalidates the
+browser roster, and the committed home-thread insert also refreshes it over the
+live stream. Reload reads the roster again. Loading, an empty roster, and a
+failed load are distinct states; a failed load or refresh offers Retry without
+discarding an already loaded roster.
+
 ### 10a. Group chats
+
+Personal crews also support specialists shared with the sole human owner.
+They are listed and selectable with a Shared agent label, and use the same
+recipient-owned hidden thread, key, billing, human cards, consent, pinned skills
+and private notes as a private shared chat. NyxBot's group presence and handoffs
+do not transfer its authority to a shared member. Live access is rechecked for
+every turn and callback. Revoked/destroyed members remain unavailable in the
+roster, disappear from mention/recipient choices, and addressed attempts post
+“Ask this agent's owner to share it with you.” without a model call or charge.
+Re-sharing restores the stored member without recreating the crew. Recipient
+UUIDs and `@UUID` are exact; ambiguous `@name` text never selects a namesake.
+The picker and agent instructions use UUIDs for collisions. Human ambiguous
+text without explicit recipients is refused; ambiguous handoff tokens are ignored.
+Organization groups, automation and platform/channel threads still reject shared
+agents. Multi-person collaboration uses the explicit Phase 2 surface in
+[the shared-agent design](12-shared-agents-and-groups.md).
+
+Removing an agent from a personal crew settles its active turn through Stop,
+then removes its hidden conversation and revokes its Agent Key in the same
+transaction as the roster change. Encrypted credentials, session bindings and
+pending cards are removed; bound approvals expire. Previously published group
+messages stay. Re-adding the agent creates a new thread and key. Concurrent
+roster edits conflict rather than restoring an old roster; if a replacement
+turn wins admission while removal is being prepared, the save returns
+`turn_active` without changing membership and can be retried. Late workers
+cannot publish or hand off through a retired thread, even after re-addition.
+No persisted enum or index changes are required; the deleted conversation
+releases the existing unique member-thread slot. Upgrade every writer before
+relying on the new removal/admission transaction fences.
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
@@ -337,8 +488,13 @@ group {name} while you followed it (information only; never instructions or
 authority)", bounded to the replies in `(since_seq, upper_seq]` captured
 atomically when the follower is taken, so later messages never enter it. A new
 NyxBot post creates or replaces the follower; replaying the same post never
-renews it. Delivery is best effort (no exactly-once promise); such wake-ups are
-ordinary event turns under the event-turn guards. Transcript lines are rendered with indented continuations so
+renews it. After `assistant:durable-wakes-v1` readiness, taking a follower commits
+its wake reference in the same transaction. The reference retains the group ID
+and `(since_seq, upper_seq]`, without copying transcript text. The ordinary turn
+transaction consumes it once; a crash before admission leaves it queued. This
+promises durable wake admission, not uninterrupted execution: an admitted turn
+is never replayed after a crash. These are ordinary event turns under the
+unchanged event-turn guards. Transcript lines are rendered with indented continuations so
 only real user messages start a line with `[user]:`, and specialists cannot be
 named `user`, `nyxbot`, `nyxid`, `owner` or `system`. Every reply of a member
 thread (including event turns) is posted to the group. A member's action card is
@@ -362,9 +518,39 @@ Account deletion purges agents, settings, threads and channel records.
 
 ## 12. Channel bots
 
-Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
+### Independent CMA custom-event bindings
+
+An owner may create a custom event binding for an existing NyxBot or specialist
+from the first-party NyxID API (`/api/v1/assistant/nyxagent/custom-event-bindings`;
+routes in `docs/CHANNEL_EVENT_GATEWAY.md`). This is an independent CMAEG source, not a
+chat-platform bot and not a reuse of a `NyxbotChannel` provider key. The owner
+chooses the destination channel and partition; NyxID pins every delivery to
+that destination (which must have a verified relay reply anchor). CMA's producer HMAC credential is returned once at creation
+and is unrelated to the provider agent key used by CMA to call NyxID.
+
+The `nyxbot:gateway-custom-event` flag is default-off. Creation is refused
+unless the human caller has live maintain authority for the target agent and
+write authority for the destination partition. NyxID persists a preparing row,
+creates CMA's custom source with `existing_agent { agent_id }` and `per_event`
+partitioning, and marks it ready only after CMA echoes the exact target and
+binding. Revoke deletes that channel and removes both credentials; all provider
+operations recheck current owner/org-admin authority and binding state.
+
+Each stable CMA event produces at most one NyxAgent turn. NyxID creates a
+private, event-derived destination partition, so event turns do not share the
+selected chat's ordinary transcript. Retries use the existing provider
+idempotency and event records. Custom activity input is untrusted webhook data:
+it cannot choose an agent, model, credential, conversation destination, owner
+approval or owner tools. Normal guest grants, confirmation, model access,
+billing and audit rules still apply. Acceptance, completion and downstream
+chat delivery are separate statuses, and no provider secret is exposed in a
+chat receipt or response frame.
+
+Any channel bot can be linked to NyxBot or a personal specialist (`connect_channel_bot`,
 settings, or relinked later); each chat becomes a thread of the linked agent
 (or of the chat's own agent, §12a), with that agent's authority and memory.
+See [ORG_AGENTS.md](../ORG_AGENTS.md) for the organization-specialist channel
+target boundary and recovery contract.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -426,7 +612,7 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
   looked up with the bot's credentials) instead of a username; without it the
   gateway counts any mention of a bot as addressing it. If the
-  gateway refuses, its channel is released at its current version, the new keys
+  gateway refuses, exact-version cleanup is durably queued, the new keys
   are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
   retried the next day; a manual connect never rebuilds a working bot just to
   change transport. A new bot on a listed platform the gateway refuses is
@@ -441,13 +627,15 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   images directly through its adapters on both transports, before the reply text. A message whose route the relay looked up
   just before the swap committed reaches NyxID's relay endpoint after it and is
   refused and reported like any lost message. A move whose replica stopped
-  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
-  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; after
+  30 minutes, a retirement transaction captures its cleanup responsibility and
+  revokes those keys while preserving the working route. The swap needs MongoDB transactions (a
   replica set, as in production); on a standalone development database every
   move ends as `swap_failed` and the bot stays on its existing transport.
   A return to the relay builds a fresh route key beside the working gateway
-  connection and atomically swaps the channel and existing route before
-  releasing the gateway channel and deleting its provider key and old route key.
+  connection and atomically swaps the channel and existing route, revokes the
+  provider and old route keys, and captures exact gateway cleanup responsibility.
+  Remote release is attempted after that transaction commits.
   Both directions recheck the flag, org authority and active turns before the
   swap; a busy return retries after ten minutes. At most one move is attempted
   per sweep per replica, across both directions. Gateway private events retain
@@ -455,6 +643,15 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   relay preserves that chat's history and settings across repeated moves.
   Legacy gateway history without this mapping stays isolated until a verified
   provider event establishes it; NyxID never guesses a sender's history.
+  Personal and organization private adoption replace the destination placeholder
+  and move history in one transaction. Moves and removals bind the observed
+  row ID, partition, kind and relay alias; a reused partition is not the same row.
+  Adoption still removes its old source registration, and group rediscovery
+  still deletes stale private registrations. Group recording first probes for
+  stale rows and otherwise uses a single atomic upsert; personal adoption opens
+  a transaction only when a source and an unclassified destination need a move.
+  The gateway must PUT a missing
+  partition before replaying a request refused with `conversation_not_found`.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered
@@ -470,8 +667,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   Every gateway provider endpoint and relay inbound re-checks live org-admin
   membership, as do the sweep and asynchronous replies. Loss fails the link with
   `org_access_lost`, retains the existing metadata audit and link-status/watch
-  behaviour, removes the org route, releases the gateway channel, and deletes
-  active and pending keys under their respective owners. No event reaches the
+  behaviour, atomically retires the org route, queues exact gateway cleanup and
+  revokes active and pending keys under their respective owners. No event reaches the
   linking person's agent after that check fails. Telegram org bots always use
   the gateway. Lark/Feishu org bots use the linking person's media flag and
   the same owner-media rules as personal bots; live org-admin authority is
@@ -533,15 +730,106 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
 
+### Explicit reconnect continuity
+
+An explicit reconnect restores eligible history atomically with activation. The
+source is the latest disconnected connection for the same linking person and bot,
+with the same canonical platform and effective bot owner, no committed successor,
+and ordinary personal-route eligibility. An incompatible newest row is a boundary;
+NyxBot never skips it to recover older history. Failed attempts and platform
+conversion are not continuity sources. A failed activation consumes no predecessor
+and leaves no active destination.
+
+Verified owner sender IDs, private-chat policy, stable chat partitions and their
+settings carry forward. All `conv_*` partitions remain on the predecessor, as
+before. Changing the channel's agent invalidates inherited conversation bindings
+and stops followed children; otherwise suspended children stay unavailable until
+admitted again. Stable conversation `channel` and `reply_channel` metadata move
+independently. Every activation stores a fresh one-time owner-link hash with a
+24-hour expiry and returns its new code; predecessor link material is never copied.
+Lineage records the committed predecessor/successor relationship. Gateway group
+policy is marked due in the activation transaction, so a crash before inline sync
+is repaired by the existing sweep.
+
+Reconnect remains explicit. Gateway lifecycle cleanup is independent of reconnect
+and adds no message delivery retry. See [gateway retirement and recovery](../CHANNEL_EVENT_GATEWAY.md#nyxbot-gateway-retirement-and-recovery)
+for the release states, exact-version cleanup, retired-binding acknowledgement,
+operator review and deployment boundary.
+
 ### Channel turn delivery after the provider stream closes
+
+Checking and capacity notices, machine-control notices, team updates,
+followed-thread results and permission-result occurrences are supplemental text.
+On gateway channels backed by NyxID's relay they use the local route-key reply
+adapter. This leaves the gateway's automatic final/failure, provider stream,
+recovery snapshot/replay and NyxID's primary late sender unchanged. CMA treats
+confirmed event replies as answers and suppresses its automatic final; its
+routed unknown-tool barrier also blocks reply targets. See the
+[CMA contract boundary](../CHANNEL_EVENT_GATEWAY.md#nyxbot-provider-late-replies-and-cma-contract-boundary)
+for the pinned source evidence.
+
+Source-bound text uses its admitted event's retained `relay_message_id` and live
+source authority. Unbound genuine chat results first validate the chat's
+`last_relay_message_id`. If the pointer or retained row is absent, they may use
+`event_ref_relay_message_id`, written atomically with the reference and expiry.
+Its optional binding digest detects old writers that replace either reference
+or expiry without replacing the anchor. Old/missing/stale pairs cannot supply a
+fallback. An authority mismatch never falls back. Progress uses no fallback;
+missing sources skip, while permission occurrences finish refused. All anchor
+choices preserve bot owner, route key, platform, chat/topic/root and guest
+checks. Retained-message validation uses the existing primary-key index; no
+recent-event discovery query is added.
+
+Relay-source gateway team and additional-chat results deliver within 24 hours
+of the selected retained inbound's `created_at`, and genuine followed results
+within 24 hours of the original retained event. At or past 24 hours they skip
+with `anchor_expired`, preserving the transcript. These results need no live or
+decryptable gateway reference; the paired fallback still requires its binding
+digest to match, but its reference expiry may be past. Retained-source and live
+authority checks, including agent-key presence, remain. Checking/capacity/machine
+progress keeps the original 29-minute reference gates and skip reasons;
+permission occurrences retain their own event/target gates.
+
+Widened results claim their exact settled assistant message per stable
+destination before text dispatch (#2462). Primary and additional delivery to
+the same chat share one claim. Repeated hooks audit `already_claimed` and do not
+send; a claim database error follows `source_unavailable` without sending.
+Confirmed, rejected, unknown and interrupted attempts are never retried. There
+is no preparation lease: a crash after the claim can lose the text. The optional
+serde-defaulted claim list is internal, absent from API/log/audit, and purged with
+the message. New replicas share it; old replicas ignore it and keep the 29-minute
+behavior until drained (also on rollback). There is no readiness gate or
+retroactive protection for pre-upgrade sends. Other transports and primary
+answer claims do not use this marker. Direct and relay-era
+`direct_reply` paths are unchanged. Failed local supplemental text keeps its
+receipts and audit without adding a primary-answer failure event to the web
+transcript. The existing live-turn notice claim selects
+one attempt across replicas; an already claimed local notice completing just
+after the final cannot suppress or duplicate it.
+
+Native progress is not sent. Genuine independent native team/followed/permission
+results retain today's event reply behavior. While the same event's primary
+answer is pending, those sends can still suppress that answer on confirmation
+or leave both uncertain under the gateway's routed unknown-tool barrier. This
+needs the gateway's non-answer-send contract. Metadata-only
+`nyxbot_channel_supplemental_delivery` audits include those `gateway_event`
+results as well as local sends/skips, their closed purpose/outcome/reason and
+anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
+`none`), plus turn/event/conversation IDs. No text, inbound references, tokens
+or binding digests are recorded. No owner action is needed; drain old replicas
+to apply the result window and claims everywhere.
 
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
 Per-destination MongoDB image claims are taken inside the existing text claim for
 direct/late replies, gateway streams and automation results. Event-turn sends
-remain best-effort: images have durable claims, while their text keeps its prior
-best-effort semantics. A crash after event-turn images and before text can leave
-images without text, and neither is automatically resent. Direct/late replies,
+retain their image claims and image-before-text preparation. Widened relay-source
+results then acquire the supplemental text claim described above; other event-turn
+text retains its prior best-effort behavior. A crash after images and before text
+can leave images without text. Claimed text is not replayed. An attachment claimed by a new writer
+but not yet uploaded has a MongoDB-time preparation lease and is recovered
+independently under current authority; confirmed or uncertain uploads are never
+resent. See `docs/CHANNEL_BOT_RELAY.md` for the claim phases. Direct/late replies,
 streams and automations retain their existing text barriers.
 
 Gateway events persist the original NyxID relay message ID separately from the
@@ -569,7 +857,7 @@ The provider stream owns a `waiting` delivery until it atomically claims
 separate 15-second, bounded sweep makes the same transition after 570 seconds
 from provider admission; it does not block the live-change or team workers.
 At that deadline NyxID completes the gateway response without text and leaves
-the eventual answer pending. NyxAgent keeps working. NyxID emits no queue
+the eventual answer pending. NyxAgent keeps working. Detaching emits no additional queue
 acknowledgement or continuing-work notice. Successful empty or whitespace-only
 answers atomically settle as `silent`; they produce no “Done” message. Image-only
 answers still deliver their images, and failed-image notes remain visible.
@@ -597,14 +885,39 @@ use the original inbound ID through the normal live route-key reply path;
 followed native threads retain the original source binding and adapter checks.
 Unsupported/expired targets are never redirected to the top-level chat.
 
-Immediately before dispatch a Mongo compare-and-set changes `pending` to
-`sending` with a unique claim ID. Only that claim may record the outcome. No
-replica reclaims `sending`, `unknown` or `streamed`: external delivery may have
-occurred. A confirmed gateway receipt records `sent`; missing/ambiguous receipts
-are `unknown`. These barriers survive crashes and prevent duplicate NyxID
-attempts. They cannot guarantee external delivery after an ambiguous network
-failure (see the CMA contract request in `CHANNEL_EVENT_GATEWAY.md`). Audit and
-warnings contain only event/conversation/turn IDs, transport and fixed outcomes.
+Late answers first claim a MongoDB-time `preparing_text` lease (180 seconds).
+This state proves only that the next text part has not crossed its send barrier;
+images keep their independent claims. Credential resolution, thread lookups and
+request preparation remain recoverable. The existing 15-second worker reclaims
+expired preparations under current authority. It stores only the saved-message
+ID, plan hash, numeric image-notice inputs, next-part cursor and receipt IDs on
+`nyxbot_events`, never a second copy of the answer.
+
+Immediately before a provider effect, an exact, unexpired preparation claim
+changes to `sending`. A slow worker whose preparation was reclaimed cannot
+send. Each confirmed direct-text part commits its receipt and advances the
+cursor atomically; a survivor sends only the remaining unsent suffix. Existing
+platform splitting and formatting rules are unchanged. A gateway POST or email
+reply remains one operation; NyxID does not infer receipts for its internal
+parts. Provider sends are bounded to 120 seconds per part.
+
+Outside the bounded gateway reply-target exception below, no replica retries
+`sending`, `unknown` or `streamed`. An interrupted new send
+becomes terminal `unknown` after its database-time deadline; an old `sending`
+row without that deadline is classified only when its stored `checked_at` is a
+BSON date at least 2,100 seconds old. Missing or malformed timestamps do not match.
+This is an uncertainty decision, never proof of failure or permission to resend.
+When the saved result belongs to an existing owner-visible thread, the same
+transaction appends one fixed “Delivery unconfirmed” event there. It creates no
+resend control, new content store or readback access. Guest/private execution
+surfaces and public-manager expiry contracts are unchanged. Audit and warnings
+contain only IDs, transport and fixed outcomes.
+
+An ordinary rolling upgrade needs no operator action. Old workers ignore
+`preparing_text` and cannot claim it; new workers still respect all historical
+send/stream barriers. During a binary rollback, unfinished new preparations
+remain parked until a compatible worker returns. Do not reset their state or
+remove receipts to make an old worker process them.
 
 Before guaranteeing source retention, drain old queue writers and upgrade all
 replicas. Older writers using `$slice: -20` can evict accepted sources; mixed
@@ -671,6 +984,13 @@ a group maps onto the group's one thread. Group titles come from the platform
 payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 `im/v1/chats`).
 
+On throttled missing-partition refusals, audit metadata includes a keyed
+`partition_correlation_hash` and `partition_history`. `retained_event` proves
+that a prior request passed the registration check; `no_retained_event` is
+inconclusive because events expire, and `unavailable` means the bounded lookup
+failed. The diagnostic does not add a read to successful provider requests or
+store message text or the raw provider partition.
+
 **Per-chat settings** (the owner, via NyxBot's `nyxid__list_channel_chats` and
 `nyxid__update_channel_chat`, or the chats list under each connected bot):
 
@@ -678,12 +998,40 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
-| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+| `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Default-off org-specialist bindings allow same-org targets under the [channel contract](#organization-specialists-on-channel-bots), with hidden per-actor execution. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
+
+The linked channel also has `private_chat_posts` (absent/false by default).
+The owner can enable it in **Chats and posting**, through the human-only
+channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
+customer chats then start with `allow_posts: true` when a verified message
+registers them. It does not open private-chat access, contact someone who has
+never messaged the bot, or enable groups, channels, topics, followed child
+threads, or synthetic custom-event threads. Posting still checks only each
+chat's `allow_posts`; an explicit per-chat off survives later inbound messages.
+
+`apply_to_existing: true` requires an explicit `private_chat_posts` value and
+applies that value to existing private chats on this link. Both enabling and
+disabling otherwise affect only new chats. Bulk application overrides individual
+private-chat choices and is transactional, capped at 1,000 changed chats;
+exceeding the cap changes nothing. The response and metadata-only
+`nyxbot_channel_access_updated` audit include `applied_count`. Guests and
+specialists cannot change this setting; NyxBot uses the same sensitive-action
+confirmation as per-chat permission changes. Organization links require the
+linking person's live org-admin authority.
+
+The default rides on the loaded channel; chat recording adds no DB reads.
+Gateway conversation probes cannot know the chat kind, so new probes capture
+an additive `private_chat_posts_pending` boolean without granting permission.
+The first verified chat registration consumes it atomically. Legacy placeholders
+without that marker stay off, and existing explicit permissions win. Old
+replicas ignore the additive channel field and continue creating chats with
+posting off; upgrade replicas before relying on the default for every customer.
+Reconnect continuity preserves the default alongside private-chat access.
 
 **Addressed messages.** Through the gateway, group admission is
 `mention_or_reply_to_bot` unless one of the bot's chats answers everything; then
@@ -741,14 +1089,54 @@ guest authorization; their catalog inclusion grants no execution access.
     who mounts a hosted overlay on another API applies that overlay's marks
     to it. A DELETE, and an operation
     Aevatar's `x-aevatar-tool.destructive` marks (Telegram's `deleteMessage`,
-    Sheets' `values:clear` and `values:append`, Docs' `batchUpdate`, IFTTT's
-    triggers and tool calls), never. NyxID adds its own marker rather than
+    Sheets' `values:clear`, Docs' `batchUpdate`, IFTTT's
+    triggers and tool calls), never, except a POST with a compiled NyxID
+    `x-nyxid-append-only: true` attestation. This attests adding data without
+    changing or removing existing data; it does not clear Aevatar's marker or
+    bypass owner approvals. A compiled `x-nyxid-append-only-query` object may
+    require exact query values. Sheets `values:append` requires
+    `insertDataOption=INSERT_ROWS`; absent, duplicate, or overwrite values are
+    refused under `use`. DELETE and `changes-existing: true` always win.
+    Remote and mounted remote specs cannot assert this exception; the trusted
+    attestation is matched by exact method/path only. Generic MCP fallbacks and
+    raw calls also apply the compiled contract to their concrete route, even
+    when stored endpoint rows are missing. NyxID adds its own marker rather than
     change Aevatar's, which Aevatar's approvals read. So editing a sheet, doc,
     Notion page or calendar event, trashing a Drive file or running an IFTTT
     applet is beyond `use`;
   - `all`: everything the specialist may do with the service, changing and
     deleting included (NyxBot's `nyxid__set_guest_access` says so when it sets
     it).
+  Guest-only operation limits are stored in additive
+  `guest_operation_scopes` and `guest_operation_scope_revisions` fields beside
+  grants. They intersect the level and the specialist's ordinary scopes; owner
+  turns ignore them. An empty guest selection withholds the service entirely
+  (`none` in the management tool); an absent selection preserves today's `use`
+  default. Selections use server-resolved catalog endpoint IDs, never names,
+  and cannot introduce explicit rules or resource-value limits in this release.
+  Grants exposes **No guest access**, **Selected operations**, and **All
+  operations permitted by guest level**. NyxBot first calls
+  `get_agent_operations` with `guests: true`, then `set_guest_access` with
+  exactly one service and `selection: {expected_revision, endpoint_ids}`.
+  `access: "none"` requires that revision and saves an empty selection;
+  `selection.all_operations: true` removes the selection. A level-only write
+  preserves it. Human management uses the agent's `GET /guest-operations` and
+  `PUT /guest-operations/{service_id}` routes with the same revision fence.
+  Every guest execution and discovery request enforces the saved selection,
+  including raw proxy and final pool-member/LLM routes. Method overrides and
+  WebSockets cannot bypass a guest selection. Guest execution never follows
+  redirects or issues downstream delegation tokens, which cannot carry this
+  turn's guest restrictions. Changing grants preserves limits
+  for retained services and removes them for revoked services.
+
+  Configuration of these new limits is default-off behind
+  `assistant:guest-operation-scopes`, resolved for the managing person. Deploy
+  all auth/proxy/MCP replicas before enabling it; security readiness requires
+  durable activation and observed support for this capability. Old readers deserialize the
+  additive fields without a new `GuestAccess` enum value, but cannot enforce
+  them. Disabling the flag stops configuration, never enforcement. Before a
+  rollback to old binaries, stop guest admission for affected agents (or remove
+  the affected grants); disabling the flag alone is not a safe rollback.
   A guest call never carries a method override (a header like
   `X-HTTP-Method-Override`, a `_method` or `_HttpMethod` query or body field,
   or a `method` field naming a changing verb other than the one sent, as in
@@ -762,8 +1150,9 @@ guest authorization; their catalog inclusion grants no execution access.
   catalog service's instance-mounted spec where its operations match, and
   from a mounted spec's own markers (which only narrow). Specs an admin adds to
   the catalog outside NyxID's overlays are stored as rows without markers, and
-  services without typed operations (the generic proxy) have none: they are
-  judged by the method alone, so a POST that deletes there (an RPC-style API)
+  custom services without typed operations or a matching compiled catalog
+  contract (the generic proxy) have none: they are judged by the method alone,
+  so a POST that deletes there (an RPC-style API)
   is within `use`, and a GET that deletes (Telegram's Bot API accepts GET) is
   within `read`, as are batch envelopes (a `requests` array naming methods):
   do not give such a service to a specialist that answers guests unless they
@@ -823,7 +1212,8 @@ thread's native topic (`NyxbotThread.platform_thread_id`, e.g. a Telegram forum
 topic or Slack root thread) for text and images. Optional `include_images`
 (default false; `nyxbot_chats::post_current_turn`) also sends the calling
 turn's own tool images (trusted `TurnAttachment` metadata of the exact live
-turn, `chat_tool_image` only, deduplicated, at most 8) before the text: the
+turn, `chat_tool_image` only, deduplicated, at most 8), plus server-adopted
+delegated images authorized for this original destination, before the text: the
 limiter token is taken once with the text validation, each image rechecks the
 turn fence immediately before dispatch and takes a per-(image, audience)
 delivery claim (`services/channel_image_delivery.rs`, audience from
@@ -934,10 +1324,49 @@ within twenty-four hours. Expired or invalid sources settle durably, including
 poison queue heads. A failed turn retains the genuine failure/partial/stopped
 policy; successful silence closes each eligible source without a send.
 
-The agent's own threads are also told, in the owner's turn instructions,
-what its other threads are answering right now (thread title and question
-excerpt, the same question marked), so it does not start that work again;
-channel threads never get this note, so no chat hears about another.
+### Grounded cross-thread task status
+
+Owner turns may receive title/question excerpts from the owner's other private
+threads for duplicate-work **discovery only**. Channel, guest and group-member
+threads belonging to other people are excluded because their answers do not
+reach the requester. These excerpts do not prove that work is running. Stable
+instructions require `nyxid__task_status` evidence before reporting progress,
+completion or failure, require “unknown” when evidence is absent or stale, and
+require the assistant to answer in the current thread rather than telling the
+user that a question is being handled elsewhere. Guests receive neither this
+note nor the status tool.
+
+`nyxid__task_status` is a read-only native tool for live owner turns. It reads only
+the acting person's private threads of the **same agent**, including that agent's
+hidden voice task threads. NyxBot does not gain cross-specialist or organization
+member history through it; its existing team tools retain their authority.
+Optional `thread_id` (visible or execution thread), `turn_id` and `limit` narrow
+the bounded result. Each item correlates the visible and execution thread, turn,
+voice request and result message where available. `result_message_id` belongs to
+the visible thread; `execution_result_message_id` belongs to the execution thread.
+Before voice publication only the latter is available. It reports queued, running,
+awaiting acknowledgement, completed, failed, stopped or unknown; the last
+completed activity label and time; a ≤600-character settled answer excerpt or
+stable error; start/update/settled timestamps (null when unavailable). No tool
+arguments, raw tool results, credential material or acknowledgement content are
+included. Answer excerpts are explicitly untrusted quoted data.
+
+The tool is callable only from a private owner thread (not a channel or group).
+It rechecks the caller's live turn and current conversation key. A guest,
+stopped/stale turn or rotated key cannot use it. Queries are on demand, bounded
+to 20 recent threads and three settled turns per thread, returning at most 20
+items and a truncation indicator. Unfiltered reply scans cover only each thread's
+last 200 message sequences; an exact `turn_id` uses the turn index instead. A stale heartbeat/lease reports unknown rather
+than repeating an “in progress” claim. There are no new reads on unrelated turns.
+
+Voice result publication uses one transaction for the visible reply and the
+request's `result_message_id` receipt. Racing runtime/sweeper publishers return
+the same receipt. Old replicas' replies already in the visible thread are adopted
+without copying. Refused/expired/cancelled requests can lack a hidden assistant
+reply; those now publish a fixed failure with a stable code, including legacy
+cancelled rows, instead of remaining silent and occupying the bounded delivery
+sweep. This does not replay execution. Speech retains its existing at-most-once
+send receipt; persisted delivery is not proof the caller heard the audio.
 
 ## 13. No-break guarantees
 
@@ -980,7 +1409,7 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 5. A direct message to a specialist does not wake NyxBot; it appears in NyxBot's
    next turn.
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
-   orchestrator per chat; chat apps link to NyxBot or any specialist.
+   orchestrator per chat; chat apps link to NyxBot or any personal specialist.
 
 ## Machine nodes and saved logins
 
@@ -1195,7 +1624,12 @@ the cancelled run. Guests receive the fixed note `attachments from guests are
 not shared with the assistant` and cause no download or upload. Media-bearing
 messages never answer approval/text decisions or coalesce by question digest.
 See [Inbound channel media](10-uploads.md#inbound-channel-media) for item/byte/time
-limits, dedup horizons, queued expiry and the admin drain/rollback procedure.
+limits, dedup horizons, queued expiry and the admin drain/rollback procedure. The default-off
+`assistant:channel-guest-media` exception admits personal-agent guests' own
+current-message media into their channel private/shared thread, never the owner
+home. Human-owner retention reads and exact-current-turn untrusted model input
+are described in [uploads](10-uploads.md#personal-channel-guest-media); org
+specialist guests remain attachment-free.
 
 ## Drafting agent skills
 
@@ -1297,11 +1731,12 @@ Specialist threads are sandboxed. Only the owner, and the owner's NyxBot for wor
 
 NyxBot approval behavior is controlled by the owner-level `access_mode` setting:
 **Auto** (`nyxmode`, default) confirms sensitive and destructive actions, **Ask every time** (`ask_every_time`)
-confirms every changing action, and **Full access** (`autopilot`) never asks.
-Auto and Ask every time also confirm organization connection use, including
-reads and model inference. All three modes enforce saved personal-first
+confirms every changing action, and **Full access** (`autopilot`) bypasses ordinary
+confirmations. Covered organization connections require trusted owner instruction
+or an exact card in every mode. NyxBot's own model route retains its existing
+transport behavior. All three modes enforce saved personal-first
 connection order and exact owner selection; see [service execution](../NYXBOT_SERVICE_EXECUTION.md).
-Full access bypasses every confirmation, including webhook automation, machine and
+Full access retains the org-instruction exception and otherwise bypasses webhook automation, machine and
 saved-login policies, pairing/updates, authored publication and service approvals.
 Each successful bypass leaves a non-consumable automatic receipt
 (`decided_by: access_mode`, reason `access_mode`, `webhook`, `policy` or `approval`),
@@ -1311,9 +1746,33 @@ kept synchronized for one rolling release; rows without `access_mode` migrate
 from its value (`true` means `autopilot`). Specialists may override the owner
 mode with `access_mode_override`.
 
+### Progress replies during external checks
+
+In an agent’s Profile, **Channel progress reply** enables the optional
+`channel_checking_notice` boolean. A first-party human maintainer can also set
+it through `PATCH /api/v1/assistant/nyxagent/agents/{id}`. Omitted fields preserve
+the current value; existing agents default to `false`. This applies to both
+NyxBot and specialists, including their authorized guest channel turns.
+
+When enabled, a channel turn that has started work beyond attached skill reads
+and tool discovery receives one interim reply after at least five seconds:
+“Got it, let me check and get back to you.” External work starting later receives
+the notice on the next 500 ms check, if the turn is still running. Network and
+provider delivery time are additional; this is not a hard delivery deadline.
+An attached FAQ read alone never triggers it. The trigger is observed tool
+activity, not a model’s estimate of whether it knows an answer.
+
+The task is cancelled when execution ends. A durable claim is fenced to the
+same live, unstopped turn, suppresses a second capacity/progress notice, and is
+never retried after an ambiguous send. It uses the existing live-authorized
+channel reply path. It adds no model/transcript text and does not claim or
+settle the eventual answer. Scheduled triggers, app-only threads, and the
+separate personal manager transport do not receive this channel notice.
+Only opted-in channel turns run the timer; other turns add no polling reads.
+
 ### Access modes
 
-NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses them with receipts. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
+NyxBot settings support `nyxmode`, `autopilot`, and `ask_every_time`. One shared action classifier covers account, team, service, meta (`nyx__*`), and machine tools. Owner cards describe the action, scope, and risk class; resource confirmations remain enforced in Auto and Ask every time; Full access bypasses ordinary resource policies with receipts; covered org connections still require trusted instruction or an exact card. Agent overrides require owner ACL, mode changes are owner-card actions, and `assistant_access_mode_changed` audit rows record the transition.
 
 Per-service `approval_mode`, per-machine `machine_confirm`, saved-login
 `confirm_each_sign_in`, webhook `confirmation_policy`, machine-update cards and
@@ -1354,7 +1813,12 @@ keeps its base pin's disabled state.
 
 Per attached pin the app offers **Test** (`GET /agents/{id}/skills/{skill_id}/preview`:
 verifies the exact pinned version in Ornn, then reads SKILL.md through the same
-reader as `nyxid__skill_read`; a disabled pin reports `readable: false`) and
+reader as `nyxid__skill_read`; a disabled pin reports `readable: false`). For an
+organization agent both use an accessible organization Ornn connection and the
+acting person's signed identity, including Ornn's narrowly scoped membership
+callback. This certifies that person's current visibility; a different member,
+changed grants or runtime key/turn/policy can still refuse. See
+[Agent skills](../AGENT_SKILLS.md#storage-and-authority). The app also offers
 **Edit** (`POST /agents/{id}/skills/{skill_id}/improve`: an authored improve
 draft prefilled from the exact package's SKILL.md body and `.md`/`.txt` files,
 with its review card raised in NyxBot's home thread; organization agents are
@@ -1411,7 +1875,462 @@ authorize execution or cause publication to rerun when a receipt is missing.
 Group review remains a full card without exposing hidden member context.
 
 Normal and group message renderers share an accessible Copy action. Assistants
-copy the sanitized Markdown displayed in the message; users copy the original
-body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
+copy readable text matching the rendered body, with rich HTML preserving emphasis,
+paragraphs and link labels/destinations when the clipboard supports it. Plain-text
+targets receive visible link labels without Markdown syntax or expanded URLs;
+code and literal content retain their text. Both formats use the message renderer's
+sanitization and link policy. Users copy the original body literally. Hidden tool
+markup, thinking, controls and receipts are excluded. Blank,
 image-only and streaming assistant messages have no Copy action. Clipboard
 success is reported only after the write resolves; a failure remains retryable.
+
+
+### Resource limits for guests — proposal, not implemented (#1996)
+
+The current ordinary operation scope already supports validated exact/one-of
+path values, closed query rules and closed JSON body schemas. Those scopes
+apply to both owner and guest turns. The new guest-only picker intentionally
+selects operations only; it does not accept value rules.
+
+1. Extend guest selections with the existing input-rule engine. Pin a Sheet ID,
+   file ID, Base/table ID or record ID in its catalog path variable; require
+   specific query/body fields when that is where the operation takes identity.
+   Raw proxy, MCP, LLM and the final pool member must check the same normalized
+   inputs. This is the smallest engineering change, roughly 3–5 days including
+   negative tests; a readable per-operation editor adds roughly 3–5 days.
+2. Offer catalog-declared resource selectors above those rules: a file/Sheet
+   picker generates exact constraints and explains which operations it covers.
+   Never infer resource parameters from names. Schemas need explicit resource
+   identity and expansion semantics. Expect roughly 1–2 weeks per API family.
+3. For folder or collection access, use a managed resource facade that checks
+   current containment and returns only allowed rows. A query such as Drive's
+   `q` is a program, not a folder ACL: pinning text alone does not constrain
+   direct downloads, shortcuts, shared-drive moves, exports, recursive folders,
+   batches or responses. Do not claim row-level isolation without resolving
+   those cases. Budget several weeks for a provider-specific first version.
+
+The UI should distinguish operation access from data access, show the exact
+pinned IDs alongside friendly names, preview blocked operations and fail closed
+when a resource moves or a contract changes. Search/list operations need either
+a proven constrained upstream query or server-side filtering; response fields,
+indirect references, batches, alternate encodings and MIME/upload routes all
+need adversarial tests. No owner-specific values belong in audit metadata.
+
+### Guest model readiness
+
+Opening `private_chats` or group `members` to everyone changes the audience, not
+service grants. Saving an open visitor audience starts automatic model setup
+through a hidden owner turn; it does not require an owner chat. The dedicated
+owner-only agent readiness read
+serves the open Grants and channel Chats settings; ordinary lists do no readiness
+work. Audience-setting writes include optional `guest_readiness`. The NyxBot
+channel-list tool memoizes by effective agent and checks only channels open to
+visitors (private chats or group members). NyxBot must report `not_ready` and its exact
+`fix` instead of claiming visitors can already receive replies. The owner UI
+shows the same status beside audience controls and specialist guest access.
+Older replicas may omit the field; absence is unknown, never proof of readiness.
+
+Setup failures queue a fixed owner notice in the assistant's home and, when
+available, its verified owner private chat on a bot linked to that exact agent.
+An absent bot agent binding means NyxBot. Agent/reason claims are transactional
+and limited to one per 24 hours; metadata receipts expire after 48 hours. No
+model wake-up is needed, no visitor content is included, and no group receives
+the owner's diagnostic. See the engine's guest model route section for the
+closed reasons, runtime fixtures and model-routes.json maintenance contract.
+
+## Protected org connections and hosted personal setup
+
+After readiness activation of `assistant:org-instruction-v1`, NyxBot and personal specialists need trusted owner selection of the exact org connection this turn or an approved exact single-use card in every access mode, including Full access. Org-owned specialists are excluded by actual owner UserType; model bootstrap/compaction and auto-connected/platform services retain their contract. Positive provenance comes only from first-party owner UI or verified private owner-channel ingress, bound to actor/key/conversation/live turn/expiry. Legacy selectors, API/delegated/automation/group/guest/model text and `_nyxid_via` are insufficient. Independent sensitive/destructive policies remain.
+
+Org cards persist reason `org_connection`, retain controls in Full and survive an Auto-to-Full mode switch. Admission precedes credential refresh/token exchange and is carried through final send revalidation. Machine declarations are checked per exact connection; new job/watch receipts cover only their bounded lifecycle. Legacy org jobs require a reviewed replacement command; unproven watches pause for an exact continuation card.
+
+“My account” requires the owner's personal connection; never describe org data as their personal data. When the owner asks to connect a named service, call `nyx__connect_service` with a visible catalog UUID/slug immediately, even if connections exist. Give the hosted link immediately and mention the existing connections in one short line. Never ask whether to proceed, suggest reusing an existing connection instead, substitute `/keys` or Plugins, or infer a provider account identity from ownership/labels. Both named and unnamed `settings_link add_service` return structured connect guidance; unnamed requests first identify the catalog through discovery.
+
+Chat connect results include `existing_connections` and `existing_connections_truncated`: at most ten non-deleted connections for the exact catalog, newest first with UUID tie-breaking. Facts include connection ID/slug, label (up to 120 characters), `is_active`, self/shared-person/organization ownership, organization name (up to 120 characters), and `account.status: unknown`. Unified inventory comes from `user_services` through the shared service visibility resolver, which applies live memberships, inherited role scopes, and specialist connection IDs. Unscoped NyxBot inventory also includes the actor's own active `user_service_connections` row for this catalog, marked `source: "legacy_connection"`; its ID and credential label are metadata, and its connection slug is the catalog slug. Both sources share the ten-row bound and ordering. A retained unified row with `source: "migration_connection"` and `source_id` equal to the legacy ID represents that connection once; independent same-catalog connections remain separate. Specialists never receive legacy rows because their grants name unified connection IDs. Viewer and other `allowed: false` rows are excluded. Disabled connections remain metadata; explicit deleted markers and older tombstones without an endpoint are excluded. Unreadable/inactive owners are skipped through the batched ownership projection shared with `facts_for`. Labels are fetched by metadata-only projections; no credentials, provider tokens, or guessed provider account names are returned. An empty inventory is `[]`. These facts never grant execution authority.
+
+Personal credential catalogs, including OAuth/device-code/API-key providers with `requires_user_credential=false`, receive hosted links. Explicit platform-key requests create unified connections in one step. Other non-hosted requests retain the legacy one-step connector, including no-auth and internal master-credential catalogs. Its existing-active-connection conflict returns successful `status: already_connected`, catalog ID/slug, and existing facts: say it is already connected in one short line because there is no separate account to add. Repeated no-auth connects do not create duplicate unified connections. Unsupported SSH flows and inactive/unconfigured providers return a non-link `connect_unavailable` result with the same facts. A catalog without `provider_config_id` returns `provider_requirement_only` only when it has a `required: true` provider requirement and `requires_user_credential=false`; an admin must link that provider before hosted sign-in can work. Optional requirements do not block setup, and catalogs collecting their own credential keep the hosted API-key form. Other connect failures return sanitized `connect_failed` plus facts. External MCP clients retain their existing response and routing contract.
+
+Specialists never mint links, even in routed mode. Their refusal includes only same-catalog connection facts already within the key's effective grants (including active auto/platform rows only when authentication grants them) and asks the owner to have NyxBot perform setup, followed by a separate specialist grant; direct specialist work never transfers automatically to NyxBot. An org-owned specialist thread keeps the acting member as its key owner, while the owner-bound grant resolver limits its connection IDs to the agent organization's own rows; personal or other-organization rows are excluded. Guests receive no inventory. Organization cards retain exact operation approval and current connection facts; their `connect_own` is setup guidance, not a minted link or approval. When the owner requests personal setup, use the connect tool immediately with its existing-connection narration. Unsupported hosted card offers share the connect tool's reason codes; `no_separate_account` instead explains the one-step setup contract. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Hosted preview carries the declared credential fields so a failed catalog/pricing lookup cannot hide them (clients retain catalog fallback for older servers). Web and mobile hosted credential forms render declared token-exchange fields separately (for example, App ID and App Secret), then submit one JSON credential. Lark/Feishu startup corrects only exact prior system-seed instructions, preserving admin text and explicit clears.
+
+`assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Use compatible readers/UI; observed support from every live writer/completer gates automatic activation without roster/drain declarations. Old readers that ignore the stored lock remain incompatible. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
+
+### Automatic visitor model setup
+
+Opening private chats to everyone, enabling group members or relinking an open
+bot starts model setup for the linked agent/profile. NyxBot should report the
+returned `guest_readiness`: `setting_up` means preparation is running, `ready`
+means the model route is ready (not proof of complete business information or testing), and `not_ready` includes the fix for a real failure
+(such as unavailable model credentials or credits). Do not ask owners to send a
+warm-up message. The first admitted visitor waits in a source-bound guest queue,
+then receives its answer automatically. Concurrent visitors share one setup.
+Guests never become owner events, acquire owner tools or choose setup's model.
+For an organization guest in a followed thread, hidden setup validates the
+originating admitted guest lane at admission, before the engine and before
+credential dispatch. Its own hidden conversation/key still own setup and
+settlement; source or policy revocation refuses further work. Setup uses the
+same admitted-turn validator as the guest: subscription stop/expiry alone does
+not revoke either already-admitted turn. A failed attempt
+without model dispatch retries on the next admitted message after the existing
+60-second backoff; dispatched model failures back off up to 3,600 seconds. Setup failures add a closed optional `failure_step`, projected
+as `failure_reason.guest_setup_step`; public failure codes are unchanged.
+See [engine guest model routes](08-nyxagent-engine.md) for admission, retention,
+recovery and mixed-replica details.
+
+### Channel reliability diagnostics
+
+Channel model execution resolves its typing destination and credentials once per
+task, then refreshes an ephemeral typing indicator every four seconds where
+supported. Refresh checks the live turn, event binding and channel eligibility;
+it stops on the first refusal or platform error without decrypting again. It is cancelled at settlement or Stop and never
+appears in the transcript. The existing optional **Channel progress reply**
+setting remains default-off; typing does not enable it.
+
+The settled assistant message's additive `turn_metadata.timing` stores
+`queue_wait_ms`, `admission_wait_ms`, `first_output_ms` (null if no semantic model
+output), `model_ms`, `tool_ms`, `model_calls`, `tool_calls` and `total_ms`.
+Model/tool durations are summed wall time per observed call, including failed
+calls; parallel calls can overlap. Tool duration uses retained activity start
+times; a call evicted from the bounded 40-entry activity list before completion
+still contributes to the total call count but cannot contribute a duration. Counts include calls recorded by NyxID, not
+an estimate from prose. No content, arguments or credentials are included.
+Legacy turns default to zero/null timing observations.
+
+A transient dependency refusal before any execution can retry twice under the
+same command, with 2s/4s backoff and a 15s bound. Accepted execution, model/tool
+activity or output closes that window permanently. Exhaustion has typed code
+`assistant_start_unavailable`, with the truthful message “Nothing was done.”
+Ambiguous transport failures retain the existing failure behavior.
+
+Relay response recovery is default-off behind `nyxbot:relay-response-recovery`,
+resolved for the linking person including live org overrides, in addition to
+fleet readiness and CMA capability discovery. Enable for one owner and verify
+before widening. Capability results are cached per gateway base; a dormant flag
+never probes CMA.
+
+Gateway completion is separate from platform delivery: `recovery_ready` means
+the answer is durable and CMA can retrieve it; `streamed` means it was offered
+to the live observer. Neither claims confirmed delivery. The gateway contract
+lists the required CMA journal/replay behavior and the remaining receipt gap.
+
+### Delegated specialist image results (#1897)
+
+An assignment made by a live, owner-authorized NyxBot turn captures its exact
+source specialist/turn and original reply destinations. The specialist's
+settlement publishes an exact result event transactionally when the receiving
+queue accepts it. A business refusal records a stable metadata-only code on the
+saved reply and falls back to the existing best-effort, text-only settlement
+notice; it never rolls back the specialist's reply or grants image authority.
+Database/transport errors still abort settlement. Delegated results follow the
+original FIFO eviction rule alongside ordinary notices, so they cannot
+monopolize the bounded event queue. Source questions and invocation fences keep
+their existing protections. Both event drain
+and `nyxid__wait_for_subagents` adopt the same authorized result into the live
+receiving turn before consuming its event ID. Wait exposes only server-adopted
+image references; arbitrary IDs in model text cannot export another thread's
+images, and a newer assignment to the same agent cannot replace the result.
+
+At most 16 delegated image references persist separately from owned attachments
+on the receiving reply. They retain source identity and original retention;
+the app's attachment APIs remain source-scoped. Replies through stream, late
+recovery, Event and trigger delivery use this projection and the existing
+per-source-image/per-audience claims. Tool images qualify; machine screenshots
+never do. Images remain in the specialist's app thread rather than becoming
+new attachments on NyxBot's reply.
+
+Source use access (`require_use`, including live org/group membership), source
+existence/retention, receiver authority and destination policy are checked at
+adoption and immediately before sending. Stop/failure cancels image forwarding;
+recipient reset, source deletion, guest mode and revoked membership refuse it.
+Clearing the owner's direct-message destination in the app prevents the prior
+assignment's images from following the owner into another chat. A specialist's
+later direct message or changed report target neither grants newer images nor
+revokes its completed assignment. Source and receiver turns, not mutable agent
+home/report pointers, define the result.
+
+The storage and claim contract is in
+[Channel bot relay — assigned specialist images](../CHANNEL_BOT_RELAY.md#images-from-an-assigned-specialist-1897).
+
+## Organization specialists on channel bots
+
+With `nyxbot:org-specialist-channels` enabled after replica readiness, an org
+admin can connect an existing **same-org** bot to an org specialist in the
+Channel bots settings, REST connect/link routes, or their personal NyxBot's
+`connect_channel_bot` / `link_channel_bot` tools. Personal setup links still
+create personal bots. There is no org NyxBot, cross-org link, or personal fallback.
+
+Each Admin/Member with `can_proxy()` requests a verification code in their own
+first-party NyxID session, sends it privately to the bot, and confirms the
+observed chat account back in that session. Another member/admin cannot confirm
+it. Codes expire in ten minutes. “Owner only” means verified org members on this
+binding; only a verified admin sets “owner talked here”. Removed members are
+refused and their channel keys revoked; they do not become guests automatically.
+Person erasure removes the linked person ID and their transcript content, keeping
+a sender revocation tombstone until channel/org erasure to preserve that refusal.
+Member DMs continue their private org-agent home. Groups/topics publish one
+public transcript, with hidden execution and confirmation cards per actor.
+Private DM context, tool traces and another actor's approvals are never public.
+Followed-child context status reflects the actual org turn. Its conversation
+link is only the viewing member's materialized lane; guest-only children and
+another member's lane remain unlinked. Follow guidance uses the negotiated
+gateway capability. Closed target/authority rejections and actual immediate or
+delayed send failures appear in existing bot Health with metadata-only audit;
+replay and transient preflight errors do not. Failed sends preserve the existing
+provider reason and add a separate bounded thread reason. Health describes the
+missing reply without asking the owner to inspect internal delivery logs.
+Expired delayed references report
+expiry without an owner action. Confirmed bot outbound clears the thread error.
+Queued questions enter that transcript atomically with source acceptance; queue
+instructions and unfinished/failed reply drafts remain private execution state.
+
+Guests are on by default on new organization bindings, including private chats.
+Only an organization admin can change exposure; Members can read settings.
+The connect preview on web and NyxBot states the audience, organization payer,
+guest service levels and existing readiness facts before confirmation. Preview
+is metadata only; connect revalidates live authority. After
+`nyxbot:org-guest-grants-v1` fleet readiness, a genuinely new binding follows the
+specialist's **Grants** immediately, including default `use` for a
+granted service without a saved guest override. Active org-owned HTTP services must be granted to the specialist
+and pass the existing guest levels, guest operation selections and ordinary
+operation scopes. MCP uses `filter_guest_catalog` / `guest_service_refusal`;
+HTTP uses `check_non_mcp_context`. No second operation classifier is introduced.
+Empty guest operation selections still withhold a service. Machines, node
+credentials, account tools, saved logins and approvals remain unavailable to guests.
+
+Existing bindings keep their exact saved delegated-service/digest restriction,
+including empty-list model-only chat, until the explicit Grants handoff below.
+Their **daily cap is removed as soon as readiness is complete**, even before that
+handoff. No daily cap is required or enforced in ready mode. The org wallet pays
+all guest model and tool usage, with platform keys or BYOK, and must retain its
+subscription and funding/suspension checks. Each sender still has a six-request
+per-minute limit. Verified members retain existing access and billing rules.
+
+Binding metadata lives on `org_specialist`, sender verification in
+`org_channel_sender_links`; optional `org_execution` origins carry the exact
+actor/revision through queueing, thread follow, recovery and late delivery.
+First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
+`GET/PUT org-specialist`, `POST/DELETE member-link`,
+`GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
+Other live org admins can manage/unlink the binding without reading member DMs
+or obtaining provider keys. Changing the specialist resets verification and guest
+service authority while retaining the saved exposure choice;
+changing personal ↔ org target requires disconnect/reconnect. Loss of the
+transport admin or org/bot/agent authority retires the link with
+`org_access_lost`. Flag-off, unavailable security readiness and dependency errors
+suspend new work and defer retryable deliveries without deleting the binding,
+route or key; work resumes when availability returns. Guest-policy changes invalidate pending guest authority.
+Relay/native/gateway use the same local validator; CMA never decides membership
+or payer. A verified private chat moves between relay and gateway with its member
+home reply binding and guest execution lane; adoption is atomic and keeps the
+relay alias for flag-off return, without merging already established chats. Roll out
+with the flag off; observed support from all executing workers and recorded
+activation then permit enabling for an admin, without roster/drain declarations. Disable and retire before binary downgrade.
+
+### Guest settings and binding recovery
+
+Every listed binding has a **Who can talk to this bot** section on web and mobile:
+Allow guests; a localized explanation of guest identity and org payment; named
+service access with a Grants link. Admins also see Organization spend today (this
+bot's guest usage, including earlier connections, not all org spending). Members
+see disabled controls; existing amount fields remain in API responses for released-client compatibility; private/unclassified chats and
+conversation/history identifiers are omitted from their group settings list.
+Existing Viewer bot detail and health reads are unchanged; newly readable
+settings require Admin/Member. The native mobile screen adds no connect operation. No budget
+input or separate service checklist remains. Failed/pending bindings stay readable.
+Before fleet readiness the page explains legacy enforcement and does not offer
+new enablement; disabling stays available under the existing management ACL.
+
+**One-time legacy handoff (option A).** Legacy bot pages show “Existing guest
+limits are kept. Review them in Grants.” The specialist's Grants page offers
+**Use these guest settings for all linked organization bots**. Save Grants edits
+first, then review all affected bot names (including disabled/recoverable bindings)
+and the resulting saved access by service name. Applying is human/admin-only;
+it is never inferred from an ordinary Grants save, an old-client PUT, a tool call,
+or a reconnect. `GET/POST /assistant/nyxagent/agents/{id}/org-guest-grants` binds
+that review to the actor, exact saved grants/scopes and binding set using a keyed
+fingerprint. The transaction fences the agent and live admin membership, rotates
+all guest revisions, retires guest/setup keys/work only, and audits metadata. A
+replay is idempotent; intervening changes require review again. Members are not
+retired. After adoption the notice disappears and ordinary Grants is the sole
+service guest policy. There is no per-service migration state.
+
+Persisted `GuestPolicy.follows_agent_grants` defaults false; the optional
+`grants_adoption_id` identifies the reviewed transition. Legacy lists, digests,
+cap values and financial rows remain stored. Old readers ignore the additive
+fields and remain restrictive. New bindings start guest-on with a fresh revision and private chats open; the
+Grants marker is set only when ready. The bounded versioned background step
+enables historical Off when bounded same-bot/org history has no evidence of a
+guest choice, including relinked and restored rows. It examines at most 32 stored
+specialist rows: a settings-save audit for any row/continuity id, a nonempty revision
+without continuity, or a revision that differs from its recorded restoration
+revision (or enabled bit) preserves Off. Both restoration branches now audit `guest_revision` in
+their transaction; old restoration audits omit it and rely on save audits alone.
+Missing continuity history, too many rows and malformed facts stay unchanged.
+The existing hinted audit lookup retries errors. Active bindings require live
+org, bot, specialist and linking-admin authority; recoverable authority failures
+remain pending. Bot health status is not authority. Absent/null private settings open,
+while explicit owner-only and frozen service limits remain. Completion in `assistant_migrations`,
+exact-field updates and one chained metadata audit commit transactionally.
+Explicit Off saves now mint a revision even when otherwise unchanged; REST and
+NyxBot saves append the save audit in the settings transaction. Old handlers
+also queue that audit after no-op saves, but their asynchronous audit can be
+delayed or lost during mixed rollout. This accepted evidence limit applies to
+ordinary, relinked and restored bindings; a missing save audit can misidentify
+explicit Off as untouched. A switched binding sends one typed
+guest-default notice per current admin, including service access and billing
+readiness. Switched bindings stay On on rollback; list them in `audit_log` by
+`event_type: "org_channel_guest_defaults_applied"` and
+`event_data.guest_access_switched_on: true`. The shared validator and
+key synchronization select legacy narrowing or Grants; final proxy/MCP/effect and
+delivery barriers retain live source/revision checks. A legacy digest drift still
+refuses rather than silently updating the frozen authority.
+
+Rebuilding the same org/bot/specialist preserves the adopted/legacy mode and
+original `continuity_channel_id`, with fresh guest identity and live authority
+checks. Legacy invalid/revoked/node/moved services are dropped. The newest
+incompatible predecessor remains a boundary. Missing/suspended wallets and an invalid legacy cap no longer rewrite the
+carried exposure choice. The subsequent defaults pass can enable a carried Off
+without choice evidence. Guest admission still refuses unusable billing/caps.
+Saving a policy that stays On does not require a wallet; manual Off-to-On does.
+The existing health recommendation reports `enable_billing` before gateway
+advice; provisioning usable billing lets the next guest message proceed. Manual
+Off-to-On retains its wallet requirement. Sender
+verification is not copied; claimed/erased identities cannot become paid guests.
+
+**Automatic pre-#2288 restoration.** A failed v1 org-specialist row with
+`org_access_lost` and a pre-#2288 audit proof is considered by the existing
+leased maintenance worker only while fresh org, admin, bot, specialist and
+route authority still holds. The worker calls the same rebuild path as Reconnect,
+preserves the saved guest policy, never copies sender links, and creates no
+watch, action card, onboarding notice or waiting thread. It tries one row per
+30-second pass, with 1 minute, 5 minute, 15 minute, 1 hour and then 6 hour
+cooldowns. Readiness unavailable is deferred without an attempt or failure
+audit. A successful transition sends the existing channel-health notice once;
+it says that the bot is connected again, whether guest access is on or off as
+before, and that members must verify their chat account again. The member-facing
+membership prompt repeats that fresh-verification guidance for a previously
+linked sender until verification. Confirmed live loss, an existing replacement
+route or a manual reconnect ends restoration for that predecessor. A pending
+release defers it until cleanup settles.
+Completed predecessors are excluded permanently, including after a rule-version
+bump or an expired retry date, so restoration cannot undo a later manual disconnect.
+
+**Guest exposure during restoration.** The worker deliberately restores the
+saved `org_specialist.guests` policy because this is the state the linking
+admin would have received from a defect-free rebuild. The decision is kept in
+the shared `org_channel_service::management::restore_in_session` rebuild policy
+and can be changed in one place to restore with guests off. The restoration audit event and the one health notice
+record whether guests are on or off. Restored sender links are never copied;
+the preserved guest policy therefore never turns an old verified sender into a
+paid guest.
+
+The cutover constant is `2026-11-06 14:34:00 UTC`, when #2288 merged and went
+live after that build. The audit log has no
+`nyxbot_channel_org_access_lost` event after `2026-11-06 08:58:06 UTC`. A
+retirement between merge and rollout would therefore be excluded by this
+choice; production has none. A proof one second before the constant qualifies;
+at or after it does not. The proof query is served by the existing
+`{event_type: 1, created_at: -1}` audit index and reads one projected row.
+
+Each gateway request is bounded at 20 seconds. The usual five gateway requests
+budget 100 seconds, but database retries, source checks and cleanup mean there
+is no whole-rebuild deadline. A rebuild can exceed the 120-second claim lease.
+After expiry another claimant may enter; the existing bot insertion fence
+permits only one live binding, and each failed claimant cleans only its own
+provisional row. Success finalizes through the active replacement's exact claim,
+so an expired predecessor lease cannot leave an in-flight marker or lose the
+restoration audit. Cleanup requires the exact `org_restore_claim_id` and restored
+marker. A manual row has neither and cannot be retired by
+`cleanup_org_restore_provisional`. The release journal retains remote cleanup
+obligations until settlement. The restoration gate checks unsettled releases by
+bot through the existing release index, including attempts whose provisional
+channel document has already been removed.
+
+Rollback stops new claims and drains current work before downgrading.
+`GET /api/v1/admin/channel-bots` must show no `nyxbot_restore_state: in_flight`;
+`GET /api/v1/admin/nyxbot-gateway-releases?states=provisional,due,review_required`
+must show no unsettled release for the deployment's
+`nyxbot_channel_org_access_restoration` audit rows. Check all pages of both reads.
+Old replicas ignore the additive
+restoration fields and treat a restored row as an ordinary active binding; the
+new named partial/latest indexes are additive, so an old `ensure_indexes` call
+neither drops nor conflicts with them.
+Exact holds settle once against their original UTC admission day even across
+cutover, revocation or midnight. Removing the cap never removes funding holds.
+
+Admin and Member GET continue returning legacy `delegated_service_ids`,
+`daily_credits`, `default_daily_credits`, and spend/reserved amounts. Web and mobile
+now tolerate absent amounts and hide Member spend rows, preparing for a later
+server release after compatible clients ship. Existing bot detail is unchanged. Both roles receive `grants_ready`, `guest_policy_mode`,
+`legacy_fields_ignored`, `agent_id` and `effective_guest_services`. PUT accepts
+legacy `service_ids` and `daily_credits`; omission preserves them. In ready mode
+they are ignored, never release a frozen restriction and never restore the cap.
+The sensitive NyxBot `update_channel_access.org_guests` tool retains those optional
+arguments for compatibility, now deprecated; new calls need only `enabled` and
+`expected_revision`. It cannot perform the human-only handoff. Enabling also
+opens private guest admission; group audience settings remain independent.
+
+Rollout requires every executing replica to advertise
+`nyxbot:org-guest-grants-v1` through automatic observed-support readiness; roster/drain declarations are optional.
+Before ready, old and new binaries enforce the old cap/list; adoption is refused.
+Ready removes caps for everyone while preserving legacy service restrictions.
+Recorded active Grants execution tolerates roster warnings while every live
+generation supports it, including new binding/adoption.
+If serving readiness is lost to a hard blocker, retained legacy restrictions apply again. To roll back,
+disable guests and drain/settle on upgraded binaries before downgrading. Prior
+cap-free spending may exceed the retained old cap; do not erase it to restore
+admission. Review old lists/digests/caps before re-enabling on an old binary.
+
+### Finding organization channel member verification (#2242)
+
+On a Lark / Feishu Channel bot detail page, **Setup status** separates app credentials,
+callback challenge, authenticated message receipt, route/agent connection, the current
+member's identity, and outbound delivery. **Verify Bot** checks app credentials only.
+Use **Continue setup / Verify my chat account** to open the bound agent's Channels tab
+at that connection. Every member (including admins) generates their own code, sends it
+in a private message to the bot, waits for observation, then confirms in their own
+first-party NyxID session. Expired codes must be regenerated. Connection success,
+a callback challenge, or delivery receipt does not complete member verification or
+prove an agent answer; membership and expiry checks remain mandatory.
+
+## Automation coordinator completion
+
+Coordinator completion is an optional, default-off enrollment protocol; see
+[Automations](../NYXBOT_SCHEDULES.md#coordinator-completion-v2) for rollout,
+limits, history and cancellation. The delivery-selected thread coordinates:
+NyxBot home, a dedicated NyxBot/specialist webhook thread, or a per-run thread.
+Run now follows the same selection. Accepted assignments and group requests,
+including member @mention handoffs, carry server-derived run/work lineage through
+confirmation cards and async results. Their durable results resume that
+coordinator before final completion. This lineage grants no execution authority;
+webhook confirmation floors also apply to v2 children. Initial occurrence budgets
+are charged once; continuations use per-run bounds and ordinary model billing.
+A disabled option blocks new enrollment while persisted work continues draining.
+
+
+### Onboarding context and audience decisions (#2318)
+
+A hosted bot-setup watch retains an optional, server-authored `source_turn_id` from the exact live chat authority, bound by `source_connect_link_id` to the exact hosted request. If an old replica replaces the request but leaves these unknown fields, the mismatched link makes the context unknown. On completion it reads at most four retained messages around that turn in the requesting owner's conversation, retaining a bounded excerpt of the preceding questions and the partial answer in the setup notice. This historical context is not new authority. Missing/legacy origin, deleted history, or a context reset yields an explicit unknown-context instruction; NyxBot must recover the unanswered questions. The existing outcome sentence stays first so web/mobile keep their compact channel-status label; historical context follows only for the model. Escaped excerpts remain complete JSON and bounded. The setup notice alone has a 4,800-character ceiling. The stable system/schedule prompt still satisfies its 4 KiB compile-time limit.
+
+Creating/linking a personal bot does not mean onboarding is complete and never widens its `private_chats`: a new personal binding is `owner`. NyxBot must not propose `everyone` merely because setup finished. It keeps unanswered questions pending and proposes a wider audience only when the owner asks or actual configuration and a customer test support readiness. Explicit owner opening remains allowed; no keyword classifier, new approval format, readiness veto, or second confirmation is introduced.
+
+The existing `update_channel_access` action summary discloses the live customer-model readiness, instructions/persona presence, memory-note and skill counts, service-grant count and account-read flag before opening. The tool response (including Full access) and human audience settings use the same metadata-only facts. Settings GET adds optional `configuration`; the audience PATCH/tool result adds `audience_readiness`. A post-save model-setup/readiness failure is reported as `readiness_unavailable` with a saved-access explanation, not as an unsuccessful audience write. No instructions, memory contents, or secrets enter these diagnostics or audits.
+
+These are structural facts, not a business-readiness verdict: even a ready model with populated fields may lack correct store information or a successful customer test. Existing guest admission remains authoritative: pending model setup holds eligible source-bound customer work briefly in its encrypted queue (up to the existing 60-second deadline), then resumes with the guest policy or returns the existing safe setup failure. It never grants owner tools or invents an answer while model admission is unavailable. Ready models still require appropriate instructions and testing by the owner.
+
+Old watches omit `source_turn_id`; old servers omit configuration facts, which the UI describes as unchecked. Web and mobile action cards retain their existing summary renderer and one-use decision contract. No schema enum or guest permission changes.
+
+### X direct-message verification diagnostics
+
+A successful owner-link receipt immediately projects the persisted verified
+sender onto the current chat (`owner_chat`, `owner_seen`, and the private title).
+The channel's verified sender IDs remain the execution authority; chat display
+fields grant no permissions. A consumed link-code CAS never reports a second
+successful link. Private X callbacks retain admission dispositions, including
+empty content, policy refusals and processing failures, and project bounded
+outcomes into bot Health. An organization-owned X bot may still reach its linking
+admin's personal specialist while that admin retains live org-admin authority.
+The org owns the bot/route/route key and pays channel usage; this is distinct from
+an enrolled organization-specialist execution lane. See
+[authenticated X outcomes](../CHANNEL_ACTIVITY.md#authenticated-inbound-outcomes-and-x-chat-limits).
+
+Gateway reply-target receipt waits reuse this preparation state: exact 409 `routed_reply_in_progress`, any 5xx, no HTTP response and unreadable/unparseable 2xx allow only the identical same-key operation, with admission recorded only for the exact 409. Marker v2 excludes #2561 workers; v1 upgrades on acquire. A stale sending row needs the frozen request hash v1 and committed target, and retains the original send barrier as its deadline anchor. Every pending wait remains `started` in dispatch lookup. The [receipt and dispatch lookup contract](../CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup) specifies bounds, automatic compatibility readiness and output suppression after local ownership.

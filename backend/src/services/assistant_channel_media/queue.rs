@@ -92,7 +92,7 @@ pub async fn convert_queued(db: &Database, before: DateTime<Utc>) -> AppResult<u
                     };
                     for source_id in &event.media_event_ids {
                         if let Some(source) = db.collection::<NyxbotEvent>(EVENTS)
-                            .find_one(doc! {"_id":source_id,"user_id":&row.user_id,"conversation_id":&row.id})
+                            .find_one(source_filter(&current, source_id, None))
                             .session(&mut *session).await?
                             && let Some(media) = &source.media
                         {

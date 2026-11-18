@@ -20,6 +20,8 @@ pub struct ChannelReplyDelivery {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReplyPart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatting_fallback: Option<String>,
     pub status: PartStatus,
     pub platform_message_ids: Vec<String>,
     pub outbound_message_id: Option<String>,

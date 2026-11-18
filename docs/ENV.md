@@ -49,9 +49,22 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3001` | HTTP listen port |
-| `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
+| `SHUTDOWN_DRAIN_TIMEOUT_SECS` | `25` | Process shutdown budget after SIGTERM/ctrl-c; the default fits Kubernetes' default 30-second grace period without configuration. Requests, response streams and admitted background work drain while both listeners serve. Reserves the smaller of five seconds or 10% of the budget for fenced settlement, release and audit. `0` preserves immediate shutdown, including the existing bounded Discord cancellation. See [Rolling deploys and graceful drain](DEPLOYMENT.md#rolling-deploys-and-graceful-drain). |
+| `BASE_URL` | `http://localhost:3001` | Canonical backend base URL (default JWT issuer/audience); configured HTTPS enables HSTS without subdomain/preload commitments, independent of forwarded request headers. |
+| `CHRONO_PROBE_URL` | *(unset)* | Optional trusted internal chrono-probe HTTP(S) origin; connected-service monitoring also requires the default-off `services:monitoring` flag for the acting person. Unset or invalid configuration returns `monitoring_not_configured` (404). No path, credentials, query or fragment. See [Service monitoring](SERVICE_MONITORING.md). |
+| `INVOCATION_DIAGNOSTICS_ENABLED` | `false` | Startup-only opt-in for automatic failure diagnostic handles; requires `CHRONO_PROBE_URL`. Only ordinary unconstrained access-token callers and downstream 5xx/eligible transport failures qualify. Off performs no diagnostic database write or response decoration. Redemption still checks the live `services:monitoring` flag. |
+| `BASE_URL_ALIASES` | *(empty)* | Comma-separated HTTPS API origins accepted during migration; no paths, credentials, query or fragment. Adds JWT issuer/audience verification overlap and equivalent resource, DPoP, webhook and hosted-asset origins. Minted URLs use `BASE_URL`. |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
+| `FRONTEND_URL_ALIASES` | *(empty)* | Comma-separated HTTPS frontend origins additionally trusted by CORS, CSRF, social `return_to`, login approvals and voice. Does not add JWT issuers/audiences. |
+| `COOKIE_DOMAIN` | *(unset)* | Domain for first-party auth cookies; unset means host-only cookies. |
+| `COOKIE_DOMAIN_ALIASES` | *(empty)* | Comma-separated DNS cookie domains (optional leading dot). On first-party auth responses, the longest matching configured alias replaces `COOKIE_DOMAIN`. Uses Host, or a single `X-Forwarded-Host` only from a peer in `TRUSTED_PROXY_IPS`. Never derives a cookie domain from an arbitrary host. |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+
+Alias lists are opt-in, limited to 32 entries each, and reject malformed or empty
+entries. HTTPS origins may have one trailing slash, which is removed. Cookie
+domains must be DNS names, without ports, paths, wildcards or attributes. An empty
+list preserves existing behavior. Configure only domains you control; see
+[Domain migration](DOMAIN_MIGRATION.md) for rollout and retirement ordering.
 
 ### Frontend nginx policy
 
@@ -83,11 +96,14 @@ expire before removing resource verification support. No runtime restart or
 sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
 
 Deploying the provider still needs a verified drain of existing proxy streams
-and NyxBot turns. The current backend does not track those tasks through a
-graceful shutdown; losing a worker can end its turn as `turn_lost`, without
-automatic replay. Keep existing processes alive until their admitted work is
-complete and new work has been routed elsewhere. The disabled feature flag
-does not protect unrelated in-flight work from a backend process replacement.
+and NyxBot turns. SIGTERM/ctrl-c starts the backend drain described below;
+configure the platform termination grace period to cover it. An early kill
+still ends active turns as `turn_lost`, without automatic replay. The disabled
+feature flag does not protect admitted work from a process replacement.
+
+`GET /ready` is unauthenticated and uses only process state: 200 while serving,
+503 after drain begins. Use it for traffic readiness. `GET /health` retains its
+existing liveness response, including 200 throughout the drain.
 
 ## Remote Machine backend Kubernetes authentication
 
@@ -129,9 +145,9 @@ listener through a public Service, ingress, or load balancer.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
-| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Complete comma-separated serving `INSTANCE_NAME` roster, identical on every upgraded replica. Empty/unready rosters block effective security feature activation with HTTP 503. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md). |
-| `SECURITY_ROLLOUT_DRAINED` | `false` | Exact `true` acknowledges that all old/unregistered serving replicas and relevant writers were drained. This is an operator assertion, not discovery. It must be true on every declared replica for gated security feature activation. |
+| `INSTANCE_NAME` | `POD_NAME`, `HOSTNAME`, or `nyxid-backend` | Process label; any value is supported, including shared names or generated Deployment pod names. Generation IDs separately fence ownership and leases. No readiness naming convention is required. |
+| `SECURITY_ROLLOUT_REPLICAS` | *(empty)* | Optional comma-separated diagnostic roster, still parsed/published for old binaries. Absent, missing, duplicate or differing names never refuse this binary. A matching roster with drained=true makes first recording immediate; otherwise support settles for 90 seconds. No configuration is required. See [security readiness](SECURITY_ROLLOUT_READINESS.md). |
+| `SECURITY_ROLLOUT_DRAINED` | `false` | Optional legacy diagnostic assertion, still published for old binaries. False/absent is advisory here and does not block serving, flag enables, publication or automatic activation. True plus a clean roster enables immediate recording. This does not change independent data-migration drain requirements. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
 | `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
 | `INTERNAL_DISPATCH_HMAC_KEY` | legacy derivation from `ENCRYPTION_KEY`, then JWT PEM | Optional 32-byte hex override (64 hex characters) used during legacy HMAC preparation. A configured `HMAC_KEYSET_PATH` is authoritative after adoption. All replicas must retain the same final domain key; changing an override against a durable pin fails startup. |
@@ -352,14 +368,36 @@ prices with `nyxid admin billing service show <slug>` and
 |----------|---------|-------------|
 | `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | Path to RSA private key PEM file |
 | `JWT_PUBLIC_KEY_PATH` | `keys/public.pem` | Path to RSA public key PEM file |
-| `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
+| `JWT_ISSUER` | `BASE_URL` | JWT `iss` claim and OIDC discovery issuer. Pin during a domain migration to preserve external client validation. |
+| `JWT_AUDIENCE` | `BASE_URL` | Audience for NyxID access, refresh, delegated, service-account and relay access tokens. Does not replace OAuth ID-token client audiences or the dedicated relay reply/callback audiences. Verification accepts this value plus `BASE_URL_ALIASES`; issuer verification accepts `JWT_ISSUER` plus those aliases. |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
-| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
+| `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Rolling refresh-token lifetime; restarts on rotation. First-party account refreshes also require an unexpired session (see below) |
 | `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
 | `JWT_ASSISTANT_FORWARD_TTL_SECS` | `300` (5 min) | **LEGACY / tombstone.** Was the TTL of the retired `assistant_forward` marker token. Live assistant capability uses a standard delegated access token whose 300-second lifetime is the compile-time constant `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`; there is no environment variable for that lifetime, so setting this variable changes no live assistant token. See [Assistant Chat Architecture](chat/01-architecture.md#authorization-is-not-caller-passthrough). |
 | `SA_TOKEN_TTL_SECS` | `3600` (1 hour) | Service account token lifetime in seconds |
+
+First-party account sessions have a **fixed 30-day absolute lifetime** from login
+(`token_service::SESSION_TTL_SECS`, not an environment variable). Refresh rotation
+updates `last_active_at` and issues a new refresh token with a fresh rolling TTL;
+it does **not** extend the session's `expires_at`. Legacy first-party refresh tokens
+without a session binding receive a single fixed 30-day anchor at their first
+migration refresh. Neither ordinary activity nor `nyxid session refresh` bypasses
+this cap. `nyxid session status|list --output json` exposes `session_expires_at`
+and `refresh_expires_at`; status/list warn within three days of the absolute
+expiry. For unattended work, authorize `nyxid login --agent-key` with suitable
+scopes and key expiry: these credentials do not refresh, but remain subject to
+the key's expiry, revocation and live permissions.
+
+`POST /api/v1/auth/refresh` adds identifier-free `details.reason` values:
+`refresh_expired`, `refresh_reused`, `refresh_revoked`, `refresh_not_found`,
+`session_expired`, `session_revoked`, and `session_unavailable`. Status, error key,
+numeric code and message are unchanged. `session_unavailable` includes a parent
+removed by TTL cleanup; without its row the server cannot distinguish expiry
+from removal. Other authentication failures retain their existing generic reason.
+During rolling upgrades, clients must tolerate older replicas without these
+specific reasons and avoid treating "expired or revoked" as confirmed expiry.
 
 In development mode, RSA keys are auto-generated if the files do not exist. In production, you must provide pre-generated keys:
 
@@ -371,9 +409,11 @@ chmod 600 keys/private.pem
 
 ## OAuth Broker Bindings (Optional, V2 hardening)
 
-Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3). DPoP support (RFC 9449), AAD-bound encryption, chain-follow retry, RFC 7662 introspection, and revocation webhooks need no environment configuration. Two broker hardening gates are default-off for compatibility while existing broker clients adopt sender constraints and admin provisioning. These env values are startup defaults only: platform admins can override or clear them at runtime through Admin → OAuth Clients → Broker Rollout Policy (`GET/PATCH /api/v1/admin/settings/broker`). A MongoDB override wins over the env default until it is reset to `null`; with no override and no env var, behavior remains default-off. The process that handles an admin update refreshes immediately, and other backend replicas refresh their in-memory snapshot from MongoDB on a short background interval, so enforcement paths do not add per-request database reads.
+Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3). DPoP support (RFC 9449), AAD-bound encryption, chain-follow retry, RFC 7662 introspection, and revocation webhooks need no environment configuration. Two broker hardening gates are default-off for compatibility while existing broker clients adopt sender constraints and admin provisioning. These env values are startup defaults only: platform admins can override or clear them at runtime through Admin → OAuth Clients → Broker Rollout Policy (`GET/PATCH /api/v1/admin/settings/broker`). A MongoDB override wins over the env default until it is reset to `null`; with no override and no env var, behavior remains default-off. The process that handles an admin update refreshes immediately. Other backend replicas refresh when their worker starts, then every five seconds. The snapshot has a 15-second maximum age (three refresh intervals), tolerating two missed polls. Fresh snapshots and gates already required by a stale snapshot add no per-request database commands. Consulting a stale permissive gate performs one inline policy read: success refreshes the snapshot using the read's start time; failure returns retryable `OAuthAuthorityUnavailable` (12900, HTTP 503), never a policy denial. Concurrent callers may each perform one read; later callers reuse the refreshed snapshot. The replica logs one error on becoming stale and one info on recovery. Authorization-code exchange loads the client before any policy refresh or code consumption. Non-broker clients and admin-provisioned, sender-constrained broker clients need no policy read, even with a stale snapshot. An unavailable policy read leaves the code usable for retry when an unknown gate affects that exchange. Administrative settings/client metadata continue to show the last observed settings.
 
-> **Operational caveat:** If the `platform_settings` document is manually deleted or reset to a revision below a process's cached broker-policy revision, that process retains its last-known-good policy until it is restarted.
+CAE notification intents commit with revocation; receiver outages never block or roll back the revoke. The worker rebuilds the signed body from identifiers, pins validated public destination addresses with proxies and redirects disabled, retries demonstrably unsent failures and explicit rate-limit rejections with bounded backoff, and parks ambiguous sends as uncertain because the receiver contract does not guarantee deduplication. Delivered audit intents and CAE intents without a configured webhook are deleted; delivered CAE receipts and failed/uncertain effects expire after 30 days (plus MongoDB TTL cleanup delay), while outstanding work has no expiry. Integrity shows bounded counts by kind/state and the oldest outstanding age; failed/uncertain transitions emit one error log when acknowledged.
+
+> **Revision resets:** One lower-revision read is ignored without renewing freshness. The same lower revision on two consecutive successful, non-overlapping reads confirms a store reset, which is logged at warn with both revisions. After a document deletion or revision reset, a healthy replica follows the stored state within two refresh intervals, without a restart. A failed read or an intervening current/newer revision clears the reset candidate. Once a reset is confirmed, responses from reads started before the confirming read are ignored regardless of their revision. Otherwise higher revisions still win regardless of arrival order.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -389,7 +429,7 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `RATE_LIMIT_BURST` | `30` | Cluster-wide burst capacity and per-IP limit |
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
-| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require the complete declared/drained replica roster with this env true, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
+| `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require durable activation and live observed support; roster/drain declarations are advisory, with this env true locally and on every live generation, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
 | `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
@@ -471,6 +511,10 @@ Legacy derivation couples pairing and other domains to encryption/JWT sources. A
 The erasure credential is a project API credential, not the ingestion DSN. Preserve historical destination coverage and verify vendor processing; queue/HTTP acceptance is not deletion completion. See [TELEMETRY.md](TELEMETRY.md) for account/device controls, withdrawal, dispatch reconciliation and manual erasure evidence. `DO_NOT_TRACK` and `NYXID_TELEMETRY=off` further deny CLI events; `NYXID_TELEMETRY=on` does not grant consent.
 
 ## Audit Log Hash Chain (Optional)
+
+Broker binding/consent revocations, administrator user creation, profile/role/status changes, password resets, email verification and session revocation, role and group creation/update/deletion and membership changes, and administrator invite creation/note edits/deactivation commit metadata-only audit intents with their source writes; the relay chains each stable event UUID once. Administrator profile edits retain the prior audit facts, including submitted display names and email values; avatar URLs retain origin/path while query strings, fragments and credential-bearing userinfo are removed. Required metadata is bounded to 16 KiB before mutation commits. Required audit strings retain byte-for-byte values up to their UTF-8 byte cap (identifiers/IP/key name 256, User-Agent 1,024, email/display name 512, sanitized avatar URL 4,096), including a visible `...[truncated]` suffix when shortened; request validation and stored account values are unchanged. Invite creation retains the code identifier and usage limit but redacts the redeemable code as credential material; freeform notes remain excluded from audit metadata. Old replicas retain their existing behavior, and rollback parks intents until a compatible worker returns.
+
+Role assignment to all users, role deletion and group deletion are synchronous atomic operations. The tested operating envelope is at most 20,000 matching users (about 5 KiB each), 1,000 matching groups and 25 concurrent user updates per second across 1,000 users, with a 2 GiB WiredTiger cache and the default 60-second transaction lifetime. This is an operational recommendation, not a new API limit or a latency guarantee. Above that size or write load, use a maintenance window that pauses user mutations, or assign explicit user-id batches of at most 1,000 through the existing bulk API (each batch is a separately audited action); role and group deletion have no chunked mode. Retry a definite database-error response only after reducing contention: the transaction leaves no partial memberships or audit intent. Sustained contention at 100 updates/sec completed in local testing but caused hundreds of retries; it is outside the recommended live-write envelope.
 
 NyxID audit-log rows created after this feature is enabled are tamper-evident. Each chained row carries `seq`, `prev_hash`, and `entry_hash`; `entry_hash` is an HMAC-SHA256 over a canonical encoding of the row content and the previous row's hash. The HMAC key stays in process memory and is never written to MongoDB, so a database-only attacker cannot recompute a valid chain after editing, deleting, inserting, or reordering chained rows.
 
@@ -605,6 +649,7 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_RATE_LIMIT_BURST` | `20` | Per-trigger token bucket capacity. |
 | `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
 | `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
+| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Enroll new assistant automation runs using `automation:coordinator-completion-v2` serving readiness. Recorded activation tolerates supported roster warnings; hard-unready runs use legacy behavior; disabling preserves enrolled work. No migration/startup mode. Inspect `GET /api/v1/admin/automation-continuations/readiness` (admin/operator). Disable and drain all v2 work before binary downgrade; see [Automations](NYXBOT_SCHEDULES.md#coordinator-completion-v2). |
 
 Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
 
@@ -621,7 +666,7 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
-## SMTP (Optional)
+## SMTP (Reserved; currently unused)
 
 | Variable | Description |
 |----------|-------------|
@@ -631,7 +676,7 @@ FCM and APNs are independent -- configure either or both. Push notifications are
 | `SMTP_PASSWORD` | SMTP authentication password |
 | `SMTP_FROM_ADDRESS` | Sender address for outbound email |
 
-For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
+These variables are reserved for a future mail transport. The current NyxID server does not send email, so setting them has no effect on account verification or password-reset delivery. For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
 
 ## Credential Nodes (Optional)
 
@@ -676,9 +721,23 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 Invitation codes are controlled by the global `auth:invitation-code` feature flag under Admin > Feature Flags. It defaults to enabled; disable it for public registration. `INVITE_CODE_REQUIRED` is no longer read.
 
+Signup reserves capacity for five minutes. The next reservation attempt for that
+code atomically reclaims expired pending signups; no background sweep is needed
+to make capacity available. Admin responses subtract expired reservations using
+database time without rewriting the stored count; live reservations still hold
+capacity. Redemption and account creation commit together. An
+expired reservation may finish if it has not been reclaimed; after reclaim the
+old signup cannot create an account. Session failures after account creation do
+not refund a committed use. Legacy usages and counters are retained; only new
+reservations carry the identity needed for automatic reclaim. During rollout,
+old replicas retain their previous crash-compensation behavior. Rolling back
+keeps the rows readable but suspends reclaim until an upgraded replica handles
+the code again.
+
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
+| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false**. Existing accounts, including prepared reviewer accounts, can use `/login?enable_email=true` to display the existing email/password login form without enabling email registration. This query parameter only controls form visibility; normal password, MFA and session checks apply. The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay
 
@@ -815,3 +874,37 @@ After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
 serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+
+
+### CMA Sandbox prepaid admission
+
+`experimental:cma-sandbox-billing` is the sole CMA admission rollout control.
+The admin feature flag defaults to false and resolves global, matching organization,
+then personal overrides. Enabling new quotes/windows also
+requires `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, a configured Lago
+client, exact-accounting readiness, the owner's existing billing rollout and
+subscription entitlement, and a synchronized effective CMA rate card.
+CMA billing has no dedicated environment configuration. The unique active `cma`
+catalog service owns its Sandbox billing settings. A platform admin selects its
+authorized General-purpose producer service account on the service edit page;
+the issued token and live account must both allow `billing:sandbox:write`.
+Missing or ambiguous service/producer settings fail closed. Producer changes are
+transactionally audited and the selected account becomes platform-protected.
+
+Receipt recovery and evidence finalization remain available to the configured
+producer when new admission is disabled. Keep its authority and the existing
+billing reconciler available to drain admitted liability. Deployment seeds the
+approved #2151 rates once without enabling billing. Admin Billing Settings can
+publish immutable future rate versions without redeployment. No new wallet is
+introduced. Upgrade all API readers and billing workers before enabling the
+three Sandbox metrics; old enum readers are unsafe
+once those units have been persisted. See [CMA billing](CMA_BILLING.md).
+
+
+## Android App Links
+
+`ANDROID_APP_PACKAGE` is the Android application id (for example `fun.chronoai.nyxid`). `ANDROID_APP_SHA256_CERT_FINGERPRINTS` is a comma-separated list of SHA-256 signing-certificate fingerprints, each exactly 32 colon-delimited hexadecimal bytes (`AA:BB:…`). Empty or whitespace-only comma-separated segments are ignored; surrounding whitespace is trimmed and fingerprints are normalized to uppercase and deduplicated. Malformed nonempty values fail startup, consistent with other validated configuration. Missing either value makes `GET /.well-known/assetlinks.json` return 404. With both configured, it returns standard Digital Asset Links JSON with `application/json` and `Cache-Control: public, max-age=300`. These values are public identity metadata.
+
+Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
+
+`MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.

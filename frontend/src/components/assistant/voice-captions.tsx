@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { VoiceCaption } from "./voice-caption-state";
 export type { VoiceCaption, VoiceView } from "./voice-caption-state";
 
@@ -9,6 +11,7 @@ export function VoiceCaptionText({
   caption: VoiceCaption;
   playbackMs: number;
 }) {
+  useUiTranslation();
   const fragments = caption.fragments;
   const timed =
     !!fragments?.length &&
@@ -17,13 +20,13 @@ export function VoiceCaptionText({
     <div
       className={
         caption.speaker === "user"
-          ? "ml-auto max-w-[90%] rounded-xl bg-overlay px-3 py-2 text-13"
-          : "ml-[30px] whitespace-pre-wrap px-[7px] text-13 leading-relaxed"
+          ? "ml-auto max-w-[90%] rounded-xl bg-overlay px-3 py-2 text-15"
+          : "ml-[30px] whitespace-pre-wrap px-[7px] text-15 "
       }
       data-voice-caption={caption.id}
     >
       <span className="sr-only">
-        {caption.speaker === "user" ? "You" : "Assistant"}:{" "}
+        {caption.speaker === "user" ? translateUi("You") : translateUi("Assistant")}:{" "}
       </span>
       {caption.speaker === "user" ? (
         caption.text
@@ -57,7 +60,7 @@ export function VoiceCaptionText({
         </span>
       )}
       {caption.sealed && !caption.complete && (
-        <span className="text-text-tertiary"> (interrupted)</span>
+        <span className="text-text-tertiary">{translateUi(" (interrupted)")}</span>
       )}
     </div>
   );

@@ -230,13 +230,18 @@ pub async fn pool_aliases(
     auth.ensure_llm_proxy_access()?;
     let actor = auth.proxy_resolution_user_id();
     let mut owners = vec![actor.clone()];
-    owners.extend(
-        crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
-            .await?
-            .into_iter()
-            .filter(|m| m.role.can_proxy())
-            .map(|m| m.org_user_id),
-    );
+    if let Some(shared) = auth.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        owners.push(shared.owner().to_owned());
+    } else {
+        owners.extend(
+            crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
+                .await?
+                .into_iter()
+                .filter(|m| m.role.can_proxy())
+                .map(|m| m.org_user_id),
+        );
+    }
     let offset = query.offset.unwrap_or(0);
     if offset > 1_000_000 {
         return Err(AppError::BadRequest("Invalid alias offset".into()));
@@ -265,7 +270,7 @@ pub async fn pool_aliases(
         {
             continue;
         }
-        let plan = crate::services::service_pool_service::plan_candidates_with_allowlist(
+        let plan = crate::services::service_pool_service::plan_candidates_with_access(
             &state.db,
             &state.encryption_keys,
             &actor,
@@ -278,6 +283,7 @@ pub async fn pool_aliases(
             Some(br#"{"messages":[{"role":"user","content":""}]}"#),
             allowed.as_ref(),
             nodes.as_ref(),
+            auth.org_agent_access.as_deref(),
         )
         .await;
         let available = match plan {
@@ -343,9 +349,72 @@ pub async fn pool_aliases(
 pub async fn llm_proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    path: Path<(String, String)>,
+    mut request: Request<Body>,
+) -> AppResult<Response> {
+    if let Some(context) = &auth_user.execution_permission {
+        context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
+    }
+    let trace = crate::turn_trace::TurnContext::for_request(
+        request.headers(),
+        auth_user
+            .assistant_chat
+            .as_ref()
+            .and_then(|chat| chat.turn_id.as_deref()),
+    );
+    let model = if request.method() == Method::POST
+        && crate::services::assistant_model_observer::protocol(&path.0.1)
+            != crate::services::assistant_model_observer::Protocol::Unknown
+    {
+        crate::services::assistant_model_observer::ModelRequest::from_auth(&state.db, &auth_user)
+    } else {
+        None
+    };
+    crate::services::assistant_model_observer::CURRENT_MODEL
+        .scope(
+            model,
+            trace.response(crate::turn_trace::Stage::Proxy, async move {
+                let diagnostic =
+                    super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                if diagnostic.is_none() {
+                    return Box::pin(llm_proxy_request_inner(
+                        State(state),
+                        auth_user,
+                        path,
+                        request,
+                    ))
+                    .await;
+                }
+                let result = Box::pin(llm_proxy_request_inner(
+                    State(state.clone()),
+                    auth_user.clone(),
+                    path,
+                    request,
+                ))
+                .await;
+                super::invocation_diagnostics::HttpInvocation::finish(
+                    diagnostic, &state, &auth_user, result,
+                )
+                .await
+            }),
+        )
+        .await
+}
+
+async fn llm_proxy_request_inner(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (request.method() == Method::CONNECT
+            || request.headers().contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
     auth_user
@@ -363,11 +432,16 @@ pub async fn llm_proxy_request(
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
 
+    let diagnostic_target = request
+        .extensions()
+        .get::<super::invocation_diagnostics::Target>()
+        .cloned();
     let user_id_str = auth_user.user_id.to_string();
 
     // Resolve the downstream service for this provider slug
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -380,6 +454,16 @@ pub async fn llm_proxy_request(
     let body_bytes =
         super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
             .await?;
+
+    capture_permission_input(
+        &auth_user,
+        Some(&provider_slug),
+        &path,
+        &method,
+        query.as_deref(),
+        &body_bytes,
+        &headers,
+    );
 
     let operation_path = if !auth_user.assistant_operation_scopes.is_empty()
         && provider_slug == "openai-codex"
@@ -490,6 +574,9 @@ pub async fn llm_proxy_request(
         .await?
         {
             Some(resolution) => {
+                if let Some(target) = &diagnostic_target {
+                    target.record(Some(&resolution.user_service_id));
+                }
                 operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
@@ -579,6 +666,85 @@ pub async fn llm_proxy_request(
         }
     }
 
+    let mut target = target;
+    projection.apply(&mut target);
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
+    let model_request = crate::services::assistant_model_observer::current();
+    if let Some(model) = &model_request {
+        model.configure_policy(
+            &auth_user,
+            &target.service,
+            method.as_str(),
+            &path,
+            query.as_deref(),
+            &headers,
+            &body_bytes,
+            None,
+        );
+    }
+    request_audit.observe_model(model_request.as_ref());
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            &request_method_str,
+            &dispatch_path,
+            Some(&dispatch_body),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            Some(&dispatch_body),
+            crate::services::mcp_service::http_carries_method_override(
+                &request_method_str,
+                &headers,
+                query.as_deref(),
+                &dispatch_body,
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &mut target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
     let approval_auto = check_llm_approval(
@@ -605,57 +771,55 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        owner_for_approval.as_deref(),
-        &target,
-        &request_method_str,
-        &dispatch_path,
-        query.as_deref(),
-        &dispatch_body,
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
         return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
     }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                &request_method_str,
+                &dispatch_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
-    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
-    let billing_resource_owner_id = owner_for_approval
-        .as_deref()
-        .unwrap_or(&billing_resolution_user_id);
-    let credential_class = llm_credential_class(
-        resolved_via_user_service,
-        master_credential,
-        credential_source.as_deref(),
-        &target,
-    );
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
-    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
-        &state.db,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        &service_id,
-        billing_resource_owner_id,
-        &billing_request_id,
-        credential_class,
-    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -686,6 +850,7 @@ pub async fn llm_proxy_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_payer(auth_user.assistant_chat.as_deref())
         .with_assistant_provenance(
             auth_user.assistant_turn_fence.is_some(),
             false,
@@ -758,17 +923,26 @@ pub async fn llm_proxy_request(
         &auth_user.user_id.to_string(),
     )
     .await?;
-    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
-        admission
-            .http_egress(
-                &state.db,
-                &state.encryption_keys,
-                &target,
-                method.as_str(),
-                &dispatch_path,
+    let egress_guard = assistant_decision
+        .admission
+        .as_ref()
+        .map(|admission| {
+            admission
+                .http_egress(
+                    &state.db,
+                    &state.encryption_keys,
+                    &target,
+                    method.as_str(),
+                    &dispatch_path,
+                )
+                .projected(&projection)
+                .observed(model_request.as_ref())
+        })
+        .or_else(|| {
+            crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(
+                model_request.as_ref(),
             )
-            .projected(&projection)
-    });
+        });
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -864,6 +1038,7 @@ pub async fn llm_proxy_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -980,7 +1155,10 @@ pub async fn llm_proxy_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    if let Some(model) = &model_request {
+        model.complete().await?;
+    }
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 
@@ -993,9 +1171,57 @@ pub fn gateway_request(
     state: State<AppState>,
     auth_user: AuthUser,
     path: Path<String>,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> futures::future::BoxFuture<'static, AppResult<Response>> {
-    Box::pin(gateway_request_inner(state, auth_user, path, request))
+    Box::pin(async move {
+        if let Some(context) = &auth_user.execution_permission {
+            context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
+        }
+        let trace = crate::turn_trace::TurnContext::for_request(
+            request.headers(),
+            auth_user
+                .assistant_chat
+                .as_ref()
+                .and_then(|chat| chat.turn_id.as_deref()),
+        );
+        let model = if request.method() == Method::POST
+            && crate::services::assistant_model_observer::protocol(&path.0)
+                != crate::services::assistant_model_observer::Protocol::Unknown
+        {
+            crate::services::assistant_model_observer::ModelRequest::from_auth(
+                &state.0.db,
+                &auth_user,
+            )
+        } else {
+            None
+        };
+        crate::services::assistant_model_observer::CURRENT_MODEL
+            .scope(
+                model,
+                trace.response(crate::turn_trace::Stage::Proxy, async move {
+                    let diagnostic = super::invocation_diagnostics::HttpInvocation::start(
+                        &state.0,
+                        &mut request,
+                    );
+                    if diagnostic.is_none() {
+                        return Box::pin(gateway_request_inner(state, auth_user, path, request))
+                            .await;
+                    }
+                    let result = Box::pin(gateway_request_inner(
+                        state.clone(),
+                        auth_user.clone(),
+                        path,
+                        request,
+                    ))
+                    .await;
+                    super::invocation_diagnostics::HttpInvocation::finish(
+                        diagnostic, &state.0, &auth_user, result,
+                    )
+                    .await
+                }),
+            )
+            .await
+    })
 }
 
 async fn gateway_request_inner(
@@ -1007,6 +1233,7 @@ async fn gateway_request_inner(
     if !auth_user.assistant_operation_scopes.is_empty() {
         crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
     }
+    let model_cancellation = crate::downstream_disconnect::request_cancellation(&request);
     let gateway_started_at = std::time::Instant::now();
     let gateway_uri = request.uri().clone();
     let gateway_extensions = request.extensions().clone();
@@ -1015,6 +1242,9 @@ async fn gateway_request_inner(
     auth_user
         .ensure_live_assistant_turn(&state.db, "llm.gateway")
         .await?;
+    if path == "assistant-model-context" {
+        return super::assistant_platform_models::context(&state, &auth_user, request).await;
+    }
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmGateway,
@@ -1035,6 +1265,16 @@ async fn gateway_request_inner(
     )
     .await?;
 
+    capture_permission_input(
+        &auth_user,
+        None,
+        &path,
+        &method,
+        query.as_deref(),
+        &body_bytes,
+        &headers,
+    );
+
     // Parse body as JSON to extract model
     let body_json: serde_json::Value = if body_bytes.is_empty() {
         return Err(AppError::ValidationError(
@@ -1054,6 +1294,22 @@ async fn gateway_request_inner(
         .ok_or_else(|| {
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
+
+    // Reserved platform IDs must never fall through to provider-name heuristics.
+    if model.starts_with("nyxid/") {
+        return Box::pin(super::platform_model_gateway::execute(
+            state,
+            auth_user,
+            path,
+            method,
+            query,
+            headers,
+            body_bytes,
+            body_json,
+            model_cancellation,
+        ))
+        .await;
+    }
 
     if let Some(pool_slug) = model.strip_prefix("pool:") {
         if pool_slug.is_empty() || pool_slug.contains('/') {
@@ -1097,6 +1353,9 @@ async fn gateway_request_inner(
         model,
         is_streaming,
         billing_egress_permit,
+        gateway_extensions
+            .get::<super::invocation_diagnostics::Target>()
+            .cloned(),
     ))
     .await
 }
@@ -1116,7 +1375,15 @@ async fn gateway_provider_request(
     model: String,
     is_streaming: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    diagnostic_target: Option<super::invocation_diagnostics::Target>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(&auth_user)
+        && (method == Method::CONNECT || headers.contains_key(axum::http::header::UPGRADE))
+    {
+        return Err(AppError::Forbidden(
+            "Shared streams must use the service proxy".into(),
+        ));
+    }
     let user_id_str = auth_user.user_id.to_string();
     // Resolve provider slug from model name
     let primary_slug =
@@ -1134,6 +1401,7 @@ async fn gateway_provider_request(
     // Resolve the downstream service
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -1229,6 +1497,9 @@ async fn gateway_provider_request(
         .await?
         {
             Some(resolution) => {
+                if let Some(target) = &diagnostic_target {
+                    target.record(Some(&resolution.user_service_id));
+                }
                 operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
@@ -1346,6 +1617,85 @@ async fn gateway_provider_request(
         &headers,
     )?;
 
+    let mut target = target;
+    projection.apply(&mut target);
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let billing_resource_owner_id = effective_owner_for_approval
+        .as_deref()
+        .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
+    let model_request = crate::services::assistant_model_observer::current();
+    if let Some(model) = &model_request {
+        model.configure_policy(
+            &auth_user,
+            &target.service,
+            method.as_str(),
+            &path,
+            query.as_deref(),
+            &headers,
+            &body_bytes,
+            None,
+        );
+    }
+    request_audit.observe_model(model_request.as_ref());
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            "POST",
+            &final_path,
+            final_body_bytes.as_deref(),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            final_body_bytes.as_deref(),
+            crate::services::mcp_service::http_carries_method_override(
+                "POST",
+                &headers,
+                query.as_deref(),
+                final_body_bytes.as_deref().unwrap_or_default(),
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &mut target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
     let approval_auto = check_llm_approval(
@@ -1372,57 +1722,55 @@ async fn gateway_provider_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
-    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
-        &state,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        effective_owner_for_approval.as_deref(),
-        &target,
-        "POST",
-        &final_path,
-        query.as_deref(),
-        final_body_bytes.as_deref().unwrap_or_default(),
-        headers
-            .get(crate::services::assistant_service_execution::ACK_HEADER)
-            .and_then(|value| value.to_str().ok()),
-        None,
-        &headers,
-        &projection,
-    )
-    .await?;
+    let mut assistant_decision =
+        crate::services::assistant_service_execution::check_http_projected(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            headers
+                .get(crate::services::assistant_service_execution::ACK_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            None,
+            &headers,
+            &projection,
+        )
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(409);
         return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
     }
+    if let Some(admission) = assistant_decision.admission.as_mut() {
+        admission
+            .materialize_http(
+                &state.db,
+                &state.encryption_keys,
+                &mut target,
+                "POST",
+                &final_path,
+                &projection,
+            )
+            .await
+            .inspect_err(|error| request_audit.admission_error(error))?;
+    }
+    target
+        .require_credential_materialized()
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
-    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
-    let billing_resource_owner_id = effective_owner_for_approval
-        .as_deref()
-        .unwrap_or(&billing_resolution_user_id);
-    let credential_class = llm_credential_class(
-        resolved_via_user_service,
-        master_credential,
-        credential_source.as_deref(),
-        &target,
-    );
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
-    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
-        &state.db,
-        &auth_user,
-        operation_user_service_id.as_deref(),
-        &service_id,
-        billing_resource_owner_id,
-        &billing_request_id,
-        credential_class,
-    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
@@ -1453,6 +1801,7 @@ async fn gateway_provider_request(
                 .inspect_err(|error| request_audit.admission_error(error))?
         };
     let billing_ctx = billing_ctx
+        .with_assistant_payer(auth_user.assistant_chat.as_deref())
         .with_assistant_provenance(
             auth_user.assistant_turn_fence.is_some(),
             false,
@@ -1565,17 +1914,26 @@ async fn gateway_provider_request(
         &auth_user.user_id.to_string(),
     )
     .await?;
-    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
-        admission
-            .http_egress(
-                &state.db,
-                &state.encryption_keys,
-                &target,
-                method.as_str(),
-                &final_path,
+    let egress_guard = assistant_decision
+        .admission
+        .as_ref()
+        .map(|admission| {
+            admission
+                .http_egress(
+                    &state.db,
+                    &state.encryption_keys,
+                    &target,
+                    method.as_str(),
+                    &final_path,
+                )
+                .projected(&projection)
+                .observed(model_request.as_ref())
+        })
+        .or_else(|| {
+            crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(
+                model_request.as_ref(),
             )
-            .projected(&projection)
-    });
+        });
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -1646,6 +2004,7 @@ async fn gateway_provider_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -1765,7 +2124,10 @@ async fn gateway_provider_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    if let Some(model) = &model_request {
+        model.complete().await?;
+    }
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 
@@ -2049,31 +2411,37 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-            tokio::spawn(async move {
+            let checkpoint_eligible = status.is_success()
+                && crate::services::billing::usage_checkpoint::supports_path(
+                    downstream_response.url().path(),
+                );
+            crate::turn_trace::spawn_cleanup(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut checkpoints =
+                    stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, stream.next()).await {
+                    match {
+                        let shutdown = crate::services::shutdown::process();
+                        tokio::select! {
+                            biased;
+                            () = shutdown.stopped() => break,
+                            result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                        }
+                    } {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                            while let Some(event) = parse_next_sse_event(&mut buffer) {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    accumulator.observe(usage, mode);
-                                }
-                            }
+                            crate::services::proxy_http_response::observe_sse_chunk(
+                                &mut buffer,
+                                &mut accumulator,
+                                &mut checkpoints,
+                                &bytes,
+                                status.is_success(),
+                            )
+                            .await;
 
                             if tx.send(Ok(bytes)).await.is_err() {
                                 break;
@@ -2347,26 +2715,48 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-    tokio::spawn(async move {
+    let checkpoint_eligible = downstream_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(crate::mw::security_headers::is_sse_media_type)
+        && crate::services::billing::usage_checkpoint::supports_path(
+            downstream_response.url().path(),
+        );
+    crate::turn_trace::spawn_cleanup(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
         let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
         let mut response_len: i64 = 0;
+        let mut checkpoints =
+            stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
         loop {
-            match tokio::time::timeout(idle_timeout, stream.next()).await {
+            match {
+                let shutdown = crate::services::shutdown::process();
+                tokio::select! {
+                    biased;
+                    () = shutdown.stopped() => break,
+                    result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                }
+            } {
                 Ok(Some(Ok(bytes))) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                     while let Some(event) = parse_next_sse_event(&mut buffer) {
-                        if let Some((usage, mode)) =
-                            llm_usage_service::extract_reported_usage_from_sse_event(
-                                event.event_type.as_deref(),
-                                &event.data,
-                            )
-                        {
-                            accumulator.observe(usage, mode);
+                        if let Ok(value) = serde_json::from_str(&event.data) {
+                            checkpoints
+                                .observe_value(event.event_type.as_deref(), &value)
+                                .await;
+                            if let Some((usage, mode)) =
+                                llm_usage_service::extract_reported_usage_from_value(
+                                    event.event_type.as_deref(),
+                                    &value,
+                                )
+                            {
+                                accumulator.observe(usage, mode);
+                            }
                         }
 
                         if let Some(translated) =
@@ -2461,7 +2851,7 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
-async fn preflight_llm_deny_before_resolution(
+pub(super) async fn preflight_llm_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2498,6 +2888,16 @@ async fn preflight_llm_deny_before_resolution(
     .await?;
 
     if denied {
+        crate::services::assistant_model_observer::denied_before_resolution(
+            state,
+            auth_user,
+            &hint.service_id,
+            &hint.service_owner_id,
+            None,
+            method_str,
+            path,
+        )
+        .await?;
         return Err(AppError::Forbidden(
             "Operation denied by approval policy".to_string(),
         ));
@@ -2507,7 +2907,7 @@ async fn preflight_llm_deny_before_resolution(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn check_llm_approval(
+pub(crate) async fn check_llm_approval(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2520,11 +2920,48 @@ async fn check_llm_approval(
     operation_guest: bool,
     method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
+    let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
+    operation_descriptor::apply_inference_contract(
+        &mut operation,
+        service,
+        body,
+        method_override,
+        auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(|chat| chat.guest && chat.turn_live),
+    );
+    check_llm_approval_descriptor(
+        state,
+        auth_user,
+        service_id,
+        &service.name,
+        &service.slug,
+        operation,
+        service_owner_user_id,
+        is_auto_connected,
+        operation_guest,
+    )
+    .await
+}
+
+/// Shared policy/card path; the caller supplies its verified operation descriptor.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn check_llm_approval_descriptor(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    service_name: &str,
+    service_slug: &str,
+    operation: operation_descriptor::OperationDescriptor,
+    service_owner_user_id: Option<&str>,
+    is_auto_connected: bool,
+    operation_guest: bool,
+) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
-    let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    operation_descriptor::apply_inference_contract(&mut operation, service, body, method_override);
-    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
+    let (approval_outcome, automatic) = crate::services::execution_permission_dispatch::approval(
+        auth_user.execution_permission.as_ref(),
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -2538,6 +2975,12 @@ async fn check_llm_approval(
     )
     .await?;
 
+    let approval_outcome = crate::services::execution_permission_dispatch::approval_for_catalog(
+        auth_user.execution_permission.as_ref(),
+        owner_for_resolution,
+        service_id,
+        approval_outcome,
+    );
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
@@ -2552,6 +2995,7 @@ async fn check_llm_approval(
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
+    crate::services::assistant_model_observer::before_approval_request(None).await?;
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
         &approval_owner_user_id,
@@ -2584,8 +3028,8 @@ async fn check_llm_approval(
         state.apns_auth.as_deref(),
         &pending.primary_owner_user_id,
         service_id,
-        &service.name,
-        &service.slug,
+        service_name,
+        service_slug,
         &pending.requester_type,
         &pending.requester_id,
         None,
@@ -2624,7 +3068,7 @@ fn should_bypass_approval_flow(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn enforce_agent_llm_operations(
+pub(super) async fn enforce_agent_llm_operations(
     db: &mongodb::Database,
     auth: &AuthUser,
     user_service: Option<&str>,
@@ -2669,6 +3113,11 @@ async fn enforce_agent_llm_operations(
             catalog_id,
             method,
             canonical.as_ref(),
+            operations::GuestHttpContext {
+                query,
+                websocket: headers.contains_key(axum::http::header::UPGRADE),
+                ..Default::default()
+            },
         ))
         .await?;
         return Ok(LlmOperationScope {
@@ -2695,6 +3144,11 @@ async fn enforce_agent_llm_operations(
         catalog_id,
         method,
         Some(&canonical),
+        operations::GuestHttpContext {
+            query,
+            websocket: headers.contains_key(axum::http::header::UPGRADE),
+            ..Default::default()
+        },
     ))
     .await?;
     Ok(LlmOperationScope {
@@ -2708,14 +3162,14 @@ async fn enforce_agent_llm_operations(
 /// limits check the bytes actually sent (after translation and stream-usage
 /// normalization), and a scoped call never follows a redirect.
 #[derive(Default)]
-struct LlmOperationScope {
+pub(super) struct LlmOperationScope {
     forwarding: Option<String>,
     guest: bool,
     identity: Option<(String, Option<String>)>,
 }
 
 impl LlmOperationScope {
-    fn check_outbound(
+    pub(super) fn check_outbound(
         &self,
         auth: &AuthUser,
         method: &str,
@@ -2743,7 +3197,7 @@ impl LlmOperationScope {
     }
 
     fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
-        if self.identity.is_some() {
+        if self.guest || self.identity.is_some() {
             proxy_service::no_redirect_http_client()
         } else {
             shared
@@ -2919,9 +3373,34 @@ mod tests {
             user::{self, UserType},
             user_provider_token,
         };
-        use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
+        use crate::test_utils::{
+            connect_transaction_test_database_with_command_handler, test_membership, test_user,
+        };
         use mongodb::bson::{self, doc};
-        let db = connect_transaction_test_database("gateway_selection_batch").await;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        // system.profile is a capped, best-effort server log: a completed find
+        // need not leave a profile row. Observe this dedicated client's
+        // synchronous command events to measure the request's batching directly.
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let observed = commands.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "find"
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((event.db, collection.to_owned()));
+            }
+        });
+        let db = connect_transaction_test_database_with_command_handler(
+            "gateway_selection_batch",
+            handler,
+        )
+        .await;
         let actor = uuid::Uuid::new_v4().to_string();
         let org = uuid::Uuid::new_v4().to_string();
         db.collection::<user::User>(user::COLLECTION_NAME)
@@ -2955,6 +3434,7 @@ mod tests {
         catalog.is_active = true;
         catalog.provider_config_id = Some(providers[0].id.clone());
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org.clone()],
@@ -2973,22 +3453,23 @@ mod tests {
             })
             .await
             .unwrap();
-        // Profiling applies only to this isolated test database.
-        for (iteration, expected) in [(1, "openai"), (2, "openai-codex")] {
-            db.run_command(doc! {"profile": 2}).await.unwrap();
+        for expected in ["openai", "openai-codex"] {
+            commands.lock().unwrap().clear();
             let selected = super::resolve_provider_slug_with_fallback(&db, &actor, "openai").await;
-            db.run_command(doc! {"profile": 0}).await.unwrap();
             assert_eq!(selected.unwrap(), expected);
             for collection in [
                 org_membership::COLLECTION_NAME,
                 provider_config::COLLECTION_NAME,
             ] {
                 assert_eq!(
-                    db.collection::<bson::Document>("system.profile")
-                        .count_documents(doc! {"command.find": collection})
-                        .await
-                        .unwrap(),
-                    iteration
+                    commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(database, found)| database == db.name() && found == collection)
+                        .count(),
+                    1,
+                    "one {collection} find per request, including fallback selection"
                 );
             }
             db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME)
@@ -3030,6 +3511,11 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            catalog_is_public: false,
+            catalog_slug: Some(service.slug.clone()),
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: service.base_url.clone(),
@@ -3597,4 +4083,43 @@ mod agent_operation_tests {
         }
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_permission_input(
+    auth: &AuthUser,
+    provider: Option<&str>,
+    path: &str,
+    method: &Method,
+    query: Option<&str>,
+    body: &[u8],
+    headers: &axum::http::HeaderMap,
+) {
+    let Some(context) = &auth.execution_permission else {
+        return;
+    };
+    use crate::models::execution_proposal::PreparedAdapter;
+    let adapter = if body.len() + 2048
+        <= crate::services::execution_permission_dispatch::proposals::MAX_PAYLOAD
+        && serde_json::from_slice::<serde_json::Value>(body).is_ok()
+    {
+        PreparedAdapter::Llm {
+            provider: provider.map(str::to_owned),
+            path: path.into(),
+            method: method.to_string(),
+            query: query.map(str::to_owned),
+            body: String::from_utf8_lossy(body).into_owned(),
+            headers: crate::services::proxy_service::collect_forward_headers_with_defaults(
+                headers,
+                &[],
+            ),
+        }
+    } else {
+        tracing::info!(
+            reason = "llm_input_not_retainable",
+            "Execution proposal uses legacy prompts"
+        );
+        PreparedAdapter::Unsupported
+    };
+    context.retain_adapter(adapter, headers);
 }

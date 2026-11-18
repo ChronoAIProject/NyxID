@@ -7,8 +7,10 @@ import fs from "node:fs"
 import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
+import { multilingualPreview } from "./dev/multilingual-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
+import { buildLegalMarkdown, buildRobots, getPublicOrigin } from "./scripts/public-origin.mjs"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -58,6 +60,7 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  ws: true,
   // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
   agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
     ? new https.Agent({ proxyEnv: process.env })
@@ -66,6 +69,9 @@ const proxyTarget = {
   configure: (proxy: any) => {
     // Proxy agents can send headers before proxyReq; rewrite before request creation.
     proxy.on("start", originRewrite)
+    proxy.on("proxyReqWs", (request: import("http").ClientRequest, incoming: import("http").IncomingMessage) => {
+      if (incoming.headers.origin) request.setHeader("Origin", expectedOrigin)
+    })
     proxy.on("proxyRes", cookieRewrite)
   },
 }
@@ -107,6 +113,7 @@ function docsSync(): Plugin {
   const srcDir = path.resolve(__dirname, "../docs/site")
   const outDir = path.resolve(__dirname, "public/docs")
   let isBuild = false
+  let outputDir = ""
 
   const parseMeta = (raw: string) => {
     const front = raw.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? ""
@@ -196,6 +203,24 @@ function docsSync(): Plugin {
     name: "nyxid-docs-sync",
     configResolved(config) {
       isBuild = config.command === "build"
+      outputDir = path.resolve(config.root, config.build.outDir)
+    },
+    writeBundle() {
+      if (!isBuild) return
+      const robotsPath = path.join(outputDir, "robots.txt")
+      if (fs.existsSync(robotsPath)) {
+        fs.writeFileSync(
+          robotsPath,
+          buildRobots(fs.readFileSync(robotsPath, "utf8"), process.env),
+        )
+      }
+      const termsPath = path.join(outputDir, "legal/terms.md")
+      if (fs.existsSync(termsPath)) {
+        fs.writeFileSync(
+          termsPath,
+          buildLegalMarkdown(fs.readFileSync(termsPath, "utf8"), process.env),
+        )
+      }
     },
     buildStart() {
       const errors = lint(sync())
@@ -228,12 +253,14 @@ const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
   plugins: [
+    ...(process.env.NYXID_MULTILINGUAL_PREVIEW === "1" ? [multilingualPreview()] : []),
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
     buildVersion(BUILD_ID, SOURCE_COMMIT),
   ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __NYXID_PUBLIC_ORIGIN__: JSON.stringify(getPublicOrigin()),
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
@@ -331,6 +358,7 @@ export default defineConfig({
         // Static legal / redirect stub pages — no branching logic.
         "src/pages/privacy.tsx",
         "src/pages/terms.tsx",
+        "src/pages/data-deletion.tsx",
         "src/pages/connections.tsx",
         "src/pages/services.tsx",
         "src/pages/providers-layout.tsx",

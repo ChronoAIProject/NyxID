@@ -57,9 +57,9 @@ async fn execute_public_proxy(
     )
     .await?;
 
-    if is_ws_upgrade_request(&request) {
+    if is_ws_upgrade_request(&request) || request.method() == axum::http::Method::CONNECT {
         return Err(AppError::BadRequest(
-            "WebSocket upgrades are not supported on public proxy routes".to_string(),
+            "WebSocket upgrades and CONNECT are not supported on public proxy routes".to_string(),
         ));
     }
 
@@ -73,6 +73,8 @@ async fn execute_public_proxy(
         &normalized_path,
     )
     .await?;
+
+    crate::services::shutdown::diagnostics::resolved_catalog(&matched.service);
 
     if matched.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
         let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
@@ -164,6 +166,13 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        catalog_is_public: crate::services::catalog_service::is_public_unowned_discovery_entry(
+            &service,
+        ),
+        catalog_slug: Some(service.slug.clone()),
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),
@@ -344,6 +353,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -494,6 +505,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -804,42 +817,41 @@ mod tests {
             );
         }
 
-        /// A WebSocket upgrade request to a public proxy route is rejected
-        /// (public routes are HTTP-only).
+        /// Public entrances never open opaque streams, even with a bearer.
         #[tokio::test]
-        async fn websocket_upgrade_is_rejected() {
-            let Some(db) = connect_test_database("pproxy_ws_reject").await else {
+        async fn shared_transports_security_public_websocket_and_connect_are_rejected() {
+            let Some(db) = connect_test_database("pproxy_stream_reject").await else {
                 return;
             };
-            // Service presence is irrelevant: WS rejection happens before
-            // rule matching, but insert one so the route is otherwise valid.
             let service = public_service("pub", "https://example.test", 100);
             db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
                 .insert_one(&service)
                 .await
                 .expect("insert service");
             let state = test_app_state(db);
-
-            let request = classified_public_request(
-                Request::builder()
-                    .method("GET")
+            for method in ["GET", "CONNECT"] {
+                let mut builder = Request::builder()
+                    .method(method)
                     .uri("/public/s/pub/public/echo")
-                    .header(axum::http::header::CONNECTION, "Upgrade")
-                    .header(axum::http::header::UPGRADE, "websocket")
-                    .body(Body::empty())
-                    .unwrap(),
-            );
-
-            let err = execute_public_proxy(
-                state,
-                Some(peer()),
-                "pub".to_string(),
-                "public/echo".to_string(),
-                request,
-            )
-            .await
-            .expect_err("websocket upgrade must be rejected");
-            assert!(matches!(err, AppError::BadRequest(_)));
+                    .header("authorization", "Bearer ignored-key");
+                if method == "GET" {
+                    builder = builder
+                        .header(axum::http::header::CONNECTION, "Upgrade")
+                        .header(axum::http::header::UPGRADE, "websocket");
+                }
+                let request = classified_public_request(builder.body(Body::empty()).unwrap());
+                let err = execute_public_proxy(
+                    state.clone(),
+                    Some(peer()),
+                    "pub".into(),
+                    "public/echo".into(),
+                    request,
+                )
+                .await
+                .expect_err("public stream must be rejected before resolution");
+                assert!(matches!(err, AppError::BadRequest(_)));
+            }
+            state.db.drop().await.unwrap();
         }
 
         /// A request whose method/path does not match any enabled rule returns

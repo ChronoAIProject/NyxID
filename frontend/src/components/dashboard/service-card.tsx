@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useNavigate } from "@tanstack/react-router";
 import type { DownstreamService } from "@/types/api";
 import {
@@ -30,6 +32,7 @@ export function ServiceCard({
   onDelete,
   isDeleting,
 }: ServiceCardProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   // Issue #416: surface the viewer's node binding for this catalog row
   // so admins can see at a glance which service routes through which
@@ -71,7 +74,7 @@ export function ServiceCard({
           disabled={isDeleting}
         >
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
-          <span className="sr-only">Delete service</span>
+          <span className="sr-only">{translateUi("Delete service")}</span>
         </Button>
       )}
 
@@ -86,7 +89,7 @@ export function ServiceCard({
             }
             size="md"
           />
-          <h3 className="truncate text-lg font-normal text-foreground">
+          <h3 className="truncate type-nav-item text-foreground">
             {service.name}
           </h3>
         </div>
@@ -96,11 +99,9 @@ export function ServiceCard({
           </Badge>
           {service.visibility === "private" && (
             <Badge variant="secondary">
-              <Lock className="mr-1 h-2.5 w-2.5" />
-              Private
-            </Badge>
+              <Lock className="mr-1 h-2.5 w-2.5" />{translateUi("Private")}</Badge>
           )}
-          {isOidcService(service) && <Badge variant="accent">OIDC</Badge>}
+          {isOidcService(service) && <Badge variant="accent">{translateUi("OIDC")}</Badge>}
           {service.service_type === "http" && (
             <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
           )}
@@ -109,14 +110,14 @@ export function ServiceCard({
 
       {/* Description (if exists) */}
       {service.description && (
-        <p className="text-12 text-muted-foreground line-clamp-2">
+        <p className="text-14 text-muted-foreground line-clamp-2">
           {service.description}
         </p>
       )}
 
       {/* Target + Routing */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
+        <span className="text-13 text-text-tertiary">{secondaryLabel}</span>
         {nodeLabel && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -132,9 +133,8 @@ export function ServiceCard({
               </span>
             </TooltipTrigger>
             <TooltipContent>
-              <p className="text-xs">
-                Your routing: {node?.name ?? service.node_id}
-                {node?.status ? ` (${node.status})` : ""}
+              <p className="text-13">{translateUi("Your routing: ")}{node?.name ?? service.node_id}
+                {node?.status ? translateUi(" ({{status}})", { status: node.status }) : ""}
               </p>
             </TooltipContent>
           </Tooltip>

@@ -72,7 +72,12 @@ Only an Admin may:
   routes), operation policy, developer apps, visibility, category, skills, or
   tool twins;
 - write private or person-owned rows, and Tool offerings and their
-  operations.
+  operations;
+- resync connection identity (`nyxid catalog resync-identity`), which
+  rewrites those identity settings on every connection to a service. This
+  stays Admin-only even on rows a Catalog Manager created; on unmarked rows
+  their plain creator may also run it, matching who may change the row's
+  identity fields.
 
 A Catalog Manager owns the providers they create, including the right to
 change the token URL or clear the client. Admins should therefore not place

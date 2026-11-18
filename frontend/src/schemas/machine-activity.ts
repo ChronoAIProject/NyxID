@@ -1,3 +1,4 @@
+import { historyEnum } from "./assistant-history-compat";
 import { z } from "zod";
 
 export const machineReceiptSchema = z.object({
@@ -5,9 +6,9 @@ export const machineReceiptSchema = z.object({
   node_id: z.string(),
   machine_name: z.string().nullish(),
   agent_id: z.string(),
-  context_mode: z.enum(["shared_legacy", "separated"]).nullish(),
+  context_mode: historyEnum(["shared_legacy", "separated"]).nullish(),
   action: z.string(),
-  status: z.enum([
+  status: historyEnum([
     "running",
     "completed",
     "finished",

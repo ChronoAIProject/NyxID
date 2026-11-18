@@ -1,13 +1,19 @@
+import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
+import { TOUCH_TARGET, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { StatusBadge } from "./StatusBadge";
+import { GroupedCell } from "./GroupedCell";
 import type { ApprovalItem } from "../lib/api/types";
 
 type GrantCardProps = {
   grant: ApprovalItem;
+  iconSlug?: string;
+  iconUrl?: string | null;
+  /** Position in the grants group, for the rounded corners and separators. */
+  first?: boolean;
+  last?: boolean;
   onRevoke?: () => void;
   isMutating?: boolean;
 };
@@ -18,7 +24,9 @@ function formatDate(dateStr: string): string {
 }
 
 function daysUntilExpiry(expiresAt: string): number {
-  return Math.round((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  return Math.round(
+    (new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000),
+  );
 }
 
 function formatExpiry(expiresAt: string): string {
@@ -29,106 +37,110 @@ function formatExpiry(expiresAt: string): string {
   return `${days}d left`;
 }
 
-export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProps) {
+/** An active grant: an inset-group row with its expiry and a red Revoke action. */
+export function GrantCard({
+  grant,
+  iconSlug,
+  iconUrl,
+  first = true,
+  last = true,
+  onRevoke,
+  isMutating = false,
+}: GrantCardProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const days = daysUntilExpiry(grant.expires_at);
-  const expiryVariant = days < 3 ? "expiryUrgent" : "expiryNormal";
+  const urgent = daysUntilExpiry(grant.expires_at) < 3;
   const expiryLabel = formatExpiry(grant.expires_at);
   const grantedLabel = `Approved ${formatDate(grant.granted_at)}`;
   const expiresLabel = `Expires ${formatDate(grant.expires_at)}`;
   const requesterLabel = grant.requester_label ?? grant.requester_type;
-  const showOrgChip = grant.org_scoped === true;
-  const orgChipLabel = grant.org_name ? `Org · ${grant.org_name}` : "Org";
+  const orgLabel =
+    grant.org_scoped === true
+      ? grant.org_name
+        ? `Org · ${grant.org_name}`
+        : "Org"
+      : undefined;
 
   return (
-    <View style={styles.card}>
-      <View style={styles.header}>
-        <Text style={styles.title} numberOfLines={1}>
-          {grant.service_name}
-        </Text>
+    <GroupedCell first={first} last={last}>
+      <View style={styles.row}>
+        <View style={styles.tile}>
+          <ServiceIcon
+            slug={iconSlug ?? grant.service_id}
+            iconUrl={iconUrl}
+            size="md"
+          />
+        </View>
+        <View style={styles.body}>
+          <Text style={styles.title} numberOfLines={2}>
+            {grant.service_name}
+          </Text>
+          {orgLabel ? <Text style={styles.secondary}>{orgLabel}</Text> : null}
+          <Text style={styles.secondary} numberOfLines={1}>
+            {grant.requester_type} · {requesterLabel}
+          </Text>
+          <Text style={styles.meta}>
+            {grantedLabel} · {expiresLabel} ·{" "}
+            <Text style={{ color: urgent ? colors.danger : colors.success }}>
+              {expiryLabel}
+            </Text>
+          </Text>
+        </View>
         <Pressable
-          style={[styles.revokeBtn, isMutating && styles.btnDisabled]}
+          accessibilityRole="button"
+          accessibilityLabel={`Revoke ${grant.service_name}`}
+          accessibilityState={{ disabled: isMutating }}
+          style={({ pressed }) => [
+            styles.revoke,
+            pressed && !isMutating && styles.pressed,
+          ]}
           onPress={onRevoke}
           disabled={isMutating}
         >
-          <Text style={styles.revokeBtnText}>Revoke</Text>
+          <Text
+            style={[
+              styles.revokeText,
+              { color: isMutating ? colors.textMuted : colors.danger },
+            ]}
+          >
+            Revoke
+          </Text>
         </Pressable>
       </View>
-      {showOrgChip ? (
-        <View style={styles.chipRow}>
-          <StatusBadge variant="orgChip" label={orgChipLabel} />
-        </View>
-      ) : null}
-      <Text style={styles.secondary} numberOfLines={1}>
-        {grant.requester_type} · {requesterLabel}
-      </Text>
-      <View style={styles.expiryRow}>
-        <Text style={styles.meta}>{grantedLabel} · {expiresLabel}</Text>
-        <StatusBadge variant={expiryVariant} label={expiryLabel} />
-      </View>
-    </View>
+    </GroupedCell>
   );
 }
 
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
-    card: {
-      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border on chrome.
-      borderRadius: radius.lg,
-      backgroundColor: c.card,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      padding: spacing.xxl,
-      gap: spacing.sm,
-    },
-    header: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: spacing.sm,
-    },
-    chipRow: {
-      flexDirection: "row",
-      gap: spacing.xs,
-    },
-    title: {
-      flex: 1,
-      // DESIGN.md mobile-card primary text: text-[13px] font-semibold.
-      ...typeScale.bodyStrong,
-      color: c.textPrimary,
-    },
-    secondary: {
-      ...typeScale.label,
-      color: c.textSecondary,
-    },
-    expiryRow: {
+    row: {
       flexDirection: "row",
       alignItems: "center",
-      justifyContent: "space-between",
-      gap: spacing.sm,
+      gap: spacing.lg,
+      minHeight: 52,
+      paddingLeft: spacing.xxl,
+      paddingRight: spacing.md,
+      paddingVertical: spacing.md,
     },
-    meta: {
-      ...typeScale.small,
-      color: c.textMuted,
-      flex: 1,
+    tile: {
+      width: 30,
+      alignSelf: "flex-start",
+      alignItems: "center",
+      paddingTop: 2,
     },
-    revokeBtn: {
-      paddingHorizontal: spacing.xxl,
+    body: { flex: 1, minWidth: 0, gap: 2 },
+    title: { ...typeScale.title, color: c.textPrimary },
+    secondary: { ...typeScale.label, color: c.textSecondary },
+    meta: { ...typeScale.small, color: c.textMuted },
+    revoke: {
       minHeight: TOUCH_TARGET,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.danger,
-      backgroundColor: c.dangerSoftBg,
+      minWidth: TOUCH_TARGET,
+      paddingHorizontal: spacing.md,
       alignItems: "center",
       justifyContent: "center",
+      borderRadius: 8,
     },
-    revokeBtnText: {
-      ...typeScale.label,
-      color: c.danger,
-    },
-    btnDisabled: {
-      opacity: 0.5,
-    },
+    pressed: { backgroundColor: c.navActive },
+    revokeText: { ...typeScale.label },
   });

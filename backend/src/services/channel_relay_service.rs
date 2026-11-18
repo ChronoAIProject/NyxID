@@ -226,6 +226,7 @@ pub(crate) fn inbound_metadata(
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
         original_message: is_telegram.then(|| super::telegram_input::original(&inbound.raw_data)),
+        nyxbot_admission: None,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -292,6 +293,7 @@ pub async fn store_outbound_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        nyxbot_admission: None,
         thread_context: None,
         activity: None,
         platform_send,
@@ -366,6 +368,7 @@ pub async fn store_device_event_message(
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
         original_message: None,
+        nyxbot_admission: None,
         thread_context: None,
         activity: None,
         platform_send: None,
@@ -419,6 +422,34 @@ pub struct CallbackDelivery {
     pub http_status: Option<u16>,
     pub disposition: Option<CallbackDisposition>,
     pub result: AppResult<()>,
+}
+
+/// Whether `route_api_key_id` routes an organization's bot to the NyxBot of
+/// the admin who linked it. Such a callback carries no `X-NyxID-User-Token`:
+/// that token names the bot's owner (the organization), while the Agent Event
+/// Gateway binds it to the channel's owner (the linking admin) and refuses the
+/// whole delivery on a mismatch (HTTP 401 `relay_user_mismatch`). No NyxBot
+/// receiver reads the token, and personal bots keep it unchanged.
+pub(crate) async fn is_linked_org_nyxbot_route(
+    db: &mongodb::Database,
+    bot_id: &str,
+    route_api_key_id: &str,
+) -> AppResult<bool> {
+    use crate::models::nyxbot_channel::COLLECTION_NAME as CHANNELS;
+    Ok(db
+        .collection::<mongodb::bson::Document>(CHANNELS)
+        .find_one(doc! {
+            "channel_bot_id": bot_id,
+            "bot_owner_id": {"$type": "string"},
+            // A transport move builds the next route beside the current one.
+            "$or": [
+                {"route_api_key_id": route_api_key_id},
+                {"pending_route_api_key_id": route_api_key_id},
+            ],
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
 }
 
 /// Forward an inbound message to the agent's callback URL.
@@ -859,6 +890,31 @@ pub fn build_callback_payload(
         thread_id: inbound.thread_id.clone(),
         timestamp: message.created_at.to_rfc3339(),
         raw_platform_data: Some(inbound.raw_data.clone()),
+    }
+}
+
+/// One-use relay dispatch barrier. A failed or uncertain platform effect never
+/// removes this row; the token cannot authorize a second send.
+pub(crate) async fn consume_reply_token_use(
+    db: &mongodb::Database,
+    usage: &crate::models::reply_token_use::ReplyTokenUse,
+) -> AppResult<()> {
+    match db
+        .collection::<crate::models::reply_token_use::ReplyTokenUse>(
+            crate::models::reply_token_use::COLLECTION_NAME,
+        )
+        .insert_one(usage)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(error.kind.as_ref(),
+            mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write))
+                if write.code == 11000) =>
+        {
+            Err(AppError::Unauthorized("Reply token already used".into()))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1430,6 +1486,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -1760,7 +1817,10 @@ mod tests {
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             port: 0,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             base_url: "http://localhost".to_string(),
+            chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
@@ -1770,6 +1830,7 @@ mod tests {
             jwt_private_key_path: String::new(),
             jwt_public_key_path: String::new(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "test".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1833,6 +1894,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -1840,6 +1904,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),

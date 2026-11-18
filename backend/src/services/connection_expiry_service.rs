@@ -187,7 +187,7 @@ fn spawn_transition_side_effects(
     audit_error: String,
     notifier: Option<ConnectionExpiryNotifier>,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let user_service =
             match crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
                 .find_one(doc! {
@@ -420,6 +420,7 @@ mod tests {
             updated_at: now,
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 

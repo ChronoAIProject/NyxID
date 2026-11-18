@@ -31,6 +31,15 @@ pub(crate) struct GatewayAuthority {
     key: ApiKey,
     bearer: Zeroizing<String>,
 }
+impl GatewayAuthority {
+    /// Verified credential owner for metadata-only provider refusal attribution.
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.row.credential_owner_id
+    }
+    pub(crate) fn binding_matches(&self, binding: &str) -> bool {
+        self.row.binding_id.as_deref() == Some(binding)
+    }
+}
 impl std::fmt::Debug for GatewayAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("GatewayAuthority([REDACTED])")
@@ -129,11 +138,74 @@ async fn fence_key(
     Ok(())
 }
 
+/// Move only the catalog-controlled destination, preserving the remote channel,
+/// source policy, identity and credentials. Reuse the live dispatch fences.
+pub(crate) async fn rebase_host(
+    state: &AppState,
+    catalog: &super::nyxbot_gateway_host_move::Catalog,
+    row: &PlatformEntryGateway,
+) -> AppResult<bool> {
+    use super::nyxbot_gateway_host_move as host_move;
+    let EntryTransport::NyxagentGateway {
+        gateway_channel_id, ..
+    } = &row.configuration.transport
+    else {
+        return Ok(false);
+    };
+    let expected = format!("{}/callbacks/{gateway_channel_id}", catalog.base);
+    if !matches!(row.state.as_str(), "active" | "prepared")
+        || !host_move::valid_callback_id(gateway_channel_id)
+        || (row.callback_url == expected && row.gateway_base == catalog.base)
+        || (row.callback_url != expected
+            && host_move::rebase_callback(&row.callback_url, &catalog.base).as_deref()
+                != Some(expected.as_str()))
+        || !row.request_policy["sources"][0]["issuer"]
+            .as_str()
+            .is_some_and(|issuer| state.config.accepts_jwt_issuer(issuer))
+    {
+        return Ok(false);
+    }
+    super::transaction_service::run_db_only(&state.db,&(state,catalog,row,expected), |tx,(state,catalog,row,expected)|Box::pin(async move {
+        let db = &state.db;
+        let Some(key) = db.collection::<ApiKey>(KEYS).find_one(doc! {
+            "_id":&row.route_api_key_id,"user_id":&row.credential_owner_id,"callback_url":&row.callback_url,
+            "is_active":true,"purpose":"shared_entry_transport",
+        }).session(&mut *tx).await? else {return Ok(false);};
+        catalog.fence(db,tx).await?;
+        fence_gateway(state,tx,row).await?;
+        fence_key(db,tx,&key).await?;
+        if db.collection::<Document>(GATEWAYS).update_one(doc! {
+            "_id":&row.id,"gateway_base":&row.gateway_base,"callback_url":&row.callback_url,"revision":row.revision,
+            "configuration":bson::to_bson(&row.configuration).map_err(|_|refused())?,
+        },doc! {"$set":{"gateway_base":&catalog.base,"callback_url":expected,"updated_at":bson::DateTime::now()}})
+            .session(&mut *tx).await?.matched_count != 1 {return Err(refused());}
+        if super::api_key_mutation_service::update_one(db,doc! {"_id":&key.id,"user_id":&key.user_id,"callback_url":&row.callback_url,"purpose":"shared_entry_transport"},
+            doc! {"$set":{"callback_url":expected}},Some(&mut *tx)).await?.matched_count != 1 {return Err(refused());}
+        let old = if row.callback_url == *expected {&row.gateway_base} else {&row.callback_url};
+        host_move::audit(db,tx,&row.configured_by,"platform_entry",&row.id,old,expected).await?;
+        Ok(true)
+    })).await
+}
+
 /// Called before ordinary provider_channel performs ownership cleanup. A
 /// matching retired/malformed shared transport returns an error, never None.
 pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
+) -> AppResult<Option<GatewayAuthority>> {
+    authenticate_mode(state, headers, false).await
+}
+
+pub(crate) async fn observe_authority(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<Option<GatewayAuthority>> {
+    authenticate_mode(state, headers, true).await
+}
+async fn authenticate_mode(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
 ) -> AppResult<Option<GatewayAuthority>> {
     let Some(raw) = headers
         .get("authorization")
@@ -191,8 +263,11 @@ pub(crate) async fn authenticate(
     if is_child {
         return Err(refused());
     }
-    let (owner, key, child): (String, ApiKey, Option<String>) =
-        super::key_service::validate_api_key(&state.db, &raw).await?;
+    let (owner, key, child): (String, ApiKey, Option<String>) = if observe {
+        super::key_service::observe_api_key(&state.db, &raw).await?
+    } else {
+        super::key_service::validate_api_key(&state.db, &raw).await?
+    };
     if key.id != selected.id {
         return Err(refused());
     }
@@ -254,7 +329,9 @@ pub(crate) async fn forward_native(
     }
     let base = super::nyxbot_gateway_service::gateway_base(state).await?;
     if base != row.gateway_base
-        || row.request_policy["sources"][0]["issuer"] != state.config.jwt_issuer
+        || !row.request_policy["sources"][0]["issuer"]
+            .as_str()
+            .is_some_and(|issuer| state.config.accepts_jwt_issuer(issuer))
     {
         return Err(refused());
     }
@@ -812,6 +889,7 @@ fn transport_key(owner: &str) -> (ApiKey, Zeroizing<String>) {
         .unwrap_or(issued_at);
     let now = bson::DateTime::from_chrono(issued_at).to_chrono();
     let key = ApiKey {
+        permission_policy_id: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner.into(),
         name: "NyxID shared entry transport".into(),
@@ -995,8 +1073,12 @@ fn retained_matches(
     row: &PlatformEntryGateway,
     authority: &super::platform_entry_admin_service::NativeConversionAuthority,
     base: &str,
-    issuer: &str,
+    config: &crate::config::AppConfig,
 ) -> AppResult<()> {
+    let issuer = row.request_policy["sources"][0]["issuer"]
+        .as_str()
+        .filter(|issuer| config.accepts_jwt_issuer(issuer))
+        .ok_or_else(refused)?;
     let mut expected = authority.configuration().clone();
     expected.transport = row.configuration.transport.clone();
     let policy = request_policy(
@@ -1235,7 +1317,7 @@ pub(crate) async fn prepare(
         .find_one(doc! {"profile_id":&authority.profile_id,"state":{"$in":["prepared","active"]}})
         .await?;
     let (mut row, provider, route) = if let Some(row) = existing {
-        retained_matches(&row, authority, &base, &state.config.jwt_issuer)?;
+        retained_matches(&row, authority, &base, &state.config)?;
         let (provider, route) = keys_for_setup(state, &row).await?;
         let creator = super::nyxbot_gateway_service::creator_bearer(state, authority.actor())?;
         let observed = super::nyxbot_gateway_service::gateway_call(
@@ -1430,7 +1512,7 @@ pub(super) async fn inspect_pending(
         .find_one(doc! {"profile_id":&authority.profile_id,"state":"prepared"})
         .await?
         .ok_or_else(refused)?;
-    retained_matches(&row, authority, &base, &state.config.jwt_issuer)?;
+    retained_matches(&row, authority, &base, &state.config)?;
     let (provider, route) = keys_for_setup(state, &row).await?;
     let creator = super::nyxbot_gateway_service::creator_bearer(state, authority.actor())?;
     let response = super::nyxbot_gateway_service::gateway_call(
@@ -1495,6 +1577,29 @@ pub(super) async fn inspect_pending(
         remote_version: response.body["version"].as_i64(),
         remote_ready: ready,
     })
+}
+
+/// Retired native entries retain their primary key association. This permits
+/// only idempotent DELETE acknowledgement, without reopening entry authority.
+pub(crate) async fn acknowledge_retired_binding(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    binding: &str,
+) -> AppResult<Option<super::nyxbot_gateway_release_service::RetiredAcknowledgement>> {
+    use super::nyxbot_gateway_release_service::RetiredAcknowledgement as Ack;
+    if key.purpose != crate::models::api_key::ApiKeyPurpose::SharedEntryTransport {
+        return Ok(None);
+    }
+    let rows = db.collection::<PlatformEntryGateway>(GATEWAYS);
+    if rows.find_one(doc! {"provider_api_key_id":&key.id,"credential_owner_id":&key.user_id,"binding_id":binding,"state":"retired"}).await?.is_none() {return Ok(None);}
+    let live=rows.find_one(doc! {"state":{"$in":["prepared","active"]},"$or":[{"provider_api_key_id":&key.id},{"binding_id":binding}]}).await?.is_some()
+        || db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME).find_one(doc! {"status":{"$in":["pending","active"]},
+            "$or":[{"agent_api_key_id":&key.id},{"pending_agent_api_key_id":&key.id},{"binding_id":binding}]}).await?.is_some();
+    Ok(Some(if live {
+        Ack::ConflictingLiveReference
+    } else {
+        Ack::Acknowledged
+    }))
 }
 
 #[cfg(test)]

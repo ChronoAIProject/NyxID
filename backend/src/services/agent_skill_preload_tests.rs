@@ -33,6 +33,7 @@ impl Registry {
     fn agent(&self) -> AssistantAgent {
         let now = chrono::Utc::now();
         AssistantAgent {
+            channel_checking_notice: false,
             id: "a".into(),
             user_id: "owner".into(),
             kind: AgentKind::Specialist,
@@ -41,6 +42,8 @@ impl Registry {
             specialty: None,
             grants: Default::default(),
             guest_access: Default::default(),
+            guest_operation_scopes: Default::default(),
+            guest_operation_scope_revisions: Default::default(),
             operation_scopes: Default::default(),
             skills: vec![SkillReference {
                 source: "ornn".into(),
@@ -65,11 +68,14 @@ impl Registry {
             saved_login_ids: vec![],
             created_by: "user".into(),
             model: "nyxagent/channel".into(),
+            owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: vec![],
             display_name: None,
             persona: None,
+            voice_instructions: None,
             destroyed_at: None,
             created_at: now,
             updated_at: now,

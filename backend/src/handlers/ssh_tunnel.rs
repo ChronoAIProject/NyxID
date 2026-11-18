@@ -152,6 +152,7 @@ pub async fn issue_ssh_certificate(
         &user.email,
         &body.public_key,
         body.principal.trim(),
+        false,
     )
     .await?;
 
@@ -317,33 +318,36 @@ pub async fn ssh_tunnel_ws(
     )
     .await?;
 
+    // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| async move {
-            let work = async {
-                handle_ssh_socket(
-                    state,
-                    auth_user,
-                    service_id,
-                    service_slug,
-                    ssh_service,
-                    socket,
-                    session_guard,
-                    client_meta,
-                    tele,
-                    auth_context.owner_user_id,
-                    auth_context.approval_bypass,
-                    billing_egress_permit,
-                    session_admission,
-                )
-                .await;
-                Ok(())
-            };
-            if let Some(lease) = concurrency {
-                let _ = lease.run(work).await;
-            } else {
-                let _ = work.await;
-            }
-        })
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
+            Box::pin(async move {
+                let work = Box::pin(async {
+                    handle_ssh_socket(
+                        state,
+                        auth_user,
+                        service_id,
+                        service_slug,
+                        ssh_service,
+                        socket,
+                        session_guard,
+                        client_meta,
+                        tele,
+                        auth_context.owner_user_id,
+                        auth_context.approval_bypass,
+                        billing_egress_permit,
+                        session_admission,
+                    )
+                    .await;
+                    Ok(())
+                });
+                if let Some(lease) = concurrency {
+                    let _ = lease.run(work).await;
+                } else {
+                    let _ = work.await;
+                }
+            })
+        }))
         .into_response())
 }
 
@@ -398,7 +402,7 @@ async fn handle_ssh_socket(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &billing_resolution_user_id,
             &resource_owner_id,
             credential_class,
@@ -1772,6 +1776,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -1917,7 +1923,7 @@ mod tests {
         let payer = state
             .billing
             .owner_resolver()
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 &billing_principal_user_id,
                 &auth_context.owner_user_id,
                 crate::models::usage_meter::CredentialClass::NodeManaged,

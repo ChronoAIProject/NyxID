@@ -184,7 +184,7 @@ describe("AgentLearningReview", () => {
       configure: { mutate: mocks.configure, isPending: false }, approve: { mutateAsync: mocks.approve, isPending: false }, edit: { mutate: mocks.edit, isPending: false }, reject: { mutateAsync: mocks.reject, isPending: false }, run: { mutate: mocks.run, isPending: false }, consent: { mutate: mocks.consent, isPending: false },
     });
     render(<AgentLearningReview agentId="agent" />);
-    expect(screen.getByText("Published version: 1.2.0")).toBeInTheDocument();
+    expect(screen.getByText("1.2.0")).toBeInTheDocument();
   });
 
   it("keeps authored proposals visible without the invalid approval button", () => {
@@ -271,7 +271,7 @@ describe("AgentLearningReview", () => {
     render(<AgentLearningReview agentId="agent" />);
     expect(screen.getByRole("link", { name: "Open the confirmation card" })).toHaveAttribute("href", "/assistant?c=conversation-1&card=12345678-1234-4123-8123-123456789012");
     expect(screen.getByText(/cannot yet confirm whether Ornn published this version/)).toBeVisible();
-    expect(screen.getByText("publication_failed")).toBeVisible();
+    expect(screen.getByText("publication failed")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Publish & request confirmation" })).not.toBeInTheDocument();
   });
 

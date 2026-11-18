@@ -64,6 +64,33 @@ describe("messageTime", () => {
     expect(label(Date.parse("2026-10-12T07:40:43Z"), "UTC")).toBe("Oct 12, 2026, 7:40 AM UTC");
   });
 
+  describe("short label", () => {
+    const now = Date.parse("2026-10-28T04:00:00Z");
+    function short(value: string, timeZone: string, locale = "en-US") {
+      return messageTime(value, { locale, timeZone, now })?.short.replace(/\s/g, " ");
+    }
+
+    it("shows only the day and month within the current year, day first for English", () => {
+      expect(short("2026-10-27T00:04:00Z", "Asia/Singapore")).toBe("27 Oct");
+      expect(short("2026-01-02T12:00:00Z", "UTC", "en-GB")).toBe("2 Jan");
+    });
+
+    it("adds the year outside the current one", () => {
+      expect(short("2025-10-27T00:04:00Z", "Asia/Singapore")).toBe("27 Oct 2025");
+      expect(short("2027-01-02T12:00:00Z", "UTC")).toBe("2 Jan 2027");
+    });
+
+    it("judges the year on the reader's own calendar", () => {
+      // New Year's Eve in UTC is already next year in Tokyo.
+      expect(short("2026-12-31T16:00:00Z", "UTC")).toBe("31 Dec");
+      expect(short("2026-12-31T16:00:00Z", "Asia/Tokyo")).toBe("1 Jan 2027");
+    });
+
+    it("keeps other languages' own day and month order", () => {
+      expect(short("2026-10-27T00:04:00Z", "Asia/Shanghai", "zh-CN")).toBe("10月27日");
+    });
+  });
+
   it("yields nothing for a missing or unparseable instant", () => {
     for (const value of [undefined, null, "", "not a date", Number.NaN, Date.parse("garbage")]) {
       expect(messageTime(value)).toBeUndefined();

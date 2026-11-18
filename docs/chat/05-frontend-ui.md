@@ -4,6 +4,61 @@ Last verified against Aevatar console commit `e7ba2e6eb` (2026-08-25).
 
 The assistant page presents one continuous transcript, an anchored composer, and a conversation sidebar. Network and stream states change the same surface in place; loading, thinking, streaming, terminal, and recovery states do not replace the application shell.
 
+The NyxBot sidebar lists visible personal and organization specialists, with
+their activity and pending-request indicators. This roster is account-wide;
+it does not describe membership in the selected conversation or imply
+permission to use every listed specialist. The conversation header identifies
+the agent being addressed and offers Working context and Details controls.
+Delegation and specialist replies appear in the conversation's activity cards.
+
+In individual NyxBot and specialist threads, scrolling beyond 160px collapses
+the agent row into a compact pill at the upper right, with icon buttons for
+Working context and Details. Taller thread notices raise that threshold to
+avoid an immediate reversal when the row is removed. The full row returns
+within 24px of the start. The transcript gains the released space while its
+scroll position compensates to keep the text being read in place. Returning
+all the way to the top still shows the first message. Thread notices and
+read-only warnings remain visible, and open panels keep their state.
+
+Completed assistant replies have no generic sparkle avatar or reserved avatar
+gutter. The header identifies the current agent; group messages retain their
+author labels. Headers, transcripts, and composers share a content width,
+defaulting to 758px. On desktop, two small downward-pointing triangles sit
+flush beneath the app toolbar, before the chat padding, one at each actual
+column edge.
+Hover or keyboard focus reveals a vertical guide that stays visible while
+dragging a tab. Either tab can be dragged to resize;
+arrow keys adjust a focused edge, Home/End select its limits, and double-click
+resets it. Chat layout and Settings → Display → Chat layout also expose the width.
+One browser-wide preference applies to existing and new NyxBot, specialist,
+group, Direct, and typed chats. It is capped to the available space and fits smaller screens
+without horizontal page scrolling. Cancelled drags preserve the saved width.
+
+Desktop individual threads have a right-side conversation index, following
+Heca's rail: short ticks for user messages, longer ticks for assistant replies,
+and an accent tick for the current message. Hover or focus previews the
+message's first nonempty line; click or drag across ticks to jump. Arrow keys
+move between messages, Home/End jump to the first/latest message, and PageUp/
+PageDown move by an index window. The rail fills the available transcript
+height and ends at the composer's top edge, resizing as the composer grows.
+Tick spacing stays at 8px while all entries fit, then gradually tightens to fit
+more entries, down to 5px at default density. Both limits follow the spacing
+preference. Once the minimum spacing is reached, additional entries overflow.
+Long indices show a bounded window with pronounced fades wherever more entries
+are hidden above or below, without chevron controls. Rail fades extend up to
+64px at each overflowing edge, capped at 20% of the rail's height. Scrolling over the rail
+browses that window without moving the transcript. Fades disappear at either
+end, or when all entries fit. Ordinary transcript scrolling follows the active tick.
+The index includes loaded messages, including rows currently unmounted by the
+virtualizer, and expands as earlier history is loaded. The rail has its own
+gutter, outside the shared header/transcript/composer column, and disappears
+below the desktop breakpoint or when fewer than two messages are indexed.
+
+Scrollable navigation, transcripts, and nested message content fade at edges
+that hide more content. The top fade is short and gentle. Fades update when
+scrolling, resizing, or loading content and disappear when the content fits.
+The composer keeps its existing scroll overlays and opaque bottom band.
+
 `frontend/src/pages/assistant.tsx` selects the HTTP-fixture, typed actor, or
 Direct surface. Typed query and turn ownership live in
 `frontend/src/hooks/use-assistant-chat.ts`; Direct's memory-only seam lives in
@@ -40,6 +95,69 @@ With `experimental:direct-chat-engine` enabled, a draft or `direct-*` route uses
 the in-memory Direct seam. Explicit `nyxid-chat-*` and `chatc-*` routes still use
 the canonical actor/history page. Direct conversations are not persisted.
 
+## 会话置顶 / Conversation pins
+
+浏览器侧栏的会话菜单提供「置顶会话」和「取消置顶」。同一列表支持多个置顶项，
+以中性图钉区分，保留标题、草稿、选中态及现有未读展示。NyxAgent 的置顶项排在
+所属 agent 的普通会话列表最前；channel chats 只在所属机器人分组内置顶，
+不移动机器人分组，也不改变其计数、展开状态或 parent chat 上下文。先按机器人分组，
+再将组内置顶主题排在所有普通主题之前；两部分分别保留 parent chat 标签。
+之后应用 Show more 上限；rail 保留 recent 顺序中的各 scope 原始槽位，只在同一
+普通会话或机器人 scope 的槽位间重排，再取前 8 项；没有置顶时原顺序完全不变。
+展开列表与折叠 rail 均先进行 O(n) 稳定分组，再应用已有展示上限；置顶和普通项
+各自保留原来的顺序，取消后回到正常位置。共享 transport 的列表顺序保持不变，
+进入 agent 时仍默认选择最新会话。置顶操作不导航、不执行已读操作。
+
+The browser conversation menu offers **Pin chat** and **Unpin chat**. Multiple
+pins lead their existing list with a neutral pin glyph, retaining titles,
+drafts, selection and existing unread presentation. NyxAgent pins lead their
+own agent's ordinary thread list. Channel chats pin only inside their own bot
+group; bot order, counts, expansion and parent chat context stay intact. Split
+groups before sorting within each list, then apply Show more limits. Within a
+bot, all pinned topics precede ordinary topics; each partition groups topics
+under their parent chat labels. Rail previews retain each scope’s original
+recent-list slots, reorder only within
+ordinary-chat or same-bot slots, then take eight rows. With no pins the original
+recent order is unchanged.
+Expanded lists and rail popovers use an O(n) stable partition before their
+existing display limits. Each partition retains its original order; unpinning
+restores normal placement. Transport ordering and the latest-thread default
+are unchanged. Pinning neither navigates nor marks a conversation read.
+
+只有置顶和取消置顶操作在菜单关闭后恢复行焦点；若取消置顶使该行移出 Show more
+预览，则焦点返回该机器人标题。重命名表单打开后，标题输入框保留焦点。
+
+Pin and unpin actions restore focus to the row after the menu closes. If an
+unpinned row leaves the Show more preview, focus returns to its bot header.
+Opening Rename keeps focus in the title input. Inline Rename actions keep the
+mobile drawer open so Save can submit before the form unmounts.
+
+置顶是本浏览器偏好，采用单一 `nyxid.assistant_pins` localStorage 记录，仅保存
+version、ownerUserId 和会话 ID，不保存标题、正文或访问权限。经确认的登录身份
+决定读取归属，刷新或重新进入 Chat 保留；登出、401 或切换账号会清除内存和持久化
+记录。存储结构使用 Zod 校验；失败以本地 load/save/clear 阶段标记记录（没有 HTTP
+请求或 Trace ID），侧栏展示本地化错误，写入失败不呈现为保存成功。删除成功后由
+实际 transport/API 删除路径清理对应 ID；失败或运行中拒绝删除保留置顶。不能用
+单个 agent 的局部加载列表修剪全账户 ID。记录只影响当前授权列表中已有的行。
+
+Pins are a browser-local preference in one `nyxid.assistant_pins` localStorage
+record containing only a version, owner ID and conversation IDs. Confirmed
+identity scopes restoration; reload and Chat re-entry retain pins. Sign-out,
+401 and account changes clear memory and storage. Zod validates stored data.
+Local load/save/clear error phases replace HTTP trace correlation for this
+storage-only operation; localized sidebar errors report failures, and failed
+writes never appear saved. Actual successful transport/API deletion removes
+the ID; failed or protected no-op deletion retains it. A partially loaded
+agent list must never prune account-wide IDs. Pins only decorate rows already
+present in the authorized list.
+
+本期不包含跨浏览器/跨设备同步、群聊置顶或服务器 API；Direct 会话本身仍只在内存
+中存在。清理浏览器数据会移除置顶。回滚前端提交即可停用功能；无服务端迁移。
+
+This does not add cross-browser/device sync, crew pins or a server API. Direct
+conversations themselves remain memory-only. Clearing browser data removes
+pins. Reverting the frontend change disables the feature without a migration.
+
 ## Thread states
 
 The thread distinguishes execution state from transcript content. An active turn can have no printable output yet, printable streaming output, or structured activity without text.
@@ -56,7 +174,7 @@ This empty state must not appear after a turn has started or ended merely becaus
 
 ### Thinking
 
-Thinking begins as soon as a send or continuation is pending and there is not yet a printable assistant tail. The thread renders one assistant identity row with a loading halo and dots where the answer will appear.
+Thinking begins as soon as a send or continuation is pending and there is not yet a printable assistant tail. The thread renders a compact animated dot alongside its working status.
 
 The semantic contract is:
 
@@ -67,10 +185,9 @@ The semantic contract is:
 </article>
 ```
 
-`[data-assistant-halo]` is the stable test marker. It exists only while the
-streaming assistant identity has no printable content. Settled assistant
-avatars never carry it. The halo itself is decorative; the containing status
-announces the state.
+`[data-assistant-halo]` remains the stable test marker on the thinking dot. It
+exists only while the streaming assistant has no printable content. The dot
+itself is decorative; the containing status announces the state.
 
 ### Streaming before content
 
@@ -133,7 +250,11 @@ These attributes are part of the testing contract. They can move with equivalent
 ## Message composition
 
 Each canonical `ChatMessage` renders one identity row. User content is a compact
-bubble. An assistant row composes, in order:
+bubble with three 18px corners and a tighter 4px bottom-right corner. Its
+background and text use the dedicated `chat-bubble` and
+`chat-bubble-foreground` theme colors, editable per theme in Settings → Display
+with a live chat preview and a 4.5:1 text contrast check. Light mode defaults to
+a stronger neutral gray fill. An assistant row composes, in order:
 
 - a collapsible thinking/reasoning disclosure;
 - a collapsible step and tool-call activity disclosure;
@@ -156,6 +277,95 @@ surfaces are diagnostic accumulator data only and are not interactive.
 Media artifacts have an 8,000,000-character inline cap. Current history rows do
 not carry media, so an artifact is visible in the live local message but is not
 reconstructed after reload.
+
+### CMA submission cards
+
+NyxBot and specialist threads render CMA operation cards in the shared assets
+preview column beside the chat when an owner chat key actually invokes a
+supported CMA operation. Below the `lg` breakpoint, they share the bounded
+preview area above the chat. They follow the live session card's layout, CMA
+header glyph, status line, minimise control, and details disclosure, with the
+same 500px maximum width, theme tokens and absence of internal dividers.
+The card comes from the durable MCP watch, never assistant text or a promised
+task plan. Submission details contain operation and agent IDs when available,
+a safe idempotency key, the invoking assistant's name and the last check time.
+An unconfirmed submission uses a CMA setup/task title until a real session
+supplies its task title; it has no invented stream, action history or pin.
+Agent status labels follow CMA's own vocabulary: **Starting**, **Ready**,
+**Working**, **Needs approval**, **Paused**, **Stopped**, **Deleted**, and
+**Needs attention**. Provisioning success is **Ready**; only a completed
+Responses operation is **Completed**. Pending provisioning can show its last
+reported phase; the card does not infer implementation or deployment milestones.
+
+A **View in CMA** header control opens the exact agent in a new tab
+only when CMA supplies a valid `callback_url`, projected as `cma_url` in
+history. No destination is inferred from agent IDs or catalog configuration.
+An omitted callback preserves the last supplied link; explicit null or an
+invalid callback removes it. This gives users
+the CMA conversation and work details while keeping the status card compact.
+The checked timestamp includes the date and time so old observations are
+identifiable after the tracking window ends.
+
+A pending Responses request still reported as running after ten minutes shows
+**Taking longer than usual**, with a notice that CMA still reports it as running
+and the option to inspect progress or ask NyxBot to cancel that task. This is an
+elapsed-request-time hint, not a no-progress detector or remote execution timeout;
+`checked_at` records polling, not actual work. It does not resubmit or cancel the
+request. Specific approval, connection, terminal and unavailable states take
+precedence. The notice updates while the card is open and clears on completion.
+When the existing two-hour watch deadline expires, the card explicitly explains
+that automatic tracking ended and CMA may still be running.
+
+When CMA execution is enabled and the operation has a verified local Agent
+reference, the **View execution** clipboard-list header icon opens a right-side Sheet within
+the current NyxBot chat. The shared Agent view presents the continuous Conversation and
+Desktop tabs, locating the operation's response only after its Agent binding
+is verified. Closing the Sheet preserves the source chat, draft, and reading
+position and disposes its live observers and desktop connection. **Back to
+chat** returns focus to the composer. The Sheet can expand on desktop and uses
+the full width on narrow screens. Direct `/assistant/cma-agents/:agentId`
+links continue to render the same view as a standalone page.
+
+History returns an owner/thread-scoped `cma_operations` metadata snapshot,
+including settled operations whose initiating turn is on an older message page.
+The transport carries this snapshot on the conversation session independently
+of loaded message pages, so a pending or unconfirmed submission appears even
+without an agent ID or its original reply. A live session card replaces its
+normal operation receipt only when both service and agent IDs match; failed
+or uncertain receipts remain visible. A consolidated live card retains the
+receipt's status, request notices and metadata inside a single **Submission
+details** disclosure, collapsed by default. Opening it shows all request records
+together, with no per-request disclosures. **Session details** holds shared agent
+information. One feature-gated
+**View execution** header icon targets the newest pending request with a verified
+local `agent_ref_id`, or the newest verified request when none is pending,
+using its exact `response_id`, including while the card is minimised. The
+**Agent:** line describes the overall agent and observer connection; **Request
+status** describes each submitted request independently. Requests show pending
+work first and initially
+show three rows, with older rows revealed three at a time. Live cards precede
+submission history, which also initially shows three cards with an older-history
+control. The live card animates only the latest running action, with the overall
+agent indicator as a fallback while minimised or before any running action is
+reported. Other action markers and request statuses stay static; queued requests
+use a clock. Reduced-motion preferences disable the spin. Cards do not render
+inside replies.
+While a watch is submitting, waiting or cancelling, the selected
+thread refreshes history every five seconds, including after its assistant reply
+settles. Server polling continues independently of the page. Cards restore from
+history after reload and remain in the thread that made the call. Submission
+receipts never enter the global pin store. Verified live sessions retain the
+pin behavior from the dedicated CMA card: unpinned cards appear only in their
+source conversation; pinned cards appear across sessions and pages. Unpinning
+immediately restores source-only visibility.
+
+Approval, connection, paused, failed, timeout and unavailable states remain
+distinct. A failed result download preserves an already confirmed CMA outcome.
+Stopping a watch says **Tracking stopped** and explains that CMA may still be
+running, since these adapters declare no upstream cancel operation. Card
+metadata is retained for 30 days; encrypted result retention stays at four hours.
+See [CMA operation contracts](../API_DISCOVERY.md#cma-operation-cards) for the
+supported endpoints and tracking limits.
 
 ## Long transcripts
 
@@ -263,7 +473,7 @@ supported effort field. Do not infer supported effort levels from model names.
 - Enter during IME composition does not send; both composition state and key code 229 are guarded.
 - The composer uses a minimal Tiptap/ProseMirror editor with atomic inline mention pills. Agent pills show display names; attachment pills show numbered handles: `image-1`, `file-1`, and `text-1` for long pasted text. Autocomplete, plain-text paste, copy, undo/redo, and Shift+Enter are supported. Serialization preserves the existing `@handle` text contract; attachment handles still resolve before sending. Draft storage remains plain text. Undo history resets across conversation/owner changes, after sending, and when removing an upload so deleted references cannot return. Formatting controls are not enabled in this first iteration.
 - Composer attachments occupy one horizontally scrollable row: square image previews and compact document cards with filename, type, and size. Long pastes show a text excerpt. Corner controls remove individual files; upload progress and errors remain within the fixed card height. Attachment mention handles remain available through autocomplete and card hover text. Adding attachments scrolls the row to the newest card; upload progress and removal preserve manual scrolling. Edge fades indicate additional cards offscreen.
-- The text editor grows from one through four rows by default, then scrolls internally. Dragging the expanded composer’s top-edge handle changes its visible height even for short multiline drafts. The complete surface, including controls, attachments and padding, can reach 90% of the visible viewport, bounded below the chat header. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. Shrinking below that threshold restores measured spacing. Short single-line drafts still collapse; the chosen height is retained within the mounted composer. Arrow keys adjust it, Home/End select its limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
+- The text editor grows with the draft up to a shared maximum (92px by default), then scrolls internally. Settings → Display → Chat layout configures this maximum from 64px to 1600px. The expanded composer's top-edge resize handle updates the same browser-wide preference on release; cancelled drags preserve it. All existing and new chats share it, including across reloads. Explicit resizing still expands short multiline drafts; single-line drafts stay compact. The complete surface, including controls, attachments and padding, fits within 90% of the visible viewport and below the chat header without overwriting the saved maximum. Chat space stops growing at half the viewport or 480px; further expansion overlays the transcript. The index rail clears the actual composer surface even when it overlays the transcript. Arrow keys adjust the height, Home/End select its visible limits, and double-click resets it. Window and software-keyboard viewport changes recalculate the limit, keeping the grip and controls reachable. A persistent, draggable thumb appears while text overflows. Expanded controls sit 2px below the editor.
 - A long one-line draft switches controls to the multiline layout before text overlaps the button.
 
 The idle placeholder is `Message NyxID Assistant...`. During an active turn it is `Assistant is working...` and the textbox is disabled.
@@ -329,6 +539,37 @@ status. Dismissing setup while its request is pending cannot open a later
 orphan window. Device-code and token entry keep their existing setup behavior.
 
 ## Sidebar and history
+
+Verified CMA sessions appear automatically only in their source NyxID chat,
+with a CMA activity indicator beside the existing machine control. Each card
+links to that original conversation/specialist and optionally to CMA's validated
+supplied callback. Pinning makes a card available across chats and every page;
+unpinning restores source-only visibility. Account-bound pin/minimise preferences
+survive reload and clear on account changes. One app-level provider owns streams.
+
+Cards align left within their container and fill the available width up to
+500px. They reuse the shared resizable preview column alongside machine cards;
+on narrow screens they sit above chat while retaining composer space. Other pages
+show pinned cards in a bounded floating stack. Automatic discovery uses only
+server-verified personal connection receipts, never account inventory or the
+current route as origin evidence. Status-filtered active inventory is joined to
+exact receipts before the card limit; pins use a separate exact query. The
+compact card combines glyph/title and controls in its header, task/stream state
+on one line, and three recent actions with expandable history. Header icon
+controls have hover/focus tooltips, and the card has no internal horizontal
+dividers. Connection,
+session ID, and timestamp stay behind Session details. The root floating
+surface uses matched shell-route ownership, including global monitoring on
+standalone desktop and not-found pages. Retryable refresh outages retain the
+last valid observation for the same connection/account/source; one denied or
+unavailable connection cannot suppress healthy peers. Authorization and terminal
+detail clear the affected observation. Explicitly pinning a visible authorized
+session keeps its card and stream through navigation, including an older
+empty/error pin cache, while the pin receipt refresh is pending or retryably
+unavailable. A successful withdrawal or denial clears the promoted observation. The fixed header and internal scrolling recovery/activity
+body keep Reconnect accessible at short keyboard heights, even when minimised.
+See [CMA session status cards](12-cma-sessions.md)
+for attribution boundaries, scoped polling, preferences, and recovery.
 
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.
 
@@ -444,3 +685,22 @@ The page must not render incoherent overlaps or empty gaps during state handoff.
 - fixed message, card, toolbar, and composer dimensions prevent dynamic content from shifting controls.
 
 The Playwright continuity probe described in [Testing and gaps](07-testing-and-gaps.md) observes DOM mutations to catch transient states that ordinary final assertions would miss.
+
+
+## Generated file cards
+
+Generated attachments display their safe filename, verified type/size, revision
+and expiry. Known rasters open a full preview; supported MP4 uses native controls.
+Unknown MIME, origin or preview values use a download card. Browser decode failures
+keep the verified download available. The reader accepts future delivery states and
+rejection reasons without rejecting the whole conversation.
+
+A session-only cache shares authenticated fetches and object URLs across consumers
+and list remounts. It retains at most 32 MiB of payload and 64 resident files, fetches at
+most two concurrently, and bounds every response to 8 MiB and its reserved size.
+Canceled fetches retain their reservation until their response body settles.
+Known file sizes let all eight small files in one result fit together. Visible cards pin entries and release them on leaving the viewport, so later
+previews in the same reply can load. Idle LRU eviction, two-minute idle expiry, file expiry and account transitions
+revoke URLs. No file bytes enter persistent browser storage. Recovery refreshes the
+original reply's history page and invalidates the conversation query, preserving
+the draft and page state. Controls use the existing Button variants.

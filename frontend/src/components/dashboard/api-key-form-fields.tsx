@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { Label } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import type { UseFormReturn } from "react-hook-form";
 import { API_KEY_SCOPES, type CreateApiKeyFormData } from "@/schemas/api-keys";
@@ -28,6 +31,7 @@ export function ApiKeyResourceFields({
   }[];
   nodes: readonly { id: string; name: string }[];
 }) {
+  useUiTranslation();
   const prefix = useId();
   const allServices = form.watch("allow_all_services");
   const allNodes = form.watch("allow_all_nodes");
@@ -55,18 +59,17 @@ export function ApiKeyResourceFields({
                 <FormItem>
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
-                      {kind === "services" ? "Services" : "Nodes"}
+                      {kind === "services" ? translateUi("Services") : translateUi("Nodes")}
                     </FormLabel>
-                    <label className="flex items-center gap-2 text-12">
+                    <Label className="flex items-center gap-2 unthemed:text-14">
                       <Checkbox
                         checked={field.value ?? false}
                         onCheckedChange={(checked) => {
                           field.onChange(checked === true);
                           if (checked === true) form.setValue(idsField, []);
                         }}
-                      />
-                      Allow all {kind}
-                    </label>
+                      />{translateUi("Allow all ")}{kind}
+                    </Label>
                   </div>
                 </FormItem>
               )}
@@ -79,10 +82,10 @@ export function ApiKeyResourceFields({
                   <FormItem>
                     <div className="max-h-48 space-y-2 overflow-y-auto">
                       {resources.map((resource) => (
-                        <label
+                        <Label
                           key={resource.id}
                           htmlFor={`${prefix}-${kind}-${resource.id}`}
-                          className="flex items-start gap-2 text-12"
+                          className="flex items-start gap-2 unthemed:text-14"
                         >
                           <Checkbox
                             id={`${prefix}-${kind}-${resource.id}`}
@@ -96,12 +99,10 @@ export function ApiKeyResourceFields({
                           <span className="min-w-0 break-words">
                             {resource.name}
                           </span>
-                        </label>
+                        </Label>
                       ))}
                       {resources.length === 0 && (
-                        <p className="text-12 text-muted-foreground">
-                          No {kind} available.
-                        </p>
+                        <p className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("No ")}{kind}{translateUi(" available.")}</p>
                       )}
                     </div>
                     <FormMessage />
@@ -145,15 +146,16 @@ function toggleInArray(
 }
 
 export function ApiKeyNameField({ form }: Props) {
+  useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="name"
       render={({ field }) => (
         <FormItem>
-          <FormLabel>Name</FormLabel>
+          <FormLabel>{translateUi("Name")}</FormLabel>
           <FormControl>
-            <Input placeholder="My API Key" {...field} />
+            <Input placeholder={translateUi("My API Key")} {...field} />
           </FormControl>
           <FormMessage />
         </FormItem>
@@ -163,22 +165,23 @@ export function ApiKeyNameField({ form }: Props) {
 }
 
 export function ApiKeyScopesField({ form }: Props) {
+  useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="scopes"
       render={({ field }) => (
         <FormItem>
-          <FormLabel>Scopes</FormLabel>
+          <FormLabel>{translateUi("Scopes")}</FormLabel>
           <div className="flex flex-wrap gap-2">
             {API_KEY_SCOPES.map((scope) => {
               const isSelected = (field.value as readonly string[]).includes(
                 scope,
               );
               return (
-                <label
+                <Label
                   key={scope}
-                  className="flex cursor-pointer items-center gap-2 text-12"
+                  className="flex cursor-pointer items-center gap-2 unthemed:text-14"
                 >
                   <Checkbox
                     checked={isSelected}
@@ -189,7 +192,7 @@ export function ApiKeyScopesField({ form }: Props) {
                     }
                   />
                   {scope}
-                </label>
+                </Label>
               );
             })}
           </div>
@@ -203,32 +206,31 @@ export function ApiKeyScopesField({ form }: Props) {
 export function ApiKeyExpiryField({ form, allowNeverExpires = true }: Props & {
   allowNeverExpires?: boolean;
 }) {
+  useUiTranslation();
   const neverExpires = form.watch("never_expires") ?? false;
   return (
     <div className="space-y-2">
       {allowNeverExpires && (
         <FormField control={form.control} name="never_expires" render={({ field }) => (
           <FormItem>
-            <label className="flex items-center gap-2 text-12">
+            <Label className="flex items-center gap-2 unthemed:text-14">
               <Checkbox checked={field.value ?? false} onCheckedChange={(checked) => {
                 field.onChange(checked === true);
                 form.setValue("expires_at", checked === true ? null
                   : new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10));
-              }} />
-              No expiry
-            </label>
+              }} />{translateUi("No expiry")}</Label>
             <FormMessage />
           </FormItem>
         )} />
       )}
       {!neverExpires && <FormField control={form.control} name="expires_at" render={({ field }) => (
         <FormItem>
-          <FormLabel>Expiry date</FormLabel>
+          <FormLabel>{translateUi("Expiry date")}</FormLabel>
           <FormControl>
             <DatePicker value={field.value ?? null} onChange={field.onChange}
-              minDate={new Date().toISOString().slice(0, 10)} placeholder="90 days by default" />
+              minDate={new Date().toISOString().slice(0, 10)} placeholder={translateUi("90 days by default")} />
           </FormControl>
-          <p className="text-xs text-muted-foreground">A blank date defaults to 90 days.</p>
+          <p className="text-13 text-muted-foreground">{translateUi("A blank date defaults to 90 days.")}</p>
           <FormMessage />
         </FormItem>
       )} />}

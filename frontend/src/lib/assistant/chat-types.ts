@@ -19,10 +19,21 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly voice?: {
+    readonly session_id: string;
+    readonly segment_id: string;
+    readonly sealed: boolean;
+    readonly complete: boolean;
+    readonly interrupted?: boolean;
+  } | null;
+  readonly voiceGroup?: readonly ChatMessage[];
+  readonly anchorId?: string;
+  readonly artifactDelivery?: {readonly rejected?: readonly {readonly index: number; readonly filename: string; readonly reason: string}[]; readonly state: string; readonly count: number; readonly recoveryAvailable: boolean; readonly endpoint: string; readonly conversationId: string; readonly messageSeq: number};
+  readonly actionOutcome?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["action_outcome"];
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
   readonly continuation_of?: string | null;
-  readonly steering?: import("@/schemas/assistant-nyxagent").NyxAgentSteering | null;
+  readonly steering?: Omit<import("@/schemas/assistant-nyxagent").NyxAgentSteering, "outcome"> & { readonly outcome: string } | null;
   readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
   readonly role: ChatMessageRole;
@@ -43,7 +54,7 @@ export interface ChatMessage {
   readonly capacityWaitDeadline?: string | null;
   readonly channelDelivery?: { readonly status: string; readonly heard_prefix_chars?: number | null; readonly heard_prefix_matches_sent: boolean } | null;
   readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null } | null;
-  readonly errorDetail?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
+  readonly errorDetail?: { readonly failureReason?: import("@/schemas/assistant-nyxagent").NyxAgentFailureReason | null; readonly attempts?: number | null; readonly capacityWaitMs?: number | null; readonly upstreamCode?: string | null; readonly stage: string; readonly httpStatus?: number | null; readonly upstreamRequestId?: string | null; readonly responseId?: string | null; readonly continuations: number; readonly turnId: string; readonly occurredAt?: string } | null;
   readonly errorCode?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;
@@ -57,12 +68,25 @@ export interface ChatMessage {
   readonly via?: string | null;
   readonly activityTotal?: number;
   readonly turnStatus?: import("./turn-status").TurnStatus | null;
+  /** Settled permission decisions and automatic receipts of this reply's turn. */
+  readonly decisions?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement[];
+  /** Who started the turn this message opens (`trigger` for an automation). */
+  readonly origin?: string | null;
+  /** The automation behind an automation-started message. */
+  readonly automation?: { readonly triggerId: string; readonly runId: string; readonly label: string } | null;
 }
 
 export interface ChatImage {
-  readonly origin?: "tool" | "user_upload";
+  readonly origin?: string;
+  readonly filename?: string;
+  readonly source?: string;
+  readonly resultVersion?: string;
+  readonly previewKind?: string;
+  readonly size?: number;
+  readonly expiresAt?: string;
   readonly expired?: boolean;
-  readonly imageInput?: "sent" | "unavailable";
+  readonly imageInput?: "sent" | "unavailable" | "unknown";
+  readonly imageInputReason?: string;
   readonly id: string;
   /** Assistant API endpoint, relative to the API root. */
   readonly endpoint: string;
@@ -153,6 +177,7 @@ export interface ChatHistoryIndex {
 }
 
 export interface ChatSessionState {
+  readonly cmaOperations?: readonly import("@/schemas/cma-operation").CmaOperation[];
   readonly clientId: string;
   readonly conversationId?: string;
   readonly expectedTurnCount: number;

@@ -55,7 +55,7 @@ test("all three analytics approaches are interactive and saved views survive rel
     page.getByRole("img", { name: /Service mix: bar chart/ }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Filter billing accounts", exact: true })
+    .getByRole("button", { name: "Filter users / organizations", exact: true })
     .click();
   await page
     .getByRole("button", { name: "Platform Engineering", exact: true })
@@ -64,7 +64,7 @@ test("all three analytics approaches are interactive and saved views survive rel
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(
     page.getByRole("button", {
-      name: "Remove Billing accounts filter",
+      name: "Remove Users / organizations filter",
       exact: true,
     }),
   ).toBeVisible();
@@ -88,7 +88,7 @@ test("all three analytics approaches are interactive and saved views survive rel
   ).toContainText("Last 30 days");
   await expect(
     page.getByRole("button", {
-      name: "Remove Billing accounts filter",
+      name: "Remove Users / organizations filter",
       exact: true,
     }),
   ).toBeVisible();
@@ -165,20 +165,20 @@ test("Operations adds and restores more than twelve panels and loads charts as t
   page,
 }) => {
   await page.goto("/admin/usage?mock=1&sample=operations");
-  await expect(page.getByRole("article")).toHaveCount(6);
+  await expect(page.getByRole("article")).toHaveCount(8);
   for (let index = 0; index < 12; index++) {
     await page.getByRole("button", { name: "Add panel", exact: true }).click();
   }
-  await expect(page.getByRole("article")).toHaveCount(18);
+  await expect(page.getByRole("article")).toHaveCount(20);
   await expect(
     page.getByRole("status", { name: "Workspace save status" }),
   ).toContainText("Saved in this browser");
   await page.reload();
-  await expect(page.getByRole("article")).toHaveCount(18);
+  await expect(page.getByRole("article")).toHaveCount(20);
   await expect(
     page.getByRole("button", { name: "Add panel", exact: true }),
   ).toBeEnabled();
-  expect(await page.locator(".recharts-surface").count()).toBeLessThan(18);
+  expect(await page.locator(".recharts-surface").count()).toBeLessThan(20);
   const last = page.getByRole("article").last();
   await last.scrollIntoViewIfNeeded();
   await expect(last.locator(".recharts-surface")).toBeAttached();
@@ -364,7 +364,7 @@ for (const choice of ["Use saved view", "Restore recovered draft"] as const) {
       await expect(page.getByText("Save failed", { exact: true })).toHaveCount(
         0,
       );
-      await expect(page.getByRole("article")).toHaveCount(6);
+      await expect(page.getByRole("article")).toHaveCount(8);
       for (const panel of await page.getByRole("article").all()) {
         await panel.scrollIntoViewIfNeeded();
         await expect(panel.locator(".recharts-surface")).toBeAttached();
@@ -597,7 +597,7 @@ test("panels drag, reorder by keyboard, and persist their three-column sizes and
 }) => {
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.goto("/admin/usage?mock=1&sample=operations");
-  await expect(page.getByRole("article")).toHaveCount(6);
+  await expect(page.getByRole("article")).toHaveCount(8);
   const titles = () =>
     page
       .getByRole("article")
@@ -704,7 +704,7 @@ test("mixed-width panels keep stable drop targets and Escape cancels reordering"
 }) => {
   await page.setViewportSize({ width: 1440, height: 1800 });
   await page.goto("/admin/usage?mock=1&sample=operations");
-  await expect(page.getByRole("article")).toHaveCount(6);
+  await expect(page.getByRole("article")).toHaveCount(8);
   const titles = () =>
     page
       .getByRole("article")

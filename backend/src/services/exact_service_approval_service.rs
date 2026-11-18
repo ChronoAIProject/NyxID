@@ -494,6 +494,10 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            strict_response_utf8: false,
+            execution_permission: None,
+
+            attachment_owner_key: false,
             assistant_chat: None,
             response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
@@ -1448,6 +1452,7 @@ async fn approval_target(
         user_service_id,
         Some(&service.service_slug),
         None,
+        None,
     )
     .await?
     .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
@@ -1471,7 +1476,8 @@ async fn load_bound_request(
         .find_one(doc! { "_id": request_id })
         .await?
         .ok_or_else(|| AppError::NotFound("exact_service_request_not_found".to_string()))?;
-    if request.exact_service.is_none()
+    if request.execution_proposal.is_some()
+        || request.exact_service.is_none()
         || request.requester_type != caller.requester_type
         || request.requester_id != caller.requester_id
         || request
@@ -2178,6 +2184,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: Vec::new(),
             created_at: Utc::now(),
@@ -2302,6 +2309,9 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
+            execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-alpha".to_string(),
@@ -2357,6 +2367,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),
                 action_description: None,

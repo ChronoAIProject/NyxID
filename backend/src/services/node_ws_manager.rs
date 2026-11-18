@@ -447,7 +447,9 @@ pub struct NodeCapabilitiesFlags {
     pub http_signature_v2: bool,
     pub proxy_upload_v1: bool,
     pub credential_ack_correlation: bool,
+    pub credential_target_update_v1: bool,
     pub remote_credential_crypto_v1: bool,
+    pub machine_execution_approval_v1: bool,
     pub proxy_max_body_size: Option<usize>,
 }
 
@@ -783,8 +785,8 @@ impl Drop for PendingSshExecGuard {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
             Err(mpsc::error::TrySendError::Full(outbound)) => {
                 let tx = self.tx.clone();
-                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                    runtime.spawn(async move {
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    crate::services::shutdown::process().spawn_cleanup(async move {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
                             tx.send(outbound),
@@ -1049,8 +1051,10 @@ pub struct WsWebTerminalClosedMsg {
 /// side `credential_update_ack` before treating the push as confirmed
 /// (see `send_credential_update_and_wait`). Older node agents ignore
 /// the field; newer ones echo it back in the ack.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsCredentialUpdate {
+    #[serde(default, flatten)]
+    version: Option<CredentialVersion>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1060,21 +1064,25 @@ struct WsCredentialUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     header_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    header_value: Option<String>,
+    header_value: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     param_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    param_value: Option<String>,
+    param_value: Option<zeroize::Zeroizing<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_revision: Option<i64>,
 }
 
 /// JSON message instructing a node to drop its local credential for a
 /// given service slug. Sent when a `UserService` is reassigned from one
 /// node to another so the prior node stops holding the secret. Includes
 /// an optional `request_id` for ack-wait correlation.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsCredentialRemove {
+    #[serde(default, flatten)]
+    version: Option<CredentialVersion>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1106,6 +1114,7 @@ struct WsPendingCredentialCiphertext<'a> {
 #[derive(Debug, Clone)]
 pub enum CredentialAckOutcome {
     Ok,
+    Versioned(CredentialVersion),
     Err(String),
 }
 
@@ -1134,7 +1143,11 @@ pub struct NodeCapabilitiesMsg {
     #[serde(default)]
     pub credential_ack_correlation: bool,
     #[serde(default)]
+    pub credential_target_update_v1: bool,
+    #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub machine_execution_approval_v1: bool,
     /// Maximum raw HTTP request body that fits through this node's control WS.
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
@@ -1160,16 +1173,48 @@ impl fmt::Debug for PendingCredentialCiphertextParams<'_> {
     }
 }
 
+/// Delivery identity is metadata, but must never appear in Debug output.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CredentialVersion {
+    pub credential_id: String,
+    pub credential_generation: i64,
+}
+impl fmt::Debug for CredentialVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialVersion")
+            .field("generation", &self.credential_generation)
+            .finish_non_exhaustive()
+    }
+}
+impl CredentialVersion {
+    fn confirms(&self, expected: Option<&Self>) -> AppResult<()> {
+        if expected.is_none_or(|expected| {
+            self.credential_id == expected.credential_id
+                && self.credential_generation >= expected.credential_generation
+        }) {
+            Ok(())
+        } else {
+            Err(AppError::NodeOffline(
+                "Node has not persisted the requested credential generation".into(),
+            ))
+        }
+    }
+}
+
 /// Parameters for pushing a credential update to a node.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialUpdateParams {
+    #[serde(default, flatten)]
+    pub version: Option<CredentialVersion>,
     pub service_slug: String,
     pub injection_method: String,
     pub header_name: Option<String>,
-    pub header_value: Option<String>,
+    pub header_value: Option<zeroize::Zeroizing<String>>,
     pub param_name: Option<String>,
-    pub param_value: Option<String>,
+    pub param_value: Option<zeroize::Zeroizing<String>>,
     pub target_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<i64>,
 }
 
 /// Map a retryable proxy failure from a node into the appropriate
@@ -1958,167 +2003,185 @@ impl NodeWsManager {
         expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
-        let request_body_len = request.body.as_ref().map_or(0, Vec::len);
-        if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
-            self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
-                .await;
-        }
-        let conn = self
-            .connection_for(node_id, expected_connection_id)
-            .map_err(NodeProxyFailure::before_dispatch)?;
-        if request.target_id.is_some() {
-            let capable = conn
-                .capabilities
-                .lock()
-                .is_ok_and(|caps| caps.http_signature_v2);
-            if !capable || prepared_signature.is_none() {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::NodeHttpSignatureUnsupported,
-                ));
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
+            let request_body_len = request.body.as_ref().map_or(0, Vec::len);
+            if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+                self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
+                    .await;
             }
-            if super::destination_routing::normalize_origin(&request.base_url)
-                .as_ref()
-                .ok()
-                != Some(&request.base_url)
-            {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::ValidationError(
-                        "Target-selected node request requires an exact normalized origin".into(),
-                    ),
-                ));
-            }
-        }
-        let node_body_limit = conn
-            .capabilities
-            .lock()
-            .ok()
-            .and_then(|capabilities| capabilities.proxy_max_body_size)
-            .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
-        if request_body_len > node_body_limit {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::RequestBodyTooLarge {
-                    max_bytes: node_body_limit,
-                    context: "Node proxy".to_string(),
-                },
-            ));
-        }
-        let request_id = request.request_id.clone();
-        let dispatch_gate = conn.proxy_dispatch_gate.clone();
-        let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
-            NodeProxyFailure::before_dispatch(AppError::Internal(
-                "Node proxy dispatch gate is unavailable".to_string(),
-            ))
-        })?;
-        if self.take_proxy_cancellation(node_id, &request_id) {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::ClientDisconnected,
-            ));
-        }
-
-        // Create oneshot channel for response correlation. The response may be a
-        // complete payload or a live streaming receiver.
-        let (resp_tx, resp_rx) = oneshot::channel();
-        conn.pending
-            .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
-
-        // Build headers as JSON object
-        let headers_map: serde_json::Map<String, serde_json::Value> = request
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-
-        let body_b64 = request.body.as_ref().map(|b| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(b)
-        });
-
-        let (timestamp, nonce, signature) = prepared_signature
-            .map(|prepared| {
-                (
-                    Some(prepared.timestamp),
-                    Some(prepared.nonce),
-                    Some(prepared.signature),
-                )
-            })
-            .unwrap_or((None, None, None));
-
-        // Build WS message
-        let ws_msg = WsProxyRequest {
-            signature_version: request.target_id.as_ref().map(|_| 2),
-            target_id: request.target_id,
-            msg_type: "proxy_request",
-            request_id: request_id.clone(),
-            service_id: request.service_id,
-            service_slug: request.service_slug,
-            base_url: request.base_url,
-            method: request.method,
-            path: request.path,
-            query: request.query,
-            headers: SecretJson(serde_json::Value::Object(headers_map)),
-            body: body_b64,
-            timestamp,
-            nonce,
-            signature,
-        };
-
-        let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
-            conn.pending.remove(&request_id);
-            NodeProxyFailure::before_dispatch(AppError::Internal(format!(
-                "Failed to serialize proxy request: {e}"
-            )))
-        })?;
-
-        // H4: Use try_send on bounded channel. If the channel is full, the node
-        // is not keeping up (slow or malicious) — treat as offline.
-        match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} write buffer full"),
-                )));
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} connection closed"),
-                )));
-            }
-        }
-
-        let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
-        drop(_dispatch_guard);
-
-        // Drop the connection ref before awaiting
-        drop(conn);
-
-        // Wait for response with timeout
-        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
-        match tokio::time::timeout(timeout, resp_rx).await {
-            Ok(Ok(NodeProxyOutcome::Response(response))) => {
-                cancellation_guard.armed = false;
-                Ok(response)
-            }
-            Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
-                let error = map_retryable_node_failure(message, reason.as_deref());
-                if matches!(error, AppError::NodeCredentialMissing(_)) {
-                    // The node resolves its local credential before building or
-                    // sending the downstream request, so this reason proves the
-                    // mutation never crossed the downstream dispatch boundary.
-                    Err(NodeProxyFailure::before_dispatch(error))
-                } else {
-                    Err(NodeProxyFailure::after_dispatch(error))
+            let conn = self
+                .connection_for(node_id, expected_connection_id)
+                .map_err(NodeProxyFailure::before_dispatch)?;
+            if request.target_id.is_some() {
+                let capable = conn
+                    .capabilities
+                    .lock()
+                    .is_ok_and(|caps| caps.http_signature_v2);
+                if !capable || prepared_signature.is_none() {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::NodeHttpSignatureUnsupported,
+                    ));
+                }
+                if super::destination_routing::normalize_origin(&request.base_url)
+                    .as_ref()
+                    .ok()
+                    != Some(&request.base_url)
+                {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::ValidationError(
+                            "Target-selected node request requires an exact normalized origin"
+                                .into(),
+                        ),
+                    ));
                 }
             }
-            Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
-                format!("Node {node_id} disconnected during request"),
-            ))),
-            Err(_) => {
-                // The guard removes pending and sends cancellation to the node.
-                Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+            let node_body_limit = conn
+                .capabilities
+                .lock()
+                .ok()
+                .and_then(|capabilities| capabilities.proxy_max_body_size)
+                .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
+            if request_body_len > node_body_limit {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::RequestBodyTooLarge {
+                        max_bytes: node_body_limit,
+                        context: "Node proxy".to_string(),
+                    },
+                ));
+            }
+            let request_id = request.request_id.clone();
+            let dispatch_gate = conn.proxy_dispatch_gate.clone();
+            let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
+                NodeProxyFailure::before_dispatch(AppError::Internal(
+                    "Node proxy dispatch gate is unavailable".to_string(),
+                ))
+            })?;
+            if self.take_proxy_cancellation(node_id, &request_id) {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::ClientDisconnected,
+                ));
+            }
+
+            // Create oneshot channel for response correlation. The response may be a
+            // complete payload or a live streaming receiver.
+            let (resp_tx, resp_rx) = oneshot::channel();
+            conn.pending
+                .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
+
+            // Build headers as JSON object
+            let headers_map: serde_json::Map<String, serde_json::Value> = request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+
+            let body_b64 = request.body.as_ref().map(|b| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(b)
+            });
+
+            let (timestamp, nonce, signature) = prepared_signature
+                .map(|prepared| {
+                    (
+                        Some(prepared.timestamp),
+                        Some(prepared.nonce),
+                        Some(prepared.signature),
+                    )
+                })
+                .unwrap_or((None, None, None));
+
+            // Build WS message
+            let ws_msg = WsProxyRequest {
+                signature_version: request.target_id.as_ref().map(|_| 2),
+                target_id: request.target_id,
+                msg_type: "proxy_request",
+                request_id: request_id.clone(),
+                service_id: request.service_id,
+                service_slug: request.service_slug,
+                base_url: request.base_url,
+                method: request.method,
+                path: request.path,
+                query: request.query,
+                headers: SecretJson(serde_json::Value::Object(headers_map)),
+                body: body_b64,
+                timestamp,
+                nonce,
+                signature,
+            };
+
+            let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
+                conn.pending.remove(&request_id);
+                NodeProxyFailure::before_dispatch(AppError::Internal(format!(
+                    "Failed to serialize proxy request: {e}"
+                )))
+            })?;
+
+            // H4: Use try_send on bounded channel. If the channel is full, the node
+            // is not keeping up (slow or malicious) — treat as offline.
+            match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} write buffer full"),
+                    )));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} connection closed"),
+                    )));
+                }
+            }
+
+            let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
+            drop(_dispatch_guard);
+
+            // Drop the connection ref before awaiting
+            drop(conn);
+
+            // Wait for response with timeout
+            let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+            match tokio::time::timeout(timeout, resp_rx).await {
+                Ok(Ok(NodeProxyOutcome::Response(response))) => {
+                    cancellation_guard.armed = false;
+                    Ok(response)
+                }
+                Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
+                    let error = map_retryable_node_failure(message, reason.as_deref());
+                    if matches!(error, AppError::NodeCredentialMissing(_)) {
+                        // The node resolves its local credential before building or
+                        // sending the downstream request, so this reason proves the
+                        // mutation never crossed the downstream dispatch boundary.
+                        Err(NodeProxyFailure::before_dispatch(error))
+                    } else {
+                        Err(NodeProxyFailure::after_dispatch(error))
+                    }
+                }
+                Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+                    format!("Node {node_id} disconnected during request"),
+                ))),
+                Err(_) => {
+                    // The guard removes pending and sends cancellation to the node.
+                    Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+                }
             }
         }
+        .await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Signed opening metadata followed by bounded binary upload frames. Unlike
@@ -2129,6 +2192,11 @@ impl NodeWsManager {
         body: axum::body::Body,
         expected_connection_id: Option<&str>,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
         use futures::StreamExt;
         let header_timeout = if request.operation == nyxid_machine::Operation::ProxyUpload
             && request.parameters["git"] == true
@@ -2186,7 +2254,7 @@ impl NodeWsManager {
             )));
         }
         drop(conn);
-        let task = tokio::spawn(async move {
+        let task = crate::services::shutdown::process().spawn(async move {
             let mut stream = body.into_data_stream();
             let mut sequence = 0;
             let mut aborted = false;
@@ -2244,7 +2312,7 @@ impl NodeWsManager {
         match outcome {
             Ok(Ok(NodeProxyOutcome::Response(ProxyResponseType::Streaming(mut source)))) => {
                 let (sender, receiver) = mpsc::channel(16);
-                tokio::spawn(async move {
+                crate::services::shutdown::process().spawn(async move {
                     let _guard = guard;
                     loop {
                         tokio::select! {
@@ -2263,6 +2331,18 @@ impl NodeWsManager {
             }
             _ => Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout)),
         }
+
+        }.await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.
@@ -2455,7 +2535,18 @@ impl NodeWsManager {
     ) -> AppResult<()> {
         let conn = self.connection_for(node_id, expected_connection_id)?;
 
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         let msg = WsCredentialUpdate {
+            version: params.version.clone(),
             msg_type: "credential_update",
             request_id: None,
             service_slug: params.service_slug.clone(),
@@ -2465,6 +2556,7 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
 
         let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
@@ -2507,7 +2599,7 @@ impl NodeWsManager {
     /// slug. Used when a `UserService`'s `node_id` changes so the prior
     /// node stops holding the secret.
     pub fn send_credential_remove(&self, node_id: &str, service_slug: &str) -> AppResult<()> {
-        self.send_credential_remove_for(node_id, service_slug, None)
+        self.send_credential_remove_for(node_id, service_slug, None, None)
     }
 
     pub(crate) fn send_credential_remove_if(
@@ -2515,8 +2607,9 @@ impl NodeWsManager {
         node_id: &str,
         service_slug: &str,
         connection_id: &str,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
-        self.send_credential_remove_for(node_id, service_slug, Some(connection_id))
+        self.send_credential_remove_for(node_id, service_slug, Some(connection_id), version)
     }
 
     fn send_credential_remove_for(
@@ -2524,10 +2617,12 @@ impl NodeWsManager {
         node_id: &str,
         service_slug: &str,
         expected_connection_id: Option<&str>,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsCredentialRemove {
+            version: version.cloned(),
             msg_type: "credential_remove",
             request_id: None,
             service_slug: service_slug.to_string(),
@@ -2737,9 +2832,19 @@ impl NodeWsManager {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
         let conn = self.connection_for(node_id, expected_connection_id)?;
+        if params.injection_method == "target_url"
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|c| c.credential_target_update_v1 && c.credential_ack_correlation)
+        {
+            return Err(AppError::BadRequest(
+                "Node does not support metadata-only target updates; upgrade the node agent".into(),
+            ));
+        }
         conn.credential_acks.insert(request_id.clone(), tx_ack);
-
         let msg = WsCredentialUpdate {
+            version: params.version.clone(),
             msg_type: "credential_update",
             request_id: Some(request_id.clone()),
             service_slug: params.service_slug.clone(),
@@ -2749,6 +2854,7 @@ impl NodeWsManager {
             param_name: params.param_name.clone(),
             param_value: params.param_value.clone(),
             target_url: params.target_url.clone(),
+            target_revision: params.target_revision,
         };
         let json = crate::crypto::secret_json::to_secret_string(&msg).map_err(|e| {
             conn.credential_acks.remove(&request_id);
@@ -2765,6 +2871,7 @@ impl NodeWsManager {
 
         match tokio::time::timeout(timeout, rx_ack).await {
             Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Versioned(held))) => held.confirms(params.version.as_ref()),
             Ok(Ok(CredentialAckOutcome::Err(msg))) => {
                 // A negative ack means the node's keyring / local
                 // config write failed — the request body was already
@@ -2832,7 +2939,7 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
     ) -> AppResult<()> {
-        self.send_credential_remove_and_wait_for(node_id, service_slug, timeout, None)
+        self.send_credential_remove_and_wait_for(node_id, service_slug, timeout, None, None)
             .await
     }
 
@@ -2842,12 +2949,14 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
         connection_id: &str,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         self.send_credential_remove_and_wait_for(
             node_id,
             service_slug,
             timeout,
             Some(connection_id),
+            version,
         )
         .await
     }
@@ -2858,6 +2967,7 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
         expected_connection_id: Option<&str>,
+        version: Option<&CredentialVersion>,
     ) -> AppResult<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
@@ -2865,6 +2975,7 @@ impl NodeWsManager {
         conn.credential_acks.insert(request_id.clone(), tx_ack);
 
         let msg = WsCredentialRemove {
+            version: version.cloned(),
             msg_type: "credential_remove",
             request_id: Some(request_id.clone()),
             service_slug: service_slug.to_string(),
@@ -2884,6 +2995,7 @@ impl NodeWsManager {
 
         match tokio::time::timeout(timeout, rx_ack).await {
             Ok(Ok(CredentialAckOutcome::Ok)) => Ok(()),
+            Ok(Ok(CredentialAckOutcome::Versioned(held))) => held.confirms(version),
             Ok(Ok(CredentialAckOutcome::Err(msg))) => Err(AppError::NodeOffline(format!(
                 "Node rejected credential remove: {msg}"
             ))),
@@ -2932,6 +3044,27 @@ impl NodeWsManager {
         }
     }
 
+    pub async fn send_credential_remove_versioned_clustered(
+        &self,
+        node_id: &str,
+        slug: &str,
+        version: &CredentialVersion,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_remove_versioned(node_id, slug, version, timeout)
+                .await
+        } else {
+            self.send_credential_remove_and_wait_for(node_id, slug, timeout, None, Some(version))
+                .await
+        }
+    }
+
     /// Record the capabilities advertised by a node in its
     /// `status_update` message. Called by the WS reader task on each
     /// status_update; stays a no-op for nodes that omit the field
@@ -2950,7 +3083,9 @@ impl NodeWsManager {
             flags.proxy_upload_v1 = caps.proxy_upload_v1;
             flags.http_cancellation = caps.http_cancellation;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
+            flags.credential_target_update_v1 = caps.credential_target_update_v1;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
+            flags.machine_execution_approval_v1 = caps.machine_execution_approval_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
         }
     }
@@ -3051,6 +3186,23 @@ impl NodeWsManager {
             .iter()
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Idle management sockets do not keep a drain open; their operations do.
+    pub fn in_flight_operations(&self) -> usize {
+        self.connections
+            .iter()
+            .map(|connection| {
+                connection.pending.len()
+                    + connection.ssh_tunnels.len()
+                    + connection.web_terminals.len()
+                    + connection.ssh_exec_requests.len()
+                    + connection.machine_requests.len()
+                    + connection.ssh_node_exec_streams.len()
+                    + connection.ws_proxies.len()
+                    + connection.credential_acks.len()
+            })
+            .sum()
     }
 
     pub fn connected_nodes(&self) -> Vec<(String, String)> {
@@ -3761,7 +3913,7 @@ impl NodeWsManager {
             .or_insert_with(|| tokio::sync::broadcast::channel(2).0)
             .subscribe();
         let (tx, rx) = mpsc::channel(2);
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             loop {
                 tokio::select! {
                     _=tx.closed()=>break,
@@ -6027,10 +6179,12 @@ mod tests {
     fn credential_update_fails_for_disconnected_node() {
         let mgr = NodeWsManager::new(30, 100);
         let params = CredentialUpdateParams {
+            version: None,
+            target_revision: None,
             service_slug: "openai".to_string(),
             injection_method: "bearer".to_string(),
             header_name: Some("Authorization".to_string()),
-            header_value: Some("Bearer sk-test".to_string()),
+            header_value: Some(zeroize::Zeroizing::new("Bearer sk-test".to_string())),
             param_name: None,
             param_value: None,
             target_url: None,
@@ -6039,6 +6193,63 @@ mod tests {
             .send_credential_update("unknown-node", &params)
             .expect_err("should fail for disconnected node");
         assert!(matches!(err, AppError::NodeOffline(_)));
+    }
+
+    #[tokio::test]
+    async fn node_endpoint_2126_transport_gates_metadata_on_the_live_connection() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(4);
+        mgr.register_connection("node", tx);
+        let params = CredentialUpdateParams {
+            version: None,
+            service_slug: "monitor".into(),
+            injection_method: "target_url".into(),
+            header_name: None,
+            header_value: None,
+            param_name: None,
+            param_value: None,
+            target_url: Some("http://new-monitor".into()),
+            target_revision: Some(1),
+        };
+        for (target, ack) in [(false, false), (false, true), (true, false)] {
+            mgr.record_capabilities(
+                "node",
+                &NodeCapabilitiesMsg {
+                    credential_target_update_v1: target,
+                    credential_ack_correlation: ack,
+                    ..Default::default()
+                },
+            );
+            assert!(mgr.send_credential_update("node", &params).is_err());
+            assert!(
+                mgr.send_credential_update_and_wait("node", &params, Duration::from_millis(5))
+                    .await
+                    .is_err()
+            );
+            assert!(rx.try_recv().is_err());
+            assert!(
+                mgr.connections
+                    .get("node")
+                    .unwrap()
+                    .credential_acks
+                    .is_empty()
+            );
+        }
+        mgr.record_capabilities(
+            "node",
+            &NodeCapabilitiesMsg {
+                credential_target_update_v1: true,
+                credential_ack_correlation: true,
+                ..Default::default()
+            },
+        );
+        mgr.send_credential_update("node", &params).unwrap();
+        let NodeOutboundMessage::Text(frame) = rx.recv().await.unwrap() else {
+            panic!("expected metadata frame")
+        };
+        let frame: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["target_revision"], 1);
+        assert!(frame.get("header_value").is_none());
     }
 
     #[test]
@@ -6066,7 +6277,9 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
+                credential_target_update_v1: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 proxy_max_body_size: None,
             },
         );
@@ -6095,6 +6308,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             },
         );
@@ -6436,5 +6650,43 @@ mod response_debug_tests {
         ] {
             assert!(!debug.contains(secret));
         }
+    }
+}
+
+#[cfg(test)]
+mod machine_approval_wire_tests {
+    use super::*;
+    // Exact main-era capability struct shape, frozen at c3c9445ee.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct MainCapabilities {
+        #[serde(default)]
+        machine: Option<nyxid_machine::MachineProfile>,
+        #[serde(default)]
+        http_cancellation: bool,
+        #[serde(default)]
+        http_signature_v2: bool,
+        #[serde(default)]
+        proxy_upload_v1: bool,
+        #[serde(default)]
+        credential_ack_correlation: bool,
+        #[serde(default)]
+        credential_target_update_v1: bool,
+        #[serde(default)]
+        remote_credential_crypto_v1: bool,
+        #[serde(default)]
+        proxy_max_body_size: Option<usize>,
+    }
+    #[test]
+    fn old_server_accepts_machine_approval_capability_and_new_reader_defaults_off() {
+        let value =
+            serde_json::json!({"http_signature_v2":true,"machine_execution_approval_v1":true});
+        let old: MainCapabilities = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.http_signature_v2);
+        let new: NodeCapabilitiesMsg = serde_json::from_value(value).unwrap();
+        assert!(new.machine_execution_approval_v1);
+        let absent: NodeCapabilitiesMsg =
+            serde_json::from_value(serde_json::json!({"http_signature_v2":true})).unwrap();
+        assert!(!absent.machine_execution_approval_v1);
     }
 }

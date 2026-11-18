@@ -9,31 +9,7 @@ use crate::{
 use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
 
-pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> AppResult<()> {
-    use crate::{errors::access_denial::CredentialType, mw::auth::AuthMethod};
-    if !matches!(
-        user.auth_method,
-        AuthMethod::Session | AuthMethod::AccessToken
-    ) || user.oauth_client_id.is_some()
-        || user.api_key_id.is_some()
-        || user.acting_client_id.is_some()
-    {
-        let credential = match user.auth_method {
-            AuthMethod::ApiKey => CredentialType::ApiKey,
-            AuthMethod::Delegated => CredentialType::Delegated,
-            AuthMethod::Relay => CredentialType::Relay,
-            AuthMethod::ServiceAccount => CredentialType::ServiceAccount,
-            _ if user.api_key_id.is_some() => CredentialType::ApiKey,
-            _ if user.acting_client_id.is_some() => CredentialType::Delegated,
-            _ => CredentialType::OauthClient,
-        };
-        return Err(AppError::unsupported_credential(
-            "A first-party human account session is required",
-            credential,
-        ));
-    }
-    Ok(())
-}
+pub(crate) use crate::mw::auth::require_first_party_human;
 
 pub(super) fn resolve_client_ip(
     headers: &HeaderMap,
@@ -136,4 +112,39 @@ pub(super) fn capture_client_context(
         client_hardware_concurrency: body.client_hardware_concurrency,
         client_device_memory: body.client_device_memory,
     })
+}
+
+#[cfg(test)]
+mod protected_owner_instruction_tests {
+    use super::*;
+    use crate::mw::auth::AuthMethod;
+
+    #[test]
+    fn only_first_party_human_credentials_can_mint_owner_instruction_provenance() {
+        let owner = uuid::Uuid::new_v4().to_string();
+        for method in [
+            AuthMethod::Session,
+            AuthMethod::AccessToken,
+            AuthMethod::ApiKey,
+            AuthMethod::Delegated,
+            AuthMethod::Relay,
+            AuthMethod::ServiceAccount,
+        ] {
+            let mut auth = crate::test_utils::test_auth_user(&owner);
+            auth.auth_method = method.clone();
+            assert_eq!(
+                require_first_party_human(&auth).is_ok(),
+                matches!(method, AuthMethod::Session | AuthMethod::AccessToken)
+            );
+            for field in 0..3 {
+                let mut derived = auth.clone();
+                match field {
+                    0 => derived.oauth_client_id = Some("external-app".into()),
+                    1 => derived.acting_client_id = Some("delegated-client".into()),
+                    _ => derived.api_key_id = Some("api-key".into()),
+                }
+                assert!(require_first_party_human(&derived).is_err());
+            }
+        }
+    }
 }

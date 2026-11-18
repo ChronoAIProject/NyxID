@@ -36,6 +36,30 @@ pub async fn connect_user(
     credential: Option<&str>,
     credential_label: Option<&str>,
 ) -> AppResult<ConnectionResult> {
+    connect_user_with_audit(
+        db,
+        encryption_keys,
+        node_ws_manager,
+        user_id,
+        service_id,
+        credential,
+        credential_label,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn connect_user_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    service_id: &str,
+    credential: Option<&str>,
+    credential_label: Option<&str>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<ConnectionResult> {
     // Fetch service
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -158,7 +182,8 @@ pub async fn connect_user(
         )
         .await?;
     }
-    super::connection_record_service::commit(db, raw_source.as_ref(), &conn).await?;
+    super::connection_record_service::commit_with_audit(db, raw_source.as_ref(), &conn, audit)
+        .await?;
 
     Ok(ConnectionResult {
         service_name: service.name,
@@ -174,6 +199,28 @@ pub async fn update_credential(
     service_id: &str,
     credential: &str,
     credential_label: Option<&str>,
+) -> AppResult<()> {
+    update_credential_with_audit(
+        db,
+        encryption_keys,
+        user_id,
+        service_id,
+        credential,
+        credential_label,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn update_credential_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    service_id: &str,
+    credential: &str,
+    credential_label: Option<&str>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<()> {
     if credential.is_empty() {
         return Err(AppError::ValidationError(
@@ -232,7 +279,7 @@ pub async fn update_credential(
         .checked_add(1)
         .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
     row.updated_at = Utc::now();
-    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
+    super::connection_record_service::commit_with_audit(db, Some(&raw_source), &row, audit).await?;
 
     Ok(())
 }
@@ -257,6 +304,17 @@ pub async fn disconnect_user_with_expected_state_version(
     service_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<UserServiceConnection> {
+    disconnect_user_with_audit(db, user_id, service_id, expected_state_version, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn disconnect_user_with_audit(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    expected_state_version: Option<i64>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<UserServiceConnection> {
     let raw_source = db
         .collection::<bson::Document>(CONNECTIONS)
         .find_one(doc! {"user_id":user_id,"service_id":service_id,"is_active":true})
@@ -279,7 +337,7 @@ pub async fn disconnect_user_with_expected_state_version(
         .state_version
         .checked_add(1)
         .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
-    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
+    super::connection_record_service::commit_with_audit(db, Some(&raw_source), &row, audit).await?;
     Ok(row)
 }
 

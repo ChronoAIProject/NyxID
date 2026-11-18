@@ -122,6 +122,17 @@ async fn faq_admission_survives_crash_and_preserves_canonical_modes_without_raw_
 
 #[tokio::test]
 async fn faq_limits_reset_and_admission_abort_or_mode_change_cannot_send() {
+    // Start at the last millisecond of a minute and advance explicitly. Future
+    // windows also keep Mongo's real TTL monitor out of this clocked fixture.
+    let minute = Utc::now().timestamp_millis() / 60_000 + 1440;
+    let now = bson::DateTime::from_millis(minute * 60_000 + 59_999);
+    crate::services::coordination_service::TEST_RATE_WINDOW_NOW
+        .scope(std::cell::Cell::new(now), faq_limits_at_controlled_time())
+        .await;
+}
+
+async fn faq_limits_at_controlled_time() {
+    use crate::services::coordination_service::TEST_RATE_WINDOW_NOW;
     let j = Journey::new().await;
     j.state
         .db
@@ -210,7 +221,11 @@ async fn faq_limits_reset_and_admission_abort_or_mode_change_cannot_send() {
         .state
         .db
         .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME);
-    windows.update_many(doc!{"namespace":{"$in":["manager_faq_profile","manager_faq_sender"]}},doc!{"$set":{"window_start":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(61))}}).await.unwrap();
+    TEST_RATE_WINDOW_NOW.with(|clock| {
+        clock.set(bson::DateTime::from_millis(
+            clock.get().timestamp_millis() + 1,
+        ));
+    });
     let admitted = dispatch::admit_text_update(
         &j.state.db,
         j.producers.identity.as_ref(),
@@ -310,7 +325,11 @@ async fn faq_limits_reset_and_admission_abort_or_mode_change_cannot_send() {
         .unwrap()
         .is_none()
     );
-    windows.update_many(doc!{"namespace":"manager_faq_profile"},doc!{"$set":{"window_start":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(61))}}).await.unwrap();
+    TEST_RATE_WINDOW_NOW.with(|clock| {
+        clock.set(bson::DateTime::from_millis(
+            clock.get().timestamp_millis() + 60_000,
+        ));
+    });
     assert!(matches!(
         dispatch::admit_text_update(
             &j.state.db,

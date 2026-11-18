@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import {
+  skillPreviewSchema,
   agentSkillSchema,
   agentSkillsSchema,
   learningProposalSchema,
@@ -91,3 +92,33 @@ describe("learning proposal schema", () => {
     expect(learningProposalSchema.parse({ ...proposal, draft }).draft?.base_skill).toBeNull();
   });
 });
+
+describe("skill preview outline and author", () => {
+  const base = {
+    reference: { source: "ornn", skill_id: "s", name: "s", version: "1.0", sha256: "a".repeat(64), dependencies: [] },
+    description: "d",
+    size_bytes: 1,
+  };
+  it("keeps the plain preview when the server sends no outline", () => {
+    const parsed = skillPreviewSchema.parse(base);
+    expect(parsed.outline).toBeUndefined();
+    expect(parsed.author ?? null).toBeNull();
+  });
+  it("parses steps, pins and authors", () => {
+    const parsed = skillPreviewSchema.parse({
+      ...base,
+      outline: {
+        overview: "o",
+        steps: [{ id: "step-1", title: "t", text: "x", uses: { source: "ornn", skill_id: "d", name: "dep", version: "1.0", sha256: "b".repeat(64) } }],
+      },
+      author: { kind: "platform", name: "Platform Skills", service: "cma", system_skill: true },
+    });
+    expect(parsed.outline?.steps[0]).toMatchObject({ uses: { name: "dep" }, asks_you: false });
+    expect(parsed.author).toEqual({ kind: "platform", name: "Platform Skills", service: "cma", system_skill: true });
+    expect(skillPreviewSchema.parse({ ...base, outline: null }).outline).toBeNull();
+  });
+  it("drops an author kind it does not know", () => {
+    expect(skillPreviewSchema.parse({ ...base, author: { kind: "robot", name: "x" } }).author).toBeNull();
+  });
+});
+

@@ -5,7 +5,7 @@ import { ApiError } from "@/lib/api-client";
 import { MachineGrantConsent } from "./machine-grant-consent";
 const mocks = vi.hoisted(() => ({ prepare: vi.fn(), changed: vi.fn() }));
 vi.mock("@/hooks/use-machine-grants", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/hooks/use-machine-grants")>()), prepareMachineConsent: mocks.prepare }));
-vi.mock("./machine-grant-editor", () => ({ MachineGrantEditor: ({ onSubmit, onSelectionChange }: { onSubmit: (value: object) => Promise<void>; onSelectionChange: () => void }) => <><button onClick={() => void onSubmit({ assignments: {} })}>Save fixture selection</button><button onClick={onSelectionChange}>Change fixture selection</button></> }));
+vi.mock("./machine-grant-editor", () => ({ MachineGrantEditor: ({ onSubmit, onSelectionChange }: { onSubmit: (value: object) => Promise<void>; onSelectionChange: (selected: boolean) => void }) => <><button onClick={() => { onSelectionChange(true); void onSubmit({ assignments: {} }); }}>Save fixture selection</button><button onClick={() => onSelectionChange(true)}>Change fixture selection</button><button onClick={() => onSelectionChange(false)}>Clear fixture selection</button></> }));
 function token(client = "client", scope = "openid machine", exp = Math.floor(Date.now() / 1000) + 900) { return `header.${btoa(JSON.stringify({ token_type: "oauth_consent_request", client_id: client, scope, exp }))}.signature`; }
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
@@ -41,4 +41,24 @@ describe("protected Machine consent", () => {
     expect(screen.getByText(/protected Machine consent request is missing or expired/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save fixture selection" })).not.toBeInTheDocument();
   });
+});
+
+it("explains optional access without preparing a grant", () => {
+  render(<MachineGrantConsent consentRequest={token()} onPrepared={mocks.changed} />);
+  expect(screen.getByRole("heading", { name: "Machine access (optional)" })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("No Machines will be shared");
+  expect(mocks.prepare).not.toHaveBeenCalled();
+});
+it("does not revive saved authority when a pending selection was cleared", async () => {
+  let resolve!: (value: string) => void;
+  mocks.prepare.mockReturnValue(new Promise<string>((done) => { resolve = done; }));
+  const required = vi.fn();
+  render(<MachineGrantConsent consentRequest={token()} onPrepared={mocks.changed} onSelectionRequired={required} />);
+  await userEvent.click(screen.getByRole("button", { name: "Save fixture selection" }));
+  expect(required).toHaveBeenLastCalledWith(true);
+  await userEvent.click(screen.getByRole("button", { name: "Clear fixture selection" }));
+  expect(required).toHaveBeenLastCalledWith(false);
+  resolve(token());
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("No Machines will be shared"));
+  expect(mocks.changed).not.toHaveBeenCalledWith(expect.any(String));
 });

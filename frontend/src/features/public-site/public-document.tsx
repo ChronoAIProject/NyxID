@@ -29,7 +29,7 @@ export function PublicDocument({
   return (
     <DocsLayout {...navigation} currentSlug={slug}>
       <article ref={content} id="website-main" className="max-w-3xl">
-        <h1 className="mb-6 font-display text-3xl font-bold">{doc.title}</h1>
+        <h1 className="mb-6 font-display type-compact-page-title sm:type-page-title">{doc.title}</h1>
         <DocMarkdown
           markdown={doc.body}
           baseHref={`/docs/${slug.split("/").slice(0, -1).join("/")}/`}

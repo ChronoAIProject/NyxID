@@ -1,0 +1,181 @@
+{
+  "description": "Top-level request schemas from deployed CMAEG /openapi.json, read-only export 2026-11-05. Full export SHA-256 3261aafeb934f12bf0b4fbb93e208b528aeb747ab3bbb94acf4e1c3417e5cef5. See ChronoAIProject/cma docs/CMAEG_Protocol.md at b7d9bd9f384c2964ab72c9302f3748ef4f9ed4dc. References name upstream nested schemas; this fixture checks the strict top-level contract.",
+  "schemas": {
+    "ChannelCreateRequest": {
+      "type": "object",
+      "description": "Request wrapper used by channel creation.",
+      "required": [
+        "schema_version",
+        "name",
+        "profile",
+        "provider",
+        "sources",
+        "partition",
+        "reply",
+        "credentials"
+      ],
+      "properties": {
+        "connection_admission": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/AdmissionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentials": {
+          "$ref": "#/components/schemas/CredentialsRequest"
+        },
+        "durable_custom_execution": {
+          "type": "boolean",
+          "description": "Immutable opt-in to durable execution for this channel's Custom source."
+        },
+        "name": {
+          "type": "string"
+        },
+        "partition": {
+          "$ref": "#/components/schemas/PartitionRule"
+        },
+        "profile": {
+          "$ref": "#/components/schemas/EventWorkerProfile"
+        },
+        "provider": {
+          "$ref": "#/components/schemas/ProviderRequest"
+        },
+        "record_id": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/RecordId",
+              "description": "Stable UUID reserved by a durable creator before issuing the request.\nRequired as a canonical UUID v4 when authoring native Discord or WhatsApp;\noptional for existing non-native creation contracts."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reply": {
+          "$ref": "#/components/schemas/ReplyPolicy"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/SourceRequest"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChannelUpdateRequest": {
+      "type": "object",
+      "description": "Update body; credentials are retained when this field is absent.",
+      "required": [
+        "schema_version",
+        "name",
+        "profile",
+        "provider",
+        "sources",
+        "partition",
+        "reply",
+        "expected_version"
+      ],
+      "properties": {
+        "connection_admission": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/AdmissionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "connection_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentials": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/CredentialPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durable_custom_execution": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Optional echo for older clients; a supplied value must match the saved mode."
+        },
+        "expected_version": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "partition": {
+          "$ref": "#/components/schemas/PartitionRule"
+        },
+        "profile": {
+          "$ref": "#/components/schemas/EventWorkerProfile"
+        },
+        "provider": {
+          "$ref": "#/components/schemas/ProviderRequest"
+        },
+        "reply": {
+          "$ref": "#/components/schemas/ReplyPolicy"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/SourceRequest"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoutingUpdateRequest": {
+      "type": "object",
+      "required": [
+        "expected_version",
+        "routing"
+      ],
+      "properties": {
+        "expected_version": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "routing": {
+          "$ref": "#/components/schemas/RoutingPolicyRequest"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

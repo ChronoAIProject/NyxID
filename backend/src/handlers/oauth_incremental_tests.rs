@@ -1,4 +1,416 @@
 // Included in oauth::tests to share the real handler fixtures.
+use crate::services::token_service;
+
+async fn delivery_route(
+    fixture: &IncrementalFixture,
+    token: &str,
+    decision: &str,
+    // Browser marker, Fetch Metadata, explicit JSON, authenticated.
+    mode: (bool, bool, bool, bool),
+) -> Response {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let incremental = fixture.params.service_access_mode.is_some();
+    let path = if incremental {
+        "/oauth/authorize/incremental/decision"
+    } else {
+        "/oauth/authorize/decision"
+    };
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("response_type", "code")
+        .append_pair("client_id", &fixture.client_id)
+        .append_pair("redirect_uri", &fixture.params.redirect_uri)
+        .append_pair("consent_request", token)
+        .append_pair("decision", decision);
+    if incremental {
+        form.append_pair("service_access_mode", "incremental");
+    }
+    if mode.0 {
+        form.append_pair("browser_form", "true");
+    }
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if mode.1 {
+        request = request
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document");
+    }
+    if mode.2 {
+        request = request.header(header::ACCEPT, "application/json");
+    }
+    if mode.3 {
+        let session =
+            token_service::create_session(&fixture.state.db, &fixture.user_id, None, None)
+                .await
+                .unwrap();
+        request = request.header(
+            header::COOKIE,
+            format!("nyx_session={}", session.session_token),
+        );
+    }
+    let (app, _) = crate::routes::build_router_with_state(fixture.state.clone());
+    Box::pin(
+        app.with_state(fixture.state.clone())
+            .oneshot(request.body(Body::from(form.finish())).unwrap()),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn consent_delivery_real_routes_cover_browser_and_api_contracts() {
+    use axum::body::to_bytes;
+    for incremental in [false, true] {
+        let mut f = Box::pin(IncrementalFixture::new(false, false)).await;
+        if !incremental {
+            f.params.service_access_mode = None;
+            f.params.requested_service_ids.clear();
+        }
+        f.params.redirect_uri = "https://app.example/callback?existing=encoded%26%2F%22".into();
+        f.state
+            .db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! {"_id":&f.client_id},
+                doc! {"$set":{"redirect_uris":[&f.params.redirect_uri]}},
+            )
+            .await
+            .unwrap();
+        f.params.state = Some("state & encoded/%+\" marker".into());
+        let token = f.request().await.unwrap();
+        for (decision, auth, metadata) in [
+            ("allow", true, false),
+            ("deny", true, true),
+            ("allow", false, false),
+        ] {
+            // Each approval gets a fresh incremental snapshot after the previous write.
+            let token = if auth {
+                f.request().await.unwrap()
+            } else {
+                token.clone()
+            };
+            let response = Box::pin(delivery_route(
+                &f,
+                &token,
+                decision,
+                (true, metadata, false, auth),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(header::LOCATION));
+            assert!(
+                !response
+                    .headers()
+                    .contains_key("x-nyxid-browser-consent-form")
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let html = String::from_utf8(
+                to_bytes(response.into_body(), 32_768)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(!html.contains("<script"));
+            assert!(html.contains("Continue to the application"));
+            if auth {
+                assert!(html.contains("existing=encoded%26%2F%22&amp;"));
+                assert!(html.contains("state=state%20%26%20encoded%2F%25%2B%22%20marker"));
+                assert!(html.contains(if decision == "allow" {
+                    "code="
+                } else {
+                    "error=access_denied"
+                }));
+            } else {
+                assert!(html.contains("/login?return_to="));
+            }
+        }
+        for mode in [(false, false, false, true), (true, true, true, true)] {
+            for decision in ["allow", "deny"] {
+                let token = f.request().await.unwrap();
+                let response = Box::pin(delivery_route(&f, &token, decision, mode)).await;
+                assert_eq!(response.status(), StatusCode::FOUND);
+                assert!(
+                    response.headers()[header::LOCATION]
+                        .to_str()
+                        .unwrap()
+                        .contains(if decision == "allow" {
+                            "code="
+                        } else {
+                            "error=access_denied"
+                        })
+                );
+            }
+        }
+        // Old frontend + new backend: HTML Accept / Fetch Metadata without the marker.
+        let token = f.request().await.unwrap();
+        let response = Box::pin(delivery_route(
+            &f,
+            &token,
+            "deny",
+            (false, true, false, true),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        if incremental {
+            consent_service::revoke_consent(&f.state.db, &f.user_id, &f.client_id)
+                .await
+                .unwrap();
+            for mode in [
+                (true, false, false, true),
+                (true, true, false, true),
+                (false, false, false, true),
+                (true, true, true, true),
+            ] {
+                let response = Box::pin(delivery_route(&f, &token, "allow", mode)).await;
+                if mode.2 || !mode.0 {
+                    assert_eq!(response.status(), StatusCode::FOUND);
+                    assert!(
+                        response.headers()[header::LOCATION]
+                            .to_str()
+                            .unwrap()
+                            .contains("error=interaction_required")
+                    );
+                } else {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let html = String::from_utf8(
+                        to_bytes(response.into_body(), 32_768)
+                            .await
+                            .unwrap()
+                            .to_vec(),
+                    )
+                    .unwrap();
+                    assert!(html.contains("error=interaction_required"));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn consent_delivery_native_get_and_post_remain_script_free() {
+    use axum::body::to_bytes;
+    for destination in [
+        "cursor://callback",
+        "com.example.app:/oauth2redirect",
+        "http://127.0.0.1:39218/callback",
+    ] {
+        let mut f = Box::pin(IncrementalFixture::new(false, false)).await;
+        f.params.service_access_mode = None;
+        f.params.requested_service_ids.clear();
+        f.params.resource.clear();
+        f.params.redirect_uri = destination.into();
+        let token = f.request().await.unwrap();
+        let response = Box::pin(delivery_route(
+            &f,
+            &token,
+            "allow",
+            (true, false, false, true),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 32_768)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("2;url="));
+        assert!(!html.contains("<script"));
+        f.params.prompt = None;
+        let response = Box::pin(authorize_inner(
+            &f.state,
+            OptionalAuthUser(Some(crate::test_utils::test_auth_user(&f.user_id))),
+            &f.params,
+            true,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            to_bytes(response.into_body(), 32_768)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("Authentication successful"));
+        assert!(!html.contains("<script"));
+    }
+}
+
+#[tokio::test]
+async fn consent_delivery_rejects_legacy_unsafe_redirects_on_every_decision_path() {
+    for incremental in [false, true] {
+        let mut f = Box::pin(IncrementalFixture::new(false, false)).await;
+        if !incremental {
+            f.params.service_access_mode = None;
+            f.params.requested_service_ids.clear();
+        }
+        f.params.redirect_uri = "custom:marker".into();
+        f.state.db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(doc! {"_id":&f.client_id},
+            doc! {"$set":{"redirect_uris":["custom:marker"],"created_by":"dynamic_registration"}}).await.unwrap();
+        let token = sign_consent_request(
+            &f.state,
+            &f.user_id,
+            &f.params,
+            f.params.scope.as_deref().unwrap(),
+        )
+        .unwrap();
+        for decision in ["allow", "deny"] {
+            let response = Box::pin(delivery_route(
+                &f,
+                &token,
+                decision,
+                (true, false, false, true),
+            ))
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(!response.headers().contains_key(header::LOCATION));
+        }
+        assert!(matches!(
+            Box::pin(authorize_inner(
+                &f.state,
+                OptionalAuthUser(Some(crate::test_utils::test_auth_user(&f.user_id))),
+                &f.params,
+                true,
+                None
+            ))
+            .await,
+            Err(AppError::InvalidRedirectUri)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn ordinary_two_devices_keep_old_claims_through_no_op_and_broadening() {
+    let mut f = Box::pin(IncrementalFixture::new(false, false)).await;
+    f.params.service_access_mode = None;
+    f.params.requested_service_ids.clear();
+    f.params.resource.clear();
+    let approve = |token: String, selection: Vec<String>| {
+        let state = f.state.clone();
+        let user = f.user_id.clone();
+        async move {
+            let form = serde_json::from_value(serde_json::json!({
+                "response_type":"code", "client_id":"unsigned", "redirect_uri":"https://unused.example",
+                "decision":"allow", "consent_request":token, "allowed_service_ids":selection
+            })).unwrap();
+            authorize_decision(
+                State(state),
+                OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user))),
+                TelemetryContext::default(),
+                Form(form),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let request = f.request().await.unwrap();
+    let response = Box::pin(approve(request.clone(), vec![f.services[0].id.clone()])).await;
+    let location = url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    let code = location
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .into_owned();
+    let Json(device_a) = Box::pin(f.exchange(&code)).await.unwrap();
+    let a_claims =
+        jwt::verify_token(&f.state.jwt_keys, &f.state.config, &device_a.access_token).unwrap();
+    let before = consent_service::check_consent(&f.state.db, &f.user_id, &f.client_id, "")
+        .await
+        .unwrap()
+        .unwrap();
+    // Device B replays exactly the reviewed selection; the stored union stays unchanged.
+    Box::pin(approve(request, vec![f.services[0].id.clone()])).await;
+    let equal = consent_service::check_consent(&f.state.db, &f.user_id, &f.client_id, "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.write_version, equal.write_version);
+    crate::services::oauth_token_authority_service::validate_claims(&f.state.db, &a_claims)
+        .await
+        .unwrap();
+    let refresh = device_a.refresh_token.unwrap();
+    token_service::refresh_tokens(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &refresh,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    f.state.db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(doc! {"_id":&f.client_id}, doc! {"$set":{"allowed_scopes":format!("{} profile", f.params.scope.as_deref().unwrap())}}).await.unwrap();
+    f.params.scope = Some(format!("{} profile", f.params.scope.as_deref().unwrap()));
+    let request = f.request().await.unwrap();
+    let response = Box::pin(approve(request, vec![f.services[2].id.clone()])).await;
+    let location = url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    let code = location
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .into_owned();
+    let Json(device_b) = Box::pin(f.exchange(&code)).await.unwrap();
+    let b_claims =
+        jwt::verify_token(&f.state.jwt_keys, &f.state.config, &device_b.access_token).unwrap();
+    assert_eq!(
+        b_claims.allowed_service_ids,
+        Some(vec![f.services[2].id.clone()])
+    );
+    assert_eq!(
+        a_claims.allowed_service_ids,
+        Some(vec![f.services[0].id.clone()])
+    );
+    assert!(!a_claims.scope.split_whitespace().any(|s| s == "profile"));
+    crate::services::oauth_token_authority_service::validate_claims(&f.state.db, &a_claims)
+        .await
+        .unwrap();
+    token_service::refresh_tokens(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &refresh,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    consent_service::grant_consent_with_services(
+        &f.state.db,
+        &f.user_id,
+        &f.client_id,
+        "openid",
+        Some(vec![]),
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::services::oauth_token_authority_service::validate_claims(&f.state.db, &a_claims)
+            .await
+            .is_err()
+    );
+    assert!(
+        token_service::refresh_tokens(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &refresh,
+            None,
+            None
+        )
+        .await
+        .is_err()
+    );
+}
+
 struct IncrementalFixture {
     state: AppState,
     user_id: String,
@@ -84,6 +496,9 @@ impl IncrementalFixture {
         .await?;
         let location = response.headers()[header::LOCATION].to_str().unwrap();
         let url = url::Url::parse(location).unwrap();
+        if let Some((_, token)) = url.query_pairs().find(|(key, _)| key == "consent_request") {
+            return Ok(token.into_owned());
+        }
         assert!(location.len() < 256, "consent URL stays bounded");
         let handle = url
             .query_pairs()
@@ -527,10 +942,7 @@ async fn stale_incremental_binding_update_preserves_row_but_rejects_superseded_g
         &fixture.user_id,
         &fixture.client_id,
         scope,
-        Some(vec![
-            fixture.services[0].id.clone(),
-            fixture.services[1].id.clone(),
-        ]),
+        Some(vec![fixture.services[0].id.clone()]),
     )
     .await
     .unwrap();

@@ -1,10 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mockDashboard } from "./managed-onboarding-fixtures";
-import { usageStats } from "../src/test/admin-usage-fixture";
+import { usageFixture, usageStats } from "../src/test/admin-usage-fixture";
 import { newView } from "../src/lib/usage-analytics";
 
 async function mockUsage(page: Page, withImages = true) {
   await mockDashboard(page);
+  await page.route("**/api/v1/services", (route) =>
+    route.fulfill({ json: { services: [] } }),
+  );
+  await page.route("**/api/v1/admin/usage/identities?**", (route) =>
+    route.fulfill({ json: { options: [], total: 0 } }),
+  );
+  await page.route("**/api/v1/admin/assistant/feedback?**", (route) =>
+    route.fulfill({ json: { counts: [], recent: [], next_cursor: null } }),
+  );
   const totals = usageStats({
     prompt_tokens: 4_600_000_000,
     completion_tokens: 1_500_000_000,
@@ -23,7 +32,10 @@ async function mockUsage(page: Page, withImages = true) {
     }),
   );
   await page.route("**/api/v1/admin/usage/analytics?**", (route) => {
-    const measure = new URL(route.request().url()).searchParams.get("measure")!;
+    const params = new URL(route.request().url()).searchParams;
+    const measure = params.get("measure")!;
+    const label =
+      params.get("breakdown") === "model" ? "gpt-6-luna" : "Image service";
     const value = measure.endsWith("_tokens")
       ? totals[measure as keyof typeof totals]
       : measure === "requests"
@@ -67,7 +79,7 @@ async function mockUsage(page: Page, withImages = true) {
         series: [
           {
             id: "service",
-            label: "Image service",
+            label,
             is_other: false,
             value,
             points: [point],
@@ -76,7 +88,7 @@ async function mockUsage(page: Page, withImages = true) {
         slices: [
           {
             id: "service",
-            label: "Image service",
+            label,
             value,
             requests: totals.requests,
             unknown_cost_events: 0,
@@ -152,4 +164,135 @@ test.describe("mobile token breakdown", () => {
       });
     });
   }
+});
+
+test("top-level filters scope dashboard, model charts, and usage records together", async ({
+  page,
+}) => {
+  await mockUsage(page);
+  const listRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/admin/usage"))
+      listRequests.push(request.url());
+  });
+  const actor = "11111111-1111-4111-8111-111111111111";
+  const owner = "22222222-2222-4222-8222-222222222222";
+  await page.route("**/api/v1/services", (route) =>
+    route.fulfill({
+      json: {
+        services: [
+          {
+            id: "chrono-llm-public",
+            name: "Chrono LLM (public)",
+            slug: "chrono-llm-public",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/v1/admin/usage/identities?**", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const options = [
+      { id: actor, label: "Alice" },
+      { id: owner, label: "Research org" },
+    ].filter((option) =>
+      params.has("ids")
+        ? params.get("ids")!.split(",").includes(option.id)
+        : option.id === (params.get("kind") === "actors" ? actor : owner),
+    );
+    return route.fulfill({ json: { options, total: options.length } });
+  });
+  await page.route("**/api/v1/admin/usage?**", (route) =>
+    route.fulfill({ json: usageFixture() }),
+  );
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/admin/usage");
+  const filters = page.getByRole("group", { name: "Usage filters" });
+  await expect(filters).toBeVisible();
+  const filterBounds = (await filters.boundingBox())!;
+  const tabsBounds = (await page
+    .getByRole("tablist", { name: "Usage view" })
+    .boundingBox())!;
+  expect(filterBounds.y + filterBounds.height).toBeLessThan(tabsBounds.y);
+  for (const [button, option] of [
+    ["Filter users", "Alice"],
+    ["Filter users / organizations", "Research org"],
+    ["Filter services", "Chrono LLM (public)"],
+  ]) {
+    await page.getByRole("button", { name: button, exact: true }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: option })
+      .click();
+    await page.getByRole("button", { name: "Apply", exact: true }).click();
+  }
+  await page.getByRole("combobox", { name: "Time range" }).click();
+  const analytics = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      url.pathname.endsWith("/usage/analytics") &&
+      url.searchParams.get("period") === "30d"
+    );
+  });
+  await page.getByRole("option", { name: "Last 30 days" }).click();
+  const scope = (url: string) => {
+    const params = new URL(url).searchParams;
+    expect(params.get("actors")).toBe(actor);
+    expect(params.get("owners")).toBe(owner);
+    expect(params.get("services")).toBe("chrono-llm-public");
+    expect(params.get("period")).toBe("30d");
+  };
+  scope((await analytics).url());
+  await page
+    .getByRole("combobox", { name: "Break down Request traffic by" })
+    .click();
+  const regrouped = page.waitForRequest((request) => {
+    const params = new URL(request.url()).searchParams;
+    return (
+      new URL(request.url()).pathname.endsWith("/usage/analytics") &&
+      params.get("measure") === "requests" &&
+      params.get("breakdown") === "model"
+    );
+  });
+  await page.getByRole("option", { name: "Model", exact: true }).click();
+  scope((await regrouped).url());
+  const modelPanel = page.getByRole("article", { name: "Tokens by model" });
+  await modelPanel.scrollIntoViewIfNeeded();
+  await expect(
+    modelPanel.getByRole("combobox", { name: "Break down Tokens by model by" }),
+  ).toHaveText("Model");
+  await expect(modelPanel.getByRole("table")).toContainText("gpt-6-luna");
+  await expect(
+    modelPanel.getByRole("columnheader", { name: "Model", exact: true }),
+  ).toBeVisible();
+  // Model identifiers must never be applied as billing-owner UUID filters.
+  await expect(
+    modelPanel.getByRole("button", { name: "gpt-6-luna", exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({ path: "test-results/usage-model-breakdown.png" });
+  await page.getByRole("tab", { name: "List", exact: true }).click();
+  // The dashboard preloads list data, so switching tabs can reuse that request.
+  await expect
+    .poll(() =>
+      listRequests.some(
+        (url) => new URL(url).searchParams.get("period") === "30d",
+      ),
+    )
+    .toBe(true);
+  scope(
+    listRequests.findLast(
+      (url) => new URL(url).searchParams.get("period") === "30d",
+    )!,
+  );
+  await page.getByRole("tab", { name: "Dashboard", exact: true }).click();
+  await expect(
+    filters.getByRole("combobox", { name: "Time range" }),
+  ).toHaveText("Last 30 days");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await filters.scrollIntoViewIfNeeded();
+  await expect(filters).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "test-results/usage-filters-mobile.png" });
 });

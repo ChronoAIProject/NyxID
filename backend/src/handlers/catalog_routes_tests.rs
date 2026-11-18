@@ -617,7 +617,7 @@ async fn service_accounts_retain_rejection_because_detail_requires_a_user_actor(
     // Restricted platform grants to the human owner must not transfer to SA.
     f.state.db.collection::<DownstreamService>(CATALOG).update_one(doc! {"_id": &catalog.id}, doc! {"$set": {
         "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
-        "platform_key": bson::to_bson(&PlatformKeyConfig { enabled: true, audience: PlatformKeyAudience::Restricted, allowed_owner_ids: vec![f.owner.clone()] }).unwrap()
+        "platform_key": bson::to_bson(&PlatformKeyConfig { purpose: Default::default(), enabled: true, audience: PlatformKeyAudience::Restricted, allowed_owner_ids: vec![f.owner.clone()] }).unwrap()
     }}).await.unwrap();
     f.mount(&f.owner, "owner-private", None).await;
     use crate::services::service_account_service as accounts;

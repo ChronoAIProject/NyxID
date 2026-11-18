@@ -211,6 +211,7 @@ pub async fn resolve_service_or_user_service(
         .await?
     {
         crate::services::retired_service_service::require_available(&service)?;
+        crate::services::platform_key_service::require_ordinary_use(&service)?;
         return Ok(ResolvedService::Catalog(Box::new(service)));
     }
 
@@ -228,6 +229,7 @@ pub async fn resolve_service_or_user_service(
             .await?
     {
         crate::services::retired_service_service::require_available(&catalog)?;
+        crate::services::platform_key_service::require_ordinary_use(&catalog)?;
     }
 
     let access =
@@ -335,6 +337,7 @@ pub async fn service_to_response_with_viewer(
             })
             .collect();
     ServiceResponse {
+        credential_verification: s.credential_verification.clone(),
         catalog_manager_created: s.catalog_manager_created,
         tools_manager_created: s.tools_manager_created,
         tools_manager_eligible: crate::services::tools_manager_service::eligible_manager_tool(&s),
@@ -430,6 +433,7 @@ pub async fn service_to_response_with_viewer(
         node_id: viewer.and_then(|v| v.node_id.clone()),
         your_user_service_id: viewer.and_then(|v| v.user_service_id.clone()),
         your_binding_count: viewer.map_or(0, |v| v.binding_count),
+        can_resync_identity: None,
     }
 }
 

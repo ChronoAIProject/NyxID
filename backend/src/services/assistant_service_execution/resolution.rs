@@ -28,7 +28,8 @@ pub async fn resolve_implicit_for_request(
             crate::services::proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_access(auth.org_agent_access.as_deref()),
         )
         .await;
     };
@@ -40,10 +41,20 @@ pub async fn resolve_implicit_for_request(
         .find_one(doc! {"_id": catalog, "is_active": true})
         .await?
         .is_some_and(|row| row.inference.is_some());
-    let memberships =
-        crate::services::org_service::list_memberships_for_member(&state.db, &chat.user_id, false)
-            .await?;
-    let rows =
+    let shared = auth
+        .org_agent_access
+        .as_ref()
+        .and_then(|access| access.shared());
+    let mut rows: Vec<UserService> = if let Some(shared) = shared {
+        shared.catalog_connections(catalog, inference_catalog)
+    } else {
+        let memberships = crate::services::org_service::list_memberships_for_member(
+            &state.db,
+            &chat.user_id,
+            false,
+        )
+        .await?;
+        let rows =
         crate::services::user_service_service::list_user_services_with_sources_selected_in_group(
             &state.db,
             &chat.user_id,
@@ -56,6 +67,22 @@ pub async fn resolve_implicit_for_request(
             },
         )
         .await?;
+        rows.into_iter()
+            .filter(|row| {
+                !matches!(
+                    row.source,
+                    crate::services::user_service_service::CredentialSource::Org {
+                        allowed: false,
+                        ..
+                    }
+                ) && (chat.turn_live || row.service.user_id == chat.user_id)
+                    && (auth.allow_all_services
+                        || auth.allowed_service_ids.contains(&row.service.id)
+                        || inference_catalog)
+            })
+            .map(|row| row.service)
+            .collect()
+    };
     let order = preferences::get(&state.db, &chat.user_id)
         .await?
         .map(|row| row.ordered)
@@ -69,19 +96,6 @@ pub async fn resolve_implicit_for_request(
     let selected_id = selected
         .as_ref()
         .and_then(|row| row.get_str("connection_id").ok());
-    let mut rows: Vec<_> = rows
-        .into_iter()
-        .filter(|row| {
-            !matches!(
-                row.source,
-                crate::services::user_service_service::CredentialSource::Org { allowed: false, .. }
-            ) && (chat.turn_live || row.service.user_id == chat.user_id)
-                && (auth.allow_all_services
-                    || auth.allowed_service_ids.contains(&row.service.id)
-                    || inference_catalog)
-        })
-        .map(|row| row.service)
-        .collect();
     rows.sort_by_key(|row| {
         (
             Some(row.id.as_str()) != selected_id,
@@ -110,7 +124,8 @@ pub async fn resolve_implicit_for_request(
             ));
         }
     }
-    let legacy_personal = selected_in_group.is_none()
+    let legacy_personal = shared.is_none()
+        && selected_in_group.is_none()
         && crate::services::proxy_service::user_has_legacy_personal_connection(
             &state.db,
             &chat.user_id,
@@ -151,7 +166,7 @@ pub async fn resolve_implicit_for_request(
                 )
                 .is_err()
             {
-                if selected_in_group.is_some() {
+                if selected_in_group.is_some() || shared.is_some() {
                     return Err(AppError::Forbidden(
                         "Selected connection does not permit this operation".into(),
                     ));
@@ -169,12 +184,14 @@ pub async fn resolve_implicit_for_request(
             crate::services::proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_access(auth.org_agent_access.as_deref()),
         )
         .await
         {
             Ok(Some(mut resolved)) => {
-                if selected_in_group.is_none()
+                if shared.is_none()
+                    && selected_in_group.is_none()
                     && let Some((method, path, query, body, headers, projection)) = request
                 {
                     projection.apply(&mut resolved.target);
@@ -217,13 +234,15 @@ pub async fn resolve_implicit_for_request(
                 }
                 return Ok(Some(resolved));
             }
-            Ok(None) if selected_in_group.is_some() => {
+            Ok(None) if selected_in_group.is_some() || shared.is_some() => {
                 return Err(AppError::Forbidden(
                     "Selected connection is unavailable".into(),
                 ));
             }
             Ok(None) => continue,
-            Err(AppError::CredentialUnavailable(_)) if selected_id != Some(row.id.as_str()) => {
+            Err(AppError::CredentialUnavailable(_))
+                if shared.is_none() && selected_id != Some(row.id.as_str()) =>
+            {
                 continue;
             }
             Err(error) => return Err(error),

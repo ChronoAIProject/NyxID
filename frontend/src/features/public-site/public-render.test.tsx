@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import { renderPage } from "../../../scripts/public-render";
-import { metadataHead } from "./metadata";
+import { metadataHead, PUBLIC_ORIGIN } from "./metadata";
 import { publicationPath } from "./publication";
 describe("window-free public renderer", () => {
   it.each(["/", "/security", "/solutions/help-desk"])(
@@ -22,7 +22,7 @@ describe("window-free public renderer", () => {
         expect(meta.description.length).toBeGreaterThan(20);
         expect(html).not.toMatch(/<script(?:\s|>)/);
         const head = metadataHead(meta);
-        expect(head).toContain(`href="https://nyx.chrono-ai.fun${path}"`);
+        expect(head).toContain(`href="${PUBLIC_ORIGIN}${path}"`);
         expect(head).toContain('hreflang="zh-Hans"');
         expect(metadataHead(meta, "https://preview.example")).toContain(
           'content="noindex,follow"',

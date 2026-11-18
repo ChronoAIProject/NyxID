@@ -1,6 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import { assistantFeedbackAdminSchema } from "@/schemas/assistant-feedback-admin";
+import {
+  assistantFeedbackAdminSchema,
+  feedbackThreadSchema,
+} from "@/schemas/assistant-feedback-admin";
 import { useAuthStore } from "@/stores/auth-store";
 
 export function useAssistantFeedbackAdmin(
@@ -26,5 +29,28 @@ export function useAssistantFeedbackAdmin(
         ? previous
         : undefined;
     },
+  });
+}
+
+export function useFeedbackThread(
+  id: string,
+  revision: string,
+  enabled: boolean,
+) {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useInfiniteQuery({
+    queryKey: ["admin", "feedback-thread", userId, id, revision],
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      feedbackThreadSchema.parse(
+        await api.get(
+          `/admin/assistant/feedback/${encodeURIComponent(id)}/thread${pageParam ? `?cursor=${encodeURIComponent(pageParam)}` : ""}`,
+        ),
+      ),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    enabled,
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
   });
 }

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, useMemo, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,9 +48,12 @@ function parseDate(value: string): Date | null {
 }
 
 interface CommonDatePickerProps {
+  readonly grouped?: boolean;
   readonly minDate?: string;
   readonly placeholder?: string;
   readonly ariaLabel?: string;
+  readonly describedBy?: string;
+  readonly invalid?: boolean;
   readonly disabled?: boolean;
 }
 
@@ -69,11 +73,13 @@ type DatePickerProps = CommonDatePickerProps &
   );
 
 export function DatePicker(props: DatePickerProps) {
+  const { t } = useUiTranslation();
   const {
     minDate,
     placeholder = "Select date",
     ariaLabel,
     disabled = false,
+    grouped = false,
   } = props;
   const multiple = props.mode === "multiple";
   const values = multiple ? props.values : props.value ? [props.value] : [];
@@ -202,11 +208,15 @@ export function DatePicker(props: DatePickerProps) {
           type="button"
           disabled={disabled}
           aria-label={ariaLabel}
+          aria-describedby={props.describedBy}
+          aria-invalid={props.invalid}
           className={cn(
-            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-12 transition-colors",
+            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-14 unthemed:text-12 transition-colors",
             "hover:border-hairline-strong focus-visible:outline-none focus-visible:border-input-focus",
             "disabled:cursor-not-allowed disabled:opacity-50",
             displayValue ? "text-foreground" : "text-text-tertiary",
+            grouped &&
+              "h-auto min-h-8 w-auto max-w-full gap-2 border-0 px-0 text-left focus-visible:ring-2 focus-visible:ring-ring",
           )}
         >
           <span>{displayValue ?? placeholder}</span>
@@ -219,18 +229,18 @@ export function DatePicker(props: DatePickerProps) {
           <div className="flex items-center justify-between">
             <button
               type="button"
-              aria-label="Previous month"
+              aria-label={t("Previous month")}
               onClick={prevMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
               <ChevronLeft className="h-4 w-4" aria-hidden="true" />
             </button>
-            <span className="text-12 font-medium">
+            <span className="type-row-title unthemed:text-12">
               {MONTHS[viewMonth]} {viewYear}
             </span>
             <button
               type="button"
-              aria-label="Next month"
+              aria-label={t("Next month")}
               onClick={nextMonth}
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-overlay-strong hover:text-foreground"
             >
@@ -243,7 +253,7 @@ export function DatePicker(props: DatePickerProps) {
             {DAYS.map((d, i) => (
               <span
                 key={i}
-                className="text-10 font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
+                className="type-table-header unthemed:text-10 uppercase tracking-[1px] text-text-tertiary py-1"
               >
                 {d}
               </span>
@@ -266,7 +276,7 @@ export function DatePicker(props: DatePickerProps) {
                   aria-pressed={sel}
                   onClick={() => selectDay(cell.date)}
                   className={cn(
-                    "flex h-8 w-full items-center justify-center rounded-md text-12 transition-colors",
+                    "flex h-8 w-full items-center justify-center rounded-md type-button unthemed:text-12 transition-colors",
                     !cell.current && "text-text-tertiary/40",
                     cell.current &&
                       !sel &&
@@ -274,8 +284,8 @@ export function DatePicker(props: DatePickerProps) {
                       "text-foreground hover:bg-overlay-strong",
                     (cell.disabled || selectionLimitReached) &&
                       "cursor-not-allowed opacity-30",
-                    sel && "bg-primary text-primary-foreground font-medium",
-                    tod && !sel && "font-medium text-primary-text",
+                    sel && "bg-primary text-primary-foreground",
+                    tod && !sel && "text-primary-text",
                   )}
                 >
                   {cell.day}
@@ -289,7 +299,7 @@ export function DatePicker(props: DatePickerProps) {
             <Button
               type="button"
               variant="ghost"
-              className="h-7 text-11"
+              className="h-7 text-14 unthemed:text-11"
               disabled={values.length === 0}
               onClick={() => {
                 if (multiple) {
@@ -300,13 +310,13 @@ export function DatePicker(props: DatePickerProps) {
                 }
               }}
             >
-              {multiple ? "Clear all" : "Clear"}
+              {multiple ? t("Clear all") : t("Clear")}
             </Button>
             <div className="flex items-center gap-1">
               <Button
                 type="button"
                 variant="ghost"
-                className="h-7 text-11"
+                className="h-7 text-14 unthemed:text-11"
                 onClick={() => {
                   const t = new Date();
                   const todayValue = toDateString(t);
@@ -324,18 +334,14 @@ export function DatePicker(props: DatePickerProps) {
                     setOpen(false);
                   }
                 }}
-              >
-                Today
-              </Button>
+              >{t("Today")}</Button>
               {multiple && (
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-7 text-11"
+                  className="h-7 text-14 unthemed:text-11"
                   onClick={() => setOpen(false)}
-                >
-                  Done
-                </Button>
+                >{t("Done")}</Button>
               )}
             </div>
           </div>

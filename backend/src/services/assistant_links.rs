@@ -2,9 +2,22 @@
 
 pub const AGENT_DETAILS_GRANTS: &str = "grants";
 pub const AGENT_DETAILS_SKILLS: &str = "skills";
+/// The agent's Chats settings (channel bots and their chats).
+pub const AGENT_DETAILS_CHANNELS: &str = "channels";
 
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
+    Agent {
+        agent: Option<&'a str>,
+    },
+    TelegramSetup {
+        request: Option<&'a str>,
+    },
+    Group {
+        group: &'a str,
+    },
+    Approvals,
+    ApprovalSettings,
     Conversation {
         conversation: &'a str,
     },
@@ -52,6 +65,25 @@ impl AssistantPage<'_> {
     pub fn path(self) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         let path = match self {
+            Self::Agent { agent } => {
+                if let Some(agent) = agent {
+                    query.append_pair("agent", agent);
+                }
+                "/assistant".into()
+            }
+            Self::TelegramSetup { request } => {
+                query.append_pair("connect", "telegram-new");
+                if let Some(request) = request {
+                    query.append_pair("request_id", request);
+                }
+                "/channel-bots".into()
+            }
+            Self::Group { group } => {
+                query.append_pair("c", group);
+                "/assistant".into()
+            }
+            Self::Approvals => "/assistant/approvals".into(),
+            Self::ApprovalSettings => "/approvals/settings".into(),
             Self::Conversation { conversation } => {
                 query.append_pair("c", conversation);
                 "/assistant".into()
@@ -192,7 +224,20 @@ mod tests {
                 },
                 "/assistant?c=nyxa-test&card=a%26b",
             ),
+            (Agent { agent: None }, "/assistant"),
+            (Agent { agent: Some("a&b") }, "/assistant?agent=a%26b"),
+            (
+                TelegramSetup { request: None },
+                "/channel-bots?connect=telegram-new",
+            ),
+            (
+                TelegramSetup {
+                    request: Some("a&b"),
+                },
+                "/channel-bots?connect=telegram-new&request_id=a%26b",
+            ),
             (NyxBotSettings, "/assistant?panel=nyxbot"),
+            (Approvals, "/assistant/approvals"),
             (
                 Billing { tab: "billing" },
                 "/assistant?panel=billing&panelTab=billing",

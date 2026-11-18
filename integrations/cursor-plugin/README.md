@@ -37,7 +37,7 @@ After installation, ask the agent to find or connect a service. The bundled skil
 5. `nyx__search_tools` finds the exact operation and schema.
 6. A typed service tool or `nyx__call_tool` performs the proxied call.
 
-The core built-in tools are `nyx__discover_services`, `nyx__list_connected_services`, `nyx__connect_service`, `nyx__wait_for_connection`, `nyx__search_tools`, and `nyx__call_tool`. The server also registers `nyx__ssh_list_services`, `nyx__ssh_exec`, and the Oracle relay tools (`nyx__oracle_pools`, `nyx__oracle_ask`, `nyx__oracle_result`, `nyx__oracle_attach`, `nyx__oracle_extract`, `nyx__oracle_session`). Connected OpenAPI services add tools whose names come from their service slug and operation ID.
+The core built-in tools are `nyx__discover_services`, `nyx__list_connected_services`, `nyx__connect_service`, `nyx__wait_for_connection`, `nyx__search_tools`, and `nyx__call_tool`. The server also registers `nyx__ssh_list_services` and `nyx__ssh_exec`. The former Oracle relay tools (`nyx__oracle_*`) are permanently retired and refuse every call. Connected OpenAPI services add tools whose names come from their service slug and operation ID.
 
 The `/mcp` proxy decrypts and injects stored downstream credentials at call time. Credentials, connection secrets, and raw API keys must never be pasted into chat, committed to a repository, or echoed in a command.
 

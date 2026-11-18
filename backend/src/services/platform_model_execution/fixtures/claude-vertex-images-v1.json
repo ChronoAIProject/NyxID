@@ -1,0 +1,120 @@
+{
+  "certification_version": 1,
+  "provenance": "Synthetic sanitized protocol fixture; no live provider certification call.",
+  "native_model": "claude-sonnet-4-5",
+  "transport": "vertex_anthropic",
+  "request": {
+    "model": "nyxid/claude-sonnet-4-5",
+    "max_tokens": 128,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe this image."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMwSJgAAAHkASHKbNIyAAAAAElFTkSuQmCC",
+              "detail": "auto"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Be brief."
+          }
+        ]
+      }
+    ]
+  },
+  "response": {
+    "type": "message",
+    "id": "private-response",
+    "model": "private-native",
+    "content": [
+      {
+        "type": "text",
+        "text": "Hello"
+      }
+    ],
+    "stop_reason": "end_turn",
+    "usage": {
+      "input_tokens": 100,
+      "output_tokens": 20,
+      "cache_read_input_tokens": 10,
+      "cache_creation_input_tokens": 5,
+      "cache_creation": {
+        "ephemeral_5m_input_tokens": 5,
+        "ephemeral_1h_input_tokens": 0
+      }
+    }
+  },
+  "stream_events": [
+    {
+      "type": "message_start",
+      "message": {
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "cache_read_input_tokens": 10,
+          "cache_creation_input_tokens": 5,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 5,
+            "ephemeral_1h_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "text",
+        "text": ""
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "text_delta",
+        "text": "Hello"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "end_turn"
+      },
+      "usage": {
+        "output_tokens": 20
+      }
+    },
+    {
+      "type": "message_stop"
+    }
+  ],
+  "missing_evidence_response": {
+    "type": "message",
+    "id": "private-response",
+    "model": "private-native",
+    "content": [
+      {
+        "type": "text",
+        "text": "Hello"
+      }
+    ],
+    "stop_reason": "end_turn"
+  },
+  "zero_refusal": {
+    "error": {
+      "type": "rate_limit_error"
+    }
+  }
+}

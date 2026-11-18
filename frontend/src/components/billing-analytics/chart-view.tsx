@@ -1,5 +1,9 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { analyticsAmount, plotAmount } from "@/lib/usage-analytics";
 import { useId } from "react";
+import { useTextSize } from "@/hooks/use-text-size";
 import {
   Area,
   AreaChart,
@@ -21,6 +25,7 @@ import {
   formatAnalyticsValue,
   unitLabel,
   INTERVAL_LABELS,
+  BREAKDOWN_LABELS,
   PANEL_HEIGHTS,
   partialBucket,
   bucketBounds,
@@ -77,7 +82,9 @@ export function ChartView({
   onSelect?: (id: string) => void;
   compact?: boolean;
 }) {
+  useUiTranslation();
   const chartId = useId().replace(/:/g, "");
+  const tokenSize = useTextSize(13);
   const seriesData = data.points.map((point, index) => ({
     ...point,
     value: plotAmount(point),
@@ -110,7 +117,9 @@ export function ChartView({
     (slice) => slice.value !== null && slice.value > 0,
   );
   const noUsage = data.totals.events === 0;
-  const tick = chartTick;
+  // Recharts measures labels in JS. A CSS var alone leaves its measurement
+  // cache unchanged when Display changes the root font size.
+  const tick = { ...chartTick, fontSize: tokenSize };
   const seriesColors = data.series.map((series, index) =>
     color(index, series.is_other),
   );
@@ -130,12 +139,8 @@ export function ChartView({
   };
   const chart = noUsage ? (
     <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
-      <span className="text-15 font-medium text-foreground">
-        No usage in this view
-      </span>
-      <span className="text-12">
-        Try a different time range or clear a filter.
-      </span>
+      <span className="type-card-title text-foreground">{translateUi("No usage in this view")}</span>
+      <span className="text-14">{translateUi("Try a different time range or clear a filter.")}</span>
     </div>
   ) : panel.chart === "pie" ? (
     pieData.length ? (
@@ -145,7 +150,7 @@ export function ChartView({
         minWidth={1}
         initialDimension={{ width: 640, height: 280 }}
       >
-        <PieChart accessibilityLayer>
+        <PieChart key={tokenSize} accessibilityLayer>
           <Pie
             data={pieData}
             dataKey="value"
@@ -177,10 +182,10 @@ export function ChartView({
         </PieChart>
       </ResponsiveContainer>
     ) : (
-      <div className="flex h-full items-center justify-center text-12 text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-14 text-muted-foreground">
         {data.slices.some((slice) => slice.value === null)
-          ? "Cost is unavailable for this selection."
-          : "No positive values to display."}
+          ? translateUi("Cost is unavailable for this selection.")
+          : translateUi("No positive values to display.")}
       </div>
     )
   ) : panel.chart === "bar" ? (
@@ -191,6 +196,7 @@ export function ChartView({
       initialDimension={{ width: 640, height: 280 }}
     >
       <BarChart
+        key={tokenSize}
         accessibilityLayer
         data={plotSlices}
         layout="vertical"
@@ -221,7 +227,7 @@ export function ChartView({
         <YAxis
           type="category"
           dataKey="label"
-          width={105}
+          width={tokenSize * 9.5}
           tick={tick}
           tickLine={false}
           axisLine={false}
@@ -265,6 +271,7 @@ export function ChartView({
     >
       {panel.chart === "combo" ? (
         <ComposedChart
+          key={tokenSize}
           accessibilityLayer
           data={seriesData}
           margin={{ top: 10, right: 8, bottom: 4, left: 0 }}
@@ -282,7 +289,8 @@ export function ChartView({
             tick={tick}
             tickLine={false}
             axisLine={false}
-            minTickGap={35}
+            minTickGap={tokenSize * 2}
+            height={tokenSize * 2.5}
             interval="preserveStartEnd"
             tickFormatter={(s: string) =>
               `${bucketLabel(s, data.granularity)}${partialBucket(s, data) ? "*" : ""}`
@@ -291,7 +299,7 @@ export function ChartView({
           <YAxis
             yAxisId="value"
             tick={tick}
-            width={55}
+            width={tokenSize * 5}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) => format(n, true)}
@@ -300,7 +308,7 @@ export function ChartView({
             yAxisId="requests"
             orientation="right"
             tick={tick}
-            width={45}
+            width={tokenSize * 4}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) =>
@@ -356,6 +364,7 @@ export function ChartView({
         </ComposedChart>
       ) : (
         <AreaChart
+          key={tokenSize}
           accessibilityLayer
           data={seriesData}
           margin={{ top: 10, right: 20, bottom: 4, left: 0 }}
@@ -373,7 +382,8 @@ export function ChartView({
             tick={tick}
             tickLine={false}
             axisLine={false}
-            minTickGap={35}
+            minTickGap={tokenSize * 2}
+            height={tokenSize * 2.5}
             interval="preserveStartEnd"
             tickFormatter={(s: string) =>
               `${bucketLabel(s, data.granularity)}${partialBucket(s, data) ? "*" : ""}`
@@ -381,7 +391,7 @@ export function ChartView({
           />
           <YAxis
             tick={tick}
-            width={55}
+            width={tokenSize * 5}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) => format(n, true)}
@@ -448,35 +458,32 @@ export function ChartView({
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <span
-            className={cn(
-              "font-display font-medium tracking-tight tabular-nums",
-              compact ? "text-22" : "text-28",
-            )}
+            className="font-display type-metric tracking-tight tabular-nums"
           >
             {format(
               data.exact_total === undefined ? data.total : data.exact_total,
               true,
             )}
           </span>
-          <span className="ml-2 text-11 text-muted-foreground">{unit}</span>
+          <span className="ml-2 text-13 text-muted-foreground">{unit}</span>
         </div>
-        <span className="text-10 text-muted-foreground">
+        <span className="text-12 text-muted-foreground">
           {temporal
-            ? `${INTERVAL_LABELS[data.granularity]} · UTC`
+            ? translateUi("{{value1}} · UTC", { value1: INTERVAL_LABELS[data.granularity] })
             : panel.top
-              ? `Top ${panel.top}${data.slices.some((s) => s.is_other) ? " + Other" : ""}`
-              : "All usage"}
+              ? translateUi("Top {{value1}}{{value2}}", { value1: panel.top, value2: data.slices.some((s) => s.is_other) ? translateUi(" + Other") : "" })
+              : translateUi("All usage")}
         </span>
       </div>
       {panel.chart === "combo" && (
-        <div className="mb-2 flex justify-between text-10 text-muted-foreground">
-          <span>Bars · {unit} · left axis</span>
-          <span>Line · requests · right axis</span>
+        <div className="mb-2 flex justify-between text-12 text-muted-foreground">
+          <span>{translateUi("Bars · ")}{unit}{translateUi(" · left axis")}</span>
+          <span>{translateUi("Line · requests · right axis")}</span>
         </div>
       )}
       <div
         role="img"
-        aria-label={`${panel.title}: ${panel.chart} chart. Values available in the data table.`}
+        aria-label={translateUi("{{value1}}: {{value2}} chart. Values available in the data table.", { value1: panel.title, value2: panel.chart })}
         aria-describedby={`${chartId}-coverage`}
         className={cn(
           "analytics-plot min-w-0 shrink-0",
@@ -490,26 +497,22 @@ export function ChartView({
       </div>
       <div
         id={`${chartId}-coverage`}
-        className="mt-3 space-y-1 text-11 text-muted-foreground"
+        className="mt-3 space-y-1 text-13 text-muted-foreground"
       >
         {temporal &&
           data.points.some((point) => partialBucket(point.bucket, data)) && (
-            <p>* Partial intervals. Hover for the exact UTC dates included.</p>
+            <p>{translateUi("* Partial intervals. Hover for the exact UTC dates included.")}</p>
           )}
         {unknown > 0 && (
           <p className="text-warning">
-            {unknown.toLocaleString()} metering events have unknown cost.
-            Affected cost values are unavailable
-            {panel.chart === "pie" ? "; slices show known values only" : ""}.
+            {unknown.toLocaleString(getFormattingLocale())}{translateUi(" metering events have unknown cost. Affected cost values are unavailable")}{panel.chart === "pie" ? translateUi("; slices show known values only") : ""}.
           </p>
         )}
         {data.totals.legacy_cost_events > 0 && data.unit === "microcredits" && (
-          <p>Includes historical estimates at cached rates.</p>
+          <p>{translateUi("Includes historical estimates at cached rates.")}</p>
         )}
         {!data.freshness.validated && (
-          <p className="text-warning">
-            Usage is updating. Refresh to confirm this snapshot.
-          </p>
+          <p className="text-warning">{translateUi("Usage is updating. Refresh to confirm this snapshot.")}</p>
         )}
       </div>
       {!noUsage && (
@@ -523,10 +526,10 @@ export function ChartView({
             <div
               key={`${slice.id}-${index}`}
               className={cn(
-                "flex items-center justify-between gap-3 text-11",
+                "flex items-center justify-between gap-3 text-13",
                 compact && "max-w-[46%]",
               )}
-              title={`${slice.label}: ${format(analyticsAmount(slice))} ${unit}`}
+              title={translateUi("{{label}}: {{value}} {{unit}}", { label: slice.label, value: format(analyticsAmount(slice)), unit: unit })}
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span
@@ -538,8 +541,8 @@ export function ChartView({
                 {onSelect && slice.id && panel.top !== 0 ? (
                   <Button
                     variant="link"
-                    className="h-auto min-w-0 justify-start p-0 text-11 text-foreground"
-                    title={`Filter to ${slice.label}`}
+                    className="h-auto min-w-0 justify-start p-0 text-14 text-foreground"
+                    title={translateUi("Filter to {{value1}}", { value1: slice.label })}
                     onClick={() => onSelect(slice.id!)}
                   >
                     <span className="truncate">{slice.label}</span>
@@ -565,7 +568,7 @@ export function ChartView({
       <div className={cn("pt-4", compact && "mt-auto")}>
         <section
           className="border-t border-border/50 pt-3"
-          aria-label={`${panel.title} data table`}
+          aria-label={translateUi("{{value1}} data table", { value1: panel.title })}
         >
           <details
             key={panel.table_display ?? "always"}
@@ -574,17 +577,13 @@ export function ChartView({
           >
             <summary
               className={cn(
-                "flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden",
+                "flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden",
                 panel.table_display !== "accordion" && "hidden",
               )}
-            >
-              Data table
-              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            >{translateUi("Data table")}<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
             </summary>
             {panel.table_display !== "accordion" && (
-              <h4 className="text-11 font-medium text-muted-foreground">
-                Data table
-              </h4>
+              <h4 className="type-secondary-emphasis text-muted-foreground">{translateUi("Data table")}</h4>
             )}
             <div
               className={cn(
@@ -592,12 +591,16 @@ export function ChartView({
                 compact ? "max-h-44" : "max-h-72",
               )}
             >
-              <table className="w-full text-left text-11">
-                <caption className="sr-only">{panel.title} data</caption>
+              <table className="w-full text-left text-13">
+                <caption className="sr-only">{panel.title}{translateUi(" data")}</caption>
                 <thead className="sticky top-0 bg-muted/90">
                   <tr>
                     <th className="px-3 py-2 font-medium">
-                      {temporal ? "Time (UTC)" : "Group"}
+                      {temporal
+                        ? translateUi("Time (UTC)")
+                        : panel.top === 0
+                          ? translateUi("Group")
+                          : BREAKDOWN_LABELS[panel.breakdown]}
                     </th>
                     <th className="px-3 py-2 text-right font-medium">{unit}</th>
                     {temporal &&
@@ -611,9 +614,7 @@ export function ChartView({
                         </th>
                       ))}
                     {panel.chart === "combo" && (
-                      <th className="px-3 py-2 text-right font-medium">
-                        Requests
-                      </th>
+                      <th className="px-3 py-2 text-right font-medium">{translateUi("Requests")}</th>
                     )}
                   </tr>
                 </thead>
@@ -647,7 +648,7 @@ export function ChartView({
                             ))}
                           {panel.chart === "combo" && (
                             <td className="px-3 py-2 text-right font-mono">
-                              {point.requests.toLocaleString()}
+                              {point.requests.toLocaleString(getFormattingLocale())}
                             </td>
                           )}
                         </tr>

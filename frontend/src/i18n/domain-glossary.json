@@ -1,0 +1,70 @@
+[
+  {
+    "term": "permission grant",
+    "source": "grant",
+    "except": "credit|allowance|wallet|billing|balance",
+    "forbidden": "拨款|撥款"
+  },
+  {
+    "term": "secret",
+    "source": "secret",
+    "except": "password|Confidential client",
+    "forbidden": "密码|密碼|机密|機密"
+  },
+  {
+    "term": "slug",
+    "source": "slug",
+    "forbidden": "蛞蝓"
+  },
+  {
+    "term": "route",
+    "source": "route",
+    "forbidden": "航线|航線"
+  },
+  {
+    "term": "agent",
+    "source": "agent",
+    "forbidden": "代理商|经纪人|經紀人|特工"
+  },
+  {
+    "term": "broker",
+    "source": "broker",
+    "forbidden": "经纪人|經紀人"
+  },
+  {
+    "term": "assistant turn",
+    "source": "turn",
+    "forbidden": "轮班|輪班"
+  },
+  {
+    "term": "callback",
+    "source": "callback",
+    "forbidden": "回拨|回撥"
+  },
+  {
+    "term": "pagination cursor",
+    "source": "server cursor|pagination cursor",
+    "forbidden": "光标|光標"
+  },
+  {
+    "term": "Taiwan permissions",
+    "source": ".*",
+    "forbidden": "許可權"
+  },
+  {
+    "term": "security and diagnostic code",
+    "source": "\\bcodes?\\b",
+    "except": "source|snippet|program|application code|run code|client-side code",
+    "forbidden": "程式碼"
+  },
+  {
+    "term": "prompt injection",
+    "source": "prompt injection",
+    "forbidden": "立即註射|注射"
+  },
+  {
+    "term": "Telegram /link command",
+    "source": "/link",
+    "forbidden": "/連結|/链接"
+  }
+]

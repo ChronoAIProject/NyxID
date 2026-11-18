@@ -3,6 +3,7 @@
 // service catalog (`GET /api/v1/catalog`): connected rows render as "Added",
 // catalog entries with no matching connection as "Available to add".
 
+import { credentialVerificationMeta, connectionVerificationLabel } from "@/lib/credential-verification";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { ConnectCardContentBlock } from "@/types/assistant";
 
@@ -41,13 +42,19 @@ export interface ConnectorCardItem {
    * connection when what they wanted was to re-enable the one they have.
    */
   readonly disabled?: boolean;
-  /** Available items only: catalog slug for the `/keys?slug=` connect deep link. */
+  readonly verificationLabel?: string;
+  /** Available items only: catalog slug for the hosted connect link. */
   readonly connectSlug?: string;
+  /** Added org-only items: catalog slug for a personal "Connect your own" link. */
+  readonly connectOwnSlug?: string;
+  /** Available items the hosted page cannot set up (SSH): Studio catalog slug. */
+  readonly advancedSetupSlug?: string;
 }
 
 export interface ConnectorItems {
   readonly added: readonly ConnectorCardItem[];
   readonly available: readonly ConnectorCardItem[];
+  readonly models: readonly ConnectorCardItem[];
 }
 
 /** Tile initial: first letters of the first two words ("OpenClaw Gateway"
@@ -59,22 +66,22 @@ export function connectorInitial(name: string): string {
   return `${first}${second}`.toUpperCase();
 }
 
-/** Lowercase auth-kind meta for a catalog entry, mirroring the connect flow
+/** Human auth-kind label for a catalog entry, mirroring the connect flow
  *  the entry drives (same shape detection as the CLI wizard catalog grid). */
 function catalogMeta(entry: CatalogEntry): string {
-  if (entry.service_type === "ssh") return "ssh";
+  if (entry.service_type === "ssh") return "SSH";
   const providerType = (entry.provider_type ?? "").toLowerCase();
-  if (providerType === "oauth2") return "oauth";
-  if (providerType === "device_code") return "device code";
-  if (!entry.requires_credential) return "no credential";
+  if (providerType === "oauth2") return "OAuth";
+  if (providerType === "device_code") return "Device code";
+  if (!entry.requires_credential) return "No credential required";
   if (
     entry.token_exchange_credential_fields &&
     entry.token_exchange_credential_fields.length > 0
   ) {
-    return "token exchange";
+    return "Token exchange";
   }
-  if (entry.requires_gateway_url) return "self-hosted";
-  return "api key";
+  if (entry.requires_gateway_url) return "Self-hosted";
+  return "API key";
 }
 
 function categoryOf(serviceType: string): string {
@@ -113,9 +120,9 @@ function addedServiceItem(
   const first = group[0] as KeyInfo;
   const catalogEntry = catalogBySlug.get(slug);
   const name = catalogEntry?.name ?? first.label;
-  const endpointDescription = !first.auto_connected && first.endpoint_url
+  const endpointDescription = credentialVerificationMeta(first)?.tooltip ?? (!first.auto_connected && first.endpoint_url
     ? `Connected through the NyxID proxy (${first.endpoint_url}).`
-    : "Connected through the NyxID proxy.";
+    : "Connected through the NyxID proxy.");
   return {
     id: `service:${slug}`,
     name,
@@ -128,23 +135,31 @@ function addedServiceItem(
       null,
     category: categoryOf(first.service_type),
     description:
-      catalogEntry?.description ??
-      first.description ??
+      catalogEntry?.description?.trim() ||
+      first.description?.trim() ||
       endpointDescription,
     meta:
       group.length > 1
         ? `${String(group.length)} connections`
         : first.credential_type.replaceAll("_", " "),
     added: true,
+    verificationLabel: connectionVerificationLabel(group),
     disabled: group.every((key) => key.is_active === false),
     manageKeyIds: group.map((key) => key.id),
+    connectOwnSlug:
+      catalogEntry &&
+      catalogEntry.service_type !== "ssh" &&
+      catalogEntry.requires_credential &&
+      group.every((key) => key.credential_source?.type === "org")
+        ? slug
+        : undefined,
   };
 }
 
 function addedCustomItem(key: KeyInfo): ConnectorCardItem {
-  const endpointDescription = !key.auto_connected && key.endpoint_url
+  const endpointDescription = credentialVerificationMeta(key)?.tooltip ?? (!key.auto_connected && key.endpoint_url
     ? `Connected through the NyxID proxy (${key.endpoint_url}).`
-    : "Connected through the NyxID proxy.";
+    : "Connected through the NyxID proxy.");
   return {
     id: `key:${key.id}`,
     name: key.label,
@@ -153,10 +168,11 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
     iconUrl: key.icon_url ?? null,
     category: categoryOf(key.service_type),
     description:
-      key.description ??
+      key.description?.trim() ||
       endpointDescription,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
+    verificationLabel: connectionVerificationLabel([key]),
     disabled: key.is_active === false,
     manageKeyIds: [key.id],
   };
@@ -170,10 +186,11 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
     iconSlug: entry.slug,
     iconUrl: entry.icon_url,
     category: categoryOf(entry.service_type),
-    description: entry.description ?? `Proxy requests to ${entry.base_url}.`,
+    description: entry.description?.trim() || `Proxy requests to ${entry.base_url}.`,
     meta: catalogMeta(entry),
     added: false,
-    connectSlug: entry.slug,
+    connectSlug: entry.service_type === "ssh" ? undefined : entry.slug,
+    advancedSetupSlug: entry.service_type === "ssh" ? entry.slug : undefined,
   };
 }
 
@@ -181,8 +198,9 @@ function availableItem(entry: CatalogEntry): ConnectorCardItem {
  * Split the marketplace into Added (one card per connected service — several
  * credentials for the same service dedupe into a single card with a
  * connection count; custom services with no catalog slug get one card per
- * key) and Available to add (catalog entries with no connection). The join
- * key is `catalog_service_slug` — never `KeyInfo.slug`, which is the
+ * key) and Available to add (catalog entries with no connection). Automatic
+ * connections are hidden from both sections and excluded from management.
+ * The join key is `catalog_service_slug` — never `KeyInfo.slug`, which is the
  * user-facing proxy path and can diverge from the catalog entry (custom
  * labels, auto-suffixing).
  */
@@ -191,9 +209,13 @@ export function deriveConnectorItems(
   catalog: readonly CatalogEntry[],
 ): ConnectorItems {
   const catalogBySlug = new Map(catalog.map((entry) => [entry.slug, entry]));
+  const connectedSlugs = new Set(
+    keys.flatMap((key) => key.catalog_service_slug ? [key.catalog_service_slug] : []),
+  );
   const bySlug = new Map<string, KeyInfo[]>();
   const custom: KeyInfo[] = [];
   for (const key of keys) {
+    if (key.auto_connected || key.credential_binding === "platform") continue;
     if (key.catalog_service_slug) {
       const group = bySlug.get(key.catalog_service_slug) ?? [];
       group.push(key);
@@ -210,8 +232,9 @@ export function deriveConnectorItems(
       ...custom.map(addedCustomItem),
     ],
     available: catalog
-      .filter((entry) => !bySlug.has(entry.slug))
+      .filter((entry) => !connectedSlugs.has(entry.slug) && !entry.inference && entry.slug !== "chrono-llm" && !entry.platform_key?.available)
       .map(availableItem),
+    models: catalog.filter((entry) => entry.inference || entry.slug === "chrono-llm").map(availableItem),
   };
 }
 

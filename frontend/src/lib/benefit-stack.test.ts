@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   equalShareStack,
   overallCaption,
-  proportionalStack,
   stackStatus,
   stackValueText,
   WARNING_PERCENT,
@@ -151,24 +150,5 @@ describe("equalShareStack", () => {
     expect(overallCaption(0.71)).toBe("0.71% used");
     expect(overallCaption(0)).toBe("Unused");
     expect(equalShareStack([input("a", 0)]).entries[0]!.share).toBe(0);
-  });
-});
-
-describe("proportionalStack", () => {
-  it("sizes each grant by its consumed credits over all original credits", () => {
-    const stack = proportionalStack([
-      input("welcome", 5, 10),
-      input("promo", 3, 30),
-    ]);
-    expect(stack.entries.map((entry) => entry.share)).toEqual([12.5, 7.5]);
-    expect(stack.entries.map((entry) => entry.step)).toEqual([0, 1]);
-    expect(stack.overall).toBe(20);
-    expect(stack.k).toBe(2);
-  });
-
-  it("is one segment for a single grant", () => {
-    const stack = proportionalStack([input("welcome", 35_500, 5_000_000)]);
-    expect(stack.entries).toHaveLength(1);
-    expect(overallCaption(stack.overall)).toBe("0.71% used");
   });
 });

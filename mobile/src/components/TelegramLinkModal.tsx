@@ -15,6 +15,7 @@ import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
 import { mobileApi } from "../lib/api/mobileApi";
+import { SkeletonRows } from "./Skeleton";
 import type { TelegramLinkInfo } from "../lib/api/types";
 
 type TelegramLinkModalProps = {
@@ -156,11 +157,14 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
             Receive approval notifications directly in Telegram.
           </Text>
 
-          {/* Loading state */}
+          {/* First load: the link button and code row, as a skeleton */}
           {isLoading && (
-            <View style={styles.centerWrap}>
-              <ActivityIndicator size="small" color={colors.primary} />
-            </View>
+            <SkeletonRows
+              rows={2}
+              icon={false}
+              detail={false}
+              accessibilityLabel="Generating link code"
+            />
           )}
 
           {/* Error state */}

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 
@@ -76,15 +77,14 @@ function ArticleSkeleton() {
 }
 
 function ErrorState({ message }: { readonly message: string }) {
+  const { t } = useUiTranslation();
   return (
     <div className="px-6 pt-20 pb-24">
       <div
         role="alert"
         className="bg-destructive/5 mx-auto max-w-md rounded-2xl border border-destructive/40 p-10 text-center"
       >
-        <p className="font-mono text-xs tracking-widest text-destructive uppercase">
-          Failed to load
-        </p>
+        <p className="font-mono text-xs tracking-widest text-destructive uppercase">{t("Failed to load")}</p>
         <p className="mt-3 text-sm text-gray-300">{message}</p>
       </div>
     </div>

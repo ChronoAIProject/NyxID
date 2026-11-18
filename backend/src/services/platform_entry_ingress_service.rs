@@ -164,7 +164,12 @@ async fn intercept_native_impl(
         }
     }
     if !batch.messages().is_empty() {
-        super::channel_bot_service::record_inbound_success(&state.db, &bot).await;
+        super::channel_bot_service::record_inbound_success(
+            &state.db,
+            &bot,
+            super::channel_inbound_service::InboundSource::Webhook,
+        )
+        .await;
     }
     let controls = super::platform_bot_runtime_control_service::get(&state.db, profile_id)
         .await?

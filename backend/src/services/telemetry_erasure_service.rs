@@ -62,11 +62,13 @@ pub async fn register_destinations(db: &Database, clients: &ErasureClients) -> A
 
 pub fn spawn_worker(db: crate::db::DbHandle, clients: ErasureClients) {
     let clients = Arc::new(clients);
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(30));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            let Some(_work) = crate::services::shutdown::process().tick(&mut timer).await else {
+                break;
+            };
             if drain_once(&db, &clients).await.is_err() {
                 tracing::warn!("Telemetry erasure pass failed; durable checkpoints retained");
             }
@@ -730,10 +732,21 @@ pub(crate) async fn drain_once(db: &Database, clients: &ErasureClients) -> AppRe
     let db = &durable;
     backfill_intents(db).await?;
     for _ in 0..BATCH_SIZE {
+        let Some(_work) = super::shutdown::process().background() else {
+            break;
+        };
         let Some(job) = claim(db).await? else {
             break;
         };
+        let release = super::shutdown::process().register_release(super::shutdown::Release {
+            safe_after_stop: false,
+            db: db.clone(),
+            collection: COLLECTION_NAME,
+            filter: doc! {"_id": &job.id, "lease_token": &job.lease_token},
+            update: doc! {"$set": {"lease_expires_at": null, "lease_token": null}},
+        });
         process(db, clients, &job).await?;
+        release.completed();
     }
     Ok(())
 }
@@ -1007,11 +1020,13 @@ mod tests {
             owner_deletion_policy: None,
             status: crate::models::personal_erasure::ErasureStatus::Complete,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![crate::models::personal_erasure::DomainCheckpoint {
                 retry_generation: 0,
                 last_retry_key_hash: None,
                 last_retry_request_digest: None,
                 consecutive_failures: 0,
+                remote_wait_started_at: None,
                 domain: "vendor".into(),
                 status: crate::models::personal_erasure::DomainStatus::Complete,
                 cursor: Some(personal_evidence),
@@ -1189,6 +1204,9 @@ mod tests {
             .await
             .unwrap();
         let permission = consent::set(&db, &user, true).await.unwrap();
+        // `begin` is a majority-write transaction bounded by its production
+        // 250 ms deadline; require a responsive server before measuring it.
+        crate::test_utils::await_responsive_majority_io(&db).await;
         let held = dispatch::begin(&db, &user, &permission.revision)
             .await
             .unwrap();
@@ -1488,6 +1506,29 @@ mod durability_tests {
         let (clients, _server) = crate::telemetry::erasure::test_support::clients().await;
         let user = uuid::Uuid::new_v4().to_string();
         db.collection::<Document>("users").insert_one(doc! {"_id":&user,"is_active":true,"profile_config":{"analytics":{"enabled":true,"revision":"revision"}}}).await.unwrap();
+        // Startup initializes these collections and indexes before admission.
+        // Keep cold catalog creation outside the production 250 ms bound.
+        let ready_db = super::super::transaction_service::durable_database(&weak);
+        for (collection, keys) in [
+            (
+                super::super::analytics_dispatch_service::COLLECTION,
+                doc! {"status":1,"created_at":1},
+            ),
+            (
+                super::super::analytics_dispatch_service::COLLECTION,
+                doc! {"user_id":1,"status":1,"_id":1},
+            ),
+            (
+                super::super::analytics_dispatch_service::ACCOUNTS,
+                doc! {"updated_at":1},
+            ),
+        ] {
+            ready_db
+                .collection::<Document>(collection)
+                .create_index(mongodb::IndexModel::builder().keys(keys).build())
+                .await
+                .unwrap();
+        }
         commands.lock().unwrap().clear();
         register_destinations(&weak, &clients).await.unwrap();
         let dispatch = super::super::analytics_dispatch_service::begin(&weak, &user, "revision")

@@ -1,4 +1,8 @@
 use super::*;
+#[path = "trigger_model_scope_tests.rs"]
+mod model_scope_tests;
+#[path = "trigger_notification_tests.rs"]
+mod notification_tests;
 use crate::models::trigger_run::RunOutcome;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::{
@@ -34,6 +38,11 @@ type Calls = Arc<Mutex<Vec<Call>>>;
 
 /// A NyxAgent stand-in answering every turn with one completed reply.
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_reply(name, "Work finished").await
+}
+
+async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    let reply = reply.to_owned();
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -46,6 +55,7 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
         "/v1/responses",
         post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
+            let reply = reply.clone();
             async move {
                 sink.lock().await.push(Call {
                     authorization: headers["authorization"].to_str().unwrap().into(),
@@ -65,7 +75,7 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
                                 {
                                     "type": "message",
                                     "role": "assistant",
-                                    "content": [{"type": "output_text", "text": "Work finished"}],
+                                    "content": [{"type": "output_text", "text": reply}],
                                 },
                             ],
                         },
@@ -181,7 +191,22 @@ async fn completed(state: &AppState, trigger: &Trigger) -> TriggerRun {
                 .await
                 .unwrap()
             {
-                return run;
+                // finish() commits the terminal run before finish_record()
+                // projects it onto the trigger. Wait for that write too: an
+                // exact-source owner edit must not race the finishing worker.
+                let projected = state
+                    .db
+                    .collection::<Document>(TRIGGERS)
+                    .find_one(doc! {
+                        "_id": &trigger.id,
+                        "schedule_state.last_run._id": &run.id,
+                        "schedule_state.last_run.outcome": run.outcome.as_str(),
+                    })
+                    .await
+                    .unwrap();
+                if projected.is_some() {
+                    return run;
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -567,6 +592,7 @@ async fn specialist(state: &AppState) -> crate::models::assistant_agent::Assista
             description: "Research using only granted services".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -630,6 +656,16 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        voice_parent_conversation_id: None,
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -661,6 +697,16 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        voice_parent_conversation_id: None,
+        platform_model_context: None,
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
         invocation_controlled: false,
         invocation_id: None,
         report_to: None,
@@ -1089,6 +1135,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .unwrap()
         .unwrap();
     let claim = schedules::TurnClaim {
+        enroll_v2: false,
         run_id: run.id.clone(),
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: trigger.updated_at,
@@ -1112,6 +1159,11 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            activity_execution: None,
+            automation_work: None,
+            execution_task: None,
+            connect_own: None,
+            activity_id: None,
             invocation_id: None,
             routing: None,
             link: None,
@@ -1383,7 +1435,18 @@ async fn result_transport() -> (
     Arc<Mutex<Vec<(String, Value)>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    result_transport_responses(vec![]).await
+}
+
+async fn result_transport_responses(
+    responses: Vec<(u16, Option<u64>)>,
+) -> (
+    reqwest::Client,
+    Arc<Mutex<Vec<(String, Value)>>>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let responses = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
     let hosts = vec![
         "api.telegram.org".into(),
         "fcm.googleapis.com".into(),
@@ -1413,6 +1476,7 @@ async fn result_transport() -> (
             };
             let acceptor = acceptor.clone();
             let sink = sink.clone();
+            let responses = responses.clone();
             tokio::spawn(async move {
                 let mut stream = acceptor.accept(stream).await.unwrap();
                 let mut bytes = Vec::new();
@@ -1465,8 +1529,26 @@ async fn result_transport() -> (
                     }
                 }
                 .to_string();
+                let (status, retry_after) = if route == "/token" {
+                    (200, None)
+                } else {
+                    responses.lock().await.pop_front().unwrap_or((200, None))
+                };
+                if status == 0 {
+                    return;
+                } // Request arrived, response was lost.
+                let body = if status == 200 {
+                    body
+                } else if status == 404 {
+                    json!({"error":{"status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}).to_string()
+                } else {
+                    json!({"error":{"status":"PRIVATE_PROVIDER_TEXT", "message":"test-device-token secret-report"}}).to_string()
+                };
+                let retry = retry_after
+                    .map(|s| format!("Retry-After: {s}\r\n"))
+                    .unwrap_or_default();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} Fixture\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -1862,6 +1944,7 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
     .await
     .unwrap();
     let claim = schedules::TurnClaim {
+        enroll_v2: false,
         run_id: pending.id,
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: current.updated_at,
@@ -3866,3 +3949,6 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     server.abort();
 }
+
+#[path = "trigger_coordinator_tests.rs"]
+mod coordinator_tests;

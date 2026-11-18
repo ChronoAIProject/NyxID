@@ -1,3 +1,5 @@
+pub mod domain_aliases;
+
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
@@ -193,8 +195,15 @@ impl std::str::FromStr for TrustedProxyRange {
 pub struct AppConfig {
     /// Server port (default: 3001)
     pub port: u16,
+    /// Work-drain deadline after SIGTERM/ctrl-c; zero preserves immediate shutdown.
+    pub shutdown_drain_timeout_secs: u64,
     /// Base URL for the backend (e.g. https://auth.nyxid.dev)
     pub base_url: String,
+    /// Operator-configured chrono-probe origin; unset disables monitoring integration.
+    pub chrono_probe_url: Option<String>,
+    /// Default-off automatic diagnostic issuance; startup snapshot, no hot-path reads.
+    pub invocation_diagnostics_enabled: bool,
+    pub domain_aliases: domain_aliases::DomainAliases,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
     /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
@@ -363,7 +372,7 @@ pub struct AppConfig {
     /// telemetry is hard-off: `TelemetryClient::from_config` returns
     /// `None` and no events are captured.
     pub telemetry_dsn: Option<String>,
-    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    /// Telemetry ingest host (defaults to the US PostHog endpoint if unset).
     pub telemetry_host: Option<String>,
     /// When true AND `telemetry_dsn` is empty, fall back to the
     /// compiled-in public share-back DSN. Self-hoster opt-in knob.
@@ -440,6 +449,13 @@ pub struct AppConfig {
     /// APNs topic (bundle ID of the iOS app, e.g. "dev.nyxid.app").
     pub apns_topic: Option<String>,
 
+    /// Public Android Digital Asset Links identity (optional).
+    pub android_app_package: Option<String>,
+    pub android_app_sha256_cert_fingerprints: Vec<String>,
+    /// Additional lowercase URL schemes accepted for mobile OAuth returns.
+    /// `nyxid` is always accepted implicitly.
+    pub mobile_app_return_schemes: Vec<String>,
+
     /// Use APNs sandbox instead of production.
     /// Default: true in development, false otherwise.
     pub apns_sandbox: bool,
@@ -463,6 +479,8 @@ pub struct AppConfig {
     // Node Proxy
     /// Stable pod/host identity. The process generation is created at startup.
     pub instance_name: String,
+    /// Enroll new assistant automation runs only after fleet readiness.
+    pub automation_continuation_v2_enabled: bool,
     pub security_rollout: crate::services::security_readiness_service::RolloutConfig,
     /// Dedicated private listener for inter-replica traffic.
     pub internal_bind_addr: String,
@@ -636,6 +654,7 @@ impl std::fmt::Debug for AppConfig {
             .field("jwt_private_key_path", &self.jwt_private_key_path)
             .field("jwt_public_key_path", &self.jwt_public_key_path)
             .field("jwt_issuer", &self.jwt_issuer)
+            .field("domain_aliases", &self.domain_aliases)
             .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
             .field("jwt_relay_reply_ttl_secs", &self.jwt_relay_reply_ttl_secs)
             .field(
@@ -1027,6 +1046,111 @@ fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange>
     ips
 }
 
+pub(crate) const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 25;
+
+fn shutdown_drain_timeout(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS)
+}
+
+fn parse_android_package(raw: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.split('.').count() < 2
+        || !value.split('.').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return Err("expected an Android application package");
+    }
+    Ok(Some(value.into()))
+}
+
+fn parse_android_fingerprints(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let bytes: Vec<_> = value.split(':').collect();
+        if bytes.len() != 32
+            || !bytes
+                .iter()
+                .all(|byte| byte.len() == 2 && byte.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err("expected comma-separated 32-byte colon-delimited SHA-256 fingerprints");
+        }
+        let normalized = value.to_ascii_uppercase();
+        if !result.contains(&normalized) {
+            result.push(normalized);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    const RESERVED: &[&str] = &[
+        "http",
+        "https",
+        "ws",
+        "wss",
+        "ftp",
+        "file",
+        "data",
+        "javascript",
+        "vbscript",
+        "blob",
+        "about",
+        "intent",
+        "content",
+        "exp",
+        "exps",
+        "mailto",
+        "tel",
+        "sms",
+    ];
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut schemes = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = value.to_ascii_lowercase();
+        if value.len() > 32
+            || !value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte)
+            })
+            || RESERVED.contains(&value.as_str())
+        {
+            return Err("expected non-web mobile URL schemes");
+        }
+        if !schemes.iter().any(|existing| existing == &value) {
+            schemes.push(value);
+        }
+    }
+    Ok(schemes)
+}
+
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1061,6 +1185,9 @@ impl AppConfig {
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
+            shutdown_drain_timeout_secs: shutdown_drain_timeout(
+                env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS").ok().as_deref(),
+            ),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1096,6 +1223,9 @@ impl AppConfig {
             jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
+            chrono_probe_url: env::var("CHRONO_PROBE_URL").ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+            invocation_diagnostics_enabled: parse_bool_env("INVOCATION_DIAGNOSTICS_ENABLED", false),
+            domain_aliases: domain_aliases::DomainAliases::from_env(),
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1281,6 +1411,9 @@ impl AppConfig {
             apns_key_id: env::var("APNS_KEY_ID").ok().filter(|s| !s.is_empty()),
             apns_team_id: env::var("APNS_TEAM_ID").ok().filter(|s| !s.is_empty()),
             apns_topic: env::var("APNS_TOPIC").ok().filter(|s| !s.is_empty()),
+            android_app_package: parse_android_package(env::var("ANDROID_APP_PACKAGE").ok().as_deref()).expect("invalid ANDROID_APP_PACKAGE"),
+            android_app_sha256_cert_fingerprints: parse_android_fingerprints(env::var("ANDROID_APP_SHA256_CERT_FINGERPRINTS").ok().as_deref()).expect("invalid ANDROID_APP_SHA256_CERT_FINGERPRINTS"),
+            mobile_app_return_schemes: parse_mobile_app_return_schemes(env::var("MOBILE_APP_RETURN_SCHEMES").ok().as_deref()).expect("invalid MOBILE_APP_RETURN_SCHEMES"),
             apns_sandbox: env::var("APNS_SANDBOX")
                 .ok()
                 .map(|v| v == "true" || v == "1")
@@ -1301,6 +1434,7 @@ impl AppConfig {
                 .or_else(|_| env::var("POD_NAME"))
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
+            automation_continuation_v2_enabled: env::var("AUTOMATION_CONTINUATION_V2_ENABLED").is_ok_and(|v| v == "true"),
             security_rollout: crate::services::security_readiness_service::RolloutConfig::parse(
                 &env::var("SECURITY_ROLLOUT_REPLICAS").unwrap_or_default(),
                 env::var("SECURITY_ROLLOUT_DRAINED").is_ok_and(|v| v == "true"),
@@ -1860,6 +1994,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shutdown_default_fits_kubernetes_and_explicit_budgets_are_preserved() {
+        assert_eq!(shutdown_drain_timeout(None), 25);
+        assert_eq!(shutdown_drain_timeout(Some("invalid")), 25);
+        for budget in [0, 1, 10, 25, 30, 600, u64::MAX] {
+            assert_eq!(shutdown_drain_timeout(Some(&budget.to_string())), budget);
+        }
+    }
+
+    #[test]
     fn internal_advertise_url_prefers_explicit_url() {
         let resolved = resolve_internal_advertise_url(
             Some("https://backend-1.internal:9443"),
@@ -1935,9 +2078,12 @@ mod tests {
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
+            chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
@@ -1947,6 +2093,7 @@ mod tests {
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -2010,6 +2157,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -2017,6 +2167,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -2519,5 +2670,92 @@ mod contextual_cutover_tests {
         }
         assert!(mode(Some("invalid"), Some("true"), Some("true")).is_err());
         assert_eq!(mode(Some("false"), Some("1"), Some("1")), Ok((false, true)));
+    }
+}
+
+#[cfg(test)]
+mod android_app_link_tests {
+    #[test]
+    fn android_app_link_identity_validation() {
+        use super::{parse_android_fingerprints, parse_android_package};
+        assert_eq!(parse_android_package(None).unwrap(), None);
+        assert_eq!(
+            parse_android_package(Some("fun.chronoai.nyxid"))
+                .unwrap()
+                .as_deref(),
+            Some("fun.chronoai.nyxid")
+        );
+        for invalid in ["package", "a..b", "a.-b", "a.1b", "a.b/path"] {
+            assert!(parse_android_package(Some(invalid)).is_err());
+        }
+        let lower = ["ab"; 32].join(":");
+        let fingerprints =
+            parse_android_fingerprints(Some(&format!(" {lower},{} ", lower.to_ascii_uppercase())))
+                .unwrap();
+        assert_eq!(fingerprints, vec![lower.to_ascii_uppercase()]);
+        assert!(parse_android_fingerprints(None).unwrap().is_empty());
+        for value in [
+            format!("{lower},"),
+            format!(",{lower}"),
+            format!(", {lower}, ,{},", lower.to_ascii_uppercase()),
+        ] {
+            assert_eq!(
+                parse_android_fingerprints(Some(&value)).unwrap(),
+                vec![lower.to_ascii_uppercase()]
+            );
+        }
+        assert!(parse_android_fingerprints(Some(", ,,")).unwrap().is_empty());
+        for invalid in [
+            "AA:BB",
+            "aa".repeat(32).as_str(),
+            &format!("{}:GG", ["AA"; 31].join(":")),
+        ] {
+            assert!(parse_android_fingerprints(Some(invalid)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mobile_app_return_scheme_tests {
+    use super::parse_mobile_app_return_schemes;
+
+    #[test]
+    fn mobile_return_schemes_validate_lowercase_custom_schemes() {
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(",acme-nyx,,ACME-NYX,")).unwrap(),
+            ["acme-nyx"]
+        );
+        for empty in ["", " ", ", ,,"] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(empty))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(" acme-nyx,foo+bar,acme-nyx ")).unwrap(),
+            ["acme-nyx", "foo+bar"]
+        );
+        assert!(parse_mobile_app_return_schemes(None).unwrap().is_empty());
+        assert!(
+            parse_mobile_app_return_schemes(Some(" "))
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            "HTTPS",
+            "1acme",
+            "acme_nyx",
+            "https",
+            "exp",
+            "javascript",
+            "acme nyx",
+            "abcdefghijklmnopqrstuvwxyzabcdefg",
+        ] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }

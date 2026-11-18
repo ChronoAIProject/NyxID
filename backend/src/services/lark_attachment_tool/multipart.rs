@@ -106,6 +106,34 @@ pub(crate) fn encode(
     digest.update(file);
     digest.update(serde_json::to_vec(fields).map_err(|_| invalid())?);
     let boundary = format!("nyxid-{}", &hex::encode(digest.finalize())[..32]);
+    encode_parts(fields, &fields[0].1, "file", content_type, file, &boundary)
+}
+
+pub(crate) fn encode_image(
+    name: &str,
+    content_type: &str,
+    file: &[u8],
+) -> AppResult<(bytes::Bytes, String)> {
+    filename(name)?;
+    let boundary = format!("nyxid-{}", uuid::Uuid::new_v4().simple());
+    encode_parts(
+        &[("image_type".into(), "message".into())],
+        name,
+        "image",
+        content_type,
+        file,
+        &boundary,
+    )
+}
+
+fn encode_parts(
+    fields: &[(String, String)],
+    filename: &str,
+    file_field: &str,
+    content_type: &str,
+    file: &[u8],
+    boundary: &str,
+) -> AppResult<(bytes::Bytes, String)> {
     let mut body = Vec::with_capacity(file.len() + 8192);
     for (name, value) in fields {
         body.extend_from_slice(
@@ -116,7 +144,7 @@ pub(crate) fn encode(
             .as_bytes(),
         );
     }
-    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {content_type}\r\n\r\n",quote(&fields[0].1)).as_bytes());
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"{}\"\r\nContent-Type: {content_type}\r\n\r\n",quote(filename)).as_bytes());
     body.extend_from_slice(file);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     Ok((

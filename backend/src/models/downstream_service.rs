@@ -85,6 +85,10 @@ pub struct VoiceChoice {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct VoiceInference {
     pub protocol: VoiceProtocol,
+    /// Catalog-selected task model. Explicit null means dictation only; preserve
+    /// it on save so migration can distinguish an older absent field.
+    #[serde(default)]
+    pub delegation_model: Option<String>,
     pub models: Vec<VoiceModel>,
     pub voices: Vec<VoiceChoice>,
     pub usage_source: VoiceUsageSource,
@@ -106,8 +110,25 @@ pub enum PlatformKeyAudience {
     Public,
 }
 
+/// A restrictive purpose is sticky and cannot be cleared by legacy catalog forms.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyPurpose {
+    #[default]
+    Ordinary,
+    ModelRoute,
+    ModelOffering,
+}
+
+fn ordinary_platform_key_purpose(purpose: &PlatformKeyPurpose) -> bool {
+    *purpose == PlatformKeyPurpose::Ordinary
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformKeyConfig {
+    // Keep legacy authority snapshots/digests byte-compatible when unset.
+    #[serde(default, skip_serializing_if = "ordinary_platform_key_purpose")]
+    pub purpose: PlatformKeyPurpose,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -460,6 +481,11 @@ pub struct DownstreamService {
     /// Explicit admin edits, including clearing metadata, suppress startup defaults.
     #[serde(default)]
     pub inference_admin_modified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_verification:
+        Option<super::credential_verification::CredentialVerificationCheck>,
+    #[serde(default)]
+    pub credential_verification_admin_modified: bool,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -665,6 +691,8 @@ pub mod test_helpers {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -788,6 +816,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -885,6 +915,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

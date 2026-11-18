@@ -1,3 +1,5 @@
+import type { ChannelBotGateway } from "@/schemas/channel-bot-health";
+
 /** Platform identifiers are supplied by the server catalog. */
 export type ChannelPlatform = string;
 
@@ -32,7 +34,7 @@ export type ContentType =
   | "sticker"
   | "unknown";
 
-export interface ChannelBotItem {
+export interface ChannelBotItem extends Readonly<ChannelBotGateway> {
   readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";
   readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
@@ -389,7 +391,21 @@ export interface ChannelActivityDescriptor {
   readonly content_availability: string;
   readonly reply_supported: boolean;
 }
+export interface ChannelAdmission {
+  readonly disposition: string;
+  readonly bot_mentioned: boolean | null;
+  readonly managed_role_mentioned: boolean;
+  readonly broadcast_roles: number | null;
+  readonly broadcast_everyone_or_here: boolean;
+  readonly address: string;
+  readonly thread_follow_selection: string | null;
+  readonly resolved_thread_id: string | null;
+  readonly turn_id: string | null;
+}
+
 export interface ChannelActivityItem {
+  readonly nyxbot_admission?: ChannelAdmission;
+
   readonly id: string;
   readonly conversation_id: string;
   readonly platform_conversation_id: string | null;

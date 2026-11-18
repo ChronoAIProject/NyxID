@@ -8,6 +8,8 @@ pub const TURNS: &str = "assistant_invocation_turns";
 /// output, credential, provider binding or arbitrary caller metadata.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantInvocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

@@ -104,6 +104,7 @@ const TELEGRAM: ChannelPlatformDescriptor = {
 
 function preview(link: MockLink): ConnectLinkPreview {
   return {
+    assistant_intent_locked: false,
     service_name: "GitHub",
     service_slug: "github",
     label: "NyxBot GitHub connection",

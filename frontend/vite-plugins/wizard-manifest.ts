@@ -1,13 +1,33 @@
 import type { Plugin } from "vite"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import postcss from "postcss"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, "..", "..")
 
+/** CSS imports are inlined before Rollup sees their individual module IDs. */
+export function wizardSourceFiles(moduleIds: Iterable<string>, root = repoRoot): string[] {
+  const files = new Set<string>()
+  function add(id: string) {
+    if (id.includes("\0") || id.includes("node_modules") || !id.startsWith(root + path.sep) || files.has(id)) return
+    files.add(id)
+    if (path.extname(id) !== ".css") return
+    postcss.parse(readFileSync(id, "utf8")).walkAtRules("import", rule => {
+      const match = rule.params.match(/^(?:url\(\s*)?["']([^"']+)["']/)
+      if (!match) return
+      const imported = path.resolve(path.dirname(id), match[1].split(/[?#]/)[0])
+      if (path.extname(imported) === ".css" && existsSync(imported)) add(imported)
+    })
+  }
+  for (const id of moduleIds) add(id)
+  return [...files].map(id => path.relative(root, id).split(path.sep).join("/")).sort()
+}
+
 /**
  * Emits `wizard.manifest`, a sorted newline-separated list of every
- * repo-relative source file Rollup traversed while building the wizard.
+ * repo-relative source file Rollup or a CSS import traversed for the wizard.
  * Node-module dependencies are excluded (their bytes are already pinned
  * transitively by `frontend/package-lock.json`, which the CI freshness
  * check hashes separately).
@@ -23,18 +43,7 @@ export function wizardManifest(): Plugin {
     name: "wizard-manifest",
     apply: "build",
     generateBundle() {
-      const files = [...this.getModuleIds()]
-        // Drop Rollup virtual modules (ids containing NUL).
-        .filter((id) => !id.includes("\0"))
-        // Drop anything installed — captured via lockfile hash.
-        .filter((id) => !id.includes("node_modules"))
-        // Keep only files inside the repo. External absolute paths
-        // (e.g. Vite's client runtime) are noise for freshness.
-        .filter((id) => id.startsWith(repoRoot + path.sep))
-        .map((id) =>
-          path.relative(repoRoot, id).split(path.sep).join("/"),
-        )
-        .sort()
+      const files = wizardSourceFiles(this.getModuleIds())
       this.emitFile({
         type: "asset",
         fileName: "wizard.manifest",

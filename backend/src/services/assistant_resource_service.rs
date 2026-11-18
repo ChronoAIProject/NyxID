@@ -84,6 +84,9 @@ pub(crate) fn live_filter(chat: &ChatAuthority) -> AppResult<bson::Document> {
 }
 
 pub async fn require_live(db: &Database, chat: &ChatAuthority) -> AppResult<()> {
+    if chat.collaboration_thread {
+        super::collaboration_group_service::uploads::thread(db, chat).await?;
+    }
     if chat.invocation_id.is_some() {
         // Keep the shared authority gate out of every source-resource caller's
         // future; it also contains platform admission and audit paths.

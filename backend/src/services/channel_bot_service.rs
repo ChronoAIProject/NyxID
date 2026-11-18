@@ -1377,6 +1377,7 @@ pub async fn apply_manager_configuration_status(
 /// Register the webhook URL with the platform and activate the bot.
 ///
 /// The `webhook_secret` must be the raw secret returned from [`create_bot`].
+#[allow(clippy::too_many_arguments)]
 pub async fn register_webhook(
     db: &mongodb::Database,
     http_client: &reqwest::Client,
@@ -1385,6 +1386,7 @@ pub async fn register_webhook(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     register_webhook_with_telegram_api(
         db,
@@ -1394,10 +1396,12 @@ pub async fn register_webhook(
         bot_token,
         webhook_url,
         webhook_secret,
+        config,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn register_webhook_with_telegram_api(
     db: &mongodb::Database,
     telegram_api: &super::telegram_new_api::TelegramApi<'_>,
@@ -1406,6 +1410,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     if adapter.serializes_lifecycle() {
         return super::channel_retry_ingress::with_lifecycle(
@@ -1445,6 +1450,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
                     bot_token,
                     webhook_url,
                     webhook_secret,
+                    config,
                 )
                 .await
             },
@@ -1505,6 +1511,7 @@ async fn verify_telegram_token_identity(
 }
 
 // The identity lease covers the provider effect and its matching local secret/status.
+#[allow(clippy::too_many_arguments)]
 async fn register_telegram_webhook_locked(
     db: &mongodb::Database,
     telegram_api: &super::telegram_new_api::TelegramApi<'_>,
@@ -1513,6 +1520,7 @@ async fn register_telegram_webhook_locked(
     bot_token: &str,
     webhook_url: &str,
     webhook_secret: &str,
+    config: &AppConfig,
 ) -> AppResult<()> {
     if bot.credential_source == "telegram_manager" {
         let verification = async {
@@ -1526,7 +1534,7 @@ async fn register_telegram_webhook_locked(
             let webhook = telegram_api
                 .call(bot_token, "getWebhookInfo", serde_json::json!({}))
                 .await?;
-            super::telegram_new_admin::validate_manager_webhook(&webhook, webhook_url)
+            super::telegram_new_admin::validate_manager_webhook(&webhook, webhook_url, config)
         }
         .await;
         if let Err(error) = verification {
@@ -1579,7 +1587,7 @@ pub(crate) async fn verify_telegram_bot(
     adapter: &dyn PlatformAdapter,
     bot_id: &str,
     owner_id: &str,
-    base_url: &str,
+    config: &AppConfig,
 ) -> AppResult<ChannelBot> {
     let bot = get_bot_for_user(db, bot_id, owner_id).await?;
     super::telegram_new_service::with_operation(
@@ -1609,7 +1617,7 @@ pub(crate) async fn verify_telegram_bot(
                 hex::encode(rand::random::<[u8; 32]>())
             };
             if let Err(error) = register_telegram_webhook_locked(
-                db, telegram_api, adapter, &bot, &token, &webhook_url(base_url, &bot), &secret,
+                db, telegram_api, adapter, &bot, &token, &webhook_url(&config.base_url, &bot), &secret, config,
             ).await {
                 if bot.credential_source == "telegram_manager" {
                     return Err(error);
@@ -1745,12 +1753,26 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
 /// The actor and every organization they administer: the owners whose
 /// channel bots and routes the actor manages.
 pub async fn managed_owner_ids(db: &mongodb::Database, actor: &str) -> AppResult<Vec<String>> {
+    bot_owner_ids(db, actor, false).await
+}
+
+async fn bot_owner_ids(
+    db: &mongodb::Database,
+    actor: &str,
+    members: bool,
+) -> AppResult<Vec<String>> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
 
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
     let org_ids: Vec<_> = memberships
         .into_iter()
-        .filter(|membership| membership.role.can_admin())
+        .filter(|membership| {
+            if members {
+                membership.role.can_proxy()
+            } else {
+                membership.role.can_admin()
+            }
+        })
         .map(|membership| membership.org_user_id)
         .collect();
     let mut owner_ids = vec![actor.to_string()];
@@ -1774,6 +1796,21 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
         .collection::<ChannelBot>(COLLECTION_NAME)
         .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })
         .sort(doc! { "created_at": -1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?)
+}
+
+/// Human settings inventory; internal tool inventory retains administered owners.
+pub(crate) async fn list_accessible_bots(
+    db: &mongodb::Database,
+    actor: &str,
+) -> AppResult<Vec<ChannelBot>> {
+    let owners = bot_owner_ids(db, actor, true).await?;
+    Ok(db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .find(doc! {"user_id":{"$in":owners},"is_active":true})
+        .sort(doc! {"created_at":-1,"_id":1})
         .await?
         .try_collect()
         .await?)
@@ -1852,14 +1889,27 @@ pub async fn record_outbound_outcome(
     bot_id: &str,
     error: Option<&crate::errors::AppError>,
 ) {
+    record_outbound_outcome_with_reason(db, bot_id, error, None).await;
+}
+
+pub(crate) async fn record_outbound_outcome_with_reason(
+    db: &mongodb::Database,
+    bot_id: &str,
+    error: Option<&crate::errors::AppError>,
+    thread_failure: Option<super::channel_thread_service::gateway::ReplyFailure>,
+) {
     let update = match error {
-        Some(error) => doc! { "$set": {
-            "diagnostics.last_outbound_error": {
+        Some(error) => {
+            let mut failure = doc! {
                 "code": error.error_code().to_string(),
                 "reason": super::channel_bot_health::failure_code(error),
                 "at": mongodb::bson::DateTime::now(),
-            },
-        } },
+            };
+            if let Some(reason) = thread_failure.and_then(|class| class.reason()) {
+                failure.insert("thread_reason", reason);
+            }
+            doc! { "$set": { "diagnostics.last_outbound_error": failure } }
+        }
         None => doc! { "$set": {
             "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(),
             "diagnostics.last_outbound_error": mongodb::bson::Bson::Null,
@@ -1893,15 +1943,19 @@ pub async fn record_webhook_error(
 
 /// Best-effort liveness stamp after an authenticated, admitted inbound batch.
 /// Clears webhook and failure diagnostics that the delivery disproves.
-pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
+pub(crate) async fn record_inbound_success(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    source: super::channel_inbound_service::InboundSource,
+) {
     let now = mongodb::bson::DateTime::now();
     let mut set = doc! {
         "diagnostics.last_inbound_at": now,
-        "diagnostics.last_inbound_source": if bot.webhook_registered { "webhook" } else { "poll" },
+        "diagnostics.last_inbound_source": source.as_str(),
         "diagnostics.consecutive_errors": 0,
         "diagnostics.last_webhook_error": mongodb::bson::Bson::Null,
     };
-    if bot.webhook_registered {
+    if source == super::channel_inbound_service::InboundSource::Webhook {
         set.insert("diagnostics.last_webhook_at", now);
     }
     // Only delivery-shaped reasons are disproved by a successful delivery.
@@ -1930,6 +1984,25 @@ pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
     .await;
     if let Err(error) = result {
         tracing::warn!(%error, bot_id = %bot.id, "channel bot inbound diagnostics write failed");
+    }
+}
+
+/// Separate receipt from routing: a missing ChannelMessage is not missing inbound.
+pub(crate) async fn record_inbound_route(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    result: &'static str,
+) {
+    if let Err(error) = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &bot.id, "user_id": &bot.user_id },
+            doc! { "$set": { "diagnostics.last_route_at": mongodb::bson::DateTime::now(),
+            "diagnostics.last_route_result": result } },
+        )
+        .await
+    {
+        tracing::warn!(%error, bot_id = %bot.id, "channel bot route diagnostics write failed");
     }
 }
 
@@ -2156,6 +2229,8 @@ async fn delete_bot_inner(
             "Channel bot changed during deletion; retry with its current state".into(),
         ));
     }
+
+    super::org_channel_service::defaults::erase(db, doc! {"channel_bot_id":bot_id}).await?;
 
     // Deactivate all conversations tied to this bot
     db.collection::<mongodb::bson::Document>(CONVERSATIONS)
@@ -2661,6 +2736,7 @@ mod tests {
             "app:secret",
             "https://nyxid.test/hook",
             "unused",
+            &crate::test_utils::test_app_config(),
         )
         .await
         .unwrap();

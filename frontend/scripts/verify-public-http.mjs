@@ -1,3 +1,5 @@
+import { getPublicOrigin } from "./public-origin.mjs";
+const PUBLIC_ORIGIN = getPublicOrigin();
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -21,12 +23,12 @@ async function check(url, status, verify, options = {}) {
 for (const page of manifest.pages) {
   await check(page.path, 200, async (r) => {
     assert.match(r.headers.get("content-type"), /text\/html/);
-    assert.equal(r.headers.get("cache-control"), ["/privacy", "/terms"].includes(page.path) ? "public, max-age=86400, must-revalidate" : "no-cache");
+    assert.equal(r.headers.get("cache-control"), ["/privacy", "/terms", "/data-deletion"].includes(page.path) ? "public, max-age=86400, must-revalidate" : "no-cache");
     assert.equal(r.headers.get("referrer-policy"), "no-referrer");
     assert.doesNotMatch(r.headers.get("content-security-policy"), /unsafe-eval/);
     const body = await r.text();
     assert.ok(body.includes("<h1"));
-    if (["/privacy", "/terms"].includes(page.path)) {
+    if (["/privacy", "/terms", "/data-deletion"].includes(page.path)) {
       const etag = `W/"${createHash("sha256").update(body).digest("hex")}"`;
       assert.equal(r.headers.get("etag"), etag);
       await check(page.path, 304, undefined, { headers: { "If-None-Match": etag } });
@@ -41,7 +43,7 @@ for (const page of manifest.pages) {
     assert.equal(r.headers.get("x-robots-tag"), "noindex");
     assert.ok(
       (await r.text()).includes(
-        `canonical: https://nyx.chrono-ai.fun${page.path}`,
+        `canonical: ${PUBLIC_ORIGIN}${page.path}`,
       ),
     );
   });

@@ -1,5 +1,8 @@
 import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
+import { useQueryClient } from "@tanstack/react-query";
+import { advanceAuthEpoch } from "../../lib/auth/authEpoch";
+import { getAuthAccountId, setAuthAccountId } from "../../lib/auth/authAccount";
 import {
   clearStoredAuthSession,
   authSessionGeneration,
@@ -9,8 +12,6 @@ import {
 } from "../../lib/auth/sessionStore";
 import {
   activatePushAfterLogin,
-  clearPendingPushSyncSignal,
-  clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
 import { clearPendingApprovalRefreshSignal } from "../../lib/notifications/approvalRefreshSignal";
@@ -38,6 +39,7 @@ type AuthSessionContextValue = {
 const AuthSessionContext = createContext<AuthSessionContextValue | null>(null);
 
 export function AuthSessionProvider({ children }: PropsWithChildren) {
+  const queryClient = useQueryClient();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
   const isSigningOutRef = useRef(false);
@@ -45,15 +47,12 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   const performSignOut = useCallback(async () => {
     if (isSigningOutRef.current) return;
     isSigningOutRef.current = true;
+    setAuthAccountId(null);
+    advanceAuthEpoch();
     const expectedGeneration = authSessionGeneration();
     telemetryReset();
     try {
-      const pushUnlinked = await deactivatePushOnLogout();
-      if (pushUnlinked) {
-        await clearLocalPushRegistrationState();
-      } else {
-        await clearPendingPushSyncSignal();
-      }
+      await deactivatePushOnLogout();
       // A generic refresh hint may outlive a blurred Activity route. Never
       // carry that previous user's pending work into the next auth session.
       clearPendingApprovalRefreshSignal();
@@ -63,11 +62,14 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       telemetryReset();
       if (authSessionGeneration() !== expectedGeneration) return;
       await clearStoredAuthSession();
-      if (authSessionGeneration() === expectedGeneration + 1) setIsAuthenticated(false);
+      if (authSessionGeneration() === expectedGeneration + 1) {
+        queryClient.clear();
+        setIsAuthenticated(false);
+      }
     } finally {
       isSigningOutRef.current = false;
     }
-  }, []);
+  }, [queryClient]);
 
   // Register the HTTP-layer session invalidation hook so that a 401
   // after failed refresh triggers a full sign-out (React state + storage
@@ -126,6 +128,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       .then((session) => {
         if (!active) return;
         setIsAuthenticated(Boolean(session));
+        setAuthAccountId(
+          session ? decodeJwtSub(session.accessToken) ?? session.userId ?? null : null,
+        );
         if (session) {
           // If we restored an authenticated session with a known
           // `userId` (persisted or JWT-derived by `loadStoredAuthSession`),
@@ -165,6 +170,11 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthSessionContextValue>(() => {
     const signInWithSession = async (session: StoredAuthSession) => {
+      const nextAccountId = decodeJwtSub(session.accessToken) ?? session.userId ?? null;
+      if (getAuthAccountId() !== nextAccountId) setAuthAccountId(null);
+      advanceAuthEpoch();
+      await queryClient.cancelQueries();
+      queryClient.clear();
       await persistAuthSession(session);
       const expectedGeneration = authSessionGeneration();
 
@@ -187,6 +197,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       }
 
       if (authSessionGeneration() !== expectedGeneration) throw new Error("auth_session_changed");
+      setAuthAccountId(nextAccountId);
       setIsAuthenticated(true);
       // Identify to telemetry as soon as the session is persisted.
       // `persistAuthSession` derives/persists userId internally but does
@@ -213,7 +224,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       signInWithSession,
       signOut: performSignOut,
     };
-  }, [isAuthenticated, isRestoring, performSignOut]);
+  }, [isAuthenticated, isRestoring, performSignOut, queryClient]);
 
   return <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>;
 }

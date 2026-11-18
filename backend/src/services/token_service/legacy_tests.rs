@@ -229,7 +229,19 @@ async fn legacy_refresh_cutoff_rejects_old_ambiguous_expired_and_revoked_records
             .update_one(doc! {"_id":row.id}, doc! {"$set":{field:value}})
             .await
             .unwrap();
-        assert!(f.refresh(&token).await.is_err(), "{field}");
+        let error = f.refresh(&token).await.err().expect("legacy refusal");
+        assert_eq!(
+            error.response_body().details.unwrap()["reason"],
+            if field == "revoked" {
+                "refresh_revoked"
+            } else {
+                "refresh_expired"
+            }
+        );
+        assert_eq!(
+            error.response_body().message,
+            "Unauthorized: Refresh token has expired or been revoked"
+        );
     }
     assert_eq!(
         f.db.collection::<RefreshToken>(REFRESH_TOKENS)
@@ -292,7 +304,7 @@ async fn legacy_refresh_predating_regrant_or_incremental_replacement_cannot_upgr
     )
     .await
     .unwrap();
-    assert_ne!(regrant.revision, incremental.revision);
+    assert_eq!(regrant.revision, incremental.revision);
     assert!(increment_row.created_at > regrant.granted_at + Duration::seconds(60));
     assert!(increment_row.created_at < incremental.granted_at);
     assert!(matches!(

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 
 /**
@@ -172,7 +173,7 @@ export const defaultRequestHeaderListSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: [idx, "name"],
-          message: `Duplicate header name (case-insensitive match with row ${String(prior + 1)})`,
+          message: translateUi("Duplicate header name (case-insensitive match with row {{value0}})", { value0: String(prior + 1) }),
         });
       } else {
         seen.set(key, idx);

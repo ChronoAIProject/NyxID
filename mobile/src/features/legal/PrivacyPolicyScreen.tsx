@@ -1,8 +1,7 @@
-import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { RootStackParamList } from "../../app/AppNavigator";
+import type { SheetScreenProps } from "../../app/navigationTypes";
 import { LegalDocumentScreen } from "./LegalDocumentScreen";
 
-type Props = NativeStackScreenProps<RootStackParamList, "PrivacyPolicy">;
+type Props = SheetScreenProps<"PrivacyPolicy">;
 
 export function PrivacyPolicyScreen({ navigation }: Props) {
   return (
@@ -11,6 +10,16 @@ export function PrivacyPolicyScreen({ navigation }: Props) {
       docKey="privacy"
       telemetryBackTarget="privacy_back"
       onBack={() => navigation.goBack()}
+      onOpenDocument={(docKey) => {
+        if (docKey !== "terms") return;
+        if (
+          navigation
+            .getState()
+            .routes.some((route) => route.name === "TermsOfService")
+        )
+          navigation.popTo("TermsOfService");
+        else navigation.push("TermsOfService");
+      }}
     />
   );
 }

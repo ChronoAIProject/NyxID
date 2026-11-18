@@ -175,11 +175,9 @@ test.describe("browser microphone permission recovery", () => {
       context,
       baseURL,
     }) => {
-      const calls = await installVoiceFixture(page);
-      await page.addInitScript(() => {
-        // Remove the scripted capture fixture to exercise the browser API itself.
-        Reflect.deleteProperty(navigator, "mediaDevices");
-      });
+      // Keep the native API in the single fixture initializer; separate init
+      // scripts have no guaranteed order and can restore the scripted capture.
+      const calls = await installVoiceFixture(page, "native");
       if (mode === "dictation")
         await page.route(
           "**/api/v1/assistant/nyxagent/dictation/options?*",
@@ -259,9 +257,11 @@ for (const width of [320, 390, 1280])
     await openAssistant(page, { faults });
     const send = page.getByRole("button", { name: "Send message", exact: true });
     const chevron = page.getByRole("button", { name: "Configure dictation" });
-    await expect(chevron).toHaveCSS("opacity", "0");
-    await expect(chevron).toHaveCSS("width", "0px");
-    await expect(page.locator(".dictation-split-control")).toHaveCSS("width", "32px");
+    // The options arrow is always visible; both targets follow shared sizing.
+    await expect(chevron).toHaveCSS("opacity", "1");
+    const chevronBounds = (await chevron.boundingBox())!;
+    expect(chevronBounds.width).toBeGreaterThanOrEqual(24);
+    expect(chevronBounds.height).toBeGreaterThanOrEqual(24);
     await expect(send).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Open voice call" })).toBeVisible();
     await composerInput(page).fill(" \n ");
@@ -272,7 +272,7 @@ for (const width of [320, 390, 1280])
     const microphone = page.getByRole("button", { name: "Dictate a message" });
     await microphone.hover();
     await expect(page.getByRole("switch", { name: "Hold to record" })).toHaveCount(0);
-    await expect(chevron).toHaveCSS("width", "20px");
+    await expect(chevron).toHaveCSS("width", `${chevronBounds.width}px`);
     await expect(chevron).toHaveCSS("opacity", "1");
     const composer = await page.locator("[data-composer-input]").boundingBox();
     expect(composer).not.toBeNull();
@@ -312,12 +312,14 @@ for (const width of [320, 390, 1280])
     await page.screenshot({ path: testInfo.outputPath("dictation-settings.png"), animations: "disabled" });
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog")).toBeHidden();
-    await composerInput(page).fill("");
+    await composerInput(page).focus();
+    await composerInput(page).press("ControlOrMeta+a");
+    await composerInput(page).press("Backspace");
     await expect(send).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Open voice call" })).toBeVisible();
     await page.mouse.move(0, 0);
-    await expect(chevron).toHaveCSS("opacity", "0");
-    await expect(chevron).toHaveCSS("width", "0px");
+    await expect(chevron).toHaveCSS("opacity", "1");
+    await expect(chevron).toHaveCSS("width", `${chevronBounds.width}px`);
     await page.locator("[data-composer-input]").screenshot({ path: testInfo.outputPath("empty-composer.png"), animations: "disabled" });
   });
 test("dictation preserves rich selected draft and attachments; confirm focuses editor and one undo restores", async ({
@@ -533,8 +535,16 @@ test("microphone settings are dynamic and read-only on hover, including when ser
     const triggerBox = (await chevron.boundingBox())!;
     return Math.abs(menuBox.x + menuBox.width - triggerBox.x - triggerBox.width);
   }).toBeLessThan(1);
+  // The bespoke microphone keeps its 5-spacing-unit composer glyph. The
+  // waveform uses the shared em-scaled Lucide treatment.
   await expect(microphone.locator("svg")).toHaveCSS("width", "20px");
-  await expect(page.getByRole("button", { name: "Open voice call" }).locator("svg")).toHaveCSS("width", "20px");
+  const waveform = page.getByRole("button", { name: "Open voice call" });
+  const expectedIcon = await waveform.evaluate((element) => Math.max(
+    Number.parseFloat(getComputedStyle(document.documentElement).fontSize) * 0.75,
+    Number.parseFloat(getComputedStyle(element).fontSize) * 1.125,
+  ));
+  await expect.poll(async () => Number.parseFloat(await waveform.locator("svg").evaluate(element => getComputedStyle(element).width)))
+    .toBeCloseTo(expectedIcon, 1);
   await expect(
     page.getByRole("button", { name: "MacBook Air Microphone" }),
   ).toBeVisible();

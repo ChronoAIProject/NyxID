@@ -342,6 +342,9 @@ async fn repair_with_service(
 
 pub(crate) async fn sweep_cleanup(state: &AppState) -> AppResult<()> {
     for _ in 0..8 {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let Some(task) = configs::claim_cleanup(&state.db).await? else {
             break;
         };

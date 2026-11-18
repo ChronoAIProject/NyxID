@@ -14,7 +14,7 @@ async function fixture(page: Page, delay = false) {
     if (path === "/api/v1/users/me") {
       status = 401;
       json = { error_code: 1001, message: "Not signed in" };
-    } else if (path === "/api/v1/auth/device/v2/request") {
+    } else if (path === "/api/v1/auth/device/request") {
       json = {
         device_code: "nyx_adc2_fixture-private-poller",
         user_code: "2-ABCD-EFGH",
@@ -24,7 +24,7 @@ async function fixture(page: Page, delay = false) {
         interval: 5,
         expires_in: 600,
       };
-    } else if (path === "/api/v1/auth/device/v2/poll-web" && first) {
+    } else if (path === "/api/v1/auth/device/poll-web" && first) {
       first = false;
       polled = true;
       if (delay)
@@ -37,7 +37,7 @@ async function fixture(page: Page, delay = false) {
         auth_kind: "agent_key",
         login_code: { request_id: "handoff-fixture", code, expires_at: expiry },
       };
-    } else if (path === "/api/v1/auth/device/v2/poll-web") {
+    } else if (path === "/api/v1/auth/device/poll-web") {
       status = 400;
       json = { error_code: 11202, message: "Pending" };
     } else if (path === "/api/v1/public/config") {

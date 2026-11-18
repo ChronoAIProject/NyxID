@@ -27,6 +27,19 @@ beforeEach(() => {
 });
 
 describe('authenticated relay analytics', () => {
+  it('relays Nyxbot error codes only with active consent and the fresh revision', async () => {
+    const failure = { name: 'nyxbot.error', props: {
+      error_code: 'NYXBOT_HTTP_FORBIDDEN', engine: 'nyxagent', stage: 'request',
+      route: '/assistant/nyxagent/turns', http_status: 403,
+    } } as const;
+    boot(); window.history.replaceState(null, '', '/assistant');
+    await capture(failure);
+    expect(state.api.mock.calls[1]![1].body).toEqual({ account_id: 'account-a', revision: 'revision-a', event: failure });
+    state.device.enabled = false;
+    await capture(failure);
+    expect(state.api).toHaveBeenCalledTimes(2);
+  });
+
   it('admits each event with a fresh permission and sends its exact revision', async () => {
     boot();
     await capture(event); await capture(event);

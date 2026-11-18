@@ -96,7 +96,7 @@ beforeEach(() => {
 
 describe("pool atomic editor", () => {
   it("explains an unavailable credential while allowing a healthy connection to create the pool", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mocks.candidates.mockReturnValue(
       page([
         {
@@ -142,7 +142,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("keeps empty existing drafts editable while new pools wait for a connection", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mocks.candidates.mockReturnValue({ isLoading: true });
     const view = render(<PoolEditor onClose={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("Name"), {
@@ -161,7 +161,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("keeps configured routing and models when searching and reopening the picker", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const configured = {
       ...pool.members[0]!,
       priority: 7,
@@ -209,7 +209,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("keeps displayed member numbers and edits aligned after priority reordering", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const second = {
       ...candidate,
       user_service_id: "second-id",
@@ -260,7 +260,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("enables Save after a single pasted name edit in a valid existing pool", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     expect(saveButton()).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Name"), {
@@ -277,7 +277,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("atomically saves AI contract and required models, then clears models when switching to same API", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const view = render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /^AI chat/ }));
     expect(saveButton()).toBeDisabled();
@@ -316,7 +316,7 @@ describe("pool atomic editor", () => {
     );
   });
   it("browses inventory without a path and applies only validated complete operations", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     expect(mocks.candidates.mock.calls[0]![0]).toMatchObject({
       checkOperation: false,
@@ -376,7 +376,7 @@ describe("pool atomic editor", () => {
           )
         : page(q.search ? [] : [custom]),
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(
       <PoolEditor
         pool={{
@@ -433,7 +433,7 @@ describe("pool atomic editor", () => {
       hasNextPage: true,
       fetchNextPage: more,
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     await user.click(
       screen.getByRole("button", { name: "Choose connections" }),
@@ -450,7 +450,7 @@ describe("pool atomic editor", () => {
     expect(more).toHaveBeenCalledTimes(1);
   });
   it("makes switches dirty and validates advanced policy before saving", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     await user.click(screen.getByRole("switch", { name: "Member 1 enabled" }));
     await waitFor(() => expect(saveButton()).toBeEnabled());
@@ -482,7 +482,7 @@ describe("pool atomic editor", () => {
     mocks.update.mockRejectedValue(
       new Error("Pool configuration changed; reload before saving"),
     );
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
     await user.type(screen.getByLabelText("Name"), " edited");
     await user.click(saveButton());
@@ -498,7 +498,7 @@ describe("pool atomic editor", () => {
 
 describe("pool management", () => {
   it("keeps actions nonmodal and releases dialog pointer control after repeated cancellation", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mocks.pools.mockReturnValue({ data: [pool], isLoading: false });
     render(<ServicePoolsTab createOpen={false} onCreateOpenChange={vi.fn()} />);
     const trigger = screen.getAllByRole("button", {
@@ -524,7 +524,7 @@ describe("pool management", () => {
   it.each(["Use pool", "Edit", "Connections & health", "Delete"])(
     "hands keyboard focus from %s to its dialog and back to Actions on Escape",
     async (action) => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ delay: null });
       mocks.pools.mockReturnValue({ data: [pool], isLoading: false });
       render(
         <ServicePoolsTab createOpen={false} onCreateOpenChange={vi.fn()} />,
@@ -535,14 +535,20 @@ describe("pool management", () => {
       trigger.focus();
       await user.keyboard("{Enter}");
       await screen.findByRole("menu");
-      const steps = [
+      const items = [
         "Use pool",
         "Edit",
         "Connections & health",
         "Disable",
         "Delete",
-      ].indexOf(action);
-      await user.keyboard("{Home}" + "{ArrowDown}".repeat(steps));
+      ];
+      const steps = items.indexOf(action);
+      await user.keyboard("{Home}");
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: items[0] })).toHaveFocus());
+      for (let index = 1; index <= steps; index += 1) {
+        await user.keyboard("{ArrowDown}");
+        await waitFor(() => expect(screen.getByRole("menuitem", { name: items[index] })).toHaveFocus());
+      }
       expect(screen.getByRole("menuitem", { name: action })).toHaveFocus();
       await user.keyboard("{Enter}");
       await waitFor(() =>
@@ -565,7 +571,7 @@ describe("pool management", () => {
     },
   );
   it("returns focus to a directly clicked pool name after another pool's menu was used", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mocks.pools.mockReturnValue({
       data: [pool, { ...pool, id: "other-id", name: "Other pool" }],
       isLoading: false,
@@ -588,7 +594,7 @@ describe("pool management", () => {
     await waitFor(() => expect(nameTrigger).toHaveFocus());
   });
   it("uses the selected owner, generates a slug, and leaves the create trigger to the page header", async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const change = vi.fn();
     const view = render(
       <ServicePoolsTab createOpen={false} onCreateOpenChange={change} />,
@@ -653,7 +659,7 @@ describe("pool management", () => {
         ],
       },
     }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<PoolHealthDialog pool={pool} onClose={vi.fn()} />);
     expect(screen.getByText("Available connection")).toBeVisible();
     // Badge renders a div, which must not be nested in a paragraph.

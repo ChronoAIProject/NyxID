@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 export type TurnPhase =
   | "approval"
   | "tool"
@@ -34,7 +35,7 @@ export function deriveTurnStatus(input: {
   const interrupted = input.interrupted;
   const startedAt = input.activeTurn.started_at;
   if (input.pendingApproval) {
-    return { phase: "approval", label: "Waiting for approval", interrupted, startedAt };
+    return { phase: "approval", get label() { return translateUi("Waiting for approval"); }, interrupted, startedAt };
   }
   const running = input.activeTurn.activities?.find(
     (activity) => activity.status === "running",
@@ -42,21 +43,21 @@ export function deriveTurnStatus(input: {
   if (running) {
     return {
       phase: "tool",
-      label: `Running ${running.label}`,
+      label: translateUi("Running {{label}}", { label: running.label }),
       toolLabel: running.label,
       toolStartedAt: running.started_at,
       interrupted,
       startedAt,
     };
   }
-  if (input.retrying) return { phase: "retrying", label: "Retrying…", interrupted, startedAt };
+  if (input.retrying) return { phase: "retrying", get label() { return translateUi("Retrying…"); }, interrupted, startedAt };
   if ((input.activeTurn.continuations ?? 0) > 0) {
-    return { phase: "continuing", label: "Continuing task…", interrupted, startedAt };
+    return { phase: "continuing", get label() { return translateUi("Continuing task…"); }, interrupted, startedAt };
   }
-  if (input.live) return { phase: "working", label: "Working…", interrupted, startedAt };
+  if (input.live) return { phase: "working", get label() { return translateUi("Working…"); }, interrupted, startedAt };
   return {
     phase: "active",
-    label: "Working — the reply appears when it is ready",
+    get label() { return translateUi("Working — the reply appears when it is ready"); },
     interrupted,
     startedAt,
   };

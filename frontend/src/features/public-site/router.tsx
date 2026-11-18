@@ -1,3 +1,4 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { websiteRelease } from "../website-a/release-config";
 import { useEffect, useState, useRef } from "react";
 import type { ComponentType } from "react";
@@ -142,6 +143,7 @@ function PublicLayout() {
   );
 }
 function PublicError({ error, reset }: { error: unknown; reset: () => void }) {
+  useUiTranslation();
   const router = useRouter();
   const location = useLocation();
   const [retrying, setRetrying] = useState(false);
@@ -160,12 +162,12 @@ function PublicError({ error, reset }: { error: unknown; reset: () => void }) {
   }
   const body = (
     <section className="p-12" role="alert">
-      <h1>Page unavailable</h1>
-      <p>Please retry loading this page.</p>
+      <h1>{translateUi("Page unavailable")}</h1>
+      <p>{translateUi("Please retry loading this page.")}</p>
       <button disabled={retrying} onClick={() => void retry()}>
-        Retry
+        {translateUi("Retry")}
       </button>
-      <a href="/">NyxID home</a>
+      <a href="/">{translateUi("NyxID home")}</a>
     </section>
   );
   const tab = docTabForSlug(location.pathname.slice(6));
@@ -174,6 +176,10 @@ function PublicError({ error, reset }: { error: unknown; reset: () => void }) {
   ) : (
     body
   );
+}
+function PublicPending() {
+  useUiTranslation();
+  return <p role="status">{translateUi("Loading NyxID…")}</p>;
 }
 export function publicRouter(
   path?: string,
@@ -191,7 +197,7 @@ export function publicRouter(
     loader: ({ location }) => loadPublicPage(location.pathname, readDoc),
     staleTime: Infinity,
     component: Content,
-    pendingComponent: () => <p role="status">Loading NyxID…</p>,
+    pendingComponent: PublicPending,
     errorComponent: PublicError,
   });
   return createRouter({

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, MoveDiagonal2 } from "lucide-react";
@@ -26,6 +27,7 @@ export function SortablePanel({
   onResize: (panel: AnalyticsPanel) => void;
   children: (handle: ReactNode) => ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const itemRef = useRef<HTMLDivElement | null>(null);
   const cancelResizeRef = useRef<(() => void) | null>(null);
   const {
@@ -180,12 +182,12 @@ export function SortablePanel({
               disabled={disabled}
               {...attributes}
               {...listeners}
-              aria-label={`Drag ${panel.title}`}
+              aria-label={t("Drag {{title}}", { title: panel.title })}
             >
               <GripVertical className="size-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="top">Drag to reorder</TooltipContent>
+          <TooltipContent side="top">{t("Drag to reorder")}</TooltipContent>
         </Tooltip>,
       )}
       <Tooltip>
@@ -196,7 +198,7 @@ export function SortablePanel({
             size="icon"
             className="analytics-resize-handle absolute bottom-1 right-1 z-10 size-7 touch-none text-muted-foreground"
             disabled={disabled}
-            aria-label={`Resize ${panel.title}`}
+            aria-label={t("Resize {{title}}", { title: panel.title })}
             onPointerDown={resizeStart}
             onKeyDown={(event) => {
               if (!event.key.startsWith("Arrow")) return;
@@ -208,7 +210,7 @@ export function SortablePanel({
             <MoveDiagonal2 style={{ width: 16, height: 16 }} />
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="top">Drag to resize</TooltipContent>
+        <TooltipContent side="top">{t("Drag to resize")}</TooltipContent>
       </Tooltip>
     </div>
   );

@@ -8,9 +8,23 @@ import {
   extractChatStreamArtifacts,
   readChatStreamFrames,
   sendChatCommand,
+  ChatApiError,
   type ChatCommand,
 } from "@/lib/assistant/chat-api";
-import { assignAssistantResponseConversation } from "@/lib/assistant/assistant-http";
+import {
+  assignAssistantResponseConversation,
+  AssistantHttpError,
+} from "@/lib/assistant/assistant-http";
+import { ApiError } from "@/lib/api-client";
+import { AssistantProtocolError } from "@/lib/assistant/errors";
+import {
+  captureNyxbotError,
+  httpErrorCode,
+  messageTraceId,
+  responseCorrelation,
+  type ErrorCorrelation,
+} from "@/lib/assistant/error-telemetry";
+import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
 import {
   buildAssistantMessagePatch,
   createChatMessage,
@@ -110,6 +124,62 @@ export async function runChatStream({
   let serverStopped = false;
   let progressWatchdog: ReturnType<typeof setTimeout> | undefined;
   let streamStarted = false;
+  const startedAt = Date.now();
+  let errorReported = false;
+  let response: Response | undefined;
+  let correlation: ErrorCorrelation = {};
+
+  const reportError = (error: unknown, code?: NyxbotErrorCode) => {
+    if (errorReported) return;
+    errorReported = true;
+    const httpError =
+      error instanceof ChatApiError || error instanceof ApiError
+        ? error
+        : undefined;
+    const errorCorrelation =
+      error instanceof ChatApiError || error instanceof AssistantHttpError
+        ? error.correlation
+        : undefined;
+    let errorCode = code;
+    if (!errorCode) {
+      if (httpError) errorCode = httpErrorCode(httpError.status);
+      else if (error instanceof ChatStartTimeoutError)
+        errorCode = "NYXBOT_START_TIMEOUT";
+      else if (error instanceof ChatProgressTimeoutError)
+        errorCode = "NYXBOT_STREAM_TIMEOUT";
+      else if (error instanceof AssistantProtocolError)
+        errorCode = "NYXBOT_PROTOCOL_ERROR";
+      else if (error instanceof TypeError)
+        errorCode = response ? "NYXBOT_STREAM_ERROR" : "NYXBOT_NETWORK_ERROR";
+      else errorCode = "NYXBOT_UNKNOWN_ERROR";
+    }
+    captureNyxbotError({
+      code: errorCode,
+      engine: "aevatar",
+      stage: response ? "stream" : "request",
+      endpoint: "/assistant/chat",
+      status: httpError?.status ?? response?.status,
+      upstreamCode:
+        httpError instanceof ApiError
+          ? httpError.errorCode
+          : (httpError?.code ?? accumulator.errorCode),
+      requestId:
+        errorCorrelation?.requestId ||
+        correlation.requestId ||
+        command.clientRequestId,
+      correlationId:
+        accumulator.correlationId ||
+        errorCorrelation?.correlationId ||
+        correlation.correlationId,
+      traceId:
+        correlation.traceId ||
+        errorCorrelation?.traceId ||
+        messageTraceId(accumulator.errorText),
+      conversationId: authoritativeConversationId || command.conversationId,
+      turnId: authoritativeTurnId || accumulator.runId,
+      durationMs: Date.now() - startedAt,
+    }, error);
+  };
 
   updateEntry(activeKey, { projection: actorState, session: streaming });
 
@@ -131,6 +201,7 @@ export async function runChatStream({
         expectedStateVersion: actorState.stateVersion,
       },
       new AbortController().signal,
+      { reportErrors: false },
     ).catch(() => undefined);
   };
   const armProgressWatchdog = () => {
@@ -152,7 +223,11 @@ export async function runChatStream({
   }, STREAM_START_DEADLINE_MS);
 
   try {
-    const response = await sendChatCommand(command, controller.signal);
+    response = await sendChatCommand(command, controller.signal, {
+      reportErrors: false,
+      onError: reportError,
+    });
+    correlation = responseCorrelation(response);
     for await (const frame of readChatStreamFrames(response, {
       signal: controller.signal,
     })) {
@@ -167,11 +242,14 @@ export async function runChatStream({
       if (!isKeepaliveEvent(frame.event)) observeMeaningfulFrame();
       applyRuntimeEvent(accumulator, frame.event);
       serverStopped ||= isRunStoppedEvent(frame.event);
+      if (frame.event.type === AGUIEventType.RUN_ERROR && !serverStopped) {
+        reportError(undefined, "NYXBOT_RUN_ERROR");
+      }
       if (frame.event.type === AGUIEventType.RUN_STARTED) {
         const conversationId = accumulator.actorId.trim();
         const turnId = accumulator.runId.trim();
         if (!conversationId || !turnId) {
-          throw new Error(
+          throw new AssistantProtocolError(
             "Chat RUN_STARTED did not contain authoritative conversation and turn identities.",
           );
         }
@@ -179,14 +257,16 @@ export async function runChatStream({
           command.conversationId &&
           command.conversationId !== conversationId
         ) {
-          throw new Error("Chat returned a different conversation identity.");
+          throw new AssistantProtocolError(
+            "Chat returned a different conversation identity.",
+          );
         }
         if (
           (authoritativeConversationId &&
             authoritativeConversationId !== conversationId) ||
           (authoritativeTurnId && authoritativeTurnId !== turnId)
         ) {
-          throw new Error(
+          throw new AssistantProtocolError(
             "Chat RUN_STARTED identity changed during the stream.",
           );
         }
@@ -194,7 +274,9 @@ export async function runChatStream({
         authoritativeTurnId = turnId;
         assignAssistantResponseConversation(response, conversationId);
         if (actorState.actorId && actorState.actorId !== conversationId) {
-          throw new Error("Actor state does not match the chat conversation.");
+          throw new AssistantProtocolError(
+            "Actor state does not match the chat conversation.",
+          );
         }
         adopted = true;
         actorState = { ...actorState, actorId: conversationId };
@@ -249,7 +331,7 @@ export async function runChatStream({
     }
     if (controller.signal.aborted) throw controller.signal.reason;
     if (!authoritativeConversationId || !authoritativeTurnId) {
-      throw new Error(
+      throw new AssistantProtocolError(
         "Chat stream ended without authoritative conversation and turn identities.",
       );
     }
@@ -293,6 +375,7 @@ export async function runChatStream({
   } catch (error) {
     const reason = controller.signal.aborted ? controller.signal.reason : error;
     const stopped = reason instanceof ReaderStoppedError || serverStopped;
+    if (!stopped) reportError(reason);
     if (!adopted && reason instanceof ChatStartTimeoutError) {
       accumulator.errorText = reason.message;
       const failed = updateSessionMessage(

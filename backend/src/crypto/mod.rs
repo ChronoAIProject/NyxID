@@ -6,6 +6,8 @@ pub mod hmac_keys;
 pub(crate) mod hmac_lifecycle;
 pub mod jwks;
 pub mod jwt;
+#[cfg(test)]
+mod jwt_verifier_inventory_tests;
 pub mod key_provider;
 pub mod local_key_provider;
 pub mod mtls;

@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use axum::http::StatusCode;
-use bson::doc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -11,9 +10,7 @@ use crate::models::{
     org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole},
     user::{COLLECTION_NAME as USERS, User, UserType},
 };
-use crate::services::{
-    oracle_pool_service, oracle_worker_enrollment_service as enrollment, oracle_worker_service,
-};
+use crate::services::{oracle_pool_service, oracle_worker_enrollment_service as enrollment};
 use crate::test_utils::{
     connect_transaction_test_database, test_app_state, test_membership, test_user,
 };
@@ -115,293 +112,42 @@ fn credential() -> String {
     format!("nyx_owi_{}", hex::encode(rand::random::<[u8; 32]>()))
 }
 
-#[tokio::test]
-async fn oracle_enrollment_http_has_no_secret_response_and_scopes_worker_management() {
-    let server = Server::new().await;
-    let (member, member_jwt) = server.human().await;
-    let (admin, admin_jwt) = server.human().await;
-    let (outsider, outsider_jwt) = server.human().await;
-    let (pool, legacy) = server.org_pool(&member, &admin).await;
-    let pool_url = format!("{}/pools/{}", server.url, pool.slug);
-    let instance = Uuid::new_v4().to_string();
-    let secret = credential();
-    let enrollment_body =
-        json!({ "installation_id": instance, "label": "mine", "credential": secret });
-    let denied = server
-        .http
-        .post(format!("{pool_url}/workers/enroll"))
-        .bearer_auth(&outsider_jwt)
-        .json(&enrollment_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-    assert_eq!(denied.headers()["cache-control"], "no-store");
-    let enrolled = server
-        .http
-        .post(format!("{pool_url}/workers/enroll"))
-        .bearer_auth(&member_jwt)
-        .json(&enrollment_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(enrolled.status(), StatusCode::OK);
-    assert_eq!(enrolled.headers()["cache-control"], "no-store");
-    let payload: Value = enrolled.json().await.unwrap();
-    assert_eq!(
-        payload,
-        json!({ "pool_id": pool.id, "pool_slug": pool.slug, "label": "mine", "installation_id": instance, "credential_type": "installation" })
-    );
-    assert!(!payload.to_string().contains(&secret));
-    assert!(!payload.to_string().contains(&legacy));
+async fn assert_retired(response: reqwest::Response) {
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "oracle_retired");
+    assert_eq!(body["error_code"], 11099);
     assert!(
-        !format!(
-            "{:?}",
-            serde_json::from_value::<super::EnrollOracleWorkerRequest>(enrollment_body.clone())
-                .unwrap()
-        )
-        .contains(&secret)
-    );
-    let meta: Value = server
-        .http
-        .get(&pool_url)
-        .bearer_auth(&member_jwt)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(meta["can_enroll"], true);
-    assert_eq!(meta["can_manage"], false);
-    let metadata_list: Value = server
-        .http
-        .get(format!("{}/pools", server.url))
-        .bearer_auth(&member_jwt)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(metadata_list["pools"][0]["can_enroll"], true);
-    let sibling_secret = credential();
-    let sibling_instance = Uuid::new_v4().to_string();
-    enrollment::enroll(
-        &server.state.db,
-        &admin,
-        &pool,
-        &sibling_instance,
-        Some("sibling"),
-        &sibling_secret,
-    )
-    .await
-    .unwrap();
-    let heartbeat = server.http.post(format!("{}/worker/heartbeat", server.url)).bearer_auth(&secret)
-        .json(&json!({"worker":"mine", "instance_id":instance,"capabilities":["commands_v1"], "logged_in":true})).send().await.unwrap();
-    assert_eq!(heartbeat.status(), StatusCode::OK);
-    let own_rows: Value = server
-        .http
-        .get(format!("{pool_url}/workers"))
-        .bearer_auth(&member_jwt)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(own_rows["workers"].as_array().unwrap().len(), 1);
-    assert_eq!(own_rows["workers"][0]["owner_user_id"], member);
-    assert_eq!(own_rows["workers"][0]["credential_type"], "installation");
-    assert_eq!(own_rows["workers"][0]["can_manage"], true);
-    let all_rows: Value = server
-        .http
-        .get(format!("{pool_url}/workers"))
-        .bearer_auth(&admin_jwt)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(all_rows["workers"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        server
-            .http
-            .get(format!("{pool_url}/workers/sibling"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
+        body["message"]
+            .as_str()
             .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        server
-            .http
-            .get(format!("{pool_url}/workers/mine"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    let queued = server
-        .http
-        .post(format!("{pool_url}/workers/mine/commands"))
-        .bearer_auth(&member_jwt)
-        .json(&json!({"command":"drain"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(queued.status(), StatusCode::ACCEPTED);
-    let command: Value = queued.json().await.unwrap();
-    assert_eq!(
-        server
-            .http
-            .get(format!("{pool_url}/workers/mine/commands"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        server
-            .http
-            .delete(format!(
-                "{pool_url}/workers/mine/commands/{}",
-                command["id"].as_str().unwrap()
-            ))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    for path in [
-        "workers/sibling/commands",
-        "workers/allocate",
-        "rotate-token",
-    ] {
-        assert_eq!(
-            server
-                .http
-                .post(format!("{pool_url}/{path}"))
-                .bearer_auth(&member_jwt)
-                .json(&json!({"command":"drain"}))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN,
-            "{path}"
-        );
-    }
-    assert_eq!(
-        server
-            .http
-            .patch(&pool_url)
-            .bearer_auth(&member_jwt)
-            .json(&json!({"name":"unauthorized"}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        server
-            .http
-            .get(format!("{pool_url}/login-profiles"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        server
-            .http
-            .delete(format!("{pool_url}/workers/sibling?force=true"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        server
-            .http
-            .delete(format!("{pool_url}/workers/mine?force=true"))
-            .bearer_auth(&member_jwt)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    assert!(
-        enrollment::authenticate(&server.state.db, &secret)
-            .await
-            .is_err()
-    );
-    assert!(
-        enrollment::authenticate(&server.state.db, &sibling_secret)
-            .await
-            .is_ok()
-    );
-    // Viewers see the pool but cannot contribute, and public visibility alone grants no enrollment.
-    server
-        .state
-        .db
-        .collection::<OrgMembership>(MEMBERSHIPS)
-        .insert_one(test_membership(
-            &pool.user_id,
-            &outsider,
-            OrgRole::Viewer,
-            None,
-        ))
-        .await
-        .unwrap();
-    let viewer_meta: Value = server
-        .http
-        .get(&pool_url)
-        .bearer_auth(&outsider_jwt)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(viewer_meta["can_enroll"], false);
-    assert_eq!(
-        server
-            .http
-            .post(format!("{pool_url}/workers/enroll"))
-            .bearer_auth(&outsider_jwt)
-            .json(&enrollment_body)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
+            .contains("permanently deprecated"),
+        "{body}"
     );
 }
 
+/// Worker enrollment went with the rest of the built-in oracle: the manager
+/// route mints no credential, and the worker routes honour neither a per-worker
+/// credential nor the legacy pool token.
 #[tokio::test]
-async fn oracle_enrollment_http_binds_every_worker_route_and_rejects_retired_credentials() {
+async fn oracle_enrollment_http_answers_410_oracle_retired() {
     let server = Server::new().await;
-    let (member, _) = server.human().await;
+    let (member, member_jwt) = server.human().await;
     let (admin, _) = server.human().await;
     let (pool, legacy) = server.org_pool(&member, &admin).await;
     let instance = Uuid::new_v4().to_string();
     let secret = credential();
+    let enrolled = server
+        .http
+        .post(format!("{}/pools/{}/workers/enroll", server.url, pool.slug))
+        .bearer_auth(&member_jwt)
+        .json(&json!({ "installation_id": instance, "label": "mine", "credential": secret }))
+        .send()
+        .await
+        .unwrap();
+    assert_retired(enrolled).await;
+
+    // Even a credential written straight through the service buys nothing.
     enrollment::enroll(
         &server.state.db,
         &member,
@@ -413,169 +159,33 @@ async fn oracle_enrollment_http_binds_every_worker_route_and_rejects_retired_cre
     .await
     .unwrap();
     let url = format!("{}/worker", server.url);
-    let valid = [("worker", "mine"), ("instance_id", instance.as_str())];
-    assert_eq!(
-        server
+    let query = [("worker", "mine"), ("instance_id", instance.as_str())];
+    for token in [&secret, &legacy] {
+        let bundle = server
             .http
             .get(format!("{url}/bundle"))
-            .bearer_auth(&secret)
+            .bearer_auth(token)
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        server
+            .unwrap();
+        assert_retired(bundle).await;
+        let task = server
             .http
             .get(format!("{url}/task"))
-            .bearer_auth(&secret)
-            .query(&valid)
+            .query(&query)
+            .bearer_auth(token)
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        server
+            .unwrap();
+        assert_retired(task).await;
+        let heartbeat = server
             .http
-            .get(format!("{url}/bundle"))
-            .bearer_auth(&legacy)
+            .post(format!("{url}/heartbeat"))
+            .bearer_auth(token)
+            .json(&json!({ "worker": "mine", "instance_id": instance }))
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
-    for (label, installation) in [("sibling", instance.as_str()), ("mine", "different")] {
-        let query = [("worker", label), ("instance_id", installation)];
-        for path in ["task", "login-profile"] {
-            assert_eq!(
-                server
-                    .http
-                    .get(format!("{url}/{path}"))
-                    .bearer_auth(&secret)
-                    .query(&query)
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED,
-                "{path}"
-            );
-        }
-        let body = json!({ "worker":label, "instance_id":installation, "task_id":"task", "response":"text",
-            "chatgpt_url":"https://chatgpt.com/c/test", "turns":[], "profile_id":"profile", "binding_id":"binding",
-            "generation":"generation", "expected_revision":"revision", "publication_id":"publication", "format_version":1, "sealed_blob_base64":"e30=" });
-        for path in [
-            "heartbeat",
-            "ack",
-            "result",
-            "transcript",
-            "worker/transcript",
-            "pin-conv-url",
-            "login-profile",
-        ] {
-            assert_eq!(
-                server
-                    .http
-                    .post(format!("{url}/{path}"))
-                    .bearer_auth(&secret)
-                    .json(&body)
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                StatusCode::UNAUTHORIZED,
-                "{path}"
-            );
-        }
+            .unwrap();
+        assert_retired(heartbeat).await;
     }
-    assert_eq!(
-        server
-            .http
-            .get(format!("{url}/task"))
-            .bearer_auth(&secret)
-            .query(&[("worker", "mine")])
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        server
-            .http
-            .get(format!("{url}/login-snapshots/any"))
-            .bearer_auth(&secret)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    let current: Value = server
-        .http
-        .get(format!("{url}/login-profile"))
-        .bearer_auth(&secret)
-        .query(&valid)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(current, json!({"status":"unbound"}));
-    server
-        .state
-        .db
-        .collection::<bson::Document>(MEMBERSHIPS)
-        .update_one(
-            doc! { "member_user_id": &member },
-            doc! { "$set": { "revoked_at": bson::DateTime::now() } },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        server
-            .http
-            .get(format!("{url}/bundle"))
-            .bearer_auth(&secret)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        server
-            .http
-            .get(format!("{url}/login-snapshots/any"))
-            .bearer_auth(&secret)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        server
-            .http
-            .get(format!("{url}/task"))
-            .bearer_auth(&secret)
-            .query(&valid)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        oracle_worker_service::list_workers(&server.state.db, &pool.id)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
 }

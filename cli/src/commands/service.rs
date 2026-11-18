@@ -1831,35 +1831,12 @@ async fn run_oauth_add(
     let provider_id = catalog["provider_config_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No provider found for slug: {slug}"))?;
-    let redirect_path = format!("/keys/{key_id}");
-    let mut initiate_path = format!(
-        "/providers/{provider_id}/connect/oauth?redirect_path={}",
-        urlencoding::encode(&redirect_path)
+    let initiate_path = oauth_initiate_path(
+        provider_id,
+        key_id,
+        options.additional_scopes,
+        options.target_org_id,
     );
-    // Multi-connection: thread the placeholder's id into the initiate
-    // URL so the backend's OAuth-state insert reads its `connection_id`
-    // (off the placeholder's `UserApiKey`) and stamps it onto the new
-    // `OAuthState`. The eventual callback then writes the tokens
-    // straight onto THIS `UserApiKey` instead of taking the legacy
-    // `user_provider_tokens` path. Omitting this leaves the placeholder
-    // stuck in `pending_auth` while the token aliases onto the legacy
-    // single-tenant row — the exact silent-failure mode the
-    // multi-connection branch is meant to prevent.
-    initiate_path.push_str(&format!("&key_id={}", urlencoding::encode(key_id)));
-    if !options.additional_scopes.is_empty() {
-        initiate_path.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&options.additional_scopes.join(","))
-        ));
-    }
-    // Org-targeted OAuth: the provider token must be stored under the org's
-    // user_id so `sync_provider_token_to_api_keys` picks up the placeholder
-    // UserApiKey we just created under the same org id. Without this query
-    // param, the token would land on the admin's personal scope and the
-    // org-owned UserApiKey would stay pending_auth forever.
-    if let Some(org_id) = options.target_org_id {
-        initiate_path.push_str(&format!("&target_org_id={}", urlencoding::encode(org_id)));
-    }
     let initiate: Value = api.get(&initiate_path).await?;
     let authorization_url = initiate["authorization_url"].as_str().ok_or_else(|| {
         anyhow::anyhow!("OAuth initiate response did not include authorization_url")
@@ -1877,6 +1854,49 @@ async fn run_oauth_add(
     print_add_result(api, &final_key, auth.output)?;
 
     Ok(())
+}
+
+/// Builds the OAuth initiate request for a CLI-created placeholder.
+///
+/// `flow=wz` sends the provider callback to NyxID's standalone completion
+/// page, as a connect link's return page is, instead of the web app.
+/// `redirect_path` stays as the destination for servers that predate it.
+fn oauth_initiate_path(
+    provider_id: &str,
+    key_id: &str,
+    additional_scopes: &[String],
+    target_org_id: Option<&str>,
+) -> String {
+    let redirect_path = format!("/keys/{key_id}");
+    let mut initiate_path = format!(
+        "/providers/{provider_id}/connect/oauth?redirect_path={}&flow=wz",
+        urlencoding::encode(&redirect_path)
+    );
+    // Multi-connection: thread the placeholder's id into the initiate
+    // URL so the backend's OAuth-state insert reads its `connection_id`
+    // (off the placeholder's `UserApiKey`) and stamps it onto the new
+    // `OAuthState`. The eventual callback then writes the tokens
+    // straight onto THIS `UserApiKey` instead of taking the legacy
+    // `user_provider_tokens` path. Omitting this leaves the placeholder
+    // stuck in `pending_auth` while the token aliases onto the legacy
+    // single-tenant row — the exact silent-failure mode the
+    // multi-connection branch is meant to prevent.
+    initiate_path.push_str(&format!("&key_id={}", urlencoding::encode(key_id)));
+    if !additional_scopes.is_empty() {
+        initiate_path.push_str(&format!(
+            "&scope={}",
+            urlencoding::encode(&additional_scopes.join(","))
+        ));
+    }
+    // Org-targeted OAuth: the provider token must be stored under the org's
+    // user_id so `sync_provider_token_to_api_keys` picks up the placeholder
+    // UserApiKey we just created under the same org id. Without this query
+    // param, the token would land on the admin's personal scope and the
+    // org-owned UserApiKey would stay pending_auth forever.
+    if let Some(org_id) = target_org_id {
+        initiate_path.push_str(&format!("&target_org_id={}", urlencoding::encode(org_id)));
+    }
+    initiate_path
 }
 
 // ---- Device code add flow (I22) ----
@@ -2724,6 +2744,32 @@ fn format_node_managed_list_hint_lines(items: &[Value]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_initiate_path_requests_the_cli_completion_page() {
+        let path = oauth_initiate_path(
+            "provider-1",
+            "key-1",
+            &["repo".to_string(), "read:org".to_string()],
+            Some("org-1"),
+        );
+        let (route, query) = path.split_once('?').expect("query string");
+        assert_eq!(route, "/providers/provider-1/connect/oauth");
+        let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(
+            params,
+            [
+                ("redirect_path", "/keys/key-1"),
+                ("flow", "wz"),
+                ("key_id", "key-1"),
+                ("scope", "repo,read:org"),
+                ("target_org_id", "org-1"),
+            ]
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+        );
+    }
 
     /// A disabled service must not print as "active".
     ///

@@ -66,7 +66,8 @@ beforeEach(() => {
 });
 it("shows pinned metadata, revision and an explicit update action without re-pinning", () => {
   render(<AgentSkills agentId="agent" />);
-  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  expect(screen.getByText("Research guide", { selector: "[data-grouped-footer] p" })).toBeInTheDocument();
   expect(screen.getByText("1,000 bytes")).toBeInTheDocument();
   expect(screen.getByText(/Revision 4/)).toBeInTheDocument();
   expect(
@@ -76,6 +77,7 @@ it("shows pinned metadata, revision and an explicit update action without re-pin
 });
 it("removes immediately with the observed revision", () => {
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(screen.getByRole("button", { name: "Remove Research" }));
   expect(mocks.save).toHaveBeenCalledWith(
     { expected_revision: 4, skills: [] },
@@ -84,7 +86,8 @@ it("removes immediately with the observed revision", () => {
 });
 it("hides the enable toggle while assistant:skill-pin-disable is off", () => {
   render(<AgentSkills agentId="agent" />);
-  expect(screen.getByText("Research guide")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
+  expect(screen.getByText("Research guide", { selector: "[data-grouped-footer] p" })).toBeInTheDocument();
   expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
   expect(mocks.save).not.toHaveBeenCalled();
 });
@@ -93,12 +96,14 @@ it("still marks a disabled pin when the toggle is hidden", () => {
     data: { revision: 4, skills: [{ ...pin, disabled: true }], metadata: {} },
   });
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   expect(screen.queryByRole("switch", { name: "Use Research" })).not.toBeInTheDocument();
   expect(screen.getByText("Disabled")).toBeInTheDocument();
 });
 it("toggles a pin and sends disabled true in the PUT body", () => {
   signIn([FEATURE_FLAG.SKILL_PIN_DISABLE]);
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(screen.getByRole("switch", { name: "Use Research" }));
   expect(mocks.save).toHaveBeenCalledWith({ expected_revision: 4, skills: [{ ...pin, disabled: true }] }, expect.anything());
 });
@@ -114,6 +119,7 @@ it("searches visible Ornn skills on submit", () => {
 it("requires version preview and an explicit re-pin click", async () => {
   const user = userEvent.setup();
   const view = render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   await user.click(
     screen.getByRole("button", { name: "Newer version available: 2.0" }),
   );
@@ -134,6 +140,46 @@ it("requires version preview and an explicit re-pin click", async () => {
       expect.anything(),
     ),
   );
+});
+it("shows the skill's own outline card when the verified preview carries one", async () => {
+  mocks.search.mockReturnValue({
+    data: { page: 1, total_pages: 1, items: [{ id: "style", name: "style", description: "House style" }] },
+  });
+  const reference = { ...pin, skill_id: "style", name: "style", version: "2.0" };
+  mocks.preview.mockReturnValue({
+    data: {
+      reference,
+      description: "House style",
+      size_bytes: 900,
+      outline: {
+        overview: "One result.",
+        steps: [{ id: "step-1", title: "Prepare", text: "I get ready.", asks_you: true }],
+        needs: null,
+        produces: null,
+      },
+      author: { kind: "organization", name: "Example Org" },
+    },
+  });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^style/ }));
+  const card = await screen.findByRole("region", { name: "style skill" });
+  expect(card).toHaveTextContent("By Example Org");
+  expect(card).toHaveTextContent("Prepare. I get ready.");
+  expect(card).toHaveTextContent("Asks you");
+  // Attaching stays with the version view's own controls.
+  expect(screen.queryByRole("button", { name: "Start" })).not.toBeInTheDocument();
+});
+it("shows no outline card when the server sends no outline", async () => {
+  mocks.search.mockReturnValue({
+    data: { page: 1, total_pages: 1, items: [{ id: "style", name: "style", description: "House style" }] },
+  });
+  mocks.preview.mockReturnValue({
+    data: { reference: { ...pin, skill_id: "style", name: "style", version: "2.0" }, description: "House style", size_bytes: 900 },
+  });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^style/ }));
+  expect(await screen.findByText("900 bytes ·", { exact: false })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "style skill" })).not.toBeInTheDocument();
 });
 it("shows missing-access errors without erasing attached skills", () => {
   mocks.search.mockReturnValue({
@@ -163,6 +209,7 @@ it("offers paging through older versions before re-pinning", () => {
     },
   });
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   fireEvent.click(
     screen.getByRole("button", { name: "Newer version available: 2.0" }),
   );
@@ -198,14 +245,26 @@ it("refuses a seventeenth attachment while retaining removal", () => {
     },
   });
   render(<AgentSkills agentId="agent" />);
-  fireEvent.click(screen.getByRole("button", { name: "Extra skill" }));
+  fireEvent.click(screen.getByRole("button", { name: /Extra skill/ }));
   expect(screen.getByRole("button", { name: "Attach skill" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Back to Skills" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Skill 0 / }));
   expect(screen.getByRole("button", { name: "Remove Skill 0" })).toBeEnabled();
 });
 
 it("never tests a pin until its Test button is clicked", () => {
   render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: /^Research/ }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "");
   fireEvent.click(screen.getByRole("button", { name: "Test Research" }));
   expect(mocks.attachedPreview).toHaveBeenLastCalledWith("agent", "skill-id");
+});
+
+it("shows a history request failure on the pushed history page", () => {
+  mocks.history.mockReturnValue({ error: new Error("History request failed") });
+  render(<AgentSkills agentId="agent" />);
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  expect(screen.getByRole("heading", { name: "Skill history" })).toHaveFocus();
+  expect(screen.getByRole("alert")).toHaveTextContent("History request failed");
+  expect(screen.queryByText("No skill activity yet.")).toBeNull();
 });

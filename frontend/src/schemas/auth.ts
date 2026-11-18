@@ -69,15 +69,20 @@ export type ResetPasswordFormData = z.infer<typeof resetPasswordSchema>;
 
 export const changePasswordSchema = z
   .object({
-    currentPassword: z.string().min(1, "Current password is required"),
+    currentPassword: z
+      .string()
+      .min(1, "Current password is required")
+      .refine((value) => new TextEncoder().encode(value).length <= 128, {
+        message: "Current password must be at most 128 UTF-8 bytes",
+      }),
     newPassword: z
       .string()
-      .min(1, "New password is required")
-      .min(8, "Password must be at least 8 characters")
-      .max(128, "Password must be at most 128 characters")
-      .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
-      .regex(/[a-z]/, "Password must contain at least one lowercase letter")
-      .regex(/[0-9]/, "Password must contain at least one number"),
+      .refine((value) => new TextEncoder().encode(value).length >= 8, {
+        message: "Password must be at least 8 UTF-8 bytes",
+      })
+      .refine((value) => new TextEncoder().encode(value).length <= 128, {
+        message: "Password must be at most 128 UTF-8 bytes",
+      }),
     confirmNewPassword: z.string().min(1, "Please confirm your new password"),
   })
   .refine((data) => data.newPassword === data.confirmNewPassword, {

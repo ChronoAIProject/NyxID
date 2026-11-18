@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 
 import { ArticleCard } from "./components/article-card";
@@ -6,6 +7,7 @@ import { fetchPublishedArticles } from "./mock-api";
 import type { BlogArticle } from "./types";
 
 export function BlogIndexPage() {
+  const { t } = useUiTranslation();
   const [articles, setArticles] = useState<readonly BlogArticle[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,17 +31,9 @@ export function BlogIndexPage() {
     <BlogShell>
       <section className="px-6 pt-20 pb-12">
         <div className="mx-auto max-w-6xl">
-          <p className="font-mono text-xs tracking-widest text-primary-text uppercase">
-            The NyxID Journal
-          </p>
-          <h1 className="mt-4 max-w-3xl font-serif text-4xl leading-tight text-white md:text-6xl">
-            Field notes from the threshold
-          </h1>
-          <p className="mt-6 max-w-2xl text-lg leading-relaxed text-gray-300">
-            Dispatches from the team building the lock between you and
-            everything that asks. Engineering deep-dives, security write-ups,
-            design decisions — and the occasional confession.
-          </p>
+          <p className="font-mono text-xs tracking-widest text-primary-text uppercase">{t("The NyxID Journal")}</p>
+          <h1 className="mt-4 max-w-3xl font-serif text-4xl leading-tight text-white md:text-6xl">{t("Field notes from the threshold")}</h1>
+          <p className="mt-6 max-w-2xl text-lg leading-relaxed text-gray-300">{t("Dispatches from the team building the lock between you and everything that asks. Engineering deep-dives, security write-ups, design decisions — and the occasional confession.")}</p>
         </div>
       </section>
 
@@ -95,25 +89,23 @@ function LoadingGrid() {
 }
 
 function EmptyState() {
+  const { t } = useUiTranslation();
   return (
     <div className="border-landing-border-subtle bg-landing-surface mx-auto max-w-md rounded-2xl border p-10 text-center">
-      <p className="font-serif text-2xl text-white">Nothing to show yet.</p>
-      <p className="mt-3 text-sm text-gray-400">
-        Field notes will appear here as they're published.
-      </p>
+      <p className="font-serif text-2xl text-white">{t("Nothing to show yet.")}</p>
+      <p className="mt-3 text-sm text-gray-400">{t("Field notes will appear here as they're published.")}</p>
     </div>
   );
 }
 
 function ErrorState({ message }: { readonly message: string }) {
+  const { t } = useUiTranslation();
   return (
     <div
       role="alert"
       className="bg-destructive/5 mx-auto max-w-md rounded-2xl border border-destructive/40 p-10 text-center"
     >
-      <p className="font-mono text-xs tracking-widest text-destructive uppercase">
-        Something went wrong
-      </p>
+      <p className="font-mono text-xs tracking-widest text-destructive uppercase">{t("Something went wrong")}</p>
       <p className="mt-3 text-sm text-gray-300">{message}</p>
     </div>
   );

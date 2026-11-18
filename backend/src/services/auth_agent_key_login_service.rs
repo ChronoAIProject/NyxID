@@ -87,6 +87,7 @@ pub struct ResourceSummary {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    pub owner_name: Option<String>,
     #[serde(default)]
     pub auto_connected: bool,
 }
@@ -172,6 +173,7 @@ pub async fn request(
         let user_code = auth_device_service::generate_user_code();
         let now = Utc::now();
         let row = AgentKeyLoginRequest {
+            mfa_policy_revision: None,
             delivery_context_version: None,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: code_hash(hmac_key, &device_code),
@@ -329,6 +331,28 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
             .await?
             .try_collect()
             .await?;
+    // One batched read names organization owners of the key's services, so a
+    // connection the approver can no longer use still shows its organization.
+    let foreign_owner_ids: Vec<&str> = services
+        .iter()
+        .map(|s| s.user_id.as_str())
+        .filter(|id| *id != key.user_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let org_names: std::collections::HashMap<String, String> = if foreign_owner_ids.is_empty() {
+        Default::default()
+    } else {
+        db.collection::<User>(USERS)
+            .find(doc! {"_id": {"$in": &foreign_owner_ids}})
+            .await?
+            .try_collect::<Vec<User>>()
+            .await?
+            .into_iter()
+            .filter(|u| u.user_type.is_org())
+            .map(|u| (u.id, u.display_name.unwrap_or(u.email)))
+            .collect()
+    };
     let nodes: Vec<Node> = db
         .collection::<Node>(NODES)
         .find(doc! {"_id": {"$in": &key.allowed_node_ids}})
@@ -364,6 +388,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable service".into(), |r| r.slug.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    owner_name: row.and_then(|r| org_names.get(&r.user_id).cloned()),
                     auto_connected: row.is_some_and(consent::auto_connected),
                 }
             })
@@ -377,6 +402,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable node".into(), |r| r.name.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    owner_name: None,
                     auto_connected: false,
                 }
             })
@@ -421,6 +447,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
                 orgs.push(ResourceSummary {
                     id: owner.id.clone(),
                     owner_id: owner.id,
+                    owner_name: None,
                     auto_connected: false,
                     name: owner.display_name.unwrap_or(owner.email),
                 });
@@ -448,6 +475,10 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.service.id,
             name: entry.service.slug,
             owner_id: entry.service.user_id,
+            owner_name: match entry.source {
+                user_service_service::CredentialSource::Personal => None,
+                user_service_service::CredentialSource::Org { org_name, .. } => Some(org_name),
+            },
             auto_connected,
         });
     }
@@ -458,6 +489,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.node.id,
             name: entry.node.name,
             owner_id: entry.node.user_id,
+            owner_name: None,
             auto_connected: false,
         })
         .collect();
@@ -643,7 +675,13 @@ pub async fn approve(
     credential_expires_at: Option<DateTime<Utc>>,
     approver_ip: Option<&str>,
     approver_user_agent: Option<&str>,
+    authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    let mfa_policy_revision =
+        super::approved_sign_in_policy::authorize(db, actor, authority).await?;
+    let policy_used = mfa_policy_revision.is_some();
+    let policy_default =
+        mfa_policy_revision.as_deref() == Some(super::approved_sign_in_policy::DEFAULT_REVISION);
     let row = find_by_user_code(db, hmac_key, user_code).await?;
     if row.status != Status::Pending || row.expires_at <= Utc::now() {
         return Err(decision_error(&row));
@@ -685,6 +723,7 @@ pub async fn approve(
         let approver_ip_hmac = approver_ip.map(|ip| code_hash(hmac_key, ip));
         session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<String> = async {
+            super::approved_sign_in_policy::fence_approval(&db, &actor, authority, mfa_policy_revision.as_deref(), session).await?;
             let claimed = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).find_one_and_update(
                 doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"status": "approved"}},
@@ -700,7 +739,7 @@ pub async fn approve(
             if row.expires_at <= now { return Err(AppError::AgentKeyLoginExpired); }
             db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).update_one(
                 doc! {"_id": &row.id, "status": "approved"},
-                doc! {"$set": {"approved_user_id": &actor, "api_key_id": &key_id,
+                doc! {"$set": {"approved_user_id": &actor, "mfa_policy_revision": &mfa_policy_revision, "api_key_id": &key_id,
                     "credential_id": &credential_id, "key_was_created": false,
                     "key_created_by_approval": created_now,
                     "approver_ip_hmac": &approver_ip_hmac,
@@ -719,7 +758,7 @@ pub async fn approve(
         Some(actor.into()),
         "agent_key_login_approved".into(),
         Some(
-            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "owner_type": owner_type}),
+            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "mfa_policy": policy_used.then_some("approved_sign_in"), "policy_default": policy_default, "owner_type": owner_type}),
         ),
         approver_ip.map(str::to_owned),
         approver_user_agent.map(str::to_owned),
@@ -760,6 +799,24 @@ pub async fn deny(
         None,
     );
     Ok(())
+}
+
+async fn claim_delivery(
+    db: &Database,
+    row: &AgentKeyLoginRequest,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<AgentKeyLoginRequest>> {
+    let collection = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME);
+    let now = Utc::now();
+    let claim = collection.find_one_and_update(
+        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
+        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
+    ).return_document(ReturnDocument::Before);
+    Ok(if let Some(tx) = transaction {
+        claim.session(tx).await?
+    } else {
+        claim.await?
+    })
 }
 
 #[tracing::instrument(
@@ -814,11 +871,21 @@ pub async fn poll(
     // Resolve and decrypt before consuming the exchange. A failed read or KMS
     // call leaves the approved row available for retry and expiry cleanup.
     let delivery = prepare_delivery(db, encryption, &row).await?;
-    let now = Utc::now();
-    let delivered = collection.find_one_and_update(
-        doc! {"_id": &row.id, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}, "delivery_credential_encrypted": {"$ne": bson::Bson::Null}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now), "last_polled_at": bson::DateTime::from_chrono(now)}, "$unset": {"delivery_credential_encrypted": "", "delivery_context_version": ""}},
-    ).return_document(ReturnDocument::Before).await?;
+    let delivered = if let Some(revision) = row.mfa_policy_revision.as_deref() {
+        let context = (db.clone(), row.clone());
+        let result = super::transaction_service::run_db_only(db, &context, |tx, c| Box::pin(async move {
+            let (db, row) = c;
+            super::approved_sign_in_policy::fence(db, row.approved_user_id.as_deref().ok_or(AppError::AgentKeyLoginDenied)?, row.mfa_policy_revision.as_deref(), tx).await?;
+            claim_delivery(db, row, Some(tx)).await
+        })).await;
+        if matches!(result, Err(AppError::AuthDeviceCodeDenied)) {
+            super::approved_sign_in_policy::deny_undelivered(db, COLLECTION_NAME, &row.id, revision).await?;
+            return Err(AppError::AgentKeyLoginDenied);
+        }
+        result?
+    } else {
+        claim_delivery(db, &row, None).await?
+    };
     let delivered = match delivered {
         Some(delivered) => delivered,
         None => return Err(current_decision_error(db, &row.id).await?),

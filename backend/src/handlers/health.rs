@@ -7,8 +7,8 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
-/// GET /api/v1/admin/security-readiness. Process observations and an explicit
-/// serving roster are prerequisites, not an automatic rollout controller.
+/// GET /api/v1/admin/security-readiness. Observed support and durable activation,
+/// including the optional legacy roster/drain diagnostics.
 pub async fn security_readiness(
     State(state): State<AppState>,
     auth: crate::mw::auth::AuthUser,
@@ -24,7 +24,12 @@ pub async fn security_readiness(
     )
     .await?;
     let mut reports = std::collections::BTreeMap::new();
-    for capability in crate::services::security_readiness_service::CAPABILITIES {
+    for capability in crate::services::security_readiness_service::CAPABILITIES
+        .iter()
+        .chain(std::iter::once(
+            &crate::services::security_readiness_service::AUTOMATION_COMPLETION,
+        ))
+    {
         reports.insert(
             (*capability).to_owned(),
             crate::services::security_readiness_service::report(&state.db, capability).await?,
@@ -47,6 +52,15 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
+/// Readiness is process-local; liveness and security capability readiness are independent.
+pub async fn ready(State(state): State<AppState>) -> axum::http::StatusCode {
+    if state.shutdown.is_draining() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    }
+}
+
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.
@@ -54,12 +68,20 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: env!("NYXID_GIT_HASH").to_string(),
+        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
         encryption: EncryptionHealthResponse {
             previous_key_configured: state.encryption_keys.has_previous(),
             decrypt_stats: state.encryption_keys.decrypt_stats(),
         },
     })
+}
+
+/// Container releases stamp this after compilation. Standalone binaries keep
+/// their build.rs identity when there is no nonempty runtime override.
+fn reported_commit(runtime: Option<String>) -> String {
+    runtime
+        .filter(|commit| !commit.is_empty())
+        .unwrap_or_else(|| env!("NYXID_GIT_HASH").to_owned())
 }
 
 #[derive(Serialize)]
@@ -71,6 +93,9 @@ pub struct PublicConfigResponse {
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
     pub email_auth_enabled: bool,
+    /// Global `mobile:new-domains` admin flag. Mobile builds that embed both
+    /// production domain sets read it from both API hosts at launch.
+    pub mobile_new_domains: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
     /// when telemetry is off. See docs/TELEMETRY.md §3.
@@ -94,6 +119,7 @@ pub struct PublicConfigResponse {
 /// Returns public configuration needed by the frontend (no auth required).
 pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<PublicConfigResponse>> {
     let invite_code_required = feature_flag_service::invitation_code_required(&state.db).await?;
+    let mobile_new_domains = feature_flag_service::mobile_new_domains_enabled(&state.db).await?;
     let base = state.config.base_url.trim_end_matches('/');
 
     let mut social_providers = Vec::new();
@@ -152,15 +178,46 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
         social_providers,
         invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
+        mobile_new_domains,
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
     }))
 }
 
+/// Read-only metadata; no transcript, instruction, credentials or result bodies.
+pub async fn automation_continuations(
+    State(state): State<AppState>,
+    auth: crate::mw::auth::AuthUser,
+) -> AppResult<Json<crate::services::trigger_schedule::continuation::Diagnostic>> {
+    crate::handlers::admin_helpers::require_admin_or_operator(
+        &state,
+        &auth,
+        "admin.automation_continuations.get",
+    )
+    .await?;
+    Ok(Json(
+        crate::services::trigger_schedule::continuation::diagnostic(
+            &state.db,
+            state.config.automation_continuation_v2_enabled,
+        )
+        .await?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {
+        assert_eq!(
+            reported_commit(Some("runtime-release".into())),
+            "runtime-release"
+        );
+        assert_eq!(reported_commit(None), env!("NYXID_GIT_HASH"));
+        assert_eq!(reported_commit(Some(String::new())), env!("NYXID_GIT_HASH"));
+    }
 
     // ---- HealthResponse serialization ----
 
@@ -229,6 +286,7 @@ mod tests {
             social_providers: vec!["github".to_string()],
             invite_code_required: true,
             email_auth_enabled: true,
+            mobile_new_domains: true,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -240,6 +298,7 @@ mod tests {
         assert_eq!(json["social_providers"], serde_json::json!(["github"]));
         assert_eq!(json["invite_code_required"], true);
         assert_eq!(json["email_auth_enabled"], true);
+        assert_eq!(json["mobile_new_domains"], true);
     }
 
     #[test]
@@ -252,6 +311,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            mobile_new_domains: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -262,6 +322,8 @@ mod tests {
         assert!(json.get("telemetry_host").is_none());
         // telemetry_share_analytics false => skipped (Not::not)
         assert!(json.get("telemetry_share_analytics").is_none());
+        // Mobile launches must distinguish an explicit off from an older backend.
+        assert_eq!(json["mobile_new_domains"], false);
     }
 
     #[test]
@@ -274,6 +336,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            mobile_new_domains: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),
             telemetry_share_analytics: true,

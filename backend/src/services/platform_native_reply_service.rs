@@ -481,7 +481,7 @@ async fn materialize_and_send(
         ));
         let result = async {
             if Utc::now() >= authority.deadline { return None; }
-            super::channel_platform::mark_provider_attempt();
+            super::channel_platform::mark_provider_attempt().await.ok()?;
             let mut response = state.http_client.post(url.as_str())
                 .json(&serde_json::json!({"content":body.as_str(),"allowed_mentions":{"parse":[]},"flags":4}))
                 .send().await.ok()?;
@@ -576,9 +576,22 @@ where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
+    let guard = super::shutdown::process().work();
+    spawn_native_worker(async move {
+        let _guard = guard;
+        work.await
+    })
+}
+
+pub(crate) fn spawn_native_worker<F, T>(work: F) -> tokio::task::JoinHandle<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     #[cfg(test)]
     if let Ok(transport) = TEST_NATIVE_TRANSPORT.try_with(std::sync::Arc::clone) {
-        return tokio::spawn(async move { with_transport_for_test(transport, work).await });
+        return super::shutdown::process()
+            .spawn_worker(async move { with_transport_for_test(transport, work).await });
     }
-    tokio::spawn(work)
+    super::shutdown::process().spawn_worker(work)
 }

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   Children,
   isValidElement,
@@ -79,6 +81,7 @@ function fenceLanguage(children: ReactNode): string | null {
  * neither of which anyone pastes into a terminal.
  */
 function DocCodeBlock({ children }: { readonly children: ReactNode }) {
+  const { t } = useUiTranslation();
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
   const lang = fenceLanguage(children);
@@ -90,10 +93,10 @@ function DocCodeBlock({ children }: { readonly children: ReactNode }) {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateUi("Failed to copy"));
     }
   }
 
@@ -101,7 +104,7 @@ function DocCodeBlock({ children }: { readonly children: ReactNode }) {
     <div className="group relative my-5">
       <pre
         ref={preRef}
-        className="border-border bg-muted overflow-x-auto rounded-xl border p-4 font-mono text-sm leading-relaxed text-foreground"
+        className="border-border bg-muted overflow-x-auto rounded-xl border p-4 font-mono type-code text-foreground"
       >
         {children}
       </pre>
@@ -117,7 +120,7 @@ function DocCodeBlock({ children }: { readonly children: ReactNode }) {
           ) : (
             <Copy className="h-3.5 w-3.5" />
           )}
-          <span className="sr-only">Copy code snippet</span>
+          <span className="sr-only">{t("Copy code snippet")}</span>
         </Button>
       )}
     </div>
@@ -141,18 +144,19 @@ export function DocMarkdown({
   readonly markdown: string;
   readonly baseHref: string;
 }) {
+  useUiTranslation();
   const components = useMemo<Components>(
     () => ({
       h1: ({ children, id }) => (
-        <h1 id={id} className="mt-10 mb-4 scroll-mt-24 font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">{children}</h1>
+        <h1 id={id} className="mt-10 mb-4 scroll-mt-24 font-display type-compact-page-title sm:type-page-title tracking-tight text-foreground">{children}</h1>
       ),
       h2: ({ children, id }) => (
-        <h2 id={id} className="mt-10 mb-3 scroll-mt-24 font-display text-2xl font-semibold tracking-tight text-foreground">{children}</h2>
+        <h2 id={id} className="mt-10 mb-3 scroll-mt-24 font-display type-section-heading tracking-tight text-foreground">{children}</h2>
       ),
       h3: ({ children, id }) => (
-        <h3 id={id} className="mt-7 mb-2 scroll-mt-24 font-mono text-base font-medium text-foreground">{children}</h3>
+        <h3 id={id} className="mt-7 mb-2 scroll-mt-24 font-mono type-section-heading text-foreground">{children}</h3>
       ),
-      p: ({ children }) => <p className="mb-4 leading-relaxed text-muted-foreground">{children}</p>,
+      p: ({ children }) => <p className="mb-4 text-muted-foreground">{children}</p>,
       a: ({ href, children }) => {
         const external = typeof href === "string" && href.startsWith("http");
         return (
@@ -167,10 +171,10 @@ export function DocMarkdown({
         );
       },
       ul: ({ children }) => (
-        <ul className="mb-4 list-disc space-y-1.5 pl-6 leading-relaxed text-muted-foreground marker:text-nyx-700 dark:marker:text-nyx-secondary-400">{children}</ul>
+        <ul className="mb-4 list-disc space-y-1.5 pl-6 text-muted-foreground marker:text-nyx-700 dark:marker:text-nyx-secondary-400">{children}</ul>
       ),
       ol: ({ children }) => (
-        <ol className="mb-4 list-decimal space-y-1.5 pl-6 leading-relaxed text-muted-foreground marker:font-mono marker:text-text-tertiary">{children}</ol>
+        <ol className="mb-4 list-decimal space-y-1.5 pl-6 text-muted-foreground marker:font-mono marker:text-text-tertiary">{children}</ol>
       ),
       li: ({ children }) => <li className="pl-1">{children}</li>,
       strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
@@ -181,14 +185,14 @@ export function DocMarkdown({
       ),
       table: ({ children }) => (
         <div className="border-border bg-card my-5 overflow-x-auto rounded-xl border">
-          <table className="w-full text-left text-sm text-muted-foreground">{children}</table>
+          <table className="w-full text-left text-14 text-muted-foreground">{children}</table>
         </div>
       ),
       thead: ({ children }) => (
-        <thead className="border-border border-b font-mono text-xs text-text-tertiary uppercase">{children}</thead>
+        <thead className="border-border border-b font-mono text-12 text-text-tertiary uppercase">{children}</thead>
       ),
       tr: ({ children }) => <tr className="border-border border-b last:border-0">{children}</tr>,
-      th: ({ children }) => <th className="px-4 py-2.5 font-medium text-foreground">{children}</th>,
+      th: ({ children }) => <th className="px-4 py-2.5 font-semibold text-foreground">{children}</th>,
       td: ({ children }) => <td className="px-4 py-2.5">{children}</td>,
       img: ({ src, alt }) => {
         let resolved = typeof src === "string" ? src : "";
@@ -208,7 +212,7 @@ export function DocMarkdown({
         const isBlock = typeof className === "string" && className.startsWith("language-");
         if (isBlock) return <code className={className}>{children}</code>;
         return (
-          <code className="bg-muted text-foreground rounded px-1.5 py-0.5 font-mono text-[0.85em]">{children}</code>
+          <code className="bg-muted text-foreground rounded px-1.5 py-0.5 font-mono type-code">{children}</code>
         );
       },
       pre: ({ children }) => <DocCodeBlock>{children}</DocCodeBlock>,
@@ -225,7 +229,7 @@ export function DocMarkdown({
   );
 
   return (
-    <div className="text-muted-foreground">
+    <div className="type-prose text-muted-foreground">
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

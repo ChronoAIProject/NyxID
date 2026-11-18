@@ -67,6 +67,18 @@ Settlement reuses admitted billing meters and retains pending provider evidence
 until cleanup completes. The default-off rollout requires all API replicas to
 understand adapter-origin tool authority before activation.
 
+Automation coordinator completion adds per-run provenance to existing turns,
+events, confirmation cards, async operations and group followers. The scheduler
+owns admission and final settlement; direct assignments use the metadata-only
+`assistant_direct_handoffs` collection, indexed by owner/run and both conversation
+roles, with absolute TTL at the run's retention boundary. Result enqueue and
+receipt/follower retirement commit transactionally. Child lifecycle fences write
+their own conversation, while cancellation retires the run and its descendants.
+Personal erasure removes receipts by exact owner; conversation deletion removes
+both parent and child roles after publishing any pending child failure. The
+feature is default-off and requires fleet readiness only for new enrollment;
+persisted work continues to drain after disabling it. See [NyxBot schedules](NYXBOT_SCHEDULES.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
@@ -2155,6 +2167,20 @@ transaction. An exact approved continuation receives a fresh current-turn ref
 only after rechecking the original pending intent and expiry. See
 [Source resources](chat/10-source-resources.md).
 
+Generated Sandbox delivery is a separate, default-off owner Web lane. Its
+async watch retains main's background execution authority and cancellation
+fences. `generated_artifacts` verifies bounded responses and file containers on
+blocking CPU workers, then materializes encrypted assistant attachments with
+memory reservations acquired before transactions. The new
+`async_service_operation_artifacts`, `assistant_artifact_deliveries` and
+`generated_artifact_content_series` collections hold pending bytes, original
+reply associations and content revisions. Each has a `purge_after` TTL index and
+joins conversation deletion and personal erasure. Live retention can shorten,
+but never extend, an attachment's immutable expiry cap. The encrypted-record
+registry includes pending bytes and generated attachment AAD; its changed digest
+requires a new generation for existing operator walks. See the
+[encrypted field inventory](security/ENCRYPTED_FIELD_INVENTORY.md).
+
 See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
 
 Skill permission decisions use an outbox embedded in
@@ -2253,6 +2279,24 @@ settles those checkpoints without reopening capture; conversational attach and
 control paths reject dictation sessions. No audio recording is stored. See the
 [voice architecture and transport contract](chat/11-voice.md).
 
+## Agent Key voice service
+
+A human owner publishes an ordinary UserService bound to one personal Bot through
+server-owned `source=nyxbot_voice` and `source_id=Bot UUID`. The board Key receives
+that exact connection through existing service scope. The explicit service route
+`/api/v1/proxy/nyxbot-voice/{service_id}` authenticates that Key, checks the binding
+and invokes the existing Voice application. Browser routes keep their original
+first-party human authentication. No generic proxy target execution kind,
+MCP/Exact Service branch or device-source execution framework is introduced.
+
+VoiceSession binds the parent Key, actual login child, Bot and connection.
+Admission and runtime revalidate current permissions; revoked devices cannot
+continue audio or submit work. Accepted Bot tasks retain their existing lifetime
+independent of the call and use the Bot's own tool grants. Explicit Stop remains
+the cancellation operation. Speech notifications share the authorized call and
+are data, never permission or owner action-card decisions. Existing Voice usage
+and settlement own billing. See [Agent Key voice service](chat/12-agent-key-voice.md).
+
 ## Native channel mention admission
 
 `channel_native_mentions` interprets bounded, authenticated Telegram and
@@ -2269,3 +2313,25 @@ additions to existing collections. The gateway policy is capability negotiated
 at management time, and existing connections reconcile without participant
 OAuth. See [the relay contract](CHANNEL_BOT_RELAY.md) for admission, compatibility
 and the required reader-before-writer rollout.
+
+### CMA prepaid allocation billing
+
+The unique active `cma` catalog service owns a `sandbox_billing_settings` row
+keyed by its UUID, containing the admin-selected producer account and revision.
+The dedicated authority row lets authentication and cohort exclusion run without
+reading paid catalog/price data. Settings changes and chained audit commit
+atomically; every money/evidence transaction touches the same revision to fence
+revocation. Selected accounts are platform-protected. No CMA environment pin is
+used. The existing immutable rate-card price source is unchanged.
+
+The trusted CMA producer obtains quotes and finite resource reservations, then
+pushes retained allocation evidence to the billing service. `sandbox_rate_cards`
+stores immutable, audited effective-dated prices; a deploy-time seed installs the
+approved first version without enabling billing. Admin writes and admissions
+share a transaction fence. `sandbox_billing_quotes`, `sandbox_billing_windows`,
+`sandbox_billing_cursors` and `sandbox_billing_evidence` retain provider bindings,
+idempotent receipts and ordered evidence checkpoints. All three usage rows and
+funding holds commit atomically. Evidence/cursor finalization is transactional;
+the existing settlement journal and Lago reconciler handle recovery and emission.
+Version-specific provider codes retain the original tariff for delayed usage.
+See [CMA billing](CMA_BILLING.md) for the producer and admin contracts.

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   defaultFailoverPolicy,
   type PoolCandidate,
@@ -7,19 +8,19 @@ import {
 
 export function poolStrategyLabel(pool: ServicePool): string {
   return pool.strategy === "priority"
-    ? "Priority routing"
+    ? translateUi("Priority routing")
     : pool.strategy === "weighted"
-      ? "Weighted rotation"
-      : "Round-robin rotation";
+      ? translateUi("Weighted rotation")
+      : translateUi("Round-robin rotation");
 }
 
 export function poolFailoverLabel(pool: ServicePool): string {
-  if (!pool.is_active) return "Pool disabled · no failover";
-  if (pool.strategy !== "priority") return "Single attempt · no failover";
+  if (!pool.is_active) return translateUi("Pool disabled · no failover");
+  if (pool.strategy !== "priority") return translateUi("Single attempt · no failover");
   const policy = pool.failover ?? defaultFailoverPolicy;
   return policy.max_attempts === 1 || !policy.retry_on.length
-    ? "Failover off"
-    : `Failover · up to ${policy.max_attempts} attempts`;
+    ? translateUi("Failover off")
+    : translateUi("Failover · up to {{count}} attempts", { count: policy.max_attempts });
 }
 
 function configuredAttempts(pool: ServicePool): number {
@@ -31,19 +32,19 @@ function configuredAttempts(pool: ServicePool): number {
 }
 
 export function poolFailoverSummary(pools: readonly ServicePool[]): string {
-  if (!pools.length) return "No pool";
+  if (!pools.length) return translateUi("No pool");
   if (pools.length === 1) {
     const pool = pools[0]!;
-    if (!pool.is_active) return "Pool disabled";
+    if (!pool.is_active) return translateUi("Pool disabled");
     const attempts = configuredAttempts(pool);
-    if (!attempts) return "No enabled members";
-    return attempts > 1 ? `Up to ${attempts} attempts` : "Off · single attempt";
+    if (!attempts) return translateUi("No enabled members");
+    return attempts > 1 ? translateUi("Up to {{count}} attempts", { count: attempts }) : translateUi("Off · single attempt");
   }
-  if (pools.every((pool) => !pool.is_active)) return "Pools disabled";
+  if (pools.every((pool) => !pool.is_active)) return translateUi("Pools disabled");
   const enabled = pools.filter((pool) => configuredAttempts(pool) > 1).length;
   return enabled
-    ? `On in ${enabled} of ${pools.length} pools`
-    : "Off in all pools";
+    ? translateUi("On in {{enabled}} of {{count}} pools", { enabled, count: pools.length })
+    : translateUi("Off in all pools");
 }
 
 export function orderedPoolMembers(
@@ -71,9 +72,9 @@ export function poolMemberStatus(
   member: ServicePoolMember,
   candidate?: PoolCandidate,
 ): string {
-  if (!member.enabled) return "Member disabled";
-  if (!candidate) return "Not inspected";
+  if (!member.enabled) return translateUi("Member disabled");
+  if (!candidate) return translateUi("Not inspected");
   if (candidate.reason)
-    return reasons[candidate.reason] ?? candidate.reason.replaceAll("_", " ");
-  return candidate.eligible ? "Eligible" : "Not eligible";
+    return translateUi(reasons[candidate.reason] ?? candidate.reason.replaceAll("_", " "));
+  return candidate.eligible ? translateUi("Eligible") : translateUi("Not eligible");
 }

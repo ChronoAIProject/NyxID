@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -7,6 +10,8 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
+import { useNyxAgentModels } from "@/hooks/use-nyxbot-agents";
+import { modelCannotViewImages } from "@/lib/assistant/nyxbot-labels";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { ComposerSettings } from "./composer-settings";
 import { ComposerConnectionChip, ComposerConnectionPicker } from "./composer-connection-picker";
@@ -20,13 +25,19 @@ type UploadProps = ComponentProps<typeof UploadComposer>;
 type Props = Omit<UploadProps, "onSend"> & {
   readonly conversation?: NyxAgentConversation;
   readonly agentModel?: string;
+  readonly agentId?: string;
   readonly agentOverride?: NyxAgentAccessMode | null;
+  readonly onVoiceSettings?: () => void;
   readonly onSend: (...args: [...Parameters<UploadProps["onSend"]>, model?: string]) => Promise<void>;
 };
 
 /** Key by person + thread: pending guidance must never move with navigation. */
-export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...props }: Props) {
+export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverride, onVoiceSettings, ...props }: Props) {
+  useUiTranslation();
   const [draftModel, setDraftModel] = useState<string>();
+  const models = useNyxAgentModels(true, { conversationId: conversation?.id, agentId });
+  const selectedModel = conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat";
+  const cannotViewImages = modelCannotViewImages(models.data?.find((model) => model.id === selectedModel));
   const [connection, setConnection] = useState<KeyInfo>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
   const connections = useKeys();
@@ -50,25 +61,28 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
 
   return <UploadComposer {...props}
+    imageWarning={cannotViewImages ? translateUi("This model can’t view images. You can still send, choose another model, or describe the image in text.") : undefined}
+    onVoiceSettings={onVoiceSettings}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}
-      model={conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat"}
+      agentId={agentId}
+      model={selectedModel}
       onDraftModelChange={setDraftModel}
       agentOverride={agentOverride}
       active={props.active || props.sending || submitting}
       disabled={props.disabled}
+      onVoiceSettings={onVoiceSettings}
     />}
     attachmentMenuItems={<DropdownMenuItem disabled={connectionLocked} onSelect={() => setConnectionPickerOpen(true)}>
-      <Link2 aria-hidden className="size-4" />Use a connection
-    </DropdownMenuItem>}
+      <Link2 aria-hidden className="size-4" />{translateUi("Use a connection")}</DropdownMenuItem>}
     onVoice={props.onVoice && !connection ? async (id, preparation) => {
       if (!conversation && draftModel) await nyxBotApi.changeModel(id, draftModel);
       await props.onVoice!(id, preparation);
     } : undefined}
     allowActiveInput={canSteer}
     sending={submitting || (props.sending && !canSteer)}
-    activePlaceholder="Guide this running reply…"
-    sendLabel={canSteer ? "Send guidance" : "Send message"}
+    activePlaceholder={translateUi("Guide this running reply…")}
+    sendLabel={canSteer ? translateUi("Send guidance") : translateUi("Send message")}
     controls={<>{props.controls}
       <ComposerConnectionPicker open={connectionPickerOpen && !connectionLocked} onOpenChange={setConnectionPickerOpen}
         connections={availableConnections} value={connection?.id ?? ""}
@@ -77,8 +91,8 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
         disabled={connectionLocked} />
       {connection && <ComposerConnectionChip connection={connection} unavailable={connectionUnavailable}
         disabled={connectionLocked} onRemove={() => setConnection(undefined)} />}
-      {notice && <div className="mb-2 ml-[30px] text-12 text-muted-foreground" role="status">
-      <p>{steeringNotice(notice.code, notice.outcome)}</p>
+      {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">
+      <p>{translateUi(steeringNotice(notice.code, notice.outcome))}</p>
       {notice.code === "no_active_turn" && notice.text && <Button type="button" size="sm" variant="outline"
         disabled={submitting || props.active}
         onClick={async () => {
@@ -87,13 +101,13 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
           try { await props.onSend(notice.text!); setNotice(undefined); }
           catch { /* The ordinary send path reports its error and retains this action. */ }
           finally { busy.current = false; setSubmitting(false); }
-        }}>Send as new message</Button>}
+        }}>{translateUi("Send as new message")}</Button>}
     </div>}</>}
     onSend={async (text, uploads) => {
       if (!props.active) {
         if (connectionUnavailable) {
           const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
           throw new Error(message);
         }
         setNotice(undefined);
@@ -105,7 +119,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, ...p
           try {
             await nyxBotApi.changeModel(uploads.conversationId, draftModel);
           } catch (error) {
-            toast.error(error instanceof Error ? error.message : "Could not change the model.");
+            toast.error(translateErrorMessage(error instanceof Error ? error.message : "Could not change the model."));
             throw error;
           } finally {
             busy.current = false;

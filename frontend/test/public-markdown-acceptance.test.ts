@@ -31,7 +31,7 @@ it.each(["en", "zh"])(
       page.html,
       page.meta,
       "test",
-      "https://nyx.chrono-ai.fun",
+      "https://nyxid.ai",
     );
     verifyMarkdownContract(page.meta.path, md);
     const ast = parse(md);
@@ -57,7 +57,7 @@ it.each(["en", "zh"])(
       home.html,
       home.meta,
       "test",
-      "https://nyx.chrono-ai.fun",
+      "https://nyxid.ai",
     );
     verifyMarkdownContract(home.meta.path, homeMd);
     const homeCodes = nodes(parse(homeMd), "code").map((n) => String(n.value));
@@ -101,14 +101,14 @@ it.each(["en", "zh"])(
           page.html,
           page.meta,
           "test",
-          "https://nyx.chrono-ai.fun",
+          "https://nyxid.ai",
         ),
       );
       const links = nodes(ast, "link").map((n) => n.url);
       for (const target of targets) {
         const expected = target.startsWith("https:")
           ? target
-          : "https://nyx.chrono-ai.fun" +
+          : "https://nyxid.ai" +
             (target.startsWith("/docs") ? "" : prefix) +
             target;
         expect(links, expected).toContain(expected);
@@ -118,11 +118,11 @@ it.each(["en", "zh"])(
       '<main><h1>A guide</h1><a href="/security?a=1&amp;b=2"><h3>Title [A] &amp; B *</h3><p>A useful paragraph.</p></a><a href="/agents"><b>开发者 [工具]</b><p>另一个说明。</p></a></main>',
       { path: "/", locale: "en", title: "A guide" },
       "test",
-      "https://nyx.chrono-ai.fun",
+      "https://nyxid.ai",
     );
     expect(nodes(parse(md), "link").map((n) => n.url)).toEqual([
-      "https://nyx.chrono-ai.fun/security?a=1&b=2",
-      "https://nyx.chrono-ai.fun/agents",
+      "https://nyxid.ai/security?a=1&b=2",
+      "https://nyxid.ai/agents",
     ]);
     expect(nodes(parse(md), "heading").length).toBe(2);
   },
@@ -133,7 +133,7 @@ it("retains inline code within card titles and excludes unapproved hidden panels
     '<main><h1>Guide</h1><a href="/security"><h3>Use <code>scope_key</code></h3><p>Check the scope.</p></a><p hidden>HIDDEN_SENTINEL</p><div hidden data-public-panel="draft">DRAFT_SENTINEL</div><pre hidden data-public-panel="unknown">UNKNOWN_SENTINEL</pre><pre hidden data-public-panel="code" data-public-label="Approved">approved_code</pre></main>',
     { path: "/", locale: "en", title: "Guide" },
     "test",
-    "https://nyx.chrono-ai.fun",
+    "https://nyxid.ai",
   );
   expect(nodes(parse(md), "inlineCode").map((n) => n.value)).toContain(
     "scope_key",

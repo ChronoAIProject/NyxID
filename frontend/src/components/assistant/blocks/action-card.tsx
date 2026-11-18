@@ -1,4 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
+import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { z } from "zod";
 import {
   AlertTriangle,
@@ -346,6 +349,7 @@ function groupSummaryRows(
 }
 
 function ParameterSummary({ rows }: { readonly rows: readonly SummaryRow[] }) {
+  useUiTranslation();
   if (rows.length === 0) return null;
   return (
     <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
@@ -355,7 +359,7 @@ function ParameterSummary({ rows }: { readonly rows: readonly SummaryRow[] }) {
           className="flex flex-wrap items-center gap-1.5"
         >
           {group[0]?.label ? (
-            <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">
+            <span className="type-table-header uppercase tracking-[1px] text-muted-foreground">
               {group[0].label}
             </span>
           ) : null}
@@ -393,6 +397,7 @@ function DescriptorIcon({
   readonly icon: ActionIcon;
   readonly params: ActionCardContentBlock["params"];
 }) {
+  useUiTranslation();
   if (icon === "service" && params.variant === "catalog") {
     return <ServiceIcon slug={params.service_slug} size="sm" />;
   }
@@ -436,13 +441,14 @@ const SETTLED = {
 type SettledStatus = keyof typeof SETTLED;
 
 function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
+  useUiTranslation();
   if (block.status !== "blocked" && block.status !== "conflicted") {
     return null;
   }
   return (
     <div className="flex items-start gap-2 border-t border-border bg-muted px-4 py-3">
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
-      <p className="text-11 leading-relaxed text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {block.outcome_note}
       </p>
     </div>
@@ -456,6 +462,7 @@ export function ActionCard({
   onBlock,
   onResolve,
 }: ActionCardProps) {
+  useUiTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reauthorizeKey, setReauthorizeKey] = useState<KeyInfo | null>(null);
   const resolvingRef = useRef(false);
@@ -760,7 +767,7 @@ export function ActionCard({
   }
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+    <section className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
       <div className="flex items-start gap-3 px-4 py-3.5">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
@@ -779,7 +786,7 @@ export function ActionCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-13 font-semibold text-foreground">
+            <h3 className="type-card-title text-foreground">
               {descriptor.title(params)}
             </h3>
             <Badge
@@ -796,19 +803,19 @@ export function ActionCard({
               {verdict
                 ? verdict.badge
                 : unsupported
-                  ? "Unsupported"
+                  ? translateUi("Unsupported")
                   : conflicted
-                    ? "Conflict"
+                    ? translateUi("Conflict")
                     : blocked
-                      ? "Blocked"
+                      ? translateUi("Blocked")
                       : awaitingAuthorization
-                        ? "Authorizing"
+                        ? translateUi("Authorizing")
                         : busy
-                          ? "In progress"
-                          : "Action required"}
+                          ? translateUi("In progress")
+                          : translateUi("Action required")}
             </Badge>
           </div>
-          <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 text-14 text-muted-foreground">
             {/* A settled card states its outcome; the pitch for an action the
                 user already answered would only read as stale. */}
             {verdict ? block.outcome_note : descriptor.body(params)}
@@ -824,7 +831,7 @@ export function ActionCard({
           <VerdictIcon
             className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${verdict.iconClass}`}
           />
-          <p className="text-11 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {verdict.footer}
           </p>
         </div>
@@ -833,7 +840,7 @@ export function ActionCard({
       {!verdict && !unsupported ? (
         <div className="flex items-start gap-2 px-4 py-3">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
-          <p className="text-11 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {descriptor.assurance}
           </p>
         </div>
@@ -851,7 +858,7 @@ export function ActionCard({
             >
               {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
               {awaitingAuthorization
-                ? "Waiting for authorization"
+                ? translateUi("Waiting for authorization")
                 : busy
                   ? descriptor.busyLabel
                   : descriptor.cta(params)}
@@ -864,9 +871,7 @@ export function ActionCard({
             disabled={secondaryDisabled}
             onClick={() => report("declined")}
           >
-            <X />
-            Decline
-          </Button>
+            <X />{translateUi("Decline")}</Button>
           {blocked ? (
             <Button
               type="button"
@@ -875,13 +880,9 @@ export function ActionCard({
               disabled={secondaryDisabled}
               onClick={() => report("failed")}
             >
-              <AlertTriangle />
-              Report failure
-            </Button>
+              <AlertTriangle />{translateUi("Report failure")}</Button>
           ) : null}
-          <span className="ml-auto text-10 text-muted-foreground">
-            Nothing is shared until you finish.
-          </span>
+          <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is shared until you finish.")}</span>
         </div>
       ) : null}
 

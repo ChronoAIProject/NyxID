@@ -1,0 +1,628 @@
+import { useEffect, useMemo, useRef } from "react";
+import { Platform, StyleSheet } from "react-native";
+import { WebView } from "react-native-webview";
+import { claimVoiceAudioSession } from "./audioSessionOwnership";
+import { createNativeOpenAIMedia } from "./createNativeOpenAIMedia";
+import type {
+  VoiceMediaAdapter,
+  VoiceMediaEvent,
+} from "./AssistantVoiceClient";
+import {
+  createVoiceMediaDocument,
+  voicePcmFromBase64,
+  voicePcmToBase64,
+} from "./voiceMediaDocument";
+
+let microphoneOwner: NativeVoiceMedia | undefined;
+
+type Pending = {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type MediaDiagnostic = {
+  stage: string;
+  name: string;
+  counts?: Record<string, number>;
+};
+
+const closedError = () => new Error("Voice audio was closed.");
+
+/** No authentication material is ever passed to the local media document. */
+export class NativeVoiceMedia implements VoiceMediaAdapter {
+  private audioOwner?: ReturnType<typeof claimVoiceAudioSession>;
+  private send?: (message: Record<string, unknown>) => void;
+  private ready = false;
+  private closed = true;
+  private drainingNative = false;
+  private generation = 0;
+  private sequence = 0;
+  private failedGeneration = -1;
+  private pending = new Map<number, Pending>();
+  private readyWaiters = new Set<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }>();
+  private listeners = new Set<(event: VoiceMediaEvent) => void>();
+  private telemetry = { playback_ms: 0, playback_audible: false };
+  private diagnostics: MediaDiagnostic[] = [];
+  private native?: VoiceMediaAdapter & {
+    getDiagnostics?(): readonly MediaDiagnostic[];
+  };
+  private unsubscribeNative?: () => void;
+
+  constructor(
+    private readonly createOpenAI:
+      | (() => VoiceMediaAdapter | undefined)
+      | null = createNativeOpenAIMedia,
+  ) {}
+
+  get usesNativeMedia(): boolean {
+    return !!this.native;
+  }
+
+  /** Bounded capability diagnostics only; never SDP, candidates, IPs, or audio. */
+  getDiagnostics(): readonly MediaDiagnostic[] {
+    return (this.native?.getDiagnostics?.() ?? this.diagnostics).map((row) => ({
+      ...row,
+      ...(row.counts ? { counts: { ...row.counts } } : {}),
+    }));
+  }
+
+  connect(send: (message: Record<string, unknown>) => void): () => void {
+    this.send = send;
+    return () => {
+      if (this.send !== send) return;
+      // The client owns the deadline once native audio has been silenced for
+      // End. Removing its WebView presentation must not cut that drain short.
+      if (!this.drainingNative || !this.native) this.close();
+      this.ready = false;
+      this.send = undefined;
+    };
+  }
+
+  receive(raw: string): void {
+    if (this.native) return;
+    if (typeof raw !== "string" || raw.length > 200000) {
+      this.unavailable();
+      return;
+    }
+    let event: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") throw new Error();
+      event = parsed as Record<string, unknown>;
+    } catch {
+      this.unavailable();
+      return;
+    }
+    if (event.type === "ready") {
+      if (this.ready && !this.closed) {
+        this.unavailable();
+        return;
+      }
+      this.ready = true;
+      for (const waiter of this.readyWaiters) waiter.resolve();
+      this.readyWaiters.clear();
+      return;
+    }
+    if (this.closed || event.generation !== this.generation) return;
+    if (event.type === "diagnostic") {
+      const stages = new Set([
+        "runtime",
+        "microphone",
+        "audio_context",
+        "audio_worklet",
+        "loopback_offer",
+        "loopback_offer_ice",
+        "loopback_receiver_offer",
+        "loopback_answer",
+        "loopback_answer_ice",
+        "loopback_sender_answer",
+        "loopback_connected",
+        "loopback_sender_state",
+        "loopback_receiver_state",
+        "loopback_sender_ice",
+        "loopback_receiver_ice",
+        "loopback_receiver_track",
+        "input_track",
+        "input_source",
+        "openai_peer",
+        "openai_ice",
+        "openai_datachannel",
+        "openai_context",
+        "openai_play",
+        "openai_playback",
+        "openai_stats",
+        "openai_rtp_outbound",
+        "openai_rtp_inbound",
+        "openai_audio_source",
+      ]);
+      const names = new Set([
+        "pending",
+        "ready",
+        "Error",
+        "TypeError",
+        "OperationError",
+        "InvalidStateError",
+        "NotSupportedError",
+        "NotAllowedError",
+        "AbortError",
+        "NotFoundError",
+        "UnknownError",
+        "SecurityError",
+        "TimeoutError",
+        "new",
+        "connecting",
+        "connected",
+        "disconnected",
+        "checking",
+        "completed",
+        "failed",
+        "closed",
+        "open",
+        "closing",
+        "running",
+        "suspended",
+        "interrupted",
+        "unavailable",
+        "ended",
+      ]);
+      if (
+        typeof event.stage === "string" &&
+        stages.has(event.stage) &&
+        typeof event.name === "string" &&
+        names.has(event.name)
+      ) {
+        const counts: Record<string, number> = {};
+        const allowedCounts = [
+          "candidates",
+          "host",
+          "srflx",
+          "relay",
+          "mdns",
+          "udp",
+          "tcp",
+          "ipv4",
+          "ipv6",
+          "secure_context",
+          "opaque_document_origin",
+          "opaque_location_origin",
+          "document_visible",
+        ];
+        const metricLimits: Record<
+          string,
+          { max: number; fractional?: boolean }
+        > = {
+          audio_tracks: { max: 16 },
+          enabled_tracks: { max: 16 },
+          live_tracks: { max: 16 },
+          muted_tracks: { max: 16 },
+          input_requested: { max: 1 },
+          mock_capture: { max: 1 },
+          audio_reports: { max: 16 },
+          sample: { max: 1_000_000 },
+          bytes: { max: Number.MAX_SAFE_INTEGER },
+          packets: { max: Number.MAX_SAFE_INTEGER },
+          total_audio_energy: { max: 1e9, fractional: true },
+          total_samples_duration: { max: 1e9, fractional: true },
+          audio_level: { max: 1, fractional: true },
+          paused: { max: 1 },
+          muted: { max: 1 },
+          volume: { max: 1, fractional: true },
+          ready_state: { max: 4 },
+          current_time_ms: { max: 1_830_000 },
+        };
+        if (event.counts && typeof event.counts === "object") {
+          for (const [key, value] of Object.entries(event.counts)) {
+            const limit: { max: number; fractional?: boolean } | undefined =
+              allowedCounts.includes(key)
+                ? { max: 256 }
+                : Object.prototype.hasOwnProperty.call(metricLimits, key)
+                  ? metricLimits[key]
+                  : undefined;
+            if (
+              limit &&
+              typeof value === "number" &&
+              Number.isFinite(value) &&
+              value >= 0 &&
+              value <= limit.max &&
+              (limit.fractional || Number.isSafeInteger(value))
+            )
+              counts[key] = value;
+          }
+        }
+        // Low-frequency snapshots retain their latest value without evicting
+        // startup/playback failures merely because a call remains connected.
+        const snapshots = new Set([
+          "input_track",
+          "openai_peer",
+          "openai_ice",
+          "openai_datachannel",
+          "openai_context",
+          "openai_playback",
+          "openai_stats",
+          "openai_rtp_outbound",
+          "openai_rtp_inbound",
+          "openai_audio_source",
+        ]);
+        const previous = snapshots.has(event.stage)
+          ? this.diagnostics.filter((row) => row.stage !== event.stage)
+          : this.diagnostics;
+        this.diagnostics = [
+          ...previous.slice(-31),
+          {
+            stage: event.stage,
+            name: event.name,
+            ...(Object.keys(counts).length ? { counts } : {}),
+          },
+        ];
+      }
+    } else if (event.type === "response") {
+      const request = this.pending.get(event.requestId as number);
+      if (!request) return;
+      this.pending.delete(event.requestId as number);
+      clearTimeout(request.timer);
+      if (typeof event.error === "string")
+        request.reject(new Error(event.error));
+      else request.resolve(event.result);
+    } else if (event.type === "provider-ready") {
+      this.emit({ type: "provider-ready" });
+    } else if (event.type === "playback-blocked") {
+      this.emit({ type: "playback-blocked" });
+    } else if (event.type === "pcm") {
+      try {
+        if (
+          !Number.isSafeInteger(event.sequence) ||
+          typeof event.bytes !== "string"
+        )
+          throw new Error();
+        const bytes = voicePcmFromBase64(event.bytes);
+        if (bytes.byteLength !== 960) throw new Error();
+        this.command({ type: "pcm-ack", sequence: event.sequence });
+        this.emit({ type: "pcm", bytes });
+      } catch {
+        this.unavailable();
+      }
+    } else if (event.type === "level") {
+      // Cosmetic loudness for the call screen; malformed values are dropped
+      // rather than failing the call.
+      const valid = (value: unknown): value is number =>
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= 1;
+      if (valid(event.input) && valid(event.output))
+        this.emit({ type: "level", input: event.input, output: event.output });
+    } else if (event.type === "playback") {
+      if (
+        Number.isSafeInteger(event.playback_ms) &&
+        (event.playback_ms as number) >= 0 &&
+        (event.playback_ms as number) <= 1830000 &&
+        typeof event.playback_audible === "boolean"
+      )
+        this.telemetry = {
+          playback_ms: event.playback_ms as number,
+          playback_audible: event.playback_audible,
+        };
+    } else if (event.type === "error") {
+      // Engine messages are fixed strings; exception and provider text stay private.
+      const allowed = new Set([
+        "Microphone access was denied. Enable it in Settings to use voice.",
+        "No microphone is available.",
+        "Voice audio is not supported by this app runtime.",
+        "Voice audio could not be started. Please try again.",
+        "Voice audio connection is too slow. Please reconnect.",
+        "Voice playback could not be started. Try another voice source or continue with text.",
+        "Voice playback could not be verified.",
+        "WebRTC negotiation failed.",
+        "Voice ended when the app left the foreground.",
+        "Microphone access ended. Start a new call when it is available.",
+        "A test microphone is active. Select a real microphone and try again.",
+      ]);
+      this.unavailable(
+        typeof event.message === "string" && allowed.has(event.message)
+          ? event.message
+          : undefined,
+      );
+    }
+  }
+
+  unavailable(
+    message = "Voice audio connection was lost. Please try again.",
+  ): void {
+    if (this.closed) return;
+    if (this.failedGeneration !== this.generation) {
+      this.failedGeneration = this.generation;
+      this.emit({ type: "error", message });
+    }
+    this.close();
+  }
+
+  private emit(event: VoiceMediaEvent) {
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // A UI subscriber must not prevent media teardown or PCM backpressure.
+      }
+    }
+  }
+
+  subscribe(listener: (event: VoiceMediaEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private command(message: Record<string, unknown>): void {
+    if (this.closed || !this.ready) return;
+    try {
+      this.send?.({ ...message, generation: this.generation });
+    } catch {
+      this.unavailable();
+    }
+  }
+
+  private request(message: Record<string, unknown>): Promise<unknown> {
+    if (this.closed || !this.ready || !this.send)
+      return Promise.reject(closedError());
+    const requestId = ++this.sequence;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(
+          new Error("Voice audio took too long to start. Please try again."),
+        );
+        this.unavailable(
+          "Voice audio took too long to start. Please try again.",
+        );
+      }, 20000);
+      this.pending.set(requestId, { resolve, reject, timer });
+      this.command({ ...message, requestId });
+    });
+  }
+
+  async prepare(
+    protocol: "openai_live" | "xai_realtime",
+    signal: AbortSignal,
+  ): Promise<string> {
+    this.close();
+    if (microphoneOwner && microphoneOwner !== this)
+      throw new Error("The microphone is already in use.");
+    microphoneOwner = this;
+    this.closed = false;
+    this.diagnostics = [];
+    const generation = ++this.generation;
+    const aborted = () => {
+      if (generation === this.generation) this.close();
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+    try {
+      if (signal.aborted) throw closedError();
+      const native =
+        protocol === "openai_live" ? this.createOpenAI?.() : undefined;
+      if (native) {
+        // Native WebRTC acquires the audio session as soon as it prepares.
+        this.audioOwner = claimVoiceAudioSession();
+        this.native = native;
+        this.unsubscribeNative = native.subscribe((event) => {
+          if (this.native !== native || this.closed) return;
+          this.emit(event);
+          if (event.type === "error") this.close();
+        });
+        const offer = await native.prepare(protocol, signal);
+        if (signal.aborted || this.closed || generation !== this.generation)
+          throw closedError();
+        return offer;
+      }
+      if (!this.ready) {
+        await new Promise<void>((resolve, reject) => {
+          const waiter = {
+            resolve: () => {
+              clearTimeout(timer);
+              this.readyWaiters.delete(waiter);
+              resolve();
+            },
+            reject: (error: Error) => {
+              clearTimeout(timer);
+              this.readyWaiters.delete(waiter);
+              reject(error);
+            },
+          };
+          const timer = setTimeout(
+            () =>
+              waiter.reject(
+                new Error("Voice audio is not ready. Please try again."),
+              ),
+            15000,
+          );
+          this.readyWaiters.add(waiter);
+        });
+      }
+      if (signal.aborted || this.closed || generation !== this.generation)
+        throw closedError();
+      // From this request onward the bridge can acquire native audio. Retain
+      // any previous recognizer's deactivation until this attempt also closes.
+      this.audioOwner = claimVoiceAudioSession();
+      const result = await this.request({ type: "prepare", protocol });
+      if (signal.aborted || this.closed || generation !== this.generation)
+        throw closedError();
+      if (
+        typeof result !== "string" ||
+        result.length > 131072 ||
+        (protocol === "openai_live" && !result)
+      )
+        throw new Error("Voice audio returned an invalid offer.");
+      return result;
+    } catch (error) {
+      if (generation === this.generation) this.close();
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", aborted);
+    }
+  }
+
+  async answer(sdp: string): Promise<void> {
+    if (this.closed) return;
+    if (!sdp || sdp.length > 131072) throw new Error("Invalid voice answer.");
+    if (this.native) return this.native.answer(sdp);
+    await this.request({ type: "answer", sdp });
+  }
+  setInput(enabled: boolean): void {
+    if (this.drainingNative && enabled) return;
+    if (this.native) return this.native.setInput(enabled);
+    this.command({ type: "input", enabled });
+  }
+  hold(pressed: boolean): void {
+    if (this.drainingNative && pressed) return;
+    if (this.native) return this.native.hold(pressed);
+    this.command({ type: "hold", pressed });
+  }
+  muteSpeaker(muted: boolean): void {
+    if (this.drainingNative && !muted) return;
+    if (this.native) return this.native.muteSpeaker(muted);
+    this.command({ type: "speaker", muted });
+  }
+  async resume(): Promise<void> {
+    if (this.drainingNative) return;
+    if (this.native) return this.native.resume();
+    if (!this.closed) await this.request({ type: "resume" });
+  }
+  enqueue(bytes: ArrayBuffer, endMs: number): void {
+    if (this.closed || this.drainingNative) return;
+    if (this.native) return this.native.enqueue(bytes, endMs);
+    if (!Number.isSafeInteger(endMs) || endMs < 0 || endMs > 1830000) {
+      this.unavailable();
+      return;
+    }
+    try {
+      this.command({
+        type: "enqueue",
+        bytes: voicePcmToBase64(bytes),
+        end_ms: endMs,
+      });
+    } catch {
+      this.unavailable();
+    }
+  }
+  flush(): void {
+    if (this.native) return this.native.flush();
+    this.command({ type: "flush" });
+  }
+  playback(): { playback_ms: number; playback_audible: boolean } {
+    return this.native ? this.native.playback() : { ...this.telemetry };
+  }
+  beginEndDrain(): void {
+    if (this.closed || !this.native) return;
+    this.drainingNative = true;
+    this.native.setInput(false);
+    this.native.hold(false);
+    this.native.muteSpeaker(true);
+    this.native.flush();
+  }
+  close(): void {
+    const audioOwner = this.audioOwner;
+    this.audioOwner = undefined;
+    this.drainingNative = false;
+    const active = !this.native && !this.closed && this.ready;
+    this.closed = true;
+    this.unsubscribeNative?.();
+    this.unsubscribeNative = undefined;
+    const native = this.native;
+    this.diagnostics = [...(native?.getDiagnostics?.() ?? this.diagnostics)];
+    this.native = undefined;
+    native?.close();
+    if (microphoneOwner === this) microphoneOwner = undefined;
+    if (active) {
+      try {
+        this.send?.({ type: "close", generation: this.generation });
+      } catch {
+        // A terminated WebContent process already owns no usable media bridge.
+      }
+    }
+    audioOwner?.release();
+    this.telemetry = { playback_ms: 0, playback_audible: false };
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(closedError());
+    }
+    this.pending.clear();
+    for (const waiter of this.readyWaiters) waiter.reject(closedError());
+    this.readyWaiters.clear();
+  }
+}
+
+export function VoiceMediaBridge({
+  media,
+  origin,
+}: {
+  media: NativeVoiceMedia;
+  origin: string;
+}) {
+  const webView = useRef<WebView>(null);
+  const loaded = useRef(false);
+  const source = useMemo(
+    () => ({ html: createVoiceMediaDocument(), baseUrl: origin }),
+    [origin],
+  );
+  useEffect(() => {
+    loaded.current = false;
+    return media.connect((message) => {
+      const serialized = JSON.stringify(message).replace(/</g, "\\u003c");
+      // Chromium can defer microphone access until its document has native focus.
+      // Queue focus before the explicit start command on Android's UI thread.
+      if (Platform.OS === "android" && message.type === "prepare")
+        webView.current?.requestFocus();
+      webView.current?.injectJavaScript(
+        `window.__nyxVoiceMessage && window.__nyxVoiceMessage(${serialized}); true;`,
+      );
+    });
+  }, [media, origin]);
+
+  return (
+    <WebView
+      ref={webView}
+      source={source}
+      style={styles.engine}
+      containerStyle={styles.engine}
+      pointerEvents="none"
+      accessible={false}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      originWhitelist={["*"]}
+      javaScriptEnabled
+      allowsInlineMediaPlayback
+      mediaPlaybackRequiresUserAction={false}
+      mediaCapturePermissionGrantType="grantIfSameHostElseDeny"
+      sharedCookiesEnabled={false}
+      thirdPartyCookiesEnabled={false}
+      cacheEnabled={false}
+      setSupportMultipleWindows={false}
+      onShouldStartLoadWithRequest={({ url }) =>
+        !loaded.current &&
+        (url === "about:blank" || url === origin || url === `${origin}/`)
+      }
+      onLoadEnd={() => {
+        loaded.current = true;
+      }}
+      onMessage={({ nativeEvent }) => media.receive(nativeEvent.data)}
+      onError={() => !media.usesNativeMedia && media.unavailable()}
+      onContentProcessDidTerminate={() =>
+        !media.usesNativeMedia && media.unavailable()
+      }
+      onRenderProcessGone={() => !media.usesNativeMedia && media.unavailable()}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  engine: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    left: 0,
+    top: 0,
+    opacity: 0,
+  },
+});

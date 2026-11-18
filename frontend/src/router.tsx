@@ -1,4 +1,9 @@
 import { solutionStartHref } from "./features/website-a/auth-links";
+import { PlatformModelsPage } from "@/pages/platform-models";
+import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
+import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
+import { FloatingCmaSessions } from "@/components/assistant/cma-session-card";
+import { captureGroupInvite } from "./lib/collaboration-invite";
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
@@ -16,6 +21,7 @@ import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
+import { captureUnexpectedNyxbotError } from "@/lib/assistant/error-telemetry";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   channelBotSetupRewrite,
@@ -108,6 +114,7 @@ import {
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
+  DataDeletionPage,
   NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
@@ -158,11 +165,14 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider delayDuration={200}>
-      <Suspense>
-        <Outlet />
-      </Suspense>
-      <Toaster />
-      <CreditsDeniedHost />
+      <CmaSessionProvider>
+        <Suspense>
+          <Outlet />
+        </Suspense>
+        <Toaster />
+        <CreditsDeniedHost />
+        <FloatingCmaSessions />
+      </CmaSessionProvider>
     </TooltipProvider>
   ),
 });
@@ -181,7 +191,7 @@ const authLayout = createRoute({
         window.location.assign(trusted);
         return;
       }
-      throw redirect({ to: "/dashboard" });
+      throw redirect({ to: "/assistant" });
     }
   },
   component: AuthLayout,
@@ -192,7 +202,7 @@ const loginRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string; code?: string; enable_email?: true } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
       : {}),
@@ -200,6 +210,9 @@ const loginRoute = createRoute({
     search.code.length > 0 &&
     search.code.length <= 64
       ? { code: search.code }
+      : {}),
+    ...(search.enable_email === true || search.enable_email === "true"
+      ? { enable_email: true as const }
       : {}),
   }),
   component: LoginPage,
@@ -349,6 +362,12 @@ const legacyStartRoute = createRoute({
   component: () => null,
 });
 
+const dataDeletionRoute = createRoute({
+  path: "/data-deletion",
+  getParentRoute: () => rootRoute,
+  component: DataDeletionPage,
+});
+
 const blogIndexRoute = createRoute({
   path: "/blog",
   getParentRoute: () => rootRoute,
@@ -458,6 +477,7 @@ const standaloneAuthBeforeLoad = async ({
 }: {
   location: { pathname: string; searchStr: string };
 }) => {
+  captureGroupInvite();
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
     if (isMockMode()) {
@@ -479,6 +499,8 @@ const standaloneAuthBeforeLoad = async ({
 
 const assistantRoute = createRoute({
   path: "/assistant",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant"),
   getParentRoute: () => rootRoute,
   // Shared with AssistantPage so the router and the page agree on what
   // `?draft` means; a param dropped here makes the optimistic "New chat"
@@ -490,6 +512,8 @@ const assistantRoute = createRoute({
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/plugins"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -498,6 +522,8 @@ const assistantPluginsRoute = createRoute({
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/approvals"),
   getParentRoute: () => rootRoute,
   validateSearch: withAccountPanelSearch(() => ({})),
   beforeLoad: standaloneAuthBeforeLoad,
@@ -520,14 +546,13 @@ const dashboardLayout = createRoute({
     }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
-      // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
+      // Preserve the requested route (e.g. `/dashboard` or `/orgs/join/<nonce>`) so sign-in can
       // resume it. `onLoginSubmit` in auth-flow.tsx and the backend
       // social-login `return_to` cookie both accept an absolute URL on
-      // this origin. For plain `/dashboard` there's nothing useful to
-      // preserve, so fall through to the bare redirect.
+      // this origin. Only the root uses the default post-login destination.
       preserveTelegramClaimForLogin();
       const returnPath = `${location.pathname}${location.searchStr}`;
-      if (returnPath !== "/" && returnPath !== "/dashboard") {
+      if (returnPath !== "/") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
           `/login?return_to=${encodeURIComponent(returnTo)}`,
@@ -779,6 +804,8 @@ const automationsRoute = createRoute({
 
 const assistantAutomationsRoute = createRoute({
   path: "/assistant/automations",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/automations"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseAutomationSearch),
@@ -787,10 +814,35 @@ const assistantAutomationsRoute = createRoute({
 
 const assistantMachinesRoute = createRoute({
   path: "/assistant/machines",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: withAccountPanelSearch(parseMachinesSearch),
   component: () => <AssistantPage view="machines" />,
+});
+
+const assistantSandboxesRoute = createRoute({
+  path: "/assistant/sandboxes",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandboxes" />,
+});
+const assistantSandboxDetailRoute = createRoute({
+  path: "/assistant/sandboxes/$sandboxId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="sandbox-detail" />,
+});
+const assistantCmaAgentRoute = createRoute({
+  path: "/assistant/cma-agents/$agentId",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: (search: Record<string, unknown>): { response?: string; tab?: "desktop" } => ({
+    ...(typeof search.response === "string" && /^[A-Za-z0-9_-]{1,256}$/.test(search.response) ? { response: search.response } : {}),
+    ...(search.tab === "desktop" ? { tab: "desktop" as const } : {}),
+  }),
+  component: () => <AssistantPage view="cma-agent" />,
 });
 
 const triggersRoute = createRoute({
@@ -852,6 +904,8 @@ const nodesRoute = createRoute({
 
 const machineDesktopRoute = createRoute({
   path: "/assistant/machines/$nodeId/desktop",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/$nodeId/desktop"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: MachineDesktopPage,
@@ -860,6 +914,8 @@ const machineDesktopRoute = createRoute({
 
 const machineSetupRoute = createRoute({
   path: "/assistant/machines/new",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/new"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-setup" />,
@@ -867,6 +923,8 @@ const machineSetupRoute = createRoute({
 });
 const machinePairRoute = createRoute({
   path: "/assistant/machines/pair",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/machines/pair"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="machine-pair" />,
@@ -878,6 +936,8 @@ const nodeDetailRoute = createRoute({
   getParentRoute: () => dashboardLayout,
   component: NodeDetailPage,
 });
+
+const platformModelsRoute = createRoute({ path: "models", getParentRoute: () => dashboardLayout, component: PlatformModelsPage });
 
 const keysRoute = createRoute({
   path: "/keys",
@@ -1201,7 +1261,7 @@ const adminUsageRoute = createRoute({
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
     const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && search.tab === "nyxbot" && !hasAdminRead(user)) {
+    if (!isLoading && search.tab === "nyxbot" && !canReadAdminUsage(user)) {
       throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
     }
     const params = new URLSearchParams(location.searchStr);
@@ -1231,6 +1291,9 @@ const adminCreditsRoute = createRoute({
     ...(isValidTab(search.tab, ADMIN_CREDITS_TABS) ? { tab: search.tab } : {}),
   }),
 });
+
+const adminModelsRoute = createRoute({ path: "platform-models", getParentRoute: () => adminLayout, component: AdminPlatformModelsPage });
+const adminModelDetailRoute = createRoute({ path: "platform-models/$modelId", getParentRoute: () => adminLayout, component: AdminPlatformModelDetailPage });
 
 const adminBillingRoute = createRoute({
   path: "billing",
@@ -1303,6 +1366,7 @@ const routeTree = rootRoute.addChildren([
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
+  dataDeletionRoute,
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,
@@ -1324,6 +1388,9 @@ const routeTree = rootRoute.addChildren([
   assistantApprovalsRoute,
   assistantAutomationsRoute,
   assistantMachinesRoute,
+  assistantSandboxesRoute,
+  assistantSandboxDetailRoute,
+  assistantCmaAgentRoute,
   automationsRoute,
   machineSetupRoute,
   machinePairRoute,
@@ -1362,6 +1429,7 @@ const routeTree = rootRoute.addChildren([
     approvalHistoryRoute,
     approvalGrantsRoute,
     keysRoute,
+    platformModelsRoute,
     billingRoute,
     serviceOverviewRoute,
     keyDetailRoute,
@@ -1397,6 +1465,8 @@ const routeTree = rootRoute.addChildren([
       adminIntegrityRoute,
       adminCreditsRoute,
       adminBillingRoute,
+      adminModelsRoute,
+      adminModelDetailRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 import { API_KEY_SCOPES } from "@/schemas/api-keys";
@@ -82,6 +83,49 @@ export function canonicalScope(slug: string, scope: string): string {
 export function connectionSlug(connection: LoginConnection) {
   return connection.catalog_service_slug ?? connection.slug;
 }
+export type ConnectionOwner =
+  | { kind: "personal" }
+  // `name` is absent only when no response names the organization; never
+  // substitute its raw ID. `unavailable` marks a connection an existing key
+  // still lists but the approver can no longer use.
+  | { kind: "organization"; name?: string; unavailable: boolean };
+
+// Organization choices only include Key administrators. Service ownership must
+// also cover ordinary members who can use a shared organization connection,
+// and existing keys that still list a connection the approver lost access to.
+export function connectionOwner(
+  connection: LoginConnection,
+  inventory: LoginInventory,
+  apiKey?: AgentKeySummary,
+): ConnectionOwner {
+  const service = inventory.options.services.find((s) => s.id === connection.id);
+  const keyService = apiKey?.allowed_services.find((s) => s.id === connection.id);
+  const ownerId = service?.owner_id ?? connection.owner_id ?? keyService?.owner_id;
+  if (!ownerId || ownerId === inventory.options.personal_owner_id) {
+    return { kind: "personal" };
+  }
+  const organization = inventory.options.orgs.find((o) => o.id === ownerId);
+  const ownerKey = inventory.options.keys.find((k) => k.owner_id === ownerId);
+  if (ownerKey?.owner_type === "personal") return { kind: "personal" };
+  const name =
+    service?.owner_name?.trim() ||
+    keyService?.owner_name?.trim() ||
+    organization?.name?.trim() ||
+    ownerKey?.owner_name?.trim() ||
+    undefined;
+  return { kind: "organization", name, unavailable: !service };
+}
+
+/** Owner text shown beside a connection: "Personal" or "Organization · Name". */
+export function connectionOwnerLabel(
+  owner: ConnectionOwner,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  if (owner.kind === "personal") return t("Personal");
+  return owner.name
+    ? t("Organization · {{org_name}}", { org_name: owner.name })
+    : t("Organization");
+}
 export function connectionReady(connection: LoginConnection, now = Date.now()) {
   return (
     connection.is_active &&
@@ -109,7 +153,7 @@ export function permissionOptions(
       if (!scopes.has(canonicalScope(item.slug, scope)))
         scopes.set(canonicalScope(item.slug, scope), {
           label: scope,
-          description: "Published provider permission",
+          get description() { return translateUi("Published provider permission"); },
         });
     groups.set(item.slug, { name: item.name, scopes });
   }
@@ -123,7 +167,7 @@ export function permissionOptions(
       if (!group.scopes.has(canonicalScope(slug, scope)))
         group.scopes.set(canonicalScope(slug, scope), {
           label: scope,
-          description: "Recorded on an existing connection",
+          get description() { return translateUi("Recorded on an existing connection"); },
         });
     groups.set(slug, group);
   }
@@ -133,7 +177,7 @@ export function permissionOptions(
       group: "nyxid",
       service: "NyxID",
       label: scope,
-      description: "NyxID API permission",
+      get description() { return translateUi("NyxID API permission"); },
       field: "permissions" as const,
       value: scope,
     })),
@@ -155,8 +199,8 @@ export function permissionOptions(
                 id: slug,
                 group: slug,
                 service: group.name,
-                label: "Use service",
-                description: "Provider permissions are not published",
+                get label() { return translateUi("Use service"); },
+                get description() { return translateUi("Provider permissions are not published"); },
                 field: "services" as const,
                 value: slug,
               },
@@ -308,9 +352,9 @@ export function compareKey(
     ];
     const related = groups.has(slug) || required.length > 0;
     if (!related)
-      extras.push({ group: slug, service, label: "Additional service" });
+      extras.push({ group: slug, service, get label() { return translateUi("Additional service"); } });
     else if (!required.length)
-      matched.push({ group: slug, service, label: "Use service" });
+      matched.push({ group: slug, service, get label() { return translateUi("Use service"); } });
     for (const scope of new Set(connection.granted_scopes ?? [])) {
       (required.includes(canonicalScope(slug, scope)) ? matched : extras).push({
         group: slug,
@@ -329,35 +373,35 @@ export function compareKey(
       extras.push({
         group: slug,
         service,
-        label: "Provider access not reported",
+        get label() { return translateUi("Provider access not reported"); },
       });
     if (!connectionReady(connection))
-      extras.push({ group: slug, service, label: "Connection unavailable" });
+      extras.push({ group: slug, service, get label() { return translateUi("Connection unavailable"); } });
   }
   for (const id of allowed)
     if (!connections.some((c) => c.id === id))
       extras.push({
         group: `missing:${id}`,
         service: key.allowed_services.find((s) => s.id === id)?.name ?? id,
-        label: "Service access not reported",
+        get label() { return translateUi("Service access not reported"); },
       });
   if (key.allow_all_services)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      label: "All current and future services",
+      get label() { return translateUi("All current and future services"); },
     });
   if (key.allow_auto_connected_services)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      label: "All current and future auto-connected platform services",
+      get label() { return translateUi("All current and future auto-connected platform services"); },
     });
   if (key.allow_all_nodes)
     extras.push({
       group: "nyxid",
       service: "NyxID",
-      label: "All current and future nodes",
+      get label() { return translateUi("All current and future nodes"); },
     });
   for (const id of key.allowed_node_ids)
     extras.push({

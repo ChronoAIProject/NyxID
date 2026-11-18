@@ -32,8 +32,12 @@ class Peer {
     Peer.current = this;
   }
   addTrack() {}
+  channel = {
+    onmessage: null as null | ((event: { data: string }) => void),
+    send() {},
+  };
   createDataChannel() {
-    return { onmessage: null, send() {} };
+    return this.channel;
   }
   createOffer = async () => this.localDescription;
   setLocalDescription = async () => {};
@@ -173,6 +177,11 @@ async function setup() {
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Start fixture" }));
   });
+  act(() =>
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    }),
+  );
   return {
     container,
     audio,

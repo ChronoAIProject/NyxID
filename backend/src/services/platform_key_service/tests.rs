@@ -31,6 +31,7 @@ fn platform_service() -> DownstreamService {
     service.auth_method = "bearer".into();
     service.auth_key_name = "Authorization".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],
@@ -483,6 +484,7 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
     let link = connect_link_service::create(
         &db,
         connect_link_service::CreateInput {
+            assistant_intent_locked: false,
             user_id: user.clone(),
             service_slug: catalog.slug.clone(),
             use_platform_key: Some(true),
@@ -693,6 +695,10 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
+        strict_response_utf8: false,
+        execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: None,
         response_body_limit: None,
         actor_user_id: None,
@@ -1569,6 +1575,7 @@ async fn server_chosen_accepts_implicit_and_explicit_public_only() {
         None,
         service.platform_key.clone(),
         Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![],
@@ -1867,6 +1874,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
         .unwrap();
     catalog.billing = Some(ServiceBilling {
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric: BillingMetric::Tokens,
@@ -2016,6 +2024,11 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        catalog_is_public: false,
+        catalog_slug: None,
+        execution_request: None,
+        execution_permission: None,
+        credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,
         base_url: service.base_url.clone(),
@@ -2421,4 +2434,39 @@ async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_requ
         "a new request must recheck grants for explicit platform rows"
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_only_config_serves_overlap_and_refuses_unsupported_or_unrecorded_capability() {
+    use crate::models::{security_capability_activation as activation, security_replica};
+    use crate::services::{platform_model_service, security_readiness_service as readiness};
+    let db = crate::test_utils::connect_transaction_test_database("model_key_publication").await;
+    readiness::ready_test_replica(&db).await;
+    readiness::stop_test_replica(&db).await;
+    let sibling = readiness::overlapping_test_replica(&db).await;
+    let capability = platform_model_service::REGISTRY_READINESS;
+    let mut config = PlatformKeyConfig {
+        enabled: true,
+        purpose: crate::models::downstream_service::PlatformKeyPurpose::ModelRoute,
+        audience: PlatformKeyAudience::Restricted,
+        ..Default::default()
+    };
+    validate_config(&db, &mut config, None).await.unwrap();
+    readiness::remove_test_replica_capability(&db, &sibling, capability).await;
+    assert!(matches!(
+        validate_config(&db, &mut config, None).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    db.collection::<security_replica::SecurityReplica>(security_replica::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&sibling.id}, &sibling)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(activation::COLLECTION_NAME)
+        .delete_one(doc! {"record_kind":activation::RECORD_KIND,"capability":capability})
+        .await
+        .unwrap();
+    assert!(matches!(
+        validate_config(&db, &mut config, None).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
 }

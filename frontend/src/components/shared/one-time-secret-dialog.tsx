@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -31,10 +33,11 @@ export function OneTimeSecretDialog({
   description,
   values,
 }: OneTimeSecretDialogProps) {
+  const { t } = useUiTranslation();
   function copy(value: OneTimeSecretValue) {
     void copyToClipboard(value.value).then(
-      () => toast.success(`${value.label} copied`),
-      () => toast.error(`Failed to copy ${value.label.toLowerCase()}`),
+      () => toast.success(translateUi("{{label}} copied", { label: value.label })),
+      () => toast.error(translateUi("Failed to copy {{value}}", { value: value.label.toLowerCase() })),
     );
   }
 
@@ -48,11 +51,11 @@ export function OneTimeSecretDialog({
         <div className="space-y-4">
           {values.map((value) => (
             <div key={value.label} className="space-y-2">
-              <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+              <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
                 {value.label}
               </p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-                <p className="min-w-0 flex-1 break-all font-mono text-xs">
+                <p className="min-w-0 flex-1 break-all font-mono text-13">
                   {value.value}
                 </p>
                 <Button
@@ -60,7 +63,7 @@ export function OneTimeSecretDialog({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 shrink-0"
-                  aria-label={`Copy ${value.label}`}
+                  aria-label={t("Copy {{label}}", { label: value.label })}
                   onClick={() => copy(value)}
                 >
                   <Copy className="h-3.5 w-3.5" />
@@ -74,9 +77,7 @@ export function OneTimeSecretDialog({
             type="button"
             variant="primary"
             onClick={() => onOpenChange(false)}
-          >
-            I have saved it
-          </Button>
+          >{t("I have saved it")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

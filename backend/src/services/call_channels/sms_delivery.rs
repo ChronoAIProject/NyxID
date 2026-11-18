@@ -292,6 +292,9 @@ async fn project_delivery(state: &AppState, sent: &EventReceipt) -> AppResult<()
 pub async fn sweep(state: &AppState) -> AppResult<()> {
     let rows:Vec<EventReceipt>=state.db.collection::<EventReceipt>(EVENTS).find(doc!{"event_kind":"sms_send","billing_finalized":false,"$or":[{"provider_message_id":{"$ne":mongodb::bson::Bson::Null}},{"status":"rejected"}]}).sort(doc!{"recovery_checked_at":1,"_id":1}).limit(100).await?.try_collect().await?;
     for row in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         state
             .db
             .collection::<mongodb::bson::Document>(EVENTS)

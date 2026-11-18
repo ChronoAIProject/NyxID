@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
@@ -23,6 +24,39 @@ use mongodb::{
 
 fn stale() -> AppError {
     AppError::Conflict("Setup authority changed; review the current setup".into())
+}
+
+/// Indexed parent-scoped export reads; these keys do not change retention.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    for (name, field) in crate::services::personal_data_registry::EXPORT_JOIN_INDEX_GAPS {
+        let collection = db.collection::<Document>(name);
+        let mut covered = false;
+        match collection.list_indexes().await {
+            Ok(mut indexes) => {
+                while let Some(index) = indexes.try_next().await? {
+                    covered |= index.keys.keys().next().is_some_and(|first| first == field);
+                }
+            }
+            Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+                {}
+            Err(error) => return Err(error),
+        }
+        if !covered {
+            collection
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! {*field:1})
+                        .options(
+                            IndexOptions::builder()
+                                .name(format!("account_export_{name}_{field}"))
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
@@ -569,10 +603,19 @@ pub(crate) async fn claim_step(db: &Database) -> AppResult<Option<SetupStepJob>>
 
 pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
     for _ in 0..8 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let Some(job) = claim_step(&state.db).await? else {
             break;
         };
         let claim = job.claim_id.as_deref().ok_or_else(stale)?;
+        let release = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+            db: state.db.clone(), collection: STEPS,
+            filter: doc! {"_id": &job.id, "generation": job.generation, "claim_id": claim, "phase": "running"},
+            update: doc! {"$set": {"retry_at": bson::DateTime::from_millis(0)}},
+        });
         let outcome = if job.attempts > 5 {
             Err(AppError::Conflict(
                 "Provisioning needs a fresh owner review".into(),
@@ -609,6 +652,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
             }.await;
             transaction_result(result)
         }).await.map_err(map_transaction_error)?;
+        release.completed();
     }
     Ok(())
 }
@@ -667,7 +711,7 @@ pub(crate) async fn execute_step(state: &crate::AppState, job: &SetupStepJob) ->
                 super::assistant_team_service::CreateRequest {
                     machines: None, logins: None, name: format!("public-{}", &job.setup_id[..8]),
                     description: "A client-owned public bot specialist. Public delivery uses only the reviewed setup publication and has no private connector or account access.".into(),
-                    display_name: None, persona: None,
+                    display_name: None, persona: None, voice_instructions: None,
                     targets: super::assistant_team_service::GrantTargets {service_ids: vec![], platform_service_ids: vec![], slugs: vec![], ids_by_request: Default::default()},
                     account_read: false, specialty: None, created_by: "user",
                 }).await?;
@@ -761,6 +805,8 @@ async fn rebuild_request(
         status,
         active: status != Status::Connected,
         revision: 1,
+        previous_challenge_hashes: Vec::new(),
+        username_seed: None,
         challenge_hash: super::telegram_new_service::hash(&hex::encode(rand::random::<[u8; 24]>())),
         telegram_user_id: Some(a.telegram_sender_id),
         telegram_bot_id: installation
@@ -774,6 +820,9 @@ async fn rebuild_request(
         manager_revision: Some(proof.child_revision),
         auto_connect: false,
         start_update_id: Some(proof.start_update_id),
+        creation_context: None,
+        prompt_delivery: None,
+        prompt_update_boundary: None,
         connection_attempts: 0,
         next_connection_attempt_at: None,
         connection_error: None,
@@ -1174,6 +1223,7 @@ mod tests {
             description: "Reviewed public cafe".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -1276,6 +1326,32 @@ mod tests {
                 .unwrap()
                 .telegram_user_id,
             Some(700)
+        );
+        assert!(service.creation_link(&f.owner, &request.id).await.is_err());
+        let sent = f.server.received_requests().await.unwrap();
+        assert!(sent.iter().any(|request| {
+            request.url.path().ends_with("/sendMessage")
+                && request.body_json::<serde_json::Value>().unwrap()["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("update Telegram to the latest version"))
+        }));
+        let mut projection = service.get(&f.owner, &request.id).await.unwrap();
+        projection.auto_connect = true;
+        projection.creation_context =
+            Some(crate::models::telegram_bot_request::CreationContext::Standalone);
+        assert!(
+            !crate::handlers::telegram_new::projected_request(&f.state, projection)
+                .await
+                .unwrap()
+                .can_open_creation_form
+        );
+        assert!(
+            f.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| { !String::from_utf8_lossy(&request.body).contains("/newbot/") })
         );
         f.state.db.drop().await.unwrap();
     }

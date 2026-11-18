@@ -331,6 +331,15 @@ async fn generate_service_ca(
     ))
 }
 
+/// Sole signer for NyxID SSH user certificates. Callers are the
+/// `POST /ssh/{id}/certificate` route used by `nyxid ssh proxy` and
+/// `nyxid ssh issue-cert` (including the HTTP flow in
+/// `backend/src/ssh_cli.rs`), `ssh_web_terminal::generate_ephemeral_credentials`
+/// for browser and mobile terminals, cert-mode SSH exec, and MCP exec.
+/// Only Web/mobile terminal callers enable `permit_pty`, adding exactly the
+/// `permit-pty` extension. Certificate API and exec callers pass false and issue
+/// no extensions. No agent, port/TCP, X11-forwarding, or user-rc permissions.
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_certificate(
     encryption_keys: &EncryptionKeys,
     ssh_service: &SshServiceConfig,
@@ -339,6 +348,7 @@ pub async fn issue_certificate(
     user_email: &str,
     public_key_openssh: &str,
     principal: &str,
+    permit_pty: bool,
 ) -> AppResult<IssuedSshCertificate> {
     if !ssh_service.certificate_auth_enabled {
         return Err(AppError::BadRequest(
@@ -399,6 +409,11 @@ pub async fn issue_certificate(
     cert_builder
         .valid_principal(principal)
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate principal: {e}")))?;
+    if permit_pty {
+        cert_builder.extension("permit-pty", "").map_err(|e| {
+            AppError::Internal(format!("Failed to set SSH certificate extension: {e}"))
+        })?;
+    }
     cert_builder
         .comment(format!("NyxID SSH certificate for {user_email}"))
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate comment: {e}")))?;
@@ -542,7 +557,7 @@ mod tests {
 
         let billing = BillingOwnerResolver::new(db);
         let personal_payer = billing
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 &personal_owner_id,
                 &personal_context.owner_user_id,
                 crate::models::usage_meter::CredentialClass::NodeManaged,
@@ -550,7 +565,7 @@ mod tests {
             .await
             .expect("resolve personal SSH payer");
         let org_payer = billing
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 &org_member_id,
                 &org_context.owner_user_id,
                 crate::models::usage_meter::CredentialClass::NodeManaged,
@@ -667,17 +682,74 @@ mod tests {
             "operator@example.com",
             &public_key,
             "ubuntu",
+            true,
         )
         .await
         .expect("certificate");
 
-        assert!(
-            issued
-                .certificate
-                .starts_with("ssh-ed25519-cert-v01@openssh.com")
-        );
-        assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
-        assert!(issued.valid_before > issued.valid_after);
+        let issued_without_pty = issue_certificate(
+            &encryption_keys,
+            &ssh_service,
+            "service-1",
+            "user-1",
+            "operator@example.com",
+            &public_key,
+            "ubuntu",
+            false,
+        )
+        .await
+        .expect("certificate");
+
+        for (issued, permit_pty) in [(&issued, true), (&issued_without_pty, false)] {
+            assert!(
+                issued
+                    .certificate
+                    .starts_with("ssh-ed25519-cert-v01@openssh.com")
+            );
+            assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
+            assert!(issued.valid_before > issued.valid_after);
+            let certificate = ssh_key::Certificate::from_openssh(&issued.certificate)
+                .expect("parse issued certificate");
+            if permit_pty {
+                assert_eq!(
+                    certificate.extensions().0,
+                    std::collections::BTreeMap::from([(String::from("permit-pty"), String::new())])
+                );
+            } else {
+                assert!(certificate.extensions().0.is_empty());
+            }
+            assert!(certificate.critical_options().0.is_empty());
+            assert_eq!(certificate.valid_principals(), &[String::from("ubuntu")]);
+            assert_eq!(certificate.key_id(), issued.key_id);
+            assert_eq!(certificate.key_id(), "nyxid:service-1:user-1:ubuntu");
+            assert_eq!(
+                certificate.cert_type(),
+                ssh_key::certificate::CertType::User
+            );
+            assert_ne!(certificate.serial(), 0);
+            assert_eq!(
+                certificate.valid_after(),
+                issued.valid_after.timestamp() as u64
+            );
+            assert_eq!(
+                certificate.valid_before(),
+                issued.valid_before.timestamp() as u64
+            );
+            assert_eq!(
+                certificate.valid_before() - certificate.valid_after(),
+                30 * 60
+            );
+        }
+        let terminal = ssh_key::Certificate::from_openssh(&issued.certificate).unwrap();
+        let nonterminal =
+            ssh_key::Certificate::from_openssh(&issued_without_pty.certificate).unwrap();
+        assert_eq!(terminal.valid_principals(), nonterminal.valid_principals());
+        assert_eq!(terminal.key_id(), nonterminal.key_id());
+        assert_eq!(terminal.cert_type(), nonterminal.cert_type());
+        assert_eq!(terminal.public_key(), nonterminal.public_key());
+        assert_eq!(terminal.signature_key(), nonterminal.signature_key());
+        // Each issuance retains a fresh random serial/nonce and the current
+        // validity window; changing PTY policy does not change those contracts.
     }
 
     #[test]

@@ -1,3 +1,5 @@
+import { getPublicOrigin } from "./public-origin.mjs";
+const PUBLIC_ORIGIN = getPublicOrigin();
 import {
   verifyReleaseConfiguration,
   retainedDisabledFeatureCode,
@@ -47,6 +49,7 @@ const expected = new Set([
   ).map((p) => `/docs/${p.source.replace(/\.md$/, "")}`),
   "/privacy",
   "/terms",
+  "/data-deletion",
 ]);
 assert.deepEqual(
   [...paths].sort(),
@@ -102,7 +105,7 @@ for (const page of release.pages) {
     assert.equal(doc.querySelectorAll('link[rel="canonical"]').length, 1);
     assert.equal(
       doc.querySelector('link[rel="canonical"]').href,
-      `https://nyx.chrono-ai.fun${page.path}`,
+      `${PUBLIC_ORIGIN}${page.path}`,
     );
     assert.equal(
       doc.documentElement.lang,
@@ -120,12 +123,12 @@ for (const page of release.pages) {
       [
         'meta[property="og:url"]',
         "content",
-        `https://nyx.chrono-ai.fun${page.path}`,
+        `${PUBLIC_ORIGIN}${page.path}`,
       ],
       [
         'meta[property="og:image"]',
         "content",
-        "https://nyx.chrono-ai.fun/nyxid-coloured-logo.svg",
+        `${PUBLIC_ORIGIN}/nyxid-coloured-logo.svg`,
       ],
       ['meta[name="twitter:card"]', "content", "summary"],
       ['meta[name="twitter:title"]', "content", `${page.title} · NyxID`],
@@ -144,7 +147,7 @@ for (const page of release.pages) {
             : page.route;
         assert.equal(
           doc.querySelector(`link[hreflang="${lang}"]`).href,
-          `https://nyx.chrono-ai.fun${target}`,
+          `${PUBLIC_ORIGIN}${target}`,
         );
         assert.ok(
           release.pages.find((p) => p.path === target)?.translated,
@@ -158,13 +161,13 @@ for (const page of release.pages) {
           html,
           page,
           page.revision,
-          "https://nyx.chrono-ai.fun",
+          PUBLIC_ORIGIN,
         ),
         md,
         "HTML/Markdown semantic drift",
       );
       const computed = createHash("sha256")
-        .update(semanticMarkdown(html, page, "", "https://nyx.chrono-ai.fun"))
+        .update(semanticMarkdown(html, page, "", PUBLIC_ORIGIN))
         .digest("hex");
       assert.equal(computed, page.revision, "Content revision drift");
     }
@@ -180,7 +183,7 @@ for (const page of release.pages) {
             ? /\/blog$/.test(page.path)
             : /\/contact$/.test(page.path))) &&
         !page.path.startsWith("/docs") &&
-        !["/privacy", "/terms"].includes(page.path);
+        !["/privacy", "/terms", "/data-deletion"].includes(page.path);
       assert.equal(
         Boolean(doc.querySelector(`[data-website-feature="${feature}"]`)),
         Boolean(expected),
@@ -229,11 +232,11 @@ for (const page of release.pages) {
       );
     for (const anchor of doc.querySelectorAll("a[href]")) {
       const href = anchor.getAttribute("href"),
-        target = new URL(href, `https://nyx.chrono-ai.fun${page.path}`);
-      if (target.origin !== "https://nyx.chrono-ai.fun") continue;
+        target = new URL(href, `${PUBLIC_ORIGIN}${page.path}`);
+      if (target.origin !== PUBLIC_ORIGIN) continue;
       const known =
         paths.has(target.pathname) ||
-        ["/privacy.html", "/terms.html"].includes(target.pathname) ||
+        ["/privacy.html", "/terms.html", "/data-deletion.html"].includes(target.pathname) ||
         appPatterns.some((pattern) => pattern.test(target.pathname)) ||
         /^\/(?:api|oauth|mcp|health|\.well-known)(?:\/|$)/.test(
           target.pathname,
@@ -255,12 +258,12 @@ for (const page of release.pages) {
       doc.querySelector('script[type="application/ld+json"]').textContent,
     );
     assert.equal(schema["@type"], "WebPage");
-    assert.equal(schema.url, `https://nyx.chrono-ai.fun${page.path}`);
+    assert.equal(schema.url, `${PUBLIC_ORIGIN}${page.path}`);
     assert.ok(md.includes(page.title));
-    assert.ok(md.includes(`canonical: https://nyx.chrono-ai.fun${page.path}`));
+    assert.ok(md.includes(`canonical: ${PUBLIC_ORIGIN}${page.path}`));
     assert.ok(llms.includes(page.markdown));
     assert.equal(
-      sitemap.includes(`<loc>https://nyx.chrono-ai.fun${page.path}</loc>`),
+      sitemap.includes(`<loc>${PUBLIC_ORIGIN}${page.path}</loc>`),
       page.indexable,
     );
     assert.ok(!html.includes("<!--$!-->"), "Suspended body");

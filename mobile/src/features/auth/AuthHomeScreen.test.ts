@@ -1,0 +1,1115 @@
+import assert from "node:assert/strict";
+import { URL, fileURLToPath } from "node:url";
+import test from "node:test";
+import { MfaChallengeError } from "../../lib/auth/mfaChallenge";
+import { ApiError } from "../../lib/api/ApiError";
+import { resolveErrorMessage } from "../../lib/api/errorMessages";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
+import type { PublicAuthConfig } from "./publicAuthConfig";
+import * as emailLogin from "./emailLogin";
+import * as publicAuthConfig from "./publicAuthConfig";
+import * as socialCallback from "./socialCallback";
+import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
+import { spacing } from "../../theme/designTokens";
+
+type Element = { type: unknown; props: Record<string, any> };
+type LoginInput = ReturnType<typeof emailLogin.passwordLoginInput>;
+type Session = {
+  accessToken: string;
+  refreshToken?: string;
+  accessTokenExpiresAt: number;
+};
+const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+const signedIn = {
+  userId: "review-user",
+  accessToken: "test-access-token",
+  refreshToken: "test-refresh-token",
+  expiresIn: 3600,
+};
+
+function elements(root: Element): Element[] {
+  return [
+    root,
+    ...[root.props.children]
+      .flat(Infinity)
+      .flatMap((child) =>
+        child && typeof child === "object" && "props" in child
+          ? elements(child)
+          : [],
+      ),
+  ];
+}
+
+function textContent(root: Element): string {
+  return elements(root)
+    .flatMap((element) => [element.props.children].flat(Infinity))
+    .filter((child) => typeof child === "string")
+    .join(" ");
+}
+
+function setup({
+  state = "ready",
+  providers = [],
+  emailEnabled = true,
+  getFrontendUrl = () => "https://nyxid.example",
+  beforeMount = () => {},
+  platform = "ios",
+}: {
+  state?: "ready" | "loading" | "error";
+  providers?: PublicAuthConfig["socialProviders"];
+  emailEnabled?: boolean;
+  getFrontendUrl?: () => string;
+  beforeMount?: () => void;
+  platform?: "ios" | "android";
+} = {}) {
+  const config: PublicAuthConfig = {
+    emailAuthEnabled: emailEnabled,
+    socialProviders: providers,
+  };
+  const calls: LoginInput[] = [];
+  const sessions: Session[] = [];
+  const socialUrls: string[] = [];
+  const registrationUrls: string[] = [];
+  const navigations: string[] = [];
+  const waitlistUrls: string[] = [];
+  const urlListeners: Array<(event: { url: string }) => void> = [];
+  let login = async (_input: LoginInput) => signedIn;
+  let refetch = async () => ({ data: config, error: null as Error | null });
+  let configState = state;
+  let currentConfig = config;
+  let configRefetches = 0;
+  const appStateListeners: Array<(state: string) => void> = [];
+  let keyboardVisible = false;
+  const colors = new Proxy(
+    { dangerTone: { bg: "#fee", border: "#f00" } },
+    { get: (target, key) => Reflect.get(target, key) ?? "#111" },
+  );
+  const jsx = (type: unknown, props: Record<string, unknown>) => ({
+    type,
+    props,
+  });
+  const harness = hookHarness<Element>({
+    "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
+    "expo-web-browser": {
+      openBrowserAsync: async (url: string) => {
+        registrationUrls.push(url);
+        return { type: "dismiss" };
+      },
+      openAuthSessionAsync: async (url: string) => {
+        socialUrls.push(url);
+        return { type: "cancel" };
+      },
+    },
+    "@react-navigation/native": { useIsFocused: () => true },
+    "@tanstack/react-query": {
+      useQuery: () => ({
+        data: configState === "loading" ? undefined : currentConfig,
+        isPending: configState === "loading",
+        isError: configState === "error",
+        isFetching: configState === "loading",
+        refetch: async () => {
+          configRefetches++;
+          const result = await refetch();
+          configState = result.error ? "error" : "ready";
+          currentConfig = result.data;
+          harness.render();
+          return result;
+        },
+      }),
+    },
+    "react-native": {
+      ...Object.fromEntries(
+        [
+          "ActivityIndicator",
+          "Pressable",
+          "ScrollView",
+          "Text",
+          "TextInput",
+          "View",
+          "KeyboardAvoidingView",
+        ].map((name) => [name, name]),
+      ),
+      Platform: { OS: platform },
+      Keyboard: { metrics: () => keyboardVisible ? { screenY: 500 } : undefined },
+      StyleSheet: { create: (styles: unknown) => styles },
+      AppState: {
+        currentState: "active",
+        addEventListener: (
+          _event: string,
+          listener: (state: string) => void,
+        ) => {
+          appStateListeners.push(listener);
+          return { remove: () => {} };
+        },
+      },
+      Linking: {
+        openURL: async (url: string) => {
+          waitlistUrls.push(url);
+        },
+        getInitialURL: async () => null,
+        addEventListener: (
+          _event: string,
+          listener: (event: { url: string }) => void,
+        ) => {
+          urlListeners.push(listener);
+          return {
+            remove: () => {
+              urlListeners.splice(urlListeners.indexOf(listener), 1);
+            },
+          };
+        },
+      },
+    },
+    "react-native-svg": {
+      default: "Svg",
+      Path: "Path",
+      Defs: "Defs",
+      LinearGradient: "LinearGradient",
+      Stop: "Stop",
+    },
+    "expo-linear-gradient": { LinearGradient: "ExpoLinearGradient" },
+    "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
+    "../../lib/auth/sessionStore": { authSessionGeneration: () => 0 },
+    "../../lib/api/mobileApi": {
+      mobileApi: {
+        loginWithPassword: (input: LoginInput) => {
+          calls.push(plain(input));
+          return login(input);
+        },
+        verifyMfa: (body: { code: string; mfa_token: string }) => {
+          calls.push({ mfaCode: body.code } as LoginInput);
+          return Promise.resolve(signedIn);
+        },
+        getSocialAuthorizeUrl: (provider: string) =>
+          `https://example.test/${provider}`,
+      },
+    },
+    "../../lib/api/errorMessages": {
+      resolveErrorMessage,
+    },
+    "./AuthSessionContext": {
+      useAuthSession: () => ({
+        signInWithSession: async (session: Session) => {
+          sessions.push(plain(session));
+        },
+      }),
+    },
+    "./emailLogin": emailLogin,
+    "../../lib/api/publicAuthApi": { getPublicAuthConfig: async () => config },
+    "./publicAuthConfig": publicAuthConfig,
+    "./socialCallback": socialCallback,
+    "../../lib/telemetry": { capture: () => {} },
+    "../../lib/env": { getFrontendUrl },
+    "./useAuthTheme": { useAuthTheme: () => ({ colors }) },
+    "./AuthTextInput": { AuthTextInput: "TextInput" },
+    "./AuthSubmitButton": { AuthSubmitButton: "AuthSubmitButton" },
+    "../../theme/flowStyles": { createFlowStyles: () => ({}) },
+    "../../components/brand/BrandNebula": {
+      BrandNebula: "BrandNebula",
+      BreathingMark: "BreathingMark",
+      RiseIn: "RiseIn",
+    },
+    "lucide-react-native": {
+      Eye: "Eye",
+      EyeOff: "EyeOff",
+      LockKeyhole: "LockKeyhole",
+      Mail: "Mail",
+    },
+    "../../components/brand/PortalMark": { PortalMarkLogo: "PortalMarkLogo" },
+  });
+  const { AuthHomeScreen } = harness.load(
+    fileURLToPath(new URL("./AuthHomeScreen.tsx", import.meta.url)),
+  ) as { AuthHomeScreen: (props: unknown) => Element };
+  beforeMount();
+  harness.mount(() =>
+    AuthHomeScreen({
+      navigation: { navigate: (route: string) => navigations.push(route) },
+    }),
+  );
+
+  function input(label: string) {
+    const element = elements(harness.value()).find(
+      (element) =>
+        element.type === "TextInput" &&
+        element.props.accessibilityLabel === label,
+    );
+    assert.ok(element, `Expected visible ${label} input`);
+    return element;
+  }
+  function submit() {
+    const element = elements(harness.value()).find(
+      (element) => element.type === "AuthSubmitButton",
+    );
+    assert.ok(element, "Expected email sign-in action");
+    return element;
+  }
+  const social = () =>
+    elements(harness.value()).filter(
+      (element) => typeof element.props.provider === "string",
+    );
+  function change(label: string, value: string) {
+    input(label).props.onChangeText(value);
+    harness.flush();
+  }
+  return {
+    harness,
+    input,
+    submit,
+    social,
+    change,
+    calls,
+    sessions,
+    socialUrls,
+    registrationUrls,
+    waitlistUrls,
+    navigations,
+    showKeyboard: () => { keyboardVisible = true; },
+    hideKeyboard: () => { keyboardVisible = false; },
+    configRefetches: () => configRefetches,
+    setLogin: (handler: typeof login) => {
+      login = handler;
+    },
+    setRefetch: (handler: typeof refetch) => {
+      refetch = handler;
+    },
+    setEmailEnabled: (enabled: boolean) => {
+      config.emailAuthEnabled = enabled;
+      harness.render();
+    },
+    openUrl: (url: string) => {
+      for (const listener of [...urlListeners]) listener({ url });
+      harness.flush();
+    },
+    background: () => {
+      for (const listener of appStateListeners) listener("background");
+      harness.flush();
+    },
+  };
+}
+
+for (const platform of ["ios", "android"] as const) {
+  test(`email form keeps its actions scrollable with native keyboard handling (${platform})`, async (t) => {
+    const screen = setup({
+      platform,
+      providers: ["google", "github", "apple"],
+    });
+    t.after(screen.harness.unmount);
+    const scroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(scroller);
+    assert.equal(
+      scroller.props.automaticallyAdjustKeyboardInsets,
+      platform === "ios",
+    );
+    assert.equal(
+      scroller.props.keyboardDismissMode,
+      platform === "ios" ? "interactive" : "on-drag",
+    );
+    assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+    assert.ok(
+      elements(scroller).includes(screen.submit()),
+      "submit remains inside the keyboard-adjusted scroll content",
+    );
+    assert.equal(
+      elements(screen.harness.value()).some(
+        (element) => element.type === "KeyboardAvoidingView",
+      ),
+      false,
+      "keyboard space is reserved only once",
+    );
+
+    const scrolls: unknown[] = [];
+    scroller.props.ref.current = {
+      getNativeScrollRef: () => ({
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(0, 120, 390, 700),
+      }),
+      scrollTo: (position: unknown) => scrolls.push(plain(position)),
+    };
+    const inputGeometry = (label: string, top: number) => {
+      screen.input(label).props.ref.current = {
+        measureInWindow: (callback: (...args: number[]) => void) =>
+          callback(40, top, 300, 28),
+      };
+    };
+    inputGeometry("Email", 200);
+    inputGeometry("Password", 480);
+    screen.input("Email").props.onFocus();
+    assert.equal(
+      scrolls.length,
+      0,
+      "initial keyboard animation is owned by the native scroll view",
+    );
+    screen.showKeyboard();
+    scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 350 } } });
+    screen.input("Password").props.onFocus();
+    screen.input("Email").props.onFocus();
+    assert.deepEqual(
+      scrolls,
+      platform === "ios"
+        ? [{ y: 350 + 480 + 28 + spacing.xl - 500, animated: true }]
+        : [],
+      "measure real window coordinates so native header and safe-area offsets are respected; leave an already-visible field in place",
+    );
+    inputGeometry("Email", 110);
+    screen.input("Email").props.onFocus();
+    if (platform === "ios")
+      assert.deepEqual(
+        scrolls.at(-1),
+        { y: 350 + 110 - 120 - spacing.xl, animated: true },
+        "a field above the visible viewport also becomes reachable",
+      );
+
+    screen.setLogin(async () => {
+      throw new Error("Invalid email or password");
+    });
+    screen.change("Email", "reviewer@example.test");
+    screen.change("Password", "wrong-password");
+    screen.submit().props.onPress();
+    await screen.harness.settle();
+    const nextScroller = elements(screen.harness.value()).find(
+      (element) => element.type === "ScrollView",
+    );
+    assert.ok(nextScroller);
+    assert.match(textContent(nextScroller), /Invalid email or password/);
+    assert.ok(elements(nextScroller).includes(screen.submit()));
+  });
+}
+
+test("focus reveal waits for a mounted native scroll viewport", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let mounted = false;
+  let inputMeasurements = 0;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () =>
+      mounted
+        ? {
+            measureInWindow: (callback: (...args: number[]) => void) =>
+              callback(0, 120, 390, 700),
+          }
+        : null,
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) => {
+      inputMeasurements++;
+      callback(40, 480, 300, 28);
+    },
+  };
+  screen.showKeyboard();
+  assert.doesNotThrow(() => screen.input("Password").props.onFocus());
+  assert.equal(inputMeasurements, 0);
+  assert.deepEqual(scrolls, []);
+
+  mounted = true;
+  screen.input("Password").props.onFocus();
+  assert.equal(inputMeasurements, 1);
+  assert.deepEqual(scrolls, [
+    { y: 480 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
+test("MFA focus is revealed while the software keyboard is already open", async (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new MfaChallengeError("test-mfa-token");
+  });
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  const scrolls: unknown[] = [];
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Authenticator code").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 490, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Authenticator code").props.onFocus();
+  assert.deepEqual(scrolls, [
+    { y: 490 + 28 + spacing.xl - 500, animated: true },
+  ]);
+});
+
+test("late field measurements do not scroll after focus changes or the keyboard closes", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: (...args: number[]) => void) =>
+        callback(0, 120, 390, 700),
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  let emailMeasurement: ((...args: number[]) => void) | undefined;
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: typeof emailMeasurement) => {
+      emailMeasurement = callback;
+    },
+  };
+  screen.input("Password").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 480, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  screen.input("Password").props.onFocus();
+  assert.equal(scrolls.length, 1);
+  assert.ok(emailMeasurement);
+  emailMeasurement(40, 600, 300, 28);
+  assert.equal(
+    scrolls.length,
+    1,
+    "ignore the old field after a newer field has focused",
+  );
+  screen.input("Email").props.onFocus();
+  screen.hideKeyboard();
+  emailMeasurement(40, 600, 300, 28);
+  assert.equal(
+    scrolls.length,
+    1,
+    "keyboard dismissal invalidates a pending reveal",
+  );
+});
+
+test("a native scroll between field and viewport measurements invalidates the old geometry", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  const scroller = elements(screen.harness.value()).find(
+    (element) => element.type === "ScrollView",
+  );
+  assert.ok(scroller);
+  const scrolls: unknown[] = [];
+  let viewportMeasurement: ((...args: number[]) => void) | undefined;
+  scroller.props.ref.current = {
+    getNativeScrollRef: () => ({
+      measureInWindow: (callback: typeof viewportMeasurement) => {
+        viewportMeasurement = callback;
+      },
+    }),
+    scrollTo: (position: unknown) => scrolls.push(plain(position)),
+  };
+  screen.input("Email").props.ref.current = {
+    measureInWindow: (callback: (...args: number[]) => void) =>
+      callback(40, 800, 300, 28),
+  };
+  screen.showKeyboard();
+  screen.input("Email").props.onFocus();
+  assert.ok(viewportMeasurement);
+  scroller.props.onScroll({ nativeEvent: { contentOffset: { y: 600 } } });
+  viewportMeasurement(0, 120, 390, 700);
+  assert.deepEqual(
+    scrolls,
+    [],
+    "native keyboard adjustment already moved the field; stale screen coordinates must not add a second scroll",
+  );
+});
+
+for (const emailEnabled of [false, true]) {
+  test(`email login adopts the session when registration is ${emailEnabled ? "enabled" : "disabled"}`, async (t) => {
+    const screen = setup({ emailEnabled });
+    t.after(screen.harness.unmount);
+    assert.equal(screen.input("Password").props.secureTextEntry, true);
+    assert.equal(screen.social().length, 0);
+    assert.equal(screen.submit().props.disabled, true);
+    screen.change("Email", " reviewer@example.test ");
+    screen.change("Password", " review password ");
+    assert.equal(screen.submit().props.disabled, false);
+    const started = Date.now();
+    screen.submit().props.onPress();
+    await screen.harness.settle();
+    assert.deepEqual(screen.calls, [
+      {
+        email: "reviewer@example.test",
+        password: " review password ",
+      },
+    ]);
+    assert.equal(screen.sessions.length, 1);
+    assert.deepEqual(
+      {
+        accessToken: screen.sessions[0]!.accessToken,
+        refreshToken: screen.sessions[0]!.refreshToken,
+      },
+      {
+        accessToken: signedIn.accessToken,
+        refreshToken: signedIn.refreshToken,
+      },
+    );
+    assert.ok(screen.sessions[0]!.accessTokenExpiresAt >= started + 3_600_000);
+    assert.ok(
+      screen.sessions[0]!.accessTokenExpiresAt <= Date.now() + 3_600_000,
+    );
+    assert.equal(
+      screen.configRefetches(),
+      0,
+      "Email does not start another config request",
+    );
+  });
+}
+
+for (const emailEnabled of [false, true]) {
+  for (let subset = 0; subset < 8; subset++) {
+    const order = ["google", "github", "apple"] as const;
+    const providers = order.filter((_, i) => (subset & (1 << i)) !== 0);
+    test(`sign-in renders provider subset ${subset} with email ${emailEnabled ? "on" : "off"}`, (t) => {
+      const screen = setup({
+        emailEnabled,
+        providers: [...providers].reverse(),
+      });
+      t.after(screen.harness.unmount);
+      assert.deepEqual(
+        screen.social().map((element) => element.props.provider),
+        providers,
+      );
+      assert.deepEqual(
+        screen.social().map((element) => element.props.label),
+        providers.map(
+          (provider) =>
+            `Continue with ${{ google: "Google", github: "GitHub", apple: "Apple" }[provider]}`,
+        ),
+      );
+      const tree = elements(screen.harness.value());
+      for (const label of ["Email", "Password"]) {
+        assert.equal(
+          tree.some((element) => element.props.accessibilityLabel === label),
+          true,
+        );
+      }
+      assert.equal(
+        tree.some(
+          (element) =>
+            element.type === "AuthSubmitButton" &&
+            element.props.label === "Sign In",
+        ),
+        true,
+      );
+      assert.equal(
+        tree.some(
+          (element) =>
+            element.type === "Text" &&
+            textContent(element) === "or continue with email",
+        ),
+        providers.length > 0,
+      );
+      assert.equal(
+        tree.some(
+          (element) => element.props.accessibilityLabel === "Create account",
+        ),
+        emailEnabled,
+      );
+      if (providers.length > 0) {
+        assert.ok(
+          tree.indexOf(screen.social().at(-1)!) <
+            tree.indexOf(screen.input("Email")),
+          "provider rows precede email, matching the web",
+        );
+      }
+    });
+  }
+}
+
+for (const state of ["loading", "error"] as const) {
+  test(`unavailable ${state} config keeps email login and provider retry without offering undiscovered providers`, async (t) => {
+    const screen = setup({
+      state,
+      providers: ["google", "github", "apple"],
+      emailEnabled: true,
+    });
+    t.after(screen.harness.unmount);
+    assert.deepEqual(screen.social(), []);
+    screen.input("Email");
+    screen.input("Password");
+    assert.equal(
+      elements(screen.harness.value()).some(
+        (element) => element.props.accessibilityLabel === "Create account",
+      ),
+      false,
+    );
+    if (state === "error") {
+      const retry = elements(screen.harness.value()).find(
+        (element) =>
+          element.type === "Pressable" &&
+          textContent(element) === "Retry sign-in options",
+      );
+      assert.ok(retry);
+      retry.props.onPress();
+      await screen.harness.settle();
+      assert.equal(screen.configRefetches(), 1);
+      assert.doesNotMatch(
+        textContent(screen.harness.value()),
+        /still sign in with email/,
+      );
+    } else {
+      assert.match(
+        textContent(screen.harness.value()),
+        /Loading sign-in options/,
+      );
+    }
+  });
+}
+
+test("disabling registration keeps email credentials and social providers while hiding Create account", (t) => {
+  const screen = setup({ providers: ["google", "github", "apple"] });
+  t.after(screen.harness.unmount);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  screen.setEmailEnabled(false);
+  assert.equal(screen.input("Email").props.value, "reviewer@example.test");
+  assert.equal(screen.input("Password").props.value, "password");
+  assert.equal(screen.submit().props.disabled, false);
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google", "github", "apple"],
+  );
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Create account",
+    ),
+    false,
+  );
+});
+
+test("Create account opens the configured registration page only when registration is enabled", async (t) => {
+  const screen = setup({ emailEnabled: false });
+  t.after(screen.harness.unmount);
+  assert.deepEqual(screen.registrationUrls, []);
+  screen.setEmailEnabled(true);
+  const registration = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityLabel === "Create account",
+  );
+  assert.ok(registration);
+  assert.equal(registration.props.accessibilityRole, "link");
+  assert.equal(registration.props.style.minHeight, 44);
+  registration.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.registrationUrls, ["https://nyxid.example/register"]);
+  assert.equal(
+    screen.sessions.length,
+    0,
+    "closing registration cannot authenticate an account",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /Registration is not verified by closing the browser/,
+  );
+  assert.deepEqual(screen.calls, []);
+  screen.setEmailEnabled(false);
+  registration.props.onPress();
+  await screen.harness.settle();
+  assert.equal(
+    screen.registrationUrls.length,
+    1,
+    "a stale registration action cannot bypass the config gate",
+  );
+});
+
+test("registration-disabled social sign-in still verifies MFA, supports recovery and keeps legal links", async (t) => {
+  const screen = setup({ emailEnabled: false, providers: ["google"] });
+  t.after(screen.harness.unmount);
+  screen.openUrl(
+    "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /Verify your Google sign-in/,
+  );
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) =>
+        element.props.accessibilityLabel === "Email" ||
+        element.props.accessibilityLabel === "Password",
+    ),
+    false,
+  );
+  const recovery = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Pressable" &&
+      textContent(element) === "Use a recovery code",
+  );
+  assert.ok(recovery);
+  recovery.props.onPress();
+  screen.harness.flush();
+  screen.change("Recovery code", "abcdef12");
+  assert.equal(screen.submit().props.disabled, false);
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.calls, [{ mfaCode: "abcdef12" }]);
+  assert.equal(screen.sessions.length, 1);
+  assert.equal(screen.input("Password").props.value, "");
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Recovery code",
+    ),
+    false,
+  );
+  for (const label of ["Terms", "Privacy"]) {
+    const link = elements(screen.harness.value()).find(
+      (element) => element.type === "Text" && textContent(element) === label,
+    );
+    assert.ok(link);
+    link.props.onPress();
+  }
+  assert.deepEqual(screen.navigations, ["TermsOfService", "PrivacyPolicy"]);
+});
+
+test("registration-disabled configuration preserves provider error mapping and email login", (t) => {
+  const screen = setup({ emailEnabled: false, providers: ["github"] });
+  t.after(screen.harness.unmount);
+  screen.openUrl(
+    "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
+  );
+  assert.match(
+    textContent(screen.harness.value()),
+    /This email is linked to another login method\./,
+  );
+  assert.equal(screen.sessions.length, 0);
+  screen.input("Email");
+  screen.input("Password");
+});
+
+test("registration-disabled email authentication handles the actual MFA challenge before adopting a session", async (t) => {
+  const screen = setup({ emailEnabled: false });
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new MfaChallengeError("synthetic-challenge");
+  });
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.equal(screen.sessions.length, 0);
+  assert.equal(screen.input("Authenticator code").props.value, "");
+  assert.equal(screen.submit().props.disabled, true);
+  screen.change("Authenticator code", "12");
+  assert.equal(screen.submit().props.disabled, true);
+  screen.change("Authenticator code", "012345");
+  assert.equal(screen.submit().props.disabled, false);
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.calls, [
+    { email: "reviewer@example.test", password: "password" },
+    { mfaCode: "012345" },
+  ]);
+  assert.equal(screen.sessions.length, 1);
+});
+
+test("failed credentials show feedback and permit retry without a false MFA prompt", async (t) => {
+  const screen = setup({ emailEnabled: false });
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new ApiError({
+      errorKey: "authentication_failed",
+      errorCode: 2000,
+      statusCode: 401,
+      message: "Invalid email or password",
+    });
+  });
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "wrong-password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.match(
+    textContent(screen.harness.value()),
+    /Invalid email or password/,
+  );
+  assert.equal(screen.sessions.length, 0);
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Authenticator code",
+    ),
+    false,
+  );
+  screen.setLogin(async () => signedIn);
+  screen.change("Password", "correct-password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.equal(screen.calls.length, 2);
+  assert.equal(screen.sessions.length, 1);
+});
+
+test("registration-disabled email login preserves the server's inactive-account error", async (t) => {
+  const screen = setup({
+    emailEnabled: false,
+    providers: ["google", "github", "apple"],
+  });
+  t.after(screen.harness.unmount);
+  screen.setLogin(async () => {
+    throw new ApiError({
+      errorKey: "forbidden",
+      errorCode: 1002,
+      statusCode: 403,
+      message: "Account is deactivated",
+    });
+  });
+  screen.change("Email", "inactive@example.test");
+  screen.change("Password", "password");
+  screen.submit().props.onPress();
+  await screen.harness.settle();
+  assert.match(textContent(screen.harness.value()), /Account is deactivated/);
+  assert.equal(screen.sessions.length, 0);
+  assert.equal(screen.submit().props.disabled, false);
+  assert.equal(
+    elements(screen.harness.value()).some(
+      (element) => element.props.accessibilityLabel === "Authenticator code",
+    ),
+    false,
+  );
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google", "github", "apple"],
+  );
+});
+
+test("a pending email attempt blocks duplicate presses and concurrent social login", async (t) => {
+  const screen = setup({ providers: ["google"] });
+  t.after(screen.harness.unmount);
+  const pending = deferred<typeof signedIn>();
+  screen.setLogin(() => pending.promise);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  const staleSubmit = screen.submit().props.onPress;
+  const staleSocial = screen.social()[0]!.props.onPress;
+  staleSubmit();
+  staleSubmit();
+  staleSocial();
+  screen.harness.flush();
+  assert.equal(screen.calls.length, 1);
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.input("Email").props.editable, false);
+  assert.equal(screen.social()[0]!.props.disabled, true);
+  assert.equal(screen.configRefetches(), 0);
+  assert.deepEqual(screen.socialUrls, []);
+  pending.resolve(signedIn);
+  await screen.harness.settle();
+  assert.equal(screen.sessions.length, 1);
+});
+
+test("social login remains configured and revalidates availability before opening OAuth", async (t) => {
+  const screen = setup({ providers: ["github"] });
+  t.after(screen.harness.unmount);
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["github"],
+  );
+  screen.setRefetch(async () => ({
+    data: { emailAuthEnabled: false, socialProviders: [] },
+    error: null,
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.equal(screen.configRefetches(), 1);
+  assert.deepEqual(screen.socialUrls, []);
+  assert.match(
+    textContent(screen.harness.value()),
+    /GitHub sign-in is not enabled/,
+  );
+  assert.equal(screen.input("Password").props.editable, true);
+});
+
+test("a timed-out provider check recovers through config retry without a stale login error", async (t) => {
+  const screen = setup({ providers: ["google"] });
+  t.after(screen.harness.unmount);
+  const config = {
+    emailAuthEnabled: false,
+    socialProviders: ["google"] as const,
+  };
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: new Error(
+      "Loading sign-in options timed out. Check your connection and try again.",
+    ),
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(
+    screen.socialUrls,
+    [],
+    "failed provider discovery must not open OAuth",
+  );
+  assert.deepEqual(screen.social(), []);
+  const retry = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Pressable" &&
+      textContent(element) === "Retry sign-in options",
+  );
+  assert.ok(retry);
+  assert.match(
+    textContent(screen.harness.value()),
+    /Could not load sign-in options/,
+  );
+  assert.doesNotMatch(
+    textContent(screen.harness.value()),
+    /Loading sign-in options timed out/,
+  );
+
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: null,
+  }));
+  retry.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(
+    screen.social().map((element) => element.props.provider),
+    ["google"],
+  );
+  assert.doesNotMatch(
+    textContent(screen.harness.value()),
+    /timed out|Could not load sign-in options/,
+  );
+  assert.equal(screen.configRefetches(), 2);
+  assert.equal(screen.social()[0]!.props.disabled, false);
+  assert.deepEqual(screen.sessions, []);
+
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.equal(
+    screen.configRefetches(),
+    3,
+    "retrying Google still revalidates the provider",
+  );
+  assert.equal(screen.socialUrls.length, 1);
+  assert.match(
+    textContent(screen.harness.value()),
+    /Sign-in was closed \(cancel\)/,
+  );
+});
+
+test("a pending social attempt blocks concurrent email login", async (t) => {
+  const screen = setup({ providers: ["apple"] });
+  t.after(screen.harness.unmount);
+  const pending = deferred<{ data: PublicAuthConfig; error: Error | null }>();
+  screen.setRefetch(() => pending.promise);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  const staleSubmit = screen.submit().props.onPress;
+  screen.social()[0]!.props.onPress();
+  staleSubmit();
+  screen.harness.flush();
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.input("Password").props.editable, false);
+  assert.deepEqual(screen.calls, []);
+  pending.resolve({
+    data: { emailAuthEnabled: false, socialProviders: ["apple"] },
+    error: null,
+  });
+  await screen.harness.settle();
+  assert.equal(screen.socialUrls.length, 1);
+  assert.equal(screen.submit().props.disabled, false);
+});
+
+test("backgrounding clears password and authenticator data", (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  screen.background();
+  assert.equal(screen.input("Password").props.value, "");
+  assert.equal(screen.input("Email").props.value, "reviewer@example.test");
+  assert.equal(screen.submit().props.disabled, true);
+});
+
+test("registration and waitlist callbacks resolve the domain after import and at each press", async (t) => {
+  const domains = loadTestModule<typeof import("../../lib/domains")>(
+    "../domains.ts",
+    {
+      process: {
+        env: {
+          EXPO_PUBLIC_API_BASE_URL: "https://old-api.example/api/v1",
+          EXPO_PUBLIC_FRONTEND_URL: "https://old.example",
+          EXPO_PUBLIC_LEGAL_BASE_URL: "https://old.example",
+          EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1",
+          EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
+          EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
+        },
+      },
+    },
+  );
+  const screen = setup({
+    getFrontendUrl: domains.getFrontendUrl,
+    beforeMount: () => domains.selectNewDomains(true),
+  });
+  t.after(screen.harness.unmount);
+  const registration = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityLabel === "Create account",
+  )!;
+  registration.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register"]);
+  screen.openUrl(
+    "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
+  );
+  const waitlist = elements(screen.harness.value()).find(
+    (element) =>
+      element.type === "Text" && textContent(element) === "Join the waitlist",
+  );
+  assert.ok(waitlist);
+  waitlist.props.onPress();
+  assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai"]);
+  // Existing event handlers must not retain a URL from their earlier render.
+  domains.selectNewDomains(false);
+  registration.props.onPress();
+  waitlist.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.registrationUrls, [
+    "https://nyxid.ai/register",
+    "https://old.example/register",
+  ]);
+  assert.deepEqual(screen.waitlistUrls, [
+    "https://nyxid.ai",
+    "https://old.example",
+  ]);
+});
+
+test("sign-in delegates idle, ready, pending and MFA submits to the shared primary button", async (t) => {
+  const screen = setup();
+  t.after(screen.harness.unmount);
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.submit().props.loading, false);
+  screen.change("Email", "reviewer@example.test");
+  screen.change("Password", "password");
+  assert.equal(screen.submit().props.disabled, false);
+  let rejectLogin!: (reason: unknown) => void;
+  screen.setLogin(
+    () =>
+      new Promise((_resolve, reject) => {
+        rejectLogin = reject;
+      }),
+  );
+  screen.submit().props.onPress();
+  screen.harness.flush();
+  assert.equal(screen.submit().props.loading, true);
+  assert.equal(screen.submit().props.disabled, true);
+  assert.equal(screen.submit().props.label, "Signing in...");
+  rejectLogin(new MfaChallengeError("synthetic-challenge"));
+  await screen.harness.settle();
+  assert.equal(screen.submit().props.loading, false);
+  assert.equal(screen.submit().props.label, "Verify & sign in");
+  screen.change("Authenticator code", "12");
+  assert.equal(screen.submit().props.disabled, true);
+  screen.change("Authenticator code", "012345");
+  assert.equal(screen.submit().props.disabled, false);
+});

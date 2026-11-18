@@ -11,6 +11,7 @@
       "description": "Google AI API"
     }
   ],
+  "x-nyxid-credential-verification": { "operation": "models_list" },
   "paths": {
     "/models/{model}:generateContent": {
       "post": {

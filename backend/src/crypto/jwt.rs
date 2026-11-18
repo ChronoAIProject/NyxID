@@ -218,6 +218,16 @@ pub struct RelayReplyClaims {
     pub platform: String,
 }
 
+impl RelayReplyClaims {
+    /// Recheck a verified capability after preparation without decoding it again.
+    pub(crate) fn require_unexpired(&self) -> Result<(), AppError> {
+        if self.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= Utc::now().timestamp() {
+            return Err(AppError::TokenExpired);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RelayCallbackClaims {
     pub iss: String,
@@ -616,7 +626,7 @@ fn generate_access_token_for_client(
         oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: now + ttl_override_secs.unwrap_or(config.jwt_access_ttl_secs),
         iat: now,
         jti: Uuid::new_v4().to_string(),
@@ -641,7 +651,7 @@ fn generate_access_token_for_client(
         relay_allow_all_nodes: None,
         resources: restrictions
             .as_ref()
-            .map(|r| r.resources.to_vec())
+            .map(|r| config.canonical_resources(r.resources))
             .or_else(|| client_id.map(|_| Vec::new())),
         allowed_service_ids: restrictions
             .as_ref()
@@ -704,7 +714,7 @@ pub fn generate_assistant_forward_access_token(
         oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: now + config.jwt_assistant_forward_ttl_secs,
         iat: now,
         jti: Uuid::new_v4().to_string(),
@@ -727,7 +737,7 @@ pub fn generate_assistant_forward_access_token(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
-        resources: Some(vec![resource_uri.to_string()]),
+        resources: Some(vec![config.canonical_base_url(resource_uri).into_owned()]),
         allowed_service_ids: Some(vec![]),
         allow_all_services: Some(false),
         allowed_node_ids: Some(Vec::new()),
@@ -774,7 +784,7 @@ pub fn generate_relay_access_token(
         oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         // Relay access tokens are shipped to a client-controlled callback URL,
         // so they use the dedicated (shorter) relay-access TTL rather than the
         // general access-token TTL to bound the replay window on leak.
@@ -893,7 +903,7 @@ pub fn generate_refresh_token(
         oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: now + config.jwt_refresh_ttl_secs,
         iat: now,
         jti: jti.clone(),
@@ -951,7 +961,7 @@ pub fn reissue_refresh_token(
         oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: expires_at,
         iat: issued_at,
         jti: jti.to_string(),
@@ -1110,7 +1120,7 @@ fn generate_delegated_access_token_inner(
         oauth_lineage: restrictions.and_then(|restrictions| restrictions.oauth_lineage.clone()),
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: now + ttl_secs,
         iat: now,
         jti: jti.clone(),
@@ -1135,7 +1145,8 @@ fn generate_delegated_access_token_inner(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
-        resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
+        resources: restrictions
+            .and_then(|r| r.resources.as_ref().map(|v| config.canonical_resources(v))),
         allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
         allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
@@ -1262,7 +1273,7 @@ pub fn generate_service_account_token(
         oauth_lineage: None,
         sub: service_account_id.to_string(),
         iss: config.jwt_issuer.clone(),
-        aud: config.base_url.clone(),
+        aud: config.jwt_audience().to_owned(),
         exp: now + ttl_secs,
         iat: now,
         jti: jti.clone(),
@@ -1306,8 +1317,8 @@ pub fn generate_service_account_token(
 /// Verify and decode an access or refresh token.
 pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<Claims, AppError> {
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[&config.jwt_issuer]);
-    validation.set_audience(&[&config.base_url]);
+    validation.set_issuer(&config.accepted_jwt_issuers());
+    validation.set_audience(&config.accepted_jwt_audiences());
 
     let token_data =
         decode::<Claims>(token, keys.decoding_key(token)?, &validation).map_err(|e| {
@@ -1353,9 +1364,7 @@ pub fn validate_relay_reply_token(
     let claims = token_data.claims;
     let now = Utc::now().timestamp();
 
-    if claims.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= now {
-        return Err(AppError::TokenExpired);
-    }
+    claims.require_unexpired()?;
     if claims.iat > now + RELAY_REPLY_CLOCK_SKEW_SECS {
         return Err(AppError::Unauthorized(
             "Invalid relay reply token".to_string(),
@@ -1371,7 +1380,7 @@ pub fn validate_relay_reply_token(
 
     if claims.token_type != RELAY_REPLY_TOKEN_TYPE
         || claims.aud != RELAY_REPLY_AUDIENCE
-        || claims.iss != config.jwt_issuer
+        || !config.accepts_jwt_issuer(&claims.iss)
     {
         return Err(AppError::Unauthorized(
             "Invalid relay reply token".to_string(),
@@ -1426,7 +1435,7 @@ pub fn validate_relay_callback_token(
 
     if claims.token_type != RELAY_CALLBACK_TOKEN_TYPE
         || claims.aud != RELAY_CALLBACK_AUDIENCE
-        || claims.iss != config.jwt_issuer
+        || !config.accepts_jwt_issuer(&claims.iss)
     {
         return Err(AppError::Unauthorized(
             "Invalid relay callback token".to_string(),
@@ -1514,9 +1523,12 @@ mod tests {
 
         let config = AppConfig {
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
+            chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
@@ -1524,6 +1536,7 @@ mod tests {
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_retained_public_key_paths: Vec::new(),
+            domain_aliases: Default::default(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1587,6 +1600,9 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -1594,6 +1610,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -1807,8 +1824,8 @@ mod tests {
     /// audience only). `verify_token` intentionally refuses these.
     fn decode_as_downstream(keys: &JwtKeys, config: &AppConfig, token: &str) -> Claims {
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[&config.jwt_issuer]);
-        validation.set_audience(&[&config.base_url]);
+        validation.set_issuer(&config.accepted_jwt_issuers());
+        validation.set_audience(&config.accepted_jwt_audiences());
         decode::<Claims>(token, &keys.decoding, &validation)
             .unwrap()
             .claims
@@ -1929,7 +1946,7 @@ mod tests {
             oauth_lineage: None,
             sub: user_id.to_string(),
             iss: config.jwt_issuer.clone(),
-            aud: config.base_url.clone(),
+            aud: config.jwt_audience().to_owned(),
             exp: now - 3600, // expired 1 hour ago
             iat: now - 7200,
             jti: Uuid::new_v4().to_string(),
@@ -2005,7 +2022,7 @@ mod tests {
 
         // Verify we can decode it (use lenient validation since audience differs)
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_issuer(&config.accepted_jwt_issuers());
         validation.set_audience(&["test-client"]);
         let decoded = decode::<IdTokenClaims>(&token, &keys.decoding, &validation).unwrap();
         assert_eq!(decoded.claims.sub, user_id.to_string());
@@ -2038,7 +2055,7 @@ mod tests {
         .unwrap();
 
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_issuer(&config.accepted_jwt_issuers());
         validation.set_audience(&["test-client"]);
         let decoded = decode::<IdTokenClaims>(&id_token, &keys.decoding, &validation).unwrap();
         assert!(decoded.claims.at_hash.is_some());
@@ -2182,7 +2199,10 @@ mod tests {
         ]);
         let allowed_service_ids = vec!["svc-1".to_string()];
         let auth_user = crate::mw::auth::AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
+            mfa_enabled: None,
             org_agent_access: None,
             assistant_group_id: None,
             assistant_agent_owner_id: None,
@@ -2528,3 +2548,7 @@ mod tests {
         assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 }
+
+#[cfg(test)]
+#[path = "jwt_domain_alias_tests.rs"]
+mod domain_alias_tests;

@@ -12,6 +12,7 @@ use mongodb::{
 #[derive(Clone)]
 pub struct Authority {
     pub catalog_base_url: String,
+    pub catalog_base_aliases: Vec<String>,
     pub actor: AuditActor,
     /// Captured from the authenticated request, never inferred from a user row.
     pub first_party_human: bool,
@@ -84,6 +85,13 @@ async fn check_parent(
             write_fence,
         )
         .await?;
+        if super::platform_key_service::model_only(&live)
+            && (!authority.first_party_human || !admin)
+        {
+            return Err(AppError::Forbidden(
+                "Model-only records require live Admin authority".into(),
+            ));
+        }
         if authority.admin_required && !admin {
             return Err(AppError::Forbidden("Admin authority revoked".into()));
         }
@@ -207,7 +215,7 @@ pub async fn commit_update(
                 return Err(AppError::Forbidden("Tool credential and destination are frozen; ask an Admin".into()));
             }
             if let Ok(url) = fields.get_str("icon_url") {
-                let id = super::catalog_icon_service::asset_id(&authority.catalog_base_url, url)?;
+                let id = super::catalog_icon_service::asset_id_with_aliases(&authority.catalog_base_url, &authority.catalog_base_aliases, url)?;
                 super::catalog_icon_service::require_asset(db, id, Some(&mut *session)).await?;
             }
             if let Some(rules) = fields.get("anonymous_endpoints") {
@@ -241,6 +249,41 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    if let Some(value) = fields.get("billing") {
+        let requested: Option<crate::models::service_billing::ServiceBilling> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid billing configuration".into()))?;
+        super::billing::model_tariffs::validate_catalog_update(
+            live.billing.as_ref(),
+            requested.as_ref(),
+        )?;
+    }
+    if let Some(value) = fields.get("platform_key") {
+        let next: Option<crate::models::downstream_service::PlatformKeyConfig> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid platform key policy".into()))?;
+        if super::platform_key_service::model_only(live)
+            && next.as_ref().map(|c| c.purpose) != live.platform_key.as_ref().map(|c| c.purpose)
+        {
+            return Err(AppError::ValidationError(
+                "Model-only credential purpose cannot be changed".into(),
+            ));
+        }
+    }
+    let next_model_only = fields
+        .get_document("platform_key")
+        .ok()
+        .and_then(|p| p.get_str("purpose").ok())
+        .is_some_and(|purpose| purpose != "ordinary");
+    if super::platform_key_service::model_only(live) || next_model_only {
+        let mut candidate = bson::to_document(live)
+            .map_err(|_| AppError::Internal("Invalid catalog record".into()))?;
+        candidate.extend(fields.clone());
+        super::platform_key_service::validate_model_purpose(
+            &bson::from_document(candidate)
+                .map_err(|_| AppError::ValidationError("Invalid catalog update".into()))?,
+        )?;
+    }
     if let Some(scheme) = fields.get("auth_scheme") {
         let scheme: Option<String> = bson::from_bson(scheme.clone())
             .map_err(|_| AppError::ValidationError("Invalid auth_scheme".into()))?;

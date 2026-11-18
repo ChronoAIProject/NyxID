@@ -21,6 +21,7 @@ fn service(billing: ServiceBilling) -> DownstreamService {
 
 fn lane(metric: BillingMetric, price: &str, code: &str, status: PricingSyncStatus) -> LanePricing {
     LanePricing {
+        model_prices: Vec::new(),
         metric,
         credits_per_unit: price.into(),
         lago_metric_code: code.into(),
@@ -73,6 +74,7 @@ fn rate(code: &str, pico: i64, age_secs: i64, retired: bool) -> (String, Billing
 
 fn env(rates: &HashMap<String, BillingRateCache>) -> ResolverEnv<'_> {
     ResolverEnv {
+        model_tariffs: &[],
         billing_enabled: true,
         resale_enabled: true,
         rate_ttl_secs: 600,

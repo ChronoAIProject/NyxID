@@ -3810,6 +3810,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkify"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dfa36d52c581e9ec783a7ce2a5e0143da6237be5811a0b3153fedfdbe9f780"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4299,7 +4308,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.73.0"
+version = "0.78.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4335,9 +4344,12 @@ dependencies = [
  "http 1.4.0",
  "http-body-util",
  "httpdate",
+ "hyper 1.8.1",
+ "hyper-util",
  "image",
  "jsonwebtoken 10.3.0",
  "libc",
+ "linkify",
  "lopdf",
  "mime",
  "mongodb",
@@ -4349,6 +4361,7 @@ dependencies = [
  "nyxid-service-adapters",
  "open",
  "p256",
+ "proc-macro2",
  "pulldown-cmark",
  "quick-xml 0.41.0",
  "rand 0.8.5",
@@ -4393,7 +4406,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.73.0"
+version = "0.78.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

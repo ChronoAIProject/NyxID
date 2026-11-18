@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import { LoginDevicePage } from "./login-device";
 import { LoginAgentKeyPage } from "./login-agent-key";
 import { loginInventory } from "@/lib/__fixtures__/login-inventory";
@@ -22,7 +23,8 @@ const mocks = vi.hoisted(() => ({
   query: "?user_code=ABCD-EFGH",
   config: { email_auth_enabled: true, social_providers: [] as string[] },
 }));
-vi.mock("@/lib/api-client", () => ({
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { post: mocks.post, get: mocks.get },
   apiClient: mocks.preview,
 }));
@@ -590,6 +592,28 @@ describe("three-step device approval", () => {
       ],
     ]);
   });
+  it.each(["device", "agent-key"] as const)("steps up inline and retries %s approval", async (flow) => {
+    let denied = false;
+    const original = mocks.post.getMockImplementation()!;
+    mocks.post.mockImplementation(async (path: string, body: unknown) => {
+      if (path.includes("/approve") && !denied) {denied = true; throw new ApiError(403, {error: "mfa_step_up_required", error_code: 2003, message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."});}
+      return original(path, body);
+    });
+    if (flow === "device") {
+      mount(); await click("Continue"); await click("Continue"); await click("Continue to approval"); await click("Approve full account access");
+    } else {
+      await scope("agent-key");
+      // The existing key flow still requires explicit permission confirmation.
+      await click("Create new Agent Key"); await click("Create & continue");
+    }
+    expect(screen.getByRole("region", {name: "Verify this session"})).toBeVisible();
+    expect(screen.queryByText("Approved — return to the requesting device")).not.toBeInTheDocument();
+    await click("Use a recovery code");
+    fireEvent.change(screen.getByLabelText("Recovery code"), {target: {value: "a".repeat(32)}});
+    await click("Verify & continue");
+    expect(mocks.preview).toHaveBeenCalledWith("/auth/mfa/step-up", expect.objectContaining({body: {code: "a".repeat(32)}}));
+    expect(screen.getByText("Approved — return to the requesting device")).toBeVisible();
+  });
   it("previews linked requests, shows actual requester details, and approves full account once", async () => {
     mount();
     expect(mocks.preview).toHaveBeenCalledTimes(1);
@@ -663,12 +687,17 @@ describe("three-step device approval", () => {
       ]);
     },
   );
-  it("creates a hinted key with the exact connection only on final approval", async () => {
+  it.each(["device", "agent-key"] as const)("creates a renamed hinted key with the exact connection only on final approval via %s", async (flow) => {
     mocks.query +=
       "&login_type=agent&key_source=new&key_name=Build+agent&platform=codex&expiry_days=30&permissions=read,proxy&service_permissions=github::repo:read";
-    await scope();
+    await scope(flow);
     await click("Create new Agent Key");
     expect(screen.getByLabelText("Name")).toHaveValue("Build agent");
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeVisible();
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "My build agent" },
+    });
+    expect(screen.getByRole("heading", { name: "My build agent" })).toBeVisible();
     fireEvent.click(screen.getByText("Customize"));
     expect(
       screen.getByRole("button", { name: "January 31, 2026" }),
@@ -676,22 +705,20 @@ describe("three-step device approval", () => {
     expect(
       screen.getByText(new Date("2026-01-31T23:59:59.000Z").toLocaleString()),
     ).toBeVisible();
-    fireEvent.click(
-      screen.getByLabelText("GitHub access").querySelector("summary")!,
-    );
+    expect(screen.getByLabelText("GitHub access")).toHaveAttribute("open");
     expect(
       screen.getByRole("checkbox", {
-        name: "Grant connection GitHub personal",
+        name: "Grant connection GitHub personal (Personal)",
       }),
     ).toBeChecked();
     expect(approvals()).toEqual([]);
     await click("Create & continue");
     expect(approvals()[0]).toEqual([
-      "/auth/device/approve-agent-key",
+      `/auth/${flow}/${flow === "device" ? "approve-agent-key" : "approve"}`,
       expect.objectContaining({
         selection: expect.objectContaining({
           kind: "new",
-          name: "Build agent",
+          name: "My build agent",
           scopes: "read proxy",
           allowed_service_ids: ["svc"],
           platform: "codex",

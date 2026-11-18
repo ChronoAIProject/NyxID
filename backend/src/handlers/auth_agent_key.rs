@@ -461,6 +461,7 @@ pub async fn approve(
             expiry,
             Some(&ip),
             user_agent(&headers).as_deref(),
+            user.derived_mfa_authority(),
         )
         .await?;
         Ok(private_json(DecisionResponse { ok: true }))

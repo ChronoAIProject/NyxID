@@ -23,6 +23,8 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("execution permission review pending")]
+    ApprovalPending { request_id: String },
     #[error("invalid permission policy: {0}")]
     Policy(&'static str),
     #[error("request denied: {0}")]
@@ -150,11 +152,47 @@ pub struct Plan {
     pub resources: Vec<ResourceCheck>,
 }
 
+/// Proof that the engine has completed adapter and hook checks for this exact plan.
+/// Only Engine can construct it; verification reads never receive this token.
+pub struct VerifiedPlan<'a> {
+    plan: &'a Plan,
+}
+impl VerifiedPlan<'_> {
+    pub fn plan(&self) -> &Plan {
+        self.plan
+    }
+}
+
+/// The host marks the primary attempt only after its own admission succeeds.
+#[derive(Clone, Default)]
+pub struct DispatchMark(Arc<std::sync::atomic::AtomicBool>);
+impl DispatchMark {
+    pub fn dispatched(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn was_dispatched(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Must pin the destination and credential, reject redirects, bound the
     /// response, and never forward caller-controlled authentication headers.
     async fn send(&self, request: &Request) -> Result<Response, Error>;
+
+    /// Verified primary send. Existing hosts retain their original send boundary.
+    /// An integrating host may run admission before marking dispatch; a refusal
+    /// here is then distinguishable from an uncertain provider write.
+    async fn send_verified(
+        &self,
+        verified: VerifiedPlan<'_>,
+        dispatch: DispatchMark,
+    ) -> Result<Response, Error> {
+        dispatch.dispatched();
+        self.send_to(&verified.plan.request, verified.plan.origin.as_deref())
+            .await
+    }
 
     /// Hosts supporting generic APIs must attest to the final selected origin.
     /// Existing transports fail closed until they implement that contract.
@@ -269,16 +307,15 @@ impl Engine {
     }
 
     pub async fn execute(&self, request: Request) -> Result<Response, Error> {
-        let mut dispatched = false;
+        let dispatched = DispatchMark::default();
         let mut write_accepted = false;
         let mutating = !matches!(request.method, Method::GET | Method::HEAD);
         let result = tokio::time::timeout(Duration::from_secs(20), async {
             let _permit = self.concurrency.try_acquire().map_err(|_| Error::Busy)?;
             let plan = self.authorize(request).await?;
-            dispatched = true;
             let response = self
                 .transport
-                .send_to(&plan.request, plan.origin.as_deref())
+                .send_verified(VerifiedPlan { plan: &plan }, dispatched.clone())
                 .await?;
             if response.body.len() > MAX_RESPONSE_BYTES {
                 return Err(Error::ResponseTooLarge);
@@ -303,7 +340,7 @@ impl Engine {
         if write_accepted && result.is_err() {
             return Err(Error::WriteAcceptedResponseWithheld);
         }
-        if dispatched && mutating && result.is_err() {
+        if dispatched.was_dispatched() && mutating && result.is_err() {
             return Err(Error::OutcomeUncertain);
         }
         result

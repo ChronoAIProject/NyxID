@@ -340,6 +340,7 @@ async fn manager_outbound_revalidates_stop_after_an_accepted_prefix() {
 async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[u8]) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let mut attachment = crate::models::assistant_attachment::AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: id.clone(),
         user_id: j.owner.clone(),
@@ -348,6 +349,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
         origin: "tool".into(),
         content_type: mime.into(),
         size: bytes.len() as i64,
+        chunks: 0,
         data_encrypted: Vec::new(),
         created_at: Utc::now(),
     };
@@ -374,6 +376,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
     saved
         .attachments
         .push(crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             id: id.clone(),
             origin: "tool".into(),
             content_type: mime.into(),
@@ -381,6 +384,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
             label: "generated file".into(),
             chat_delivery: Some(true),
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             pages: None,
         });
@@ -673,5 +677,419 @@ async fn manager_outbound_provider_valid_text_preserves_links_and_whitespace() {
                 >= std::time::Duration::from_secs(sent_times.len().saturating_sub(2) as u64)
         );
     }
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_saved_reply_notice_snapshots_reuse_the_winner() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7801).await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    assert!(matches!(
+        j.deliver(&destination, &reply, body.clone()).await.unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    let sent = j.sends().await.len();
+    // Repeat the forced interleaving without depending on scheduler luck.
+    for iteration in 0..8 {
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+            .update_one(
+                doc! {"reference.reply_id": &saved.id},
+                doc! {"$unset": {"notice_card_ids": ""}},
+            )
+            .await
+            .unwrap();
+        let (a, b) = delivery::TEST_BEFORE_NOTICE_SNAPSHOT
+            .scope(Arc::new(tokio::sync::Barrier::new(2)), async {
+                tokio::join!(
+                    Box::pin(j.deliver(&destination, &reply, body.clone())),
+                    Box::pin(j.deliver(&destination, &reply, body.clone()))
+                )
+            })
+            .await;
+        assert!(
+            a.is_ok() && b.is_ok(),
+            "iteration={iteration} a={a:?} b={b:?}"
+        );
+        assert_eq!(j.sends().await.len(), sent, "a={a:?} b={b:?}");
+    }
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_saved_reply_render_adopts_a_different_winning_notice_plan() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7802).await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    assert!(matches!(
+        j.deliver(&destination, &reply, body).await.unwrap(),
+        DeliveryOutcome::Sent { .. }
+    ));
+    let row = engine::get(&j.state.db, &j.owner, &reply.turn.conversation_id)
+        .await
+        .unwrap();
+    let card = |id: &str, summary: &str| -> AssistantAcknowledgement {
+        bson::from_document(doc! {"_id":id,"conversation_id":&row.id,"user_id":&j.owner,
+        "api_key_id":&row.credential_api_key_id,"kind":"action","summary":summary,
+        "status":"pending","decider":"user","requested_turn_id":&reply.turn.turn_id,
+        "created_at":bson::DateTime::now(),
+        "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(10)),
+        "routing":{"kind":"not_involved"}})
+        .unwrap()
+    };
+    let decided = card(
+        "00000400-0000-4000-8000-000000000001",
+        "Archive the old report",
+    );
+    let remaining = card(
+        "00000400-0000-4000-8000-000000000002",
+        "Send the weekly summary",
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_many([&decided, &remaining])
+        .await
+        .unwrap();
+    let deliveries = j
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME);
+    deliveries
+        .update_one(
+            doc! {"reference.reply_id": &saved.id},
+            doc! {"$unset": {"notice_card_ids": ""}},
+        )
+        .await
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (rendered, ()) = tokio::join!(
+        delivery::TEST_BEFORE_NOTICE_SNAPSHOT.scope(
+            barrier.clone(),
+            Box::pin(delivery::render_personal(&j.state, &saved, None))
+        ),
+        async {
+            // The renderer has read both cards and is about to pin them.
+            barrier.wait().await;
+            // Another renderer wins with a different plan: the first card was
+            // decided before it read.
+            deliveries
+                .update_one(
+                    doc! {"reference.reply_id": &saved.id},
+                    doc! {"$set": {"notice_card_ids": [&remaining.id]}},
+                )
+                .await
+                .unwrap();
+            barrier.wait().await;
+        }
+    );
+    let rendered = rendered.unwrap();
+    assert!(rendered.contains("Send the weekly summary"));
+    assert!(!rendered.contains("Archive the old report"));
+    let pinned = deliveries
+        .find_one(doc! {"reference.reply_id": &saved.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pinned.get_array("notice_card_ids").unwrap(),
+        &vec![bson::Bson::String(remaining.id.clone())]
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_attachment_crash_during_loading_recovers_without_replaying_the_parent_text() {
+    use crate::models::nyxbot_image_delivery::{COLLECTION_NAME as IMAGES, NyxbotImageDelivery};
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, mut saved) = j.prepared_reply(7012).await;
+    attach(&j, &mut saved, "application/pdf", b"%PDF-1.7 result").await;
+    Mock::given(method("POST"))
+        .and(path("/bot100:manager-test-secret/sendDocument"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"ok":true,"result":{"message_id":899}})),
+        )
+        .expect(1)
+        .mount(&j.server)
+        .await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    crate::services::durable_wake_tests::drop_after(
+        "manager_image_preparation_claimed",
+        j.deliver(&destination, &reply, body),
+    )
+    .await;
+    j.state
+        .db
+        .collection::<Document>(IMAGES)
+        .update_many(
+            doc! {},
+            doc! {"$set":{"preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    // An old parent worker may finish with a missing-media note. Recovery must
+    // not depend on that worker rerunning, and must never replay its text.
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME)
+        .update_one(
+            doc! {"reference.reply_id":&saved.id},
+            doc! {"$set":{"state":"sent","multipart_media_missing":1_i64}},
+        )
+        .await
+        .unwrap();
+    let row = j
+        .state
+        .db
+        .collection::<NyxbotImageDelivery>(IMAGES)
+        .find_one(doc! {"conversation_id":&saved.conversation_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let before = j.sends().await.len();
+    let base = j.server.uri();
+    let api = crate::services::telegram_new_api::TelegramApi {
+        http: &j.state.http_client,
+        base_url: &base,
+    };
+    let (a, b) = tokio::join!(
+        delivery::recover_attachment_with_api(&j.state, &row, &api),
+        delivery::recover_attachment_with_api(&j.state, &row, &api)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(j.sends().await.len(), before);
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(IMAGES)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("state")
+            .unwrap(),
+        "sent"
+    );
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .count_documents(doc! {"namespace":"manager_part_chat"})
+            .await
+            .unwrap(),
+        1,
+        "Recovered attachments retain the shared per-chat provider pacing"
+    );
+    j.server.verify().await;
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_text_preparation_crash_survivor_sends_once() {
+    let j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7013).await;
+    let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+    let before = j.sends().await.len();
+    crate::services::durable_wake_tests::drop_after(
+        "text_part_prepared",
+        j.deliver(&destination, &reply, body.clone()),
+    )
+    .await;
+    assert_eq!(j.sends().await.len(), before);
+    j.state
+        .db
+        .collection::<Document>(TEXT)
+        .update_many(
+            doc! {},
+            doc! {"$set": {
+                "parts.0.preparation.lease_until":bson::DateTime::from_millis(0),
+            }},
+        )
+        .await
+        .unwrap();
+    let parents = j
+        .state
+        .db
+        .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME);
+    parents.update_one(doc! {"reference.reply_id":&saved.id},doc! {"$set": {
+        "updated_at":bson::DateTime::from_millis(0),"preparation.lease_until":bson::DateTime::from_millis(0),
+    }}).await.unwrap();
+    delivery::sweep(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+    )
+    .await
+    .unwrap();
+    j.state
+        .db
+        .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    j.deliver(&destination, &reply, body.clone()).await.unwrap();
+    j.deliver(&destination, &reply, body).await.unwrap();
+    assert_eq!(
+        j.sends().await.len() - before,
+        1,
+        "survivor must send the proven-unsent manager part once"
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_text_preparation_normal_send_command_counts() {
+    let mut j = Journey::new().await;
+    j.link().await;
+    let (destination, reply, saved) = j.prepared_reply(7014).await;
+    let (db, counts) = crate::services::durable_wake_tests::monitored(&j.state.db).await;
+    j.state.db = db;
+    let base = j.server.uri();
+    let api = crate::services::telegram_new_api::TelegramApi {
+        http: &j.state.http_client,
+        base_url: &base,
+    };
+    let outcome = delivery::deliver(
+        &j.state,
+        j.producers.identity.clone(),
+        &destination,
+        &DeliveryRef::Reply(reply),
+        ReplyContent::Text(delivery::render_saved(&saved, &j.state.config.frontend_url)),
+        &api,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, DeliveryOutcome::Sent { .. }));
+    let counts = crate::services::durable_wake_tests::take(&counts);
+    println!(
+        "MANAGER_TEXT_COMMANDS total={} {counts:?}",
+        counts.values().sum::<usize>()
+    );
+    j.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_text_preparation_preserves_the_prefix_and_never_reopens_the_provider_boundary() {
+    for (site, expected_prefix, recover) in [
+        ("text_suffix_prepared", 1, true),
+        ("text_part_dispatch_committed", 0, false),
+        ("text_part_provider_accepted", 1, false),
+    ] {
+        let j = Journey::new().await;
+        j.link().await;
+        let (destination, reply, saved) = long_reply(&j, 7015).await;
+        let body = delivery::render_saved(&saved, &j.state.config.frontend_url);
+        let before = j.sends().await.len();
+        crate::services::durable_wake_tests::drop_after(
+            site,
+            j.deliver(&destination, &reply, body.clone()),
+        )
+        .await;
+        assert_eq!(j.sends().await.len() - before, expected_prefix);
+        j.state
+            .db
+            .collection::<Document>(TEXT)
+            .update_many(
+                doc! {},
+                doc! {"$set":{
+                    "parts.$[p].preparation.lease_until":bson::DateTime::from_millis(0)
+                }},
+            )
+            .array_filters(vec![doc! {"p.state":"pending","p.preparation.version":1}])
+            .await
+            .unwrap();
+        let parents = j
+            .state
+            .db
+            .collection::<Document>(crate::models::platform_manager_delivery::COLLECTION_NAME);
+        parents
+            .update_one(
+                doc! {"reference.reply_id":&saved.id},
+                doc! {"$set":{"updated_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        delivery::sweep(
+            &j.state,
+            j.producers.identity.clone(),
+            j.producers.public.clone(),
+            100,
+        )
+        .await
+        .unwrap();
+        j.state
+            .db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        j.deliver(&destination, &reply, body.clone()).await.unwrap();
+        let sends = j.sends().await;
+        if recover {
+            assert!(sends.len() - before > 1);
+            assert_eq!(
+                sends[before..]
+                    .iter()
+                    .filter(|s| s["text"] == sends[before]["text"])
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(sends.len(), before + expected_prefix);
+        }
+        j.deliver(&destination, &reply, body).await.unwrap();
+        assert_eq!(j.sends().await.len(), sends.len());
+        let parent = parents
+            .find_one(doc! {"reference.reply_id":&saved.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parent.get_str("state").unwrap(),
+            if recover { "sent" } else { "uncertain" }
+        );
+        j.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn manager_text_preparation_idle_recovery_and_scheduler_each_cost_one_read() {
+    let mut j = Journey::new().await;
+    let (db, counts) = crate::services::durable_wake_tests::monitored(&j.state.db).await;
+    j.state.db = db;
+    let result = delivery::sweep(
+        &j.state,
+        j.producers.identity.clone(),
+        j.producers.public.clone(),
+        100,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.processed, 0);
+    let manager = crate::services::durable_wake_tests::take(&counts);
+    assert_eq!(manager.values().sum::<usize>(), 1);
+    assert_eq!(manager.get("find:platform_manager_deliveries"), Some(&1));
+    assert_eq!(
+        crate::handlers::trigger_scheduler::tick(&j.state)
+            .await
+            .unwrap(),
+        0
+    );
+    let scheduler = crate::services::durable_wake_tests::take(&counts);
+    assert_eq!(scheduler.values().sum::<usize>(), 1);
+    assert_eq!(scheduler.get("find:trigger_work"), Some(&1));
+    println!("TEXT_PREPARATION_IDLE_COMMANDS manager={manager:?} scheduler={scheduler:?}");
     j.state.db.drop().await.unwrap();
 }

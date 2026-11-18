@@ -11,8 +11,11 @@ use crate::services::assistant_acknowledgement_service as acks;
 use crate::services::channel_platform::PlatformAdapter;
 use wiremock::matchers::body_string_contains;
 
-async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
-    let mut f = fixture(&format!("nyxbot_images_{platform}_{transport}")).await;
+pub(super) async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
+    let mut f = Box::pin(fixture(&format!("nyxbot_images_{platform}_{transport}"))).await;
+    crate::services::channel_image_delivery::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
     crate::services::channel_text_delivery::ensure_indexes(&f.state.db)
         .await
         .unwrap();
@@ -95,6 +98,12 @@ async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer)
                 platform,
             ),
         )
+    } else if platform == "discord" {
+        std::sync::Arc::new(
+            crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+                &server.uri(),
+            ),
+        )
     } else if platform == "slack" {
         std::sync::Arc::new(
             crate::services::channel_adapters::slack::SlackAdapter::media_test_adapter(
@@ -121,6 +130,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
     for index in 0..2 {
         let bytes = format!("pixels-{index}");
         let row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "tool".into(),
@@ -129,6 +139,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             turn_id: f.event.turn_id.clone().unwrap(),
             content_type: "image/png".into(),
             size: bytes.len() as i64,
+            chunks: 0,
             data_encrypted: f
                 .state
                 .encryption_keys
@@ -144,6 +155,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             .await
             .unwrap();
         attachments.push(TurnAttachment {
+            artifact: Default::default(),
             id: row.id,
             label: "private_tool_label".into(),
             content_type: row.content_type,
@@ -152,6 +164,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             pages: None,
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
         });
     }
@@ -216,6 +229,14 @@ async fn mock_sends(
 struct ImageClaims {
     items: Vec<NyxbotImageDelivery>,
 }
+fn released(row: &NyxbotImageDelivery) -> bool {
+    row.state.as_str() == "sending"
+        && row
+            .preparation
+            .as_ref()
+            .is_some_and(|p| p.version == 1 && p.phase == "released")
+        && row.attempt.is_some()
+}
 async fn claim(f: &Fixture) -> ImageClaims {
     use futures::TryStreamExt;
     let items = f
@@ -250,6 +271,9 @@ async fn send_plan(
     images::send_turn_images(
         &f.state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Event {
+                event_id: f.event.id.clone(),
+            },
             owner: OWNER,
             conversation_id: f.event.conversation_id.as_deref().unwrap(),
             turn_id: f.event.turn_id.as_deref().unwrap(),
@@ -266,10 +290,118 @@ async fn send_plan(
             initiated: None,
             fence: None,
         },
-        &ImageSendPlan { attachments },
+        &ImageSendPlan {
+            delegated: Vec::new(),
+            attachments,
+        },
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn attachment_preparation_crash_before_loading_survivor_delivers_each_image_once() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    add_images(&f).await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "image_preparation_claimed",
+        late_delivery::process(&f.state, &f.event.id),
+    )
+    .await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    super::expire_text_preparation(&f).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$set":{"preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let sent = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with("/sendPhoto"))
+        .count();
+    assert_eq!(
+        sent, 2,
+        "both attachments were proven unsent before the crash"
+    );
+    assert!(
+        claim(&f)
+            .await
+            .items
+            .iter()
+            .all(|r| r.state == crate::models::nyxbot_image_delivery::ImageDeliveryState::Sent)
+    );
+}
+
+#[tokio::test]
+async fn attachment_normal_send_command_counts() {
+    for transport in ["direct", "gateway"] {
+        let (mut f, server) = image_fixture("telegram", transport).await;
+        add_images(&f).await;
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+        let (db, counts) = crate::services::durable_wake_tests::monitored(&f.state.db).await;
+        f.state.db = db;
+        late_delivery::process(&f.state, &f.event.id).await;
+        let counts = crate::services::durable_wake_tests::take(&counts);
+        println!(
+            "ATTACHMENT_COMMANDS {transport} total={} {counts:?}",
+            counts.values().sum::<usize>()
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path().ends_with("/sendPhoto"))
+                .count(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = [None, Some(true), Some(false)]
+        .into_iter()
+        .map(|delivery| TurnAttachment {
+            image_input_reason: None,
+            artifact: Default::default(),
+            id: Uuid::new_v4().to_string(),
+            origin: "tool".into(),
+            label: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 100,
+            pages: None,
+            chat_delivery: delivery,
+            image_input: None,
+            image_inspection: None,
+        })
+        .collect();
+    send_plan(&f, attachments, None).await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -544,9 +676,13 @@ async fn nyxbot_unknown_image_skips_rest_and_claim_survives_retry() {
     assert_eq!((first.unknown, first.skipped), (1, 1));
     let before = claim(&f).await;
     assert_eq!(before.items[0].state.as_str(), "unknown");
-    assert_eq!(before.items[1].state.as_str(), "pending");
-    assert!(before.items[1].code.is_none());
-    assert!(before.items[1].attempt.is_none());
+    assert!(released(&before.items[1]));
+    assert_eq!(before.items[1].code.as_deref(), Some("recovery_parked"));
+    assert!(before.items[1].attempt.is_some());
+    assert!(before.items[1].preparation.as_ref().unwrap().parked);
+    expire_image_preparations(&f).await;
+    images::recovery::sweep(&f.state).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
     Mock::given(path("/bottoken/sendPhoto"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":19}})),
@@ -607,7 +743,7 @@ async fn nyxbot_gateway_missing_anchor_fails_images_without_changing_text_target
 }
 
 #[tokio::test]
-async fn nyxbot_gateway_expired_event_reference_keeps_images_on_relay_and_text_off_it() {
+async fn nyxbot_gateway_expired_event_reference_keeps_images_before_local_result() {
     let (f, server) = image_fixture("telegram", "gateway").await;
     let attachments = add_images(&f).await;
     mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
@@ -643,12 +779,20 @@ async fn nyxbot_gateway_expired_event_reference_keeps_images_on_relay_and_text_o
         &row,
         row.channel.as_ref().unwrap(),
         "Useful answer",
-        Some(&ImageSendPlan { attachments }),
+        Some(&ImageSendPlan {
+            delegated: Vec::new(),
+            attachments,
+        }),
     )
     .await;
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(|r| r.url.path().ends_with("sendPhoto")));
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[..2]
+            .iter()
+            .all(|r| r.url.path().ends_with("sendPhoto"))
+    );
+    assert!(requests[2].url.path().ends_with("sendMessage"));
     assert!(sends(&f).await.is_empty());
     assert!(claim(&f).await.items.iter().all(|item| !matches!(
         item.state,
@@ -753,9 +897,7 @@ async fn nyxbot_x_image_billing_refusal_suspends_bot_and_skips_remaining_images(
     let report = send_plan(&f, attachments.clone(), None).await;
     assert_eq!((report.failed, report.skipped), (1, 1));
     let row = claim(&f).await;
-    assert!(row.items.iter().all(|item| item.state.as_str() == "pending"
-        && item.code.is_none()
-        && item.attempt.is_none()));
+    assert!(row.items.iter().all(released));
     let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.channel.channel_bot_id)
         .await
         .unwrap();
@@ -1271,14 +1413,7 @@ async fn nyxbot_image_deadline_requires_a_useful_send_window() {
     assert_eq!((report.sent, report.unknown, report.skipped), (0, 0, 2));
     assert!(server.received_requests().await.unwrap().is_empty());
     let claim = claim(&f).await;
-    assert!(
-        claim
-            .items
-            .iter()
-            .all(|item| item.state.as_str() == "pending"
-                && item.code.is_none()
-                && item.attempt.is_none())
-    );
+    assert!(claim.items.iter().all(released));
     let later = send_plan(&f, attachments.clone(), None).await;
     assert_eq!(later.sent, 2);
     let repeated = send_plan(&f, attachments, None).await;
@@ -1295,15 +1430,16 @@ async fn nyxbot_unsupported_or_unanchored_images_record_refusals_without_loading
         if unsupported {
             f.channel.platform = "openclaw".into();
         }
-        f.state
-            .db
-            .run_command(doc! {"profile":2,"slowms":0})
-            .await
-            .unwrap();
+        // Level 2 captures every operation in this database without changing
+        // the server-wide slow-query threshold for unrelated parallel tests.
+        f.state.db.run_command(doc! {"profile":2}).await.unwrap();
         let thread = thread(&f).await;
         let report = images::send_turn_images(
             &f.state,
             ImageSendContext {
+                source: crate::models::image_preparation::Source::Event {
+                    event_id: f.event.id.clone(),
+                },
                 owner: OWNER,
                 conversation_id: f.event.conversation_id.as_deref().unwrap(),
                 turn_id: f.event.turn_id.as_deref().unwrap(),
@@ -1318,7 +1454,10 @@ async fn nyxbot_unsupported_or_unanchored_images_record_refusals_without_loading
                 initiated: None,
                 fence: None,
             },
-            &ImageSendPlan { attachments },
+            &ImageSendPlan {
+                delegated: Vec::new(),
+                attachments,
+            },
         )
         .await
         .unwrap();
@@ -1833,9 +1972,15 @@ async fn nyxbot_automation_terminal_refs_do_not_consume_the_eight_unsent_budget(
         "thread_id":&f.event.conversation_id,"turn_id":&later_turn,
         "deliver_to":bson::to_bson(&DeliverTo::Chat{chat_id:target.id.clone()}).unwrap(),
         "image_refs":bson::to_bson(&refs).unwrap(),"image_refs_truncated":3,
-        "fence":"fence","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::now(),
+        "fence":"fence","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(1)),
     })
     .unwrap();
+    f.state
+        .db
+        .collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(&run)
+        .await
+        .unwrap();
     let audience = format!("{}\u{1f}123\u{1f}", f.channel.channel_bot_id);
     // Newest refs are already terminal; all eight older pending refs still
     // have capacity for their first attempt in this delivery.
@@ -2020,6 +2165,12 @@ async fn nyxbot_slack_image_payloads_bind_top_level_and_two_native_roots_across_
         "deliver_to":bson::to_bson(&DeliverTo::Chat{chat_id:target.id.clone()}).unwrap(),"image_refs":bson::to_bson(&refs).unwrap(),
         "fence":"fence","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::now(),
     }).unwrap();
+    f.state
+        .db
+        .collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(&run)
+        .await
+        .unwrap();
     let result = chats::post_automation_images(
         &f.state,
         &run,
@@ -2290,8 +2441,14 @@ async fn nyxbot_automation_delivers_later_turn_images_without_reposting_explicit
         "scheduled_at":bson::DateTime::now(),"deadline":bson::DateTime::now(),"outcome":"started",
         "thread_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,
         "deliver_to":bson::to_bson(&DeliverTo::Chat{chat_id:target.id.clone()}).unwrap(),"image_refs":bson::to_bson(&refs).unwrap(),
-        "fence":"fence","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::now(),
+        "fence":"fence","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(1)),
     }).unwrap();
+    f.state
+        .db
+        .collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(&run)
+        .await
+        .unwrap();
     let result = chats::post_automation_images(
         &f.state,
         &run,
@@ -2334,6 +2491,9 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
     let first = images::send_turn_images_with_stop(
         &f.state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Post {
+                api_key_id: chat.api_key_id.clone(),
+            },
             owner: OWNER,
             conversation_id: f.event.conversation_id.as_deref().unwrap(),
             turn_id: f.event.turn_id.as_deref().unwrap(),
@@ -2350,6 +2510,7 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
             fence: Some(&chat),
         },
         &ImageSendPlan {
+            delegated: Vec::new(),
             attachments: attachments.clone(),
         },
         Some("cancelled"),
@@ -2359,13 +2520,7 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
     assert_eq!(first.claimed, 2);
     assert!(first.outcomes.iter().all(|item| item.status == "cancelled"));
     assert!(server.received_requests().await.unwrap().is_empty());
-    assert!(
-        claim(&f)
-            .await
-            .items
-            .iter()
-            .all(|item| item.state.as_str() == "pending")
-    );
+    assert!(claim(&f).await.items.iter().all(released));
     let refs: Vec<_> = attachments
         .into_iter()
         .map(|attachment| RunImageRef {
@@ -2380,8 +2535,14 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
         "thread_id": &f.event.conversation_id, "turn_id": &f.event.turn_id,
         "deliver_to": bson::to_bson(&DeliverTo::Chat { chat_id: target.id.clone() }).unwrap(),
         "image_refs": bson::to_bson(&refs).unwrap(), "fence": "fence",
-        "lease_until": bson::DateTime::now(), "expires_at": bson::DateTime::now(),
+        "lease_until": bson::DateTime::now(), "expires_at": bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(1)),
     }).unwrap();
+    f.state
+        .db
+        .collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME)
+        .insert_one(&run)
+        .await
+        .unwrap();
     mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
     let result = chats::post_automation_images(
         &f.state,
@@ -2502,7 +2663,7 @@ async fn nyxbot_queued_direct_source_admission_preserves_original_anchor_for_tex
         work.source_event_ids = vec![f.event.id.clone()];
         work.reply_to = vec![f.event.delivery.as_ref().unwrap().origin.clone()];
         assert!(
-            delivery::enqueue(&f.state.db, OWNER, &conversation, work)
+            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None)
                 .await
                 .unwrap()
         );
@@ -2641,6 +2802,7 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
                 OWNER,
                 conversation,
                 super::source_queue_tests::work(&source, &format!("question {i}")),
+                None
             )
             .await
             .unwrap()
@@ -3194,4 +3356,963 @@ async fn nyxbot_multipart_scheduler_recovers_rate_limits_and_crashes_without_rep
         }
         f.state.db.drop().await.unwrap();
     }
+}
+
+async fn shared_post_fixture(
+    platform: &str,
+) -> (Fixture, MockServer, acks::ChatAuthority, String, String) {
+    use crate::models::assistant_sharing::{ShareRole, ShareSubject};
+    use crate::services::assistant_team_service as team;
+    use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
+    let (f, server) = image_fixture(platform, "direct").await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    sharing::ensure_indexes(&f.state.db).await.unwrap();
+    flags::set_platform_override(
+        &f.state.db,
+        sharing::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let publisher = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &publisher,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let (agent, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &publisher,
+        team::CreateRequest {
+            name: "shared-publisher".into(),
+            description: "Specialist".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            machines: None,
+            logins: None,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let user = f
+        .state
+        .db
+        .collection::<crate::models::user::User>("users")
+        .find_one(doc! {"_id":OWNER})
+        .await
+        .unwrap()
+        .unwrap();
+    sharing::update(
+        &f.state.db,
+        &publisher,
+        &agent.id,
+        sharing::SharingUpdate {
+            expected_version: 0,
+            enabled: true,
+            audience: vec![sharing::Audience {
+                subject_kind: ShareSubject::Person,
+                subject_id: format!("email:{}", user.email),
+                role: ShareRole::User,
+            }],
+            shared_access: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let row = team::home_thread_for(&f.state.db, &f.state.encryption_keys, OWNER, &agent)
+        .await
+        .unwrap();
+    let row = crate::services::assistant_authority_tests::pin_assignment(
+        &f.state.db,
+        OWNER,
+        &row.id,
+        None,
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    (f, server, chat, publisher, agent.id)
+}
+
+#[tokio::test]
+async fn shared_transports_channel_posts_only_to_actor_allowed_chats_and_stop_after_revocation() {
+    use crate::services::shared_agent_service as sharing;
+    let (f, server, chat, publisher, agent_id) = shared_post_fixture("telegram").await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(json!({"ok":true,"result":{"message_id":900}})),
+        )
+        .mount(&server)
+        .await;
+    assert_eq!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Allowed", false)
+            .await
+            .unwrap()["text"],
+        "sent"
+    );
+    assert!(
+        chats::post_current_turn(
+            &f.state,
+            &chat,
+            &Uuid::new_v4().to_string(),
+            "Other person's destination",
+            false
+        )
+        .await
+        .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":false}})
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Not allowed", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(THREADS)
+        .update_one(doc! {"_id":&target.id}, doc! {"$set":{"allow_posts":true}})
+        .await
+        .unwrap();
+    // A recipient-owned chat record cannot donate the publisher's bot authority.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":&publisher}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Publisher bot", false)
+            .await
+            .is_err()
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":OWNER}},
+        )
+        .await
+        .unwrap();
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while server.received_requests().await.unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sharing::update(
+            &f.state.db,
+            &publisher,
+            &agent_id,
+            sharing::SharingUpdate {
+                expected_version: 1,
+                enabled: false,
+                audience: vec![],
+                shared_access: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    };
+    let text = "multi part text ".repeat(900);
+    let (result, ()) = tokio::join!(
+        chats::post_current_turn(&f.state, &chat, &target.id, &text, false),
+        revoke
+    );
+    assert!(result.is_err() || result.unwrap()["text"] != "sent");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "no next part after revocation"
+    );
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "Revoked", false)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+struct PostRevokingKeys {
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    inner: crate::crypto::local_key_provider::LocalKeyProvider,
+    db: mongodb::Database,
+    collection: &'static str,
+    filter: bson::Document,
+    update: bson::Document,
+}
+impl std::fmt::Debug for PostRevokingKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PostRevokingKeys")
+    }
+}
+#[async_trait::async_trait]
+impl crate::crypto::key_provider::KeyProvider for PostRevokingKeys {
+    async fn wrap_dek(&self, bytes: &[u8]) -> AppResult<crate::crypto::key_provider::WrappedKey> {
+        self.inner.wrap_dek(bytes).await
+    }
+    async fn unwrap_dek(
+        &self,
+        wrapped: &crate::crypto::key_provider::WrappedKey,
+    ) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
+        self.db
+            .collection::<bson::Document>(self.collection)
+            .update_one(self.filter.clone(), self.update.clone())
+            .await?;
+        self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.inner.unwrap_dek(wrapped).await
+    }
+    fn current_key_id(&self) -> u8 {
+        self.inner.current_key_id()
+    }
+    fn has_key_id(&self, id: u8) -> bool {
+        self.inner.has_key_id(id)
+    }
+    fn has_previous_key(&self) -> bool {
+        self.inner.has_previous_key()
+    }
+}
+
+#[tokio::test]
+async fn shared_transports_security_posts_revalidate_after_credential_await() {
+    for change in ["posts", "share", "behavior", "bot_owner", "route_key"] {
+        let (mut f, server, chat, publisher, agent_id) = shared_post_fixture("telegram").await;
+        let thread = thread(&f).await;
+        let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+            .await
+            .unwrap();
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let (collection, filter, update) = match change {
+            "posts" => (
+                THREADS,
+                doc! {"_id":&thread.id},
+                doc! {"$set":{"allow_posts":false}},
+            ),
+            "share" => (
+                "assistant_agent_sharing",
+                doc! {"_id":&agent_id},
+                doc! {"$inc":{"revision":1}},
+            ),
+            "behavior" => (
+                "assistant_agents",
+                doc! {"_id":&agent_id},
+                doc! {"$set":{"description":"Changed behavior"}},
+            ),
+            "route_key" => (
+                crate::models::api_key::COLLECTION_NAME,
+                doc! {"_id":&target.channel.route_api_key_id},
+                doc! {"$set":{"is_active":false}},
+            ),
+            _ => (
+                crate::models::channel_bot::COLLECTION_NAME,
+                doc! {"_id":&target.bot.id},
+                doc! {"$set":{"user_id":&publisher}},
+            ),
+        };
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        f.state.encryption_keys =
+            std::sync::Arc::new(crate::crypto::aes::EncryptionKeys::with_provider(
+                std::sync::Arc::new(PostRevokingKeys {
+                    fired: fired.clone(),
+                    inner: crate::crypto::local_key_provider::LocalKeyProvider::from_config(
+                        &f.state.config,
+                    ),
+                    db: f.state.db.clone(),
+                    collection,
+                    filter,
+                    update,
+                }),
+            ));
+        let result = chats::send_post_with_fence(
+            &f.state,
+            &target,
+            crate::services::channel_platform::OutboundReply {
+                text: Some("Do not deliver".into()),
+                metadata: None,
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+            },
+            Some(&chat),
+        )
+        .await;
+        assert!(
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "{change}: reached credential await"
+        );
+        assert!(result.is_err(), "{change}: revoked send must be refused");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "{change}: no platform effect after KMS revocation"
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shared_transports_security_media_rechecks_between_upload_and_message() {
+    let (f, server, chat, _, _) = shared_post_fixture("lark").await;
+    let thread = thread(&f).await;
+    let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+        .await
+        .unwrap();
+    let arrived = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = arrived.clone();
+    Mock::given(path("/open-apis/im/v1/images"))
+        .respond_with(move |_: &wiremock::Request| {
+            signal.notify_one();
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(250))
+                .set_body_json(json!({"code":0,"data":{"image_key":"uploaded"}}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/open-apis/im/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"must-not-send"}})),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let revoke = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified())
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .update_one(doc! {"_id":&thread.id}, doc! {"$set":{"allow_posts":false}})
+            .await
+            .unwrap();
+    };
+    let outbound = crate::services::channel_platform::OutboundReply {
+        text: None,
+        metadata: None,
+        reply_to_platform_message_id: None,
+        attachments: vec![crate::services::channel_platform::MaterializedAttachment {
+            kind: crate::services::channel_platform::MediaKind::Image,
+            bytes: bytes::Bytes::from_static(b"image"),
+            filename: Some("image.png".into()),
+            mime_type: Some("image/png".into()),
+            caption: None,
+        }],
+    };
+    let (result, ()) = tokio::join!(
+        chats::send_post_with_fence(&f.state, &target, outbound, Some(&chat)),
+        revoke
+    );
+    assert!(
+        result.is_err(),
+        "revoked upload must not lead to a message send"
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/open-apis/im/v1/messages")
+            .count(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn shared_transports_security_posts_reject_org_bots_even_for_live_admin() {
+    let (f, server, chat, _, _) = shared_post_fixture("telegram").await;
+    let target = thread(&f).await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection("users")
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.channel.channel_bot_id},
+            doc! {"$set":{"user_id":&org}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(
+            &f.state,
+            &chat,
+            &target.id,
+            "No org posting authority",
+            false
+        )
+        .await
+        .is_err()
+    );
+    // Moving the route to the org does not broaden a personal shared key either.
+    f.state
+        .db
+        .collection::<bson::Document>(CHANNELS)
+        .update_one(doc! {"_id":&f.channel.id}, doc! {"$set":{"user_id":&org}})
+        .await
+        .unwrap();
+    assert!(
+        chats::post_current_turn(&f.state, &chat, &target.id, "No org route authority", false)
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_transports_security_posts_reject_stripped_shared_context_and_direct_relay() {
+    let (f, server, chat, _, _) = shared_post_fixture("telegram").await;
+    let thread = thread(&f).await;
+    let target = chats::prepare_post(&f.state, OWNER, &thread.id, None)
+        .await
+        .unwrap();
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    for tool in [
+        "channel_bot_setup_link",
+        "connect_channel_bot",
+        "link_channel_bot",
+        "update_channel_access",
+        "update_channel_chat",
+        "disconnect_channel_bot",
+    ] {
+        let (refusal, failed) = crate::handlers::assistant_team::execute_tool(
+            &f.state,
+            &chat,
+            &format!("nyxid__{tool}"),
+            &json!({}),
+        )
+        .await;
+        assert!(failed, "shared tool {tool} must remain excluded");
+        assert_eq!(refusal["error"], "shared_agent_scope");
+    }
+    let mut stripped = chat.clone();
+    stripped.org_agent_access = None;
+    assert!(!chats::post_turn_is_live(&f.state, &stripped).await.unwrap());
+    let key = crate::services::key_service::get_api_key(&f.state.db, OWNER, &chat.api_key_id)
+        .await
+        .unwrap();
+    let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+        .await
+        .unwrap();
+    let result = crate::handlers::channel_relay::deliver_prepared_initiated_message(
+        &f.state,
+        &HeaderMap::new(),
+        &auth,
+        &target.conversation,
+        &target.bot,
+        crate::services::channel_platform::OutboundReply {
+            text: Some("No direct relay".into()),
+            metadata: None,
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+        },
+        target.adapter.as_ref(),
+    )
+    .await;
+    assert!(result.is_err());
+    // Generic reply cannot treat a conversation key as the channel route key.
+    let reply = crate::handlers::channel_relay::AsyncReplyRequest {
+        thread_reply: false,
+        message_id: f.event.relay_message_id.clone().unwrap(),
+        reply: crate::handlers::channel_relay::AsyncReplyBody {
+            text: Some("No direct reply".into()),
+            metadata: None,
+            attachments: vec![],
+        },
+    };
+    assert!(
+        crate::handlers::channel_relay::resolve_reply_request_context(
+            &f.state,
+            &HeaderMap::new(),
+            Some(&auth),
+            &reply
+        )
+        .await
+        .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
+    use crate::{
+        models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        services::nyxbot_response_recovery as recovery,
+    };
+    let (f, server) = image_fixture("telegram", "gateway").await;
+    add_images(&f).await;
+    mock_sends(&server, "telegram", false, Duration::ZERO).await;
+    let payload = recovery::Payload::new("resp_images", "nyxbot_images", Default::default());
+    let stored = GatewayResponse {
+        id: Uuid::new_v4().to_string(),
+        response_id: "resp_images".into(),
+        user_id: OWNER.into(),
+        channel_id: f.channel.id.clone(),
+        binding_id: "images".into(),
+        partition: PARTITION.into(),
+        event_key: f.event.id.clone(),
+        request_hash: "images".into(),
+        conversation_id: f.event.conversation_id.clone(),
+        terminal: false,
+        revision: 0,
+        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    };
+    f.state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .insert_one(&stored)
+        .await
+        .unwrap();
+    let fixture_ref = &f;
+    for _ in 0..2 {
+        // A stale replica can race terminalization. The shared image ledger
+        // still prevents it from sending a second copy.
+        recovery::refresh(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &stored,
+            |text| async move {
+                late_delivery::stream_images(
+                    &fixture_ref.state,
+                    &fixture_ref.event.id,
+                    &text,
+                    std::time::Instant::now() + Duration::from_secs(135),
+                )
+                .await
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let result = f
+        .state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .find_one(doc! {"_id":&stored.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = recovery::payload(&f.state.encryption_keys, &result)
+        .await
+        .unwrap();
+    assert!(result.terminal);
+    assert_eq!(payload.snapshot["status"], "completed");
+    assert!(payload.snapshot.to_string().contains("Useful answer"));
+    assert!(!payload.snapshot.to_string().contains("unavailable"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("sendPhoto"))
+            .count(),
+        2
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.url.path().ends_with("sendMessage"))
+    );
+    assert_eq!(claim(&f).await.items.len(), 2);
+}
+
+#[path = "nyxbot_delegated_image_tests.rs"]
+mod delegated_image_tests;
+
+#[path = "nyxbot_supplemental_tests.rs"]
+mod supplemental_tests;
+
+async fn expire_image_preparations(f: &Fixture) {
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$set":{"preparation.lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn attachment_preparation_streamed_parent_is_not_needed_and_two_survivors_send_only_the_unsent_suffix()
+ {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = add_images(&f).await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    patch(&f, doc! {"delivery.state":"streamed"}).await;
+    crate::services::durable_wake_tests::drop_after(
+        "image_second_preparation_claimed",
+        send_plan(&f, attachments, None),
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    expire_image_preparations(&f).await;
+    let (a, b) = tokio::join!(
+        images::recovery::sweep(&f.state),
+        images::recovery::sweep(&f.state)
+    );
+    a.unwrap();
+    b.unwrap();
+    images::recovery::sweep(&f.state).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(status(&f).await, "streamed");
+    assert!(
+        claim(&f)
+            .await
+            .items
+            .iter()
+            .all(|r| r.state.as_str() == "sent")
+    );
+}
+
+#[tokio::test]
+async fn attachment_preparation_slow_original_is_fenced_after_a_survivor_claims() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = add_images(&f).await.into_iter().take(1).collect();
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    crate::services::durable_wake_tests::resume_after(
+        "image_prepared",
+        send_plan(&f, attachments, None),
+        async {
+            expire_image_preparations(&f).await;
+            // The crash hook is task-local; the survivor is a separate scoped task.
+            let state = f.state.clone();
+            state
+                .shutdown
+                .clone()
+                .spawn(async move {
+                    images::recovery::sweep(&state).await.unwrap();
+                })
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(claim(&f).await.items[0].state.as_str(), "sent");
+}
+
+#[tokio::test]
+async fn attachment_preparation_first_upload_boundary_and_legacy_uncertainty_are_terminal() {
+    for legacy in [false, true] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let attachments = add_images(&f).await.into_iter().take(1).collect();
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        crate::services::durable_wake_tests::drop_after(
+            "image_dispatch_committed",
+            send_plan(&f, attachments, None),
+        )
+        .await;
+        if legacy {
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+                .update_many(doc! {}, doc! {"$unset":{"preparation":""}})
+                .await
+                .unwrap();
+        } else {
+            expire_image_preparations(&f).await;
+        }
+        images::recovery::sweep(&f.state).await.unwrap();
+        images::recovery::sweep(&f.state).await.unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert_eq!(
+            claim(&f).await.items[0].state.as_str(),
+            if legacy { "sending" } else { "unknown" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn attachment_preparation_revoked_or_deleted_sources_are_parked_without_sending() {
+    for deleted in [false, true] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let attachments = add_images(&f).await.into_iter().take(1).collect();
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        crate::services::durable_wake_tests::drop_after(
+            "image_preparation_claimed",
+            send_plan(&f, attachments, None),
+        )
+        .await;
+        expire_image_preparations(&f).await;
+        if deleted {
+            f.state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .delete_one(doc! {"_id":&f.event.conversation_id})
+                .await
+                .unwrap();
+        } else {
+            f.state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .update_one(
+                    doc! {"_id":&f.channel.id},
+                    doc! {"$set":{"status":"revoked"}},
+                )
+                .await
+                .unwrap();
+        }
+        images::recovery::sweep(&f.state).await.unwrap();
+        images::recovery::sweep(&f.state).await.unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(
+            claim(&f).await.items[0]
+                .preparation
+                .as_ref()
+                .unwrap()
+                .parked
+        );
+    }
+}
+
+#[tokio::test]
+async fn attachment_preparation_stopped_live_post_is_parked_and_drain_takes_no_new_claim() {
+    for stopped in [false, true] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let attachments = add_images(&f).await;
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let authority = live_image_authority(&f, &attachments).await;
+        let target = thread(&f).await;
+        crate::services::durable_wake_tests::drop_after(
+            "image_preparation_claimed",
+            chats::post_current_turn(&f.state, &authority, &target.id, "Post result", true),
+        )
+        .await;
+        expire_image_preparations(&f).await;
+        let before = claim(&f).await.items[0].attempt.clone();
+        if stopped {
+            f.state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&f.event.conversation_id},
+                    doc! {"$set":{"active_turn.stop_requested":true}},
+                )
+                .await
+                .unwrap();
+        } else {
+            f.state.shutdown.begin_drain();
+        }
+        images::recovery::sweep(&f.state).await.unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let row = claim(&f).await.items.remove(0);
+        assert_eq!(row.attempt, before);
+        assert_eq!(row.preparation.as_ref().unwrap().parked, stopped);
+    }
+}
+
+#[tokio::test]
+async fn attachment_preparation_automation_survives_a_finished_parent_and_keeps_the_original_run_expiry()
+ {
+    use crate::models::{
+        trigger_run::{RunImageRef, TriggerRun},
+        trigger_schedule::DeliverTo,
+    };
+    for expired in [false, true] {
+        let (mut f, server) = image_fixture("telegram", "direct").await;
+        f.state.per_conversation_initiate_limiter =
+            std::sync::Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(0, 1));
+        let attachments = add_images(&f).await.into_iter().take(1).collect::<Vec<_>>();
+        let target = thread(&f).await;
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let refs = attachments
+            .iter()
+            .map(|a| RunImageRef {
+                conversation_id: f.event.conversation_id.clone().unwrap(),
+                turn_id: f.event.turn_id.clone().unwrap(),
+                attachment: a.clone(),
+            })
+            .collect::<Vec<_>>();
+        let run:TriggerRun=bson::from_document(doc! {
+            "_id":Uuid::new_v4().to_string(),"trigger_id":"trigger","user_id":OWNER,
+            "scheduled_at":bson::DateTime::now(),"deadline":bson::DateTime::now(),"outcome":"started",
+            "thread_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,
+            "deliver_to":bson::to_bson(&DeliverTo::Chat{chat_id:target.id.clone()}).unwrap(),
+            "image_refs":bson::to_bson(&refs).unwrap(),"fence":"fence","lease_until":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::days(1)),
+        }).unwrap();
+        let runs = f
+            .state
+            .db
+            .collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME);
+        runs.insert_one(&run).await.unwrap();
+        crate::services::durable_wake_tests::drop_after(
+            "image_preparation_claimed",
+            chats::post_automation_images(
+                &f.state,
+                &run,
+                &target.id,
+                None,
+                run.thread_id.as_deref().unwrap(),
+                "Saved result",
+            ),
+        )
+        .await;
+        runs.update_one(doc! {"_id":&run.id},doc! {"$set":{"outcome":"completed","result_claimed":true,
+            "result_delivery.expires_at":bson::DateTime::from_chrono(if expired {Utc::now()-ChronoDuration::seconds(1)} else {Utc::now()+ChronoDuration::minutes(20)})}}).await.unwrap();
+        expire_image_preparations(&f).await;
+        images::recovery::sweep(&f.state).await.unwrap();
+        images::recovery::sweep(&f.state).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.url.path().ends_with("sendPhoto"))
+                .count(),
+            usize::from(!expired)
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|r| !r.url.path().ends_with("sendMessage"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn attachment_preparation_accepted_upload_without_message_receipt_is_never_repeated() {
+    let (f, server) = image_fixture("lark", "direct").await;
+    let attachments = add_images(&f).await.into_iter().take(1).collect();
+    mock_sends(&server, "lark", false, std::time::Duration::ZERO).await;
+    let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = reached.clone();
+    Mock::given(path("/open-apis/im/v1/messages"))
+        .respond_with(move |_: &wiremock::Request| {
+            notify.notify_one();
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(2))
+                .set_body_json(json!({"code":0,"data":{"message_id":"accepted"}}))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    tokio::select! {
+        _=send_plan(&f,attachments,None)=>panic!("expected an interrupted receipt"),
+        ()=reached.notified()=>{},
+        ()=tokio::time::sleep(std::time::Duration::from_secs(10))=>panic!("provider boundary not reached"),
+    }
+    let requests = server.received_requests().await.unwrap();
+    let before = requests.len();
+    for endpoint in ["/open-apis/im/v1/images", "/open-apis/im/v1/messages"] {
+        assert_eq!(
+            requests.iter().filter(|r| r.url.path() == endpoint).count(),
+            1
+        );
+    }
+    expire_image_preparations(&f).await;
+    images::recovery::sweep(&f.state).await.unwrap();
+    images::recovery::sweep(&f.state).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    assert_eq!(claim(&f).await.items[0].state.as_str(), "unknown");
+}
+
+#[path = "nyxbot_scheduled_preparation_tests.rs"]
+mod scheduled_preparation_tests;
+
+#[tokio::test]
+async fn attachment_authority_observation_is_discarded_between_effects() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = add_images(&f).await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    crate::services::durable_wake_tests::resume_after(
+        "image_second_preparation_claimed",
+        send_plan(&f, attachments, None),
+        async {
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&f.channel.channel_bot_id},
+                    doc! {"$set":{"platform_entry_pending":true}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_discord_renderer_v2_posts_and_automation_preserve_urls_with_local_transport() {
+    Box::pin(async {
+        let (f, server) = image_fixture("discord", "direct").await;
+        let chat = live_image_authority(&f, &[]).await;
+        let target = thread(&f).await;
+        Mock::given(method("POST")).and(path("/channels/123/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"accepted"})))
+            .mount(&server).await;
+        let text = "… November 16 (Singapore time).\n\nThanks for joining the ChronoAI launch event! … once it's ready.\n\n… is now available: https://www.youtube.com/watch?v=Vre-ZFYv9as";
+        for _ in 0..2 {
+            let result = chats::post_current_turn(&f.state, &chat, &target.id, text, false).await.unwrap();
+            assert_eq!(result["text"], "sent");
+        }
+        let long = format!("{text}\n\n").repeat(60);
+        for _ in 0..2 {
+            chats::post_automation(&f.state, &chat.user_id, &target.id, &long, None, &chat.conversation_id, "discord-v2-run").await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<Value> = requests.iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+        assert_eq!(bodies[0]["content"], text);
+        assert_eq!(bodies[1..].iter().map(|b| b["content"].as_str().unwrap()).collect::<String>(), long.trim_end());
+        assert!(bodies.iter().all(|b| b["content"].as_str().unwrap().encode_utf16().count() <= 2000));
+        assert_eq!(f.state.db.collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .count_documents(doc! {"renderer_version":2}).await.unwrap(), 2);
+        f.state.db.drop().await.unwrap();
+    }).await;
 }

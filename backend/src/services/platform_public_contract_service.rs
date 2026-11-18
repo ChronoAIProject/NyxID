@@ -166,7 +166,7 @@ pub(crate) fn assertion(
 fn verify_assertion(state: &AppState, raw: &str, scope: &str, body: &[u8]) -> AppResult<Value> {
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_audience(&[AUDIENCE]);
-    validation.set_issuer(&[&state.config.jwt_issuer]);
+    validation.set_issuer(&state.config.accepted_jwt_issuers());
     validation.leeway = 0;
     let data = jsonwebtoken::decode::<Assertion>(
         raw,
@@ -1366,6 +1366,7 @@ pub(crate) async fn dispatch_probe(
         )
         .await?,
     );
+    super::shutdown::diagnostics::resolved_proxy(&target.0);
     proxy::strip_identity(&mut target.0);
     let metered = state.billing.open_required(&route).await?;
     let mut session = state.db.client().start_session().await?;

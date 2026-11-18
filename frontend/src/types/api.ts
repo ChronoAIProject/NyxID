@@ -22,8 +22,8 @@ export interface User {
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
-  /// Social login provider ("google", "github", ...) or null for
-  /// email/password accounts. Older backends omit the field.
+  /// Linked social provider ("google", "github", ...) or null when absent.
+  /// Password availability is independent. Older backends omit this field.
   readonly social_provider?: string | null;
   readonly has_password?: boolean;
   readonly is_admin: boolean;
@@ -50,7 +50,12 @@ export interface OnboardingState {
 }
 
 /// User-scoped configuration surfaced on `GET /users/me`.
+export interface SecurityPreferences {
+  readonly skip_mfa_for_approved_sign_ins: boolean;
+}
+
 export interface ProfileConfig {
+  readonly security?: SecurityPreferences;
   readonly services_view?: ServiceViewFilters | null;
   readonly service_views?: ServiceViewsPreferences | null;
   readonly onboarding: OnboardingState;
@@ -421,6 +426,19 @@ export interface DownstreamService {
    * (UI offers a "manage in AI Services" link).
    */
   readonly your_binding_count?: number;
+  /**
+   * Whether the viewer may resync connection identity for this service.
+   * Sent only by `GET /services/{id}`; absent means not allowed.
+   */
+  readonly can_resync_identity?: boolean;
+}
+
+export interface ResyncIdentityResponse {
+  readonly catalog_service_id: string;
+  /** Connections to this service that were checked. */
+  readonly matched_count: number;
+  /** Connections whose identity settings differed and were rewritten. */
+  readonly changed_count: number;
 }
 
 export interface DefaultRequestHeader {

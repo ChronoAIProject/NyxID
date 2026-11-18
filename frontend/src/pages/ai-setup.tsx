@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { Label } from "@/components/ui/label";
 import { useState, useMemo, useCallback } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -48,13 +52,14 @@ function CodeBlock({
   readonly label: string;
   readonly onCopy: () => void;
 }) {
+  useUiTranslation();
   return (
     <div className="space-y-2">
-      <Badge variant="secondary" className="text-10">
+      <Badge variant="secondary" className="text-12">
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 text-foreground">
           {code}
         </pre>
         <Button
@@ -62,7 +67,7 @@ function CodeBlock({
           size="icon"
           className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
           onClick={onCopy}
-          aria-label="Copy"
+          aria-label={translateUi("Copy")}
         >
           <Copy className="h-3.5 w-3.5" />
         </Button>
@@ -72,12 +77,11 @@ function CodeBlock({
 }
 
 function EmptyState() {
+  useUiTranslation();
   return (
     <div className="flex flex-col items-center gap-1 py-12">
       <BrainIcon className="h-48 w-48 text-muted-foreground" />
-      <p className="text-12 text-muted-foreground">
-        Create an OAuth client first to generate AI setup configs.
-      </p>
+      <p className="text-14 text-muted-foreground">{translateUi("Create an OAuth client first to generate AI setup configs.")}</p>
     </div>
   );
 }
@@ -90,6 +94,7 @@ function AiSkillSetupCard({
   readonly baseUrl: string;
   readonly dashboardUrl: string;
 }) {
+  useUiTranslation();
   const searchParams = useRouterState({
     select: (s) => s.location.search as Record<string, unknown>,
   });
@@ -118,20 +123,17 @@ function AiSkillSetupCard({
   const handleCopy = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateErrorMessage("Failed to copy"));
     }
   }, []);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Install AI Skills</CardTitle>
-        <CardDescription>
-          Install persistent NyxID skills so your AI agent automatically knows
-          about NyxID in every session. No need to paste a prompt each time.
-        </CardDescription>
+        <CardTitle>{translateUi("Install AI Skills")}</CardTitle>
+        <CardDescription>{translateUi("Install persistent NyxID skills so your AI agent automatically knows about NyxID in every session. No need to paste a prompt each time.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <Tabs
@@ -154,7 +156,7 @@ function AiSkillSetupCard({
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                     {setupPrompt}
                   </pre>
                   <Button
@@ -162,7 +164,7 @@ function AiSkillSetupCard({
                     size="icon"
                     className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
                     onClick={() => void handleCopy(setupPrompt)}
-                    aria-label="Copy"
+                    aria-label={translateUi("Copy")}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
@@ -173,17 +175,17 @@ function AiSkillSetupCard({
                     variant={
                       skillInfo.type === "auto-refresh" ? "default" : "secondary"
                     }
-                    className="text-10"
+                    className="text-12"
                   >
                     {skillInfo.type === "auto-refresh"
-                      ? "Auto-refresh"
+                      ? translateUi("Auto-refresh")
                       : skillInfo.type === "manual-refresh"
-                        ? "Manual refresh"
+                        ? translateUi("Manual refresh")
                         : skillInfo.type === "provider-level"
-                          ? "Provider-level"
-                          : "Per-session"}
+                          ? translateUi("Provider-level")
+                          : translateUi("Per-session")}
                   </Badge>
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     {skillInfo.note}
                   </span>
                 </div>
@@ -192,18 +194,16 @@ function AiSkillSetupCard({
           ))}
         </Tabs>
 
-        <p className="text-11 text-muted-foreground">
-          Skills are powered by the NyxID playbook at{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+        <p className="text-13 text-muted-foreground">{translateUi("Skills are powered by the NyxID playbook at")}{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             {baseUrl}/llms.txt
           </code>
-          . Tools with auto-refresh fetch the latest version automatically.
-          Check skill status:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+          {translateUi(". Tools with auto-refresh fetch the latest version automatically. Check skill status:")}{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             nyxid ai-setup status
           </code>
-          . Update the CLI by re-running the installer:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+          {translateUi(". Update the CLI by re-running the installer:")}{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             bash -c &quot;$(curl -fsSL ...install.sh)&quot;
           </code>
         </p>
@@ -214,6 +214,7 @@ function AiSkillSetupCard({
 
 
 export function AiSetupPage() {
+  useUiTranslation();
   const { data: appsData, isLoading: appsLoading } = useDeveloperApps();
   const { data: config, isLoading: configLoading } = usePublicConfig();
 
@@ -270,9 +271,9 @@ export function AiSetupPage() {
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(generatedConfig);
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }, [generatedConfig]);
 
@@ -289,13 +290,8 @@ export function AiSetupPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          AI Setup Guide
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Configure your AI coding assistant to work with NyxID. Pick a tool and
-          an app, copy the config, done.
-        </p>
+        <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("AI Setup Guide")}</h2>
+        <p className="text-14 text-muted-foreground">{translateUi("Configure your AI coding assistant to work with NyxID. Pick a tool and an app, copy the config, done.")}</p>
       </div>
 
       <Card>
@@ -305,21 +301,13 @@ export function AiSetupPage() {
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-13 font-semibold text-foreground">
-                Isolate this AI agent before handing it credentials
-              </h3>
-              <p className="max-w-2xl text-xs text-muted-foreground">
-                Create a scoped Agent Key, choose allowed services, add
-                credential bindings only when needed, then verify proxy access
-                from the Agent Key detail page.
-              </p>
+              <h3 className="type-card-title text-foreground">{translateUi("Isolate this AI agent before handing it credentials")}</h3>
+              <p className="max-w-2xl text-13 text-muted-foreground">{translateUi("Create a scoped Agent Key, choose allowed services, add credential bindings only when needed, then verify proxy access from the Agent Key detail page.")}</p>
             </div>
           </div>
           <Button variant="primary" asChild className="shrink-0">
             <Link to="/keys" search={{ tab: "nyxid", action: "setup-agent" }}>
-              <ButtonIcon variant="primary"><Shield className="h-3 w-3" /></ButtonIcon>
-              Set Up Agent Key
-            </Link>
+              <ButtonIcon variant="primary"><Shield className="h-3 w-3" /></ButtonIcon>{translateUi("Set Up Agent Key")}</Link>
           </Button>
         </CardContent>
       </Card>
@@ -333,9 +321,7 @@ export function AiSetupPage() {
           <div className="flex justify-end">
             <Button asChild variant="outline" className="text-text-tertiary hover:text-muted-foreground">
               <Link to="/developer/apps">
-                <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-                Create Developer App
-              </Link>
+                <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>{translateUi("Create Developer App")}</Link>
             </Button>
           </div>
           <EmptyState />
@@ -344,29 +330,26 @@ export function AiSetupPage() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>MCP Config Generator</CardTitle>
-              <CardDescription>
-                Select your OAuth client and AI tool to generate a
-                ready-to-paste configuration file.
-              </CardDescription>
+              <CardTitle>{translateUi("MCP Config Generator")}</CardTitle>
+              <CardDescription>{translateUi("Select your OAuth client and AI tool to generate a ready-to-paste configuration file.")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               {/* App selector */}
               <div className="space-y-2">
-                <label className="text-12 font-medium">OAuth Client</label>
+                <Label>{translateUi("OAuth Client")}</Label>
                 <Select
                   value={selectedClient?.id ?? ""}
                   onValueChange={setSelectedClientId}
                 >
                   <SelectTrigger className="w-full max-w-md">
-                    <SelectValue placeholder="Select an app" />
+                    <SelectValue placeholder={translateUi("Select an app")} />
                   </SelectTrigger>
                   <SelectContent>
                     {clients.map((client) => (
                       <SelectItem key={client.id} value={client.id}>
                         <span className="flex items-center gap-2">
                           {client.client_name}
-                          <Badge variant="secondary" className="text-10">
+                          <Badge variant="secondary" className="text-12">
                             {client.client_type}
                           </Badge>
                         </span>
@@ -394,16 +377,14 @@ export function AiSetupPage() {
                   <TabsContent key={tool.id} value={tool.id}>
                     <div className="space-y-4">
                       {tool.configFilePath && (
-                        <p className="text-12 text-muted-foreground">
-                          Save to{" "}
-                          <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                        <p className="text-14 text-muted-foreground">{translateUi("Save to")}{" "}
+                          <code className="rounded bg-muted px-1.5 py-0.5 text-14">
                             {tool.configFilePath}
                           </code>
                           {tool.id === "claude-code" && (
                             <span>
-                              {" "}
-                              or project-level{" "}
-                              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                              {" "}{translateUi("or project-level")}{" "}
+                              <code className="rounded bg-muted px-1.5 py-0.5 text-14">
                                 .claude/settings.json
                               </code>
                             </span>
@@ -426,20 +407,20 @@ export function AiSetupPage() {
           {selectedClient && (
             <Card>
               <CardHeader>
-                <CardTitle>Client Details</CardTitle>
+                <CardTitle>{translateUi("Client Details")}</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-12">
-                  <dt className="text-muted-foreground">Client ID</dt>
-                  <dd className="text-xs">{selectedClient.id}</dd>
-                  <dt className="text-muted-foreground">Type</dt>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-14">
+                  <dt className="text-muted-foreground">{translateUi("Client ID")}</dt>
+                  <dd className="text-13">{selectedClient.id}</dd>
+                  <dt className="text-muted-foreground">{translateUi("Type")}</dt>
                   <dd>{selectedClient.client_type}</dd>
-                  <dt className="text-muted-foreground">Redirect URIs</dt>
-                  <dd className="text-xs">
-                    {selectedClient.redirect_uris.join(", ") || "None"}
+                  <dt className="text-muted-foreground">{translateUi("Redirect URIs")}</dt>
+                  <dd className="text-13">
+                    {selectedClient.redirect_uris.join(", ") || translateUi("None")}
                   </dd>
-                  <dt className="text-muted-foreground">Scopes</dt>
-                  <dd className="text-xs">
+                  <dt className="text-muted-foreground">{translateUi("Scopes")}</dt>
+                  <dd className="text-13">
                     {selectedClient.allowed_scopes || "openid profile email"}
                   </dd>
                 </dl>

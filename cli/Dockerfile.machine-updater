@@ -1,31 +1,105 @@
-# A static, shell-free companion. Shares the CLI's Sigstore/TUF verifier.
-FROM rust:1.98.1-alpine AS builder
+# Static, shell-free companion. Shares the CLI Sigstore/TUF verifier.
+# Registry cache exports image layers only. Cargo cache mounts stay on one
+# builder, so dependency crates are compiled into ordinary layers. The release
+# binary and the release test harness are siblings: --target e2e does not
+# compile the production executable, and --target production still does.
+FROM python:3.12-alpine AS dependency-recipe
+WORKDIR /input
+COPY Cargo.toml Cargo.lock ./
+COPY backend/Cargo.toml backend/Cargo.toml
+COPY cli/Cargo.toml cli/Cargo.toml
+COPY cloud-auth/Cargo.toml cloud-auth/Cargo.toml
+COPY service-adapters/Cargo.toml service-adapters/Cargo.toml
+COPY mcp-demo/Cargo.toml mcp-demo/Cargo.toml
+COPY nyxid-crypto/Cargo.toml nyxid-crypto/Cargo.toml
+COPY machine/Cargo.toml machine/Cargo.toml
+COPY permissions/Cargo.toml permissions/Cargo.toml
+COPY machine-updater/Cargo.toml machine-updater/Cargo.toml
+COPY scripts/docker-dependency-recipe.py /recipe.py
+RUN python3 /recipe.py /input /recipe
+
+FROM rust:1.98.1-alpine AS dependencies
 RUN apk add --no-cache build-base cmake clang lld perl linux-headers python3
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY backend/ backend/
-COPY cli/ cli/
-COPY cloud-auth/ cloud-auth/
-COPY service-adapters/ service-adapters/
-COPY permissions/ permissions/
-COPY mcp-demo/ mcp-demo/
-COPY nyxid-crypto/ nyxid-crypto/
-COPY machine/ machine/
-COPY machine-updater/ machine-updater/
-ARG TARGETARCH
-RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
-    --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo build --release -p nyxid-machine-updater && cp target/release/nyxid-machine-updater /nyxid-machine-updater
+# GitHub-hosted runners used by this image have four vCPUs. Override to match
+# a smaller shared machine; do not raise it inside the shared CI VM.
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_INCREMENTAL=0
+COPY --from=dependency-recipe /recipe/ ./
+# Workspace resolution requires every member manifest and a source file per
+# target. Only machine and machine-updater are compiled for this image.
+RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
+    && mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs \
+    && mkdir -p cloud-auth/src && echo "pub fn _stub() {}" > cloud-auth/src/lib.rs \
+    && mkdir -p service-adapters/src && echo "pub fn _stub() {}" > service-adapters/src/lib.rs \
+    && mkdir -p mcp-demo/src && echo "fn main() {}" > mcp-demo/src/main.rs \
+    && mkdir -p nyxid-crypto/src && echo "pub fn _stub() {}" > nyxid-crypto/src/lib.rs \
+    && mkdir -p permissions/src && echo "fn main() {}" > permissions/src/main.rs \
+    && echo "" > permissions/src/lib.rs \
+    && mkdir -p machine/src && echo "" > machine/src/lib.rs \
+    && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
+    && echo "" > machine-updater/src/lib.rs
+RUN cargo build --locked --release -p nyxid-machine-updater
+
+# Dev-dependencies used by `cargo test --release`. Stubs keep fixture and
+# updater edits from recompiling wiremock, rcgen, and tokio-tungstenite.
+FROM dependencies AS test-dependencies
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+RUN cargo test --locked --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/stub-tests.json
+
+# Compile inputs for the real crates. Directory copies follow each module
+# tree; scripts/check-updater-docker-embeds.py rejects an include outside them.
+FROM scratch AS updater-sources
+COPY machine-updater/src machine-updater/src
+COPY machine/src machine/src
+COPY machine/resources machine/resources
+COPY cli/src/machine_updater cli/src/machine_updater
+COPY cli/src/tls.rs cli/src/tls.rs
+COPY cli/src/tls cli/src/tls
+COPY cli/src/commands/update_attestation.rs cli/src/commands/update_attestation.rs
+COPY cli/src/commands/update_attestation cli/src/commands/update_attestation
+COPY cli/resources/sigstore-root.json cli/resources/sigstore-root.json
+COPY cli/Cargo.toml cli/Cargo.toml
+
+FROM scratch AS updater-test-fixtures
+COPY cli/tests/fixtures/sigstore cli/tests/fixtures/sigstore
+COPY cli/tests/fixtures/update-attestation-statement.json cli/tests/fixtures/update-attestation-statement.json
+
+FROM dependencies AS builder
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+# Original manifests restore CARGO_PKG_VERSION and the CLI version embedded
+# by include_str. Normalized copies above exist only to keep dependency layers.
+COPY --from=dependency-recipe /input/ ./
+COPY --from=updater-sources / ./
+# Stub sources are older than their just-built artifacts. Drop those artifacts
+# or cargo republishes the empty crate as nyxid-machine-updater.
+RUN find target/release -depth \( -name 'nyxid-machine*' -o -name 'nyxid_machine*' -o -name 'libnyxid_machine*' \) -exec rm -rf {} + \
+    && touch machine-updater/src/main.rs machine-updater/src/lib.rs machine/src/lib.rs \
+        cli/src/machine_updater/mod.rs cli/src/tls.rs cli/src/commands/update_attestation.rs
+RUN cargo build --locked --release -p nyxid-machine-updater \
+    && cp target/release/nyxid-machine-updater /nyxid-machine-updater
+
 FROM scratch AS production
 COPY --from=builder /nyxid-machine-updater /nyxid-machine-updater
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 ENTRYPOINT ["/nyxid-machine-updater"]
 
-FROM builder AS tests-build
-RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
-    --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
-    cargo test --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
-    && python3 -c 'import json,shutil; [shutil.copy(v["executable"],"/updater-tests") for l in open("/tmp/tests.json") if (v:=json.loads(l)).get("executable") and v.get("profile",{}).get("test") and v.get("target",{}).get("kind")==["bin"]]'
+FROM test-dependencies AS tests-build
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+COPY --from=dependency-recipe /input/ ./
+COPY --from=updater-sources / ./
+COPY --from=updater-test-fixtures / ./
+RUN find target/release -depth \( -name 'nyxid-machine*' -o -name 'nyxid_machine*' -o -name 'libnyxid_machine*' \) -exec rm -rf {} + \
+    && touch machine-updater/src/main.rs machine-updater/src/lib.rs machine/src/lib.rs \
+        cli/src/machine_updater/mod.rs cli/src/tls.rs cli/src/commands/update_attestation.rs
+RUN cargo test --locked --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
+    && python3 -c 'import json,shutil; [shutil.copy(v["executable"],"/updater-tests") for l in open("/tmp/tests.json") if (v:=json.loads(l)).get("executable") and v.get("profile",{}).get("test") and v.get("target",{}).get("kind")==["bin"]]' \
+    && test -s /updater-tests
+
 FROM alpine:3.22 AS e2e
 RUN apk add --no-cache nodejs npm openssl && npm install --prefix /test ws
 COPY --from=tests-build /updater-tests /updater-tests
@@ -33,6 +107,12 @@ COPY cli/tests/machine_updater_fixture.mjs /test/fixture.mjs
 COPY cli/resources/machine-container/seccomp.json /test/seccomp.json
 COPY cli/tests/machine_updater_driver.sh /test/driver.sh
 ENTRYPOINT ["sh", "/test/driver.sh"]
+
+# Export the compiler's input closure for the CI staging guard without adding
+# diagnostics to either runtime image. These stages reuse the image builds.
+FROM scratch AS build-inputs
+COPY --from=builder /build/target/release/nyxid-machine-updater.d /production/
+COPY --from=tests-build /build/target/release/deps/nyxid_machine*.d /test/
 
 # Keep the shell-free production image as the default build target.
 FROM production AS final

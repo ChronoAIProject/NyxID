@@ -199,6 +199,11 @@ export const PrivacyPage = lazy(() =>
 export const TermsPage = lazy(() =>
   import("@/pages/terms").then((m) => ({ default: m.TermsPage })),
 );
+export const DataDeletionPage = lazy(() =>
+  import("@/pages/data-deletion").then((m) => ({
+    default: m.DataDeletionPage,
+  })),
+);
 export const NotificationSettingsPage = lazy(() =>
   import("@/pages/notification-settings").then((m) => ({
     default: m.NotificationSettingsPage,

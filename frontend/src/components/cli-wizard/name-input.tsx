@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 /**
  * Text input with inline Zod validation + optional helper hint.
  *
@@ -92,11 +93,11 @@ export function NameInput({
         }
       />
       {effectiveError ? (
-        <p id={errorId} className="text-xs text-destructive">
-          {effectiveError}
+        <p id={errorId} className="text-13 text-destructive">
+          {translateUi(effectiveError)}
         </p>
       ) : hint ? (
-        <p id={hintId} className="text-xs text-muted-foreground">
+        <p id={hintId} className="text-13 text-muted-foreground">
           {hint}
         </p>
       ) : null}

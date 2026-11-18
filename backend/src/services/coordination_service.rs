@@ -17,43 +17,42 @@ use crate::models::coordination::{
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     let leases = db.collection::<Document>(LEASE_COLLECTION_NAME);
-    for index_name in [
-        format!("{LEASE_COLLECTION_NAME}_expiry_ttl"),
-        format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
-    ] {
-        // Concurrent startup drops are harmless; another replica may have
-        // removed a superseded definition first.
-        let _ = leases.drop_index(index_name).await;
-    }
-    leases
-        .update_many(
-            doc! {
-                "record_kind": { "$exists": false },
-                "checkpoint": { "$exists": true },
-            },
-            doc! { "$set": { "record_kind": "checkpoint" } },
-        )
-        .await?;
-    leases
-        .update_many(
-            doc! { "record_kind": { "$exists": false } },
-            doc! { "$set": { "record_kind": "ephemeral" } },
-        )
-        .await?;
-    leases
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name(format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"))
-                        .expire_after(Duration::from_secs(0))
-                        .partial_filter_expression(doc! { "record_kind": "ephemeral" })
-                        .build(),
-                )
+    let _ = leases
+        .drop_index(format!("{LEASE_COLLECTION_NAME}_expiry_ttl"))
+        .await;
+    let index = IndexModel::builder()
+        .keys(doc! { "expires_at": 1 })
+        .options(
+            IndexOptions::builder()
+                .expire_after(Duration::from_secs(0))
+                .partial_filter_expression(doc! { "record_kind": "ephemeral" })
                 .build(),
         )
-        .await?;
+        .build();
+    crate::db::ensure_named_index_with_retry(
+        &leases,
+        &format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
+        index,
+        || async {
+            leases
+                .update_many(
+                    doc! {
+                        "record_kind": { "$exists": false },
+                        "checkpoint": { "$exists": true },
+                    },
+                    doc! { "$set": { "record_kind": "checkpoint" } },
+                )
+                .await?;
+            leases
+                .update_many(
+                    doc! { "record_kind": { "$exists": false } },
+                    doc! { "$set": { "record_kind": "ephemeral" } },
+                )
+                .await?;
+            Ok(())
+        },
+    )
+    .await?;
 
     for collection_name in [
         REPLAY_COLLECTION_NAME,
@@ -170,6 +169,19 @@ impl ClusterLeaseRuntime {
         LeaseStore::acquire(db, name, &self.holder, self.ttl).await
     }
 
+    /// Request-time leases (notably OAuth refresh) still use `acquire`.
+    pub async fn acquire_background(
+        &self,
+        db: &mongodb::Database,
+        name: &str,
+        shutdown: &super::shutdown::Runtime,
+    ) -> AppResult<Option<LeaseToken>> {
+        let Some(_claim) = shutdown.background() else {
+            return Ok(None);
+        };
+        self.acquire(db, name).await
+    }
+
     pub fn contender_wait(&self) -> Duration {
         self.renew_interval / 10
     }
@@ -247,6 +259,19 @@ impl LeaseStore {
         holder: &CoordinationHolder,
         ttl: Duration,
     ) -> AppResult<Option<LeaseToken>> {
+        Ok(Self::acquire_with_checkpoint(db, name, holder, ttl)
+            .await?
+            .map(|(token, _)| token))
+    }
+
+    /// Return the checkpoint from the acquisition's existing post-image. A
+    /// supervisor can resume durable status without another database read.
+    pub(crate) async fn acquire_with_checkpoint(
+        db: &mongodb::Database,
+        name: &str,
+        holder: &CoordinationHolder,
+        ttl: Duration,
+    ) -> AppResult<Option<(LeaseToken, Option<Bson>)>> {
         let ttl_ms = duration_millis(ttl, "lease TTL")?;
         let lease_id = uuid::Uuid::new_v4().to_string();
         let holder_bson = bson::to_bson(holder).map_err(|error| {
@@ -293,11 +318,14 @@ impl LeaseStore {
             .await;
 
         match result {
-            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some(LeaseToken {
-                name: name.to_string(),
-                holder: holder.clone(),
-                lease_id,
-            })),
+            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some((
+                LeaseToken {
+                    name: name.to_string(),
+                    holder: holder.clone(),
+                    lease_id,
+                },
+                record.checkpoint,
+            ))),
             Ok(Some(_)) => Ok(None),
             Ok(None) => Err(AppError::Internal(
                 "Lease acquisition returned no record".to_string(),
@@ -337,6 +365,7 @@ impl LeaseStore {
             .delete_one(without_checkpoint)
             .await?;
         if deleted.deleted_count == 1 {
+            super::shutdown::process().record_release("cluster", 1);
             return Ok(true);
         }
 
@@ -352,6 +381,7 @@ impl LeaseStore {
                 }},
             )
             .await?;
+        super::shutdown::process().record_release("cluster", released.modified_count);
         Ok(released.modified_count == 1)
     }
 
@@ -439,6 +469,51 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// Refund only the exact fixed window originally reserved. The consumed
+    /// reservation token is owned by the caller, so it cannot refund twice.
+    pub(crate) async fn refund(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        reset_at: chrono::DateTime<chrono::Utc>,
+        window: Duration,
+    ) -> AppResult<()> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let start = reset_at - chrono::Duration::milliseconds(window_ms);
+        db.collection::<Document>(RATE_WINDOW_COLLECTION_NAME).update_one(
+            doc! {"_id": hash_parts(&[namespace, key]), "window_start": DateTime::from_chrono(start), "count": {"$gt": 0}},
+            doc! {"$inc": {"count": -1_i64}},
+        ).await?;
+        Ok(())
+    }
+
+    /// A read-only shortcut; callers must still claim capacity with admit.
+    pub async fn is_exhausted(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        limit: u64,
+        window: Duration,
+    ) -> AppResult<bool> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| AppError::Internal("Rate limit out of range".into()))?;
+        if limit == 0 {
+            return Ok(true);
+        }
+        Ok(db
+            .collection::<Document>(RATE_WINDOW_COLLECTION_NAME)
+            .find_one(
+                doc! {"_id": hash_parts(&[namespace, key]), "$expr": {"$and": [
+                    {"$eq": ["$window_start", rate_window_start(window_ms)]},
+                    {"$gte": ["$count", limit]},
+                ]}},
+            )
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some())
+    }
+
     /// Couple admission to a caller's reservation transaction. A failed
     /// reservation consumes no rate budget and Mongo retries remain atomic.
     pub(crate) async fn admit_in_session(
@@ -728,6 +803,7 @@ impl SlotStore {
                 &token.lease_id,
             ))
             .await?;
+        super::shutdown::process().record_release("capacity_slots", result.deleted_count);
         Ok(result.deleted_count == 1)
     }
 
@@ -970,10 +1046,36 @@ fn exact_lease_filter(id: &str, holder: &CoordinationHolder, lease_id: &str) -> 
     }
 }
 
-fn active_lease_filter(id: &str, holder: &CoordinationHolder, lease_id: &str) -> Document {
+pub(crate) fn active_lease_filter(
+    id: &str,
+    holder: &CoordinationHolder,
+    lease_id: &str,
+) -> Document {
     let mut filter = exact_lease_filter(id, holder, lease_id);
     filter.insert("$expr", doc! { "$gt": ["$expires_at", "$$NOW"] });
     filter
+}
+
+// A task-local clock lets database integration tests cross an exact window
+// boundary without depending on the runner's speed. Production uses $$NOW.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_RATE_WINDOW_NOW: std::cell::Cell<DateTime>;
+}
+
+fn rate_window_start(window_ms: i64) -> Document {
+    let now = Bson::String("$$NOW".into());
+    #[cfg(test)]
+    let now = TEST_RATE_WINDOW_NOW
+        .try_with(|clock| Bson::DateTime(clock.get()))
+        .unwrap_or(now);
+    doc! {
+        "$dateTrunc": {
+            "date": now,
+            "unit": "millisecond",
+            "binSize": window_ms,
+        }
+    }
 }
 
 fn rate_window_pipeline(
@@ -983,13 +1085,7 @@ fn rate_window_pipeline(
     limit: i64,
     window_ms: i64,
 ) -> Vec<Document> {
-    let current_window = doc! {
-        "$dateTrunc": {
-            "date": "$$NOW",
-            "unit": "millisecond",
-            "binSize": window_ms,
-        }
-    };
+    let current_window = rate_window_start(window_ms);
     vec![
         doc! {
             "$set": {

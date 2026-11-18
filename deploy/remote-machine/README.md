@@ -540,3 +540,42 @@ Typed List compatibility does not resolve an independent unfinished creation
 dispatch: even after Kubernetes resources are released, `creation_result_unknown`
 continues to block final deletion and slot release until the original creation
 responsibilities are terminal. Do not rewrite database state to infer success.
+
+## Pause / Resume Node health prerequisites
+
+Ordinary native observation uses GET of the bound Node and GET of its same-name
+`coordination.k8s.io/v1` Lease in `kube-node-lease`. Ready, the original Node UID,
+Lease owner UID and holder identity must agree. The Lease must have a UID and
+resourceVersion, no deletion timestamp, a parseable renewTime no more than five
+seconds ahead, and a positive non-overflowing duration whose deadline is still
+in the future. An old Ready-condition heartbeat alone does not invalidate a
+fresh, identity-bound Lease. NotReady, unreachable and deletion remain unsafe.
+
+Read failures, absent/expired Leases and unprovable time bounds remain pending:
+they never refresh a running proof or authorize a new writer. A completed Pause
+retains its bound predecessor stop fact through these failures; Lease health is
+never a substitute for controller suspension, full scoped Pod reads, tracked Pod
+absence, original workspace identity or terminal runtime-request responsibility.
+Known identity conflicts still latch investigation and revoke execution. New
+Resume acceptance returns conflict for existing native uncertainty; replay of an
+already accepted identical request preserves its original operation. This change
+does not clear previously quarantined machines. Do not unset `native_uncertainty`
+or replace their PVC to make Resume proceed.
+
+Verify the actual backend principal with its configured credential, then perform
+real Node and same-name Lease GETs. The existing `healthcheck.sh` covers token-file
+mode; metadata credentials require the equivalent checks for their actual Google
+principal. Distinguish forbidden, unauthenticated and unreachable results.
+`node-lease-role.yaml` is applied separately under existing deployment authority:
+it is intentionally outside the namespace-rewriting kustomization. Preserve its
+`kube-node-lease` namespace and correct binding subject. No Lease LIST/WATCH/write,
+workload API permission or broader manager role is required.
+
+Before rollout, drain old backend observers and replace all backend replicas with
+the tested build so an old condition-heartbeat observer cannot still quarantine
+paused machines. Validate with dedicated disposable resources: authenticated
+workspace marker, completed Pause, 10–15 minute dwell with Node/Lease snapshots,
+Resume beyond the old cutoff, unchanged Sandbox/PVC identity and marker, exactly
+one generation/epoch increment, three cycles, then normal Delete and one slot
+release. Automated evidence and live acceptance must be reported separately;
+GKE, CSI and physical-stop behavior need their own acceptance.

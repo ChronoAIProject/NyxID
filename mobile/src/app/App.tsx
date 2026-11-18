@@ -1,8 +1,30 @@
+import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
+import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
+import { useNotificationNavigation } from "./useNotificationNavigation";
+import {
+  WorkspaceAccessibilityContext,
+  workspaceAccessibilityState,
+  type WorkspaceAccessibility,
+} from "../lib/accessibility/workspaceAccessibility";
+import {
+  type WorkspaceContentTransitionHandle,
+  WorkspacePushShell,
+} from "../components/workspace/WorkspacePushShell";
+import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
+import { getAuthAccountId, subscribeAuthAccount } from "../lib/auth/authAccount";
+import { getAuthEpoch } from "../lib/auth/authEpoch";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 // Keep the native splash visible until we've loaded fonts. The
 // expo-splash-screen plugin disables Expo's default auto-hide, so the
@@ -11,12 +33,28 @@ SplashScreen.preventAutoHideAsync().catch(() => {
   /* no-op — preventAutoHideAsync rejects if the splash has already
      been hidden, e.g. during fast refresh. Safe to ignore. */
 });
-import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
-import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  ActivityIndicator,
+  AppState,
+  findNodeHandle,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import {
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import NetInfo from "@react-native-community/netinfo";
 import {
   NavigationContainer,
+  type NavigationAction,
   NavigationState,
   PartialState,
   useNavigationContainerRef,
@@ -36,24 +74,48 @@ import {
 import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
-import { appLinking, extractChallengeIdFromNotificationResponse } from "./linking";
+import { appLinking, notificationLinkConfig } from "./linking";
+import {
+  isWorkspaceSidebarRoot,
+  openWorkspaceSheetAction,
+  workspaceDestinationMatches,
+  workspaceContentIdentity,
+  workspaceNavigateAction,
+} from "./navigationHierarchy";
+import type {
+  WorkspaceNavigationGuardChange,
+  WorkspaceEdgeBackChange,
+} from "./WorkspaceHeader";
 import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
   PushSyncSignal,
-  setForegroundNotificationHandler,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
 import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
 import { signalApprovalStateMayHaveChanged } from "../lib/notifications/approvalRefreshSignal";
-import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
+import {
+  AuthSessionProvider,
+  useAuthSession,
+} from "../features/auth/AuthSessionContext";
 import { MobileConsentProvider } from "../lib/consent";
 import { capture } from "../lib/telemetry";
 import type { PushType } from "../lib/telemetry-schema";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import type { BottomNavV2Tab } from "../components/BottomNavV2";
-// import { NyxSheet } from "../features/nyx/NyxSheet"; // TODO: re-enable when chat is ready
+import {
+  WorkspaceDrawer,
+  type WorkspaceRoute,
+} from "../components/workspace/WorkspaceDrawer";
+import { notificationsApi } from "../lib/api/notificationsApi";
+import { createNotificationPushController } from "../lib/notifications/notificationPushController";
+import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
+import { workspaceSidebarLayout } from "../components/workspace/workspacePushState";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
+import {
+  activeWorkspaceChatTarget,
+  workspaceChatNavigationAction,
+  type WorkspaceChatTarget,
+} from "./workspaceChatNavigation";
 
 // Wire TanStack Query's online state to NetInfo so queries pause when offline
 // and auto-refetch when connectivity returns.
@@ -93,14 +155,17 @@ function refreshQueryCacheFromPushSignal(signal: PushSyncSignal | null) {
 }
 
 function getActiveRouteName(
-  state: NavigationState | PartialState<NavigationState> | undefined
+  state: NavigationState | PartialState<NavigationState> | undefined,
 ): string | undefined {
   if (!state || state.routes.length === 0) return undefined;
 
   const index = state.index ?? 0;
   const route = state.routes[index];
   if (!route) return undefined;
-  const nested = route.state as NavigationState | PartialState<NavigationState> | undefined;
+  const nested = route.state as
+    | NavigationState
+    | PartialState<NavigationState>
+    | undefined;
   if (nested) {
     return getActiveRouteName(nested);
   }
@@ -110,26 +175,54 @@ function getActiveRouteName(
 
 export default function App() {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
-  const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(undefined);
-  const [isNyxOpen, setIsNyxOpen] = useState(false);
-  const pendingChallengeFromTapRef = useRef<string | null>(null);
+  const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
+    undefined,
+  );
+  const navigationGuardsRef = useRef(new Set<symbol>());
+  const criticalNavigationGuards = useRef(new Set<symbol>());
+  const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
-  const [pushToast, setPushToast] = useState<ToastState | null>(null);
 
-  const flushPendingChallengeTapNavigation = useCallback(() => {
-    if (!navigationRef.isReady()) return;
+  const [pushController] = useState(() =>
+    createNotificationPushController({
+      api: notificationsApi,
+      queryClient,
+      isForeground: () => AppState.currentState === "active",
+      isOnline: () => onlineManager.isOnline(),
+    }),
+  );
+  const { open: openNotification, flush: flushPendingNotificationNavigation } =
+    useNotificationNavigation(
+      navigationRef,
+      navigationGuardsRef,
+      pushController.navigated,
+    );
 
-    const pendingChallengeId = pendingChallengeFromTapRef.current;
-    if (!pendingChallengeId) return;
+  const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
+    (id, blocked, critical = false) => {
+      const guards = navigationGuardsRef.current;
+      if (blocked && critical) criticalNavigationGuards.current.add(id);
+      else criticalNavigationGuards.current.delete(id);
+      if (blocked) {
+        guards.add(id);
+      } else if (!guards.delete(id)) {
+        return;
+      }
+      setNavigationGuardRevision((value) => value + 1);
+    },
+    [],
+  );
 
-    const rootState = navigationRef.getRootState();
-    if (!rootState?.routeNames?.includes("Activity")) {
-      return;
-    }
+  const isNavigationBlocked = useCallback(
+    () => criticalNavigationGuards.current.size > 0,
+    [],
+  );
 
-    pendingChallengeFromTapRef.current = null;
-    navigationRef.navigate("Activity", { challengeId: pendingChallengeId });
-  }, [navigationRef]);
+  // Guard cleanup schedules a normal effect; it never dispatches during the
+  // header's layout effect or re-enters an in-progress navigation transition.
+  useEffect(() => {
+    flushPendingNotificationNavigation();
+  }, [navigationGuardRevision, flushPendingNotificationNavigation]);
 
   // Tapping the in-app toast resolves to exactly the same navigation as
   // tapping an OS notification, including the "Activity route not mounted
@@ -137,10 +230,11 @@ export default function App() {
   // and `onStateChange` flushes it.
   const openChallengeFromNotification = useCallback(
     (challengeId: string) => {
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
+      openNotification(
+        `${notificationLinkConfig.scheme}://activity?${new URLSearchParams({ challengeId })}`,
+      );
     },
-    [flushPendingChallengeTapNavigation]
+    [openNotification],
   );
 
   const [fontsLoaded] = useFonts({
@@ -185,7 +279,8 @@ export default function App() {
         cleanup = unsubscribe;
       })
       .catch((error) => {
-        if (__DEV__) console.warn("[push] notification runtime bootstrap failed", error);
+        if (__DEV__)
+          console.warn("[push] notification runtime bootstrap failed", error);
       });
 
     return () => {
@@ -234,76 +329,33 @@ export default function App() {
     // for honest emission when the listener does happen to catch a
     // backgrounded-but-live runtime; under normal conditions it reads
     // "foreground".
-    const subscription = Notifications.addNotificationReceivedListener((notification) => {
-      try {
-        const pushType = classifyPushType(notification.request.content.data);
-        const appState =
-          AppState.currentState === "active" ? "foreground" : "background";
-        capture({
-          name: "mobile.push_received",
-          props: { type: pushType, app_state: appState },
-        });
-      } catch {
-        // never break push pipeline on telemetry failure
-      }
-    });
+    const subscription = Notifications.addNotificationReceivedListener(
+      (notification) => {
+        try {
+          const pushType = classifyPushType(notification.request.content.data);
+          const appState =
+            AppState.currentState === "active" ? "foreground" : "background";
+          capture({
+            name: "mobile.push_received",
+            props: { type: pushType, app_state: appState },
+          });
+        } catch {
+          // never break push pipeline on telemetry failure
+        }
+        pushController.received(notification.request.content.data);
+      },
+    );
 
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [pushController]);
 
-  useEffect(() => {
-    const handleResponse = (response: Notifications.NotificationResponse | null) => {
-      const challengeId = extractChallengeIdFromNotificationResponse(response);
-      if (!challengeId) return;
-
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
-    };
-
-    const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      handleResponse(response);
-    });
-
-    void Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
-        handleResponse(response);
-      })
-      .catch((error) => {
-        if (__DEV__) {
-          console.warn("[push] getLastNotificationResponseAsync failed", error);
-        }
-      });
-
-    return () => {
-      responseSubscription.remove();
-    };
-  }, [flushPendingChallengeTapNavigation]);
-
-  // In-app replacement for the OS banner suppressed while the app is
-  // foregrounded (see `configureNotificationHandler`). Without this, a push
-  // arriving with the app open would be silent to the user. Reuses the same
-  // toast the rest of the app uses; the backend's push body is boilerplate
-  // ("A service is requesting access"), so the title alone loses nothing.
-  useEffect(() => {
-    return setForegroundNotificationHandler((notification) => {
-      const message = notification.title ?? notification.body;
-      if (!message) return;
-
-      const { challengeId } = notification;
-      setPushToast({
-        message,
-        kind: "info",
-        action: challengeId
-          ? {
-              label: "Review",
-              onPress: () => openChallengeFromNotification(challengeId),
-            }
-          : undefined,
-      });
-    });
-  }, [openChallengeFromNotification]);
+  const { toast: pushToast, toastKey: pushToastKey } =
+    useForegroundNotificationToast(
+      openChallengeFromNotification,
+      openNotification,
+    );
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
@@ -321,19 +373,22 @@ export default function App() {
 
     void consumePendingSignal();
 
-    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
-      const previousState = lastAppStateRef.current;
-      lastAppStateRef.current = nextState;
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      (nextState) => {
+        const previousState = lastAppStateRef.current;
+        lastAppStateRef.current = nextState;
 
-      const resumedFromBackground =
-        (previousState === "background" || previousState === "inactive") &&
-        nextState === "active";
+        const resumedFromBackground =
+          (previousState === "background" || previousState === "inactive") &&
+          nextState === "active";
 
-      if (!resumedFromBackground) return;
+        if (!resumedFromBackground) return;
 
-      void consumePendingSignal();
-      void queryClient.refetchQueries({ type: "active" });
-    });
+        void consumePendingSignal();
+        void queryClient.refetchQueries({ type: "active" });
+      },
+    );
 
     return () => {
       disposePushSyncHandler();
@@ -358,19 +413,27 @@ export default function App() {
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <ThemeProvider>
-              <MobileConsentProvider>
-                <AuthSessionProvider>
-                  <ThemedAppShell
-                    navigationRef={navigationRef}
-                    currentRouteName={currentRouteName}
-                    setCurrentRouteName={setCurrentRouteName}
-                    flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
-                    isNyxOpen={isNyxOpen}
-                    setIsNyxOpen={setIsNyxOpen}
-                    pushToast={pushToast}
-                  />
-                </AuthSessionProvider>
-              </MobileConsentProvider>
+              <LanguageProvider>
+                <ChatLayoutProvider>
+                  <MobileConsentProvider>
+                    <AuthSessionProvider>
+                      <ThemedAppShell
+                        navigationRef={navigationRef}
+                        currentRouteName={currentRouteName}
+                        setCurrentRouteName={setCurrentRouteName}
+                        flushPendingNotificationNavigation={
+                          flushPendingNotificationNavigation
+                        }
+                        onNavigationGuardChange={onNavigationGuardChange}
+                        navigationBlocked={isNavigationBlocked()}
+                        isNavigationBlocked={isNavigationBlocked}
+                        pushToast={pushToast}
+                        pushToastKey={pushToastKey}
+                      />
+                    </AuthSessionProvider>
+                  </MobileConsentProvider>
+                </ChatLayoutProvider>
+              </LanguageProvider>
             </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
@@ -383,52 +446,434 @@ function ThemedAppShell({
   navigationRef,
   currentRouteName,
   setCurrentRouteName,
-  flushPendingChallengeTapNavigation,
-  isNyxOpen,
-  setIsNyxOpen,
+  flushPendingNotificationNavigation,
+  onNavigationGuardChange,
+  navigationBlocked,
+  isNavigationBlocked,
   pushToast,
+  pushToastKey,
 }: {
-  navigationRef: ReturnType<typeof useNavigationContainerRef<RootStackParamList>>;
+  navigationRef: ReturnType<
+    typeof useNavigationContainerRef<RootStackParamList>
+  >;
   currentRouteName: string | undefined;
   setCurrentRouteName: (name: string | undefined) => void;
-  flushPendingChallengeTapNavigation: () => void;
-  isNyxOpen: boolean;
-  setIsNyxOpen: (open: boolean) => void;
+  flushPendingNotificationNavigation: () => void;
+  onNavigationGuardChange: WorkspaceNavigationGuardChange;
+  navigationBlocked: boolean;
+  isNavigationBlocked: () => boolean;
   pushToast: ToastState | null;
+  pushToastKey: number;
 }) {
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
+  const { isAuthenticated } = useAuthSession();
+  const sessionEpoch = getAuthEpoch();
+  const { width } = useWindowDimensions();
+  const persistentSidebar =
+    isAuthenticated && workspaceSidebarLayout(width).persistent;
+  const authenticatedNow = useRef(isAuthenticated);
+  authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
+  const edgeBacks = useRef(new Map<symbol, () => void>());
+  const [edgeBackRevision, setEdgeBackRevision] = useState(0);
+  const onEdgeBackChange = useCallback<WorkspaceEdgeBackChange>((id, back) => {
+    if (back) edgeBacks.current.set(id, back);
+    else edgeBacks.current.delete(id);
+    setEdgeBackRevision((value) => value + 1);
+  }, []);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerPresented, setDrawerPresented] = useState(false);
+  const sidebarFocus = useRef<View>(null);
+  const drawerOrigin =
+    useRef<ReturnType<typeof workspaceFocus.capture>>(undefined);
+  const pendingMenuFocus =
+    useRef<ReturnType<typeof workspaceFocus.capture>>(undefined);
+  const pendingDrawerNavigation = useRef<NavigationAction | null>(null);
+  const contentTransition = useRef<WorkspaceContentTransitionHandle | null>(
+    null,
+  );
+  const didNavigate = useRef(false);
+  const awaitingPaint = useRef<string | null>(null);
+  const paintedPage = useRef<string | null>(null);
+  const selectionWatchdog = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const revealContent = useCallback(() => {
+    clearTimeout(selectionWatchdog.current);
+    selectionWatchdog.current = undefined;
+    awaitingPaint.current = null;
+    contentTransition.current?.reveal();
+  }, []);
+  const cancelSelection = useCallback(() => {
+    // Fence an outstanding fade callback before making the current root visible.
+    pendingDrawerNavigation.current = null;
+    revealContent();
+  }, [revealContent]);
+  useEffect(
+    () => () => {
+      clearTimeout(selectionWatchdog.current);
+      pendingDrawerNavigation.current = null;
+    },
+    [],
+  );
+  const priorSheet = useRef<{ open: boolean; content: string; tracked: boolean }>({
+    open: false,
+    content: "",
+    tracked: false,
+  });
+  const [currentChat, setCurrentChat] = useState<WorkspaceChatTarget>();
+  const [accessibility, setAccessibility] = useState<WorkspaceAccessibility>({
+    sheetOpen: false,
+  });
+  const sidebarOpen = !persistentSidebar && drawerPresented;
+  const workspaceAccessibility = useMemo(
+    () => ({ ...accessibility, sidebarOpen }),
+    [accessibility, sidebarOpen],
+  );
+  const trackCurrentRoute = () => {
+    const state = navigationRef.getRootState();
+    const next = workspaceAccessibilityState(state);
+    const content = workspaceContentIdentity(state);
+    if (
+      authenticatedNow.current &&
+      !persistentSidebar &&
+      ((pendingDrawerNavigation.current &&
+        !didNavigate.current &&
+        workspaceDestinationMatches(state, pendingDrawerNavigation.current)) ||
+        (priorSheet.current.tracked &&
+          priorSheet.current.open &&
+          !next.sheetOpen &&
+          content !== priorSheet.current.content))
+    ) {
+      didNavigate.current = true;
+      awaitingPaint.current = content;
+      if (paintedPage.current === content) {
+        revealContent();
+        setDrawerOpen(false);
+      }
+    }
+    priorSheet.current = {
+      open: next.sheetOpen,
+      content,
+      tracked: authenticatedNow.current,
+    };
+    workspaceFocus.context(next.primaryKey, next.sheetOpen);
+    setAccessibility(next);
+    setCurrentRouteName(getActiveRouteName(state));
+    setCurrentChat(
+      authenticatedNow.current
+        ? activeWorkspaceChatTarget(navigationRef.getCurrentRoute())
+        : undefined,
+    );
+  };
+  const resetWorkspaceSession = useCallback(() => {
+    authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
+    cancelSelection();
+    paintedPage.current = null;
+    didNavigate.current = false;
+    const state = navigationRef.isReady()
+      ? navigationRef.getRootState()
+      : undefined;
+    const next = state
+      ? workspaceAccessibilityState(state)
+      : { sheetOpen: false };
+    priorSheet.current = {
+      open: next.sheetOpen,
+      content: workspaceContentIdentity(state),
+      // A retained sheet belongs to the old session until this one tracks it.
+      tracked: false,
+    };
+    drawerOrigin.current = undefined;
+    pendingMenuFocus.current = undefined;
+    setDrawerOpen(false);
+    setDrawerPresented(false);
+    setCurrentChat(undefined);
+    setCurrentRouteName(
+      authenticatedNow.current ? getActiveRouteName(state) : undefined,
+    );
+    setAccessibility(next);
+    workspaceFocus.context(next.primaryKey, next.sheetOpen);
+  }, [
+    cancelSelection,
+    navigationRef,
+    setCurrentRouteName,
+    isAuthenticated,
+  ]);
+  useEffect(() => {
+    resetWorkspaceSession();
+    // Account admission also covers a direct account switch or batched
+    // sign-out/sign-in that never renders isAuthenticated=false.
+    return subscribeAuthAccount(resetWorkspaceSession);
+  }, [isAuthenticated, resetWorkspaceSession]);
+  useEffect(() => {
+    // Resizing changes the presentation, never the navigator or its drafts.
+    // Fence a pending compact animation before exposing both tablet columns.
+    cancelSelection();
+    didNavigate.current = false;
+    drawerOrigin.current = undefined;
+    pendingMenuFocus.current = undefined;
+    setDrawerOpen(false);
+    setDrawerPresented(false);
+  }, [persistentSidebar, cancelSelection]);
+  useEffect(
+    () => () => workspaceFocus.releaseDrawer("persistent-workspace-sidebar"),
+    [persistentSidebar, accessibility.sheetOpen],
+  );
+  useEffect(() => {
+    if (drawerPresented) return;
+    const origin = pendingMenuFocus.current;
+    pendingMenuFocus.current = undefined;
+    if (isAuthenticated) workspaceFocus.restore(origin);
+  }, [drawerPresented, isAuthenticated]);
+  // Options already disable inner native-stack animation while the sidebar is
+  // presented. Hide the old root, commit its guarded swap, then reveal the
+  // painted destination while closing the slab once.
+  const selectDestination = (action: NavigationAction | null) => {
+    if (
+      !authenticatedNow.current ||
+      !navigationRef.isReady() ||
+      !action ||
+      isNavigationBlocked() ||
+      pendingDrawerNavigation.current ||
+      didNavigate.current
+    )
+      return;
+    if (persistentSidebar) {
+      // Native before-remove guards still own dirty editors and pending writes.
+      navigationRef.dispatch(action);
+      return;
+    }
+    pendingDrawerNavigation.current = action;
+    if (workspaceDestinationMatches(navigationRef.getRootState(), action)) {
+      didNavigate.current = true;
+      revealContent();
+      setDrawerOpen(false);
+    } else {
+      // Layout/focus events can be missed by a retained native screen. A failed
+      // animation must never leave an authenticated app permanently invisible.
+      selectionWatchdog.current = setTimeout(() => {
+        if (pendingDrawerNavigation.current !== action) return;
+        cancelSelection();
+        setDrawerOpen(false);
+      }, 2000);
+      const dispatch = () => {
+        if (pendingDrawerNavigation.current !== action) return;
+        if (!authenticatedNow.current || isNavigationBlocked()) {
+          cancelSelection();
+          return;
+        }
+        navigationRef.dispatch(action);
+      };
+      if (contentTransition.current)
+        contentTransition.current.fadeOut(dispatch);
+      else dispatch();
+    }
+  };
+  const onDrawerDismiss = useCallback(() => {
+    cancelSelection();
+    pendingMenuFocus.current = didNavigate.current
+      ? undefined
+      : drawerOrigin.current;
+    didNavigate.current = false;
+    drawerOrigin.current = undefined;
+    setDrawerPresented(false);
+  }, [cancelSelection]);
+  const navigateFromDrawer = (route: WorkspaceRoute) => {
+    if (
+      !authenticatedNow.current ||
+      !navigationRef.isReady() ||
+      isNavigationBlocked()
+    )
+      return;
+    if (route === "Assistant") return openChatFromDrawer({ kind: "home" });
+    const action = workspaceNavigateAction(
+      route,
+      undefined,
+      navigationRef.getRootState(),
+    );
+    // The root native modal sits above the whole push shell. Neither its
+    // presentation nor its guarded dismissal changes the underlying offset.
+    if (route === "AccountSettings") navigationRef.dispatch(action);
+    else selectDestination(action);
+  };
+  const openChatFromDrawer = (target: WorkspaceChatTarget) => {
+    if (navigationRef.isReady())
+      selectDestination(
+        workspaceChatNavigationAction(navigationRef.getRootState(), target),
+      );
+  };
 
+  function revealSidebar() {
+    if (
+      !authenticatedNow.current ||
+      accessibility.sheetOpen ||
+      isNavigationBlocked()
+    )
+      return;
+    pendingMenuFocus.current = undefined;
+    if (!drawerPresented)
+      drawerOrigin.current = workspaceFocus.capture(accessibility.primaryKey);
+    setDrawerPresented(true);
+  }
+  function changeSidebar(open: boolean) {
+    if (persistentSidebar) {
+      if (
+        open &&
+        authenticatedNow.current &&
+        !accessibility.sheetOpen &&
+        !isNavigationBlocked()
+      ) {
+        workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
+        workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
+          findNodeHandle(sidebarFocus.current),
+        );
+      }
+      return;
+    }
+    if (open) {
+      if (
+        !authenticatedNow.current ||
+        accessibility.sheetOpen ||
+        isNavigationBlocked() ||
+        pendingDrawerNavigation.current ||
+        didNavigate.current
+      )
+        return;
+      revealSidebar();
+    } else cancelSelection();
+    setDrawerOpen(open);
+  }
+
+  const renderWorkspace = (children: ReactNode) => (
+    <WorkspacePushShell
+      contentTransition={contentTransition}
+      enabled={isAuthenticated}
+      visible={drawerOpen}
+      presented={drawerPresented}
+      obscured={accessibility.sheetOpen}
+      gestureEnabled={
+        !navigationBlocked &&
+        !accessibility.sheetOpen &&
+        (Boolean(edgeBackRevision && edgeBacks.current.size) ||
+          isWorkspaceSidebarRoot(currentRouteName))
+      }
+      onEdgeBack={
+        edgeBacks.current.size
+          ? () => [...edgeBacks.current.values()].at(-1)?.()
+          : undefined
+      }
+      onOpenChange={changeSidebar}
+      onRevealStart={revealSidebar}
+      onDismiss={onDrawerDismiss}
+      initialFocusTarget={() => findNodeHandle(sidebarFocus.current)}
+      sidebar={
+        isAuthenticated ? (
+          <WorkspaceDrawer
+            visible={persistentSidebar || drawerPresented}
+            disabled={navigationBlocked}
+            initialFocusRef={sidebarFocus}
+            currentRoute={currentRouteName}
+            currentChat={currentChat}
+            onOpenChat={openChatFromDrawer}
+            onCreateAgent={() => {
+              if (navigationRef.isReady())
+                selectDestination(
+                  workspaceNavigateAction(
+                    "AgentCreate",
+                    undefined,
+                    navigationRef.getRootState(),
+                  ),
+                );
+            }}
+            onCreateGroup={() => {
+              if (navigationRef.isReady())
+                selectDestination(
+                  workspaceNavigateAction(
+                    "GroupEditor",
+                    undefined,
+                    navigationRef.getRootState(),
+                  ),
+                );
+            }}
+            onNavigate={navigateFromDrawer}
+            onHome={() => navigateFromDrawer("Assistant")}
+            onQuickAction={(action) => {
+              if (
+                !authenticatedNow.current ||
+                !navigationRef.isReady() ||
+                isNavigationBlocked()
+              )
+                return;
+              navigationRef.dispatch(
+                action === "scanner"
+                  ? openWorkspaceSheetAction("DeviceLogin", {
+                      start_scanner: true,
+                    })
+                  : openWorkspaceSheetAction("AgentKeyLogin", { mint: true }),
+              );
+            }}
+            onBrowse={(name) => {
+              if (navigationRef.isReady())
+                selectDestination(
+                  workspaceNavigateAction(
+                    name,
+                    undefined,
+                    navigationRef.getRootState(),
+                  ),
+                );
+            }}
+          />
+        ) : null
+      }
+    >
+      <View collapsable={false} accessible={false} style={appRootStyles.fill}>
+        {children}
+      </View>
+    </WorkspacePushShell>
+  );
   return (
-    <>
+    <View style={appRootStyles.fill}>
       <NavigationContainer
         ref={navigationRef}
         linking={appLinking}
         onReady={() => {
-          const routeName = getActiveRouteName(navigationRef.getRootState());
-          setCurrentRouteName(routeName);
-          flushPendingChallengeTapNavigation();
+          trackCurrentRoute();
+          flushPendingNotificationNavigation();
         }}
-        onStateChange={(state) => {
-          const routeName = getActiveRouteName(state);
-          setCurrentRouteName(routeName);
-          flushPendingChallengeTapNavigation();
+        onStateChange={() => {
+          trackCurrentRoute();
+          flushPendingNotificationNavigation();
         }}
       >
         <StatusBar style={mode === "dark" ? "light" : "dark"} />
-        <AppNavigator
-          currentRouteName={currentRouteName}
-          onMainTabPress={(tab: BottomNavV2Tab) => {
-            if (!navigationRef.isReady()) return;
-            capture({
-              name: "ui.mobile_nav_target_opened",
-              props: { target: tab, source: "tab" },
-            });
-            if (tab === "activity") navigationRef.navigate("Activity");
-            if (tab === "account") navigationRef.navigate("AccountSettings");
-          }}
-          // onNyxPress={() => setIsNyxOpen(true)} // TODO: re-enable when chat is ready
-        />
+        <WorkspaceAccessibilityContext.Provider
+          value={workspaceAccessibility}
+        >
+          <AppNavigator
+            onOpenMenu={() => changeSidebar(persistentSidebar || !drawerOpen)}
+            onNavigationGuardChange={onNavigationGuardChange}
+            onEdgeBackChange={onEdgeBackChange}
+            onNavigationCancelled={() => {
+              cancelSelection();
+            }}
+            onWorkspacePagePainted={(identity) => {
+              if (!authenticatedNow.current || sessionEpoch !== getAuthEpoch())
+                return;
+              paintedPage.current = identity;
+              if (
+                authenticatedNow.current &&
+                awaitingPaint.current === identity &&
+                workspaceContentIdentity(navigationRef.getRootState()) ===
+                  identity
+              ) {
+                revealContent();
+                setDrawerOpen(false);
+              }
+            }}
+            suppressWorkspaceAnimation={persistentSidebar || drawerPresented}
+            renderWorkspace={renderWorkspace}
+          />
+        </WorkspaceAccessibilityContext.Provider>
       </NavigationContainer>
       {/* ToastOverlay anchors to `top: 0` of its parent and relies on the
           screen's SafeAreaView for inset. Mounted globally it has no such
@@ -437,10 +882,9 @@ function ThemedAppShell({
         style={[pushToastStyles.overlay, { top: insets.top }]}
         pointerEvents="box-none"
       >
-        <ToastOverlay toast={pushToast} duration={6000} />
+        <ToastOverlay key={pushToastKey} toast={pushToast} duration={6000} />
       </View>
-      {/* <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} /> */}{/* TODO: re-enable when chat is ready */}
-    </>
+    </View>
   );
 }
 

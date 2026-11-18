@@ -1,7 +1,13 @@
+import { historyEnum, isolateHistoryItems } from "./assistant-history-compat";
+import { discordIntakeSchema } from "./channel-bot-health";
+import { executionProposalSchema } from "./execution-proposal";
+import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
+import { cmaOperationSchema } from "./cma-operation";
+import { notificationSettingsSchema } from "./assistant-notifications";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -9,28 +15,31 @@ export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).ma
 
 /// A tool call the assistant made during a turn: identifier and status only.
 export const nyxAgentTurnActivitySchema = z.object({
+  decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
   machine: machineReceiptSchema.nullable().optional(),
   id: z.string(),
   label: z.string(),
-  status: z.enum(["running", "completed", "error"]),
+  status: historyEnum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
-  failure: z.object({ kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
+  failure: z.object({ reason: z.string().max(64).nullish().transform((value) => value ?? undefined).optional(), kind: z.string(), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// A tool image or human upload, fetched from the owner-only attachment route.
+/// Attachment readers accept future types; upload policy remains server-owned.
 export const nyxAgentAttachmentSchema = z.object({
+  filename: z.string().nullable().optional(),
+  source: z.string().nullable().optional(),
+  result_version: z.string().nullable().optional(),
+  preview_kind: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
   id: z.string(),
-  content_type: z.enum([
-    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain", "text/markdown", "text/csv", "application/json",
-  ]),
-  origin: z.enum(["tool", "user_upload", ""]).optional(),
+  content_type: z.string(),
+  origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
-  image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
+  image_input: historyEnum(["sent", "unavailable"]).nullable().optional(),
+  image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported", "guest_media_unavailable"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });
@@ -54,7 +63,7 @@ export type AssistantAgentStatus = z.infer<typeof assistantAgentStatusSchema>;
 /// The agent a thread belongs to, as carried on each conversation.
 export const nyxAgentConversationAgentSchema = z.object({
   id: z.string(),
-  kind: assistantAgentKindSchema,
+  kind: historyEnum(["nyxbot", "specialist"]),
   name: z.string(),
   /** A destroyed agent's threads are read-only. */
   destroyed: z.boolean().default(false),
@@ -80,8 +89,9 @@ export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
   platform_thread: platformThreadSchema.nullish(),
-  title_source: z.enum(["provisional", "generated", "user"]).optional(),
+  title_source: historyEnum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
+  model_unavailable: z.boolean().optional(),
   created_at: z.string(),
   last_message_at: z.string(),
   message_count: z.number().int().nonnegative(),
@@ -115,7 +125,7 @@ export const nyxAgentConversationSchema = z.object({
   context_reset_at: z.string().nullable(),
   context_reset_reason: z.string().nullable().optional(),
   /** `orchestrator` on NyxBot's threads, `subagent` on a specialist's. */
-  role: z.enum(["orchestrator", "subagent"]).default("orchestrator"),
+  role: historyEnum(["orchestrator", "subagent"]).default("orchestrator"),
   /** The owning agent; null only when the server could not resolve it. */
   agent: nyxAgentConversationAgentSchema.nullable().default(null),
   /** Wake-up events queued for this thread's next turn. */
@@ -127,7 +137,7 @@ export const nyxAgentConversationSchema = z.object({
  * `orchestrator` is an instruction NyxBot sent to a specialist; `event` is a
  * server-authored NyxID notice that woke the agent.
  */
-export const nyxAgentMessageRoleSchema = z.enum(["user", "assistant", "orchestrator", "event"]);
+export const nyxAgentMessageRoleSchema = historyEnum(["user", "assistant", "orchestrator", "event"]);
 export type NyxAgentMessageRole = z.infer<typeof nyxAgentMessageRoleSchema>;
 export const nyxAgentSteeringSchema = z.object({
   client_request_id: z.string(),
@@ -139,27 +149,59 @@ export const nyxAgentCapabilitiesSchema = z.object({
   steer: z.object({ max_chars: z.number().int().positive(), max_per_turn: z.number().int().positive() }).nullable(),
 });
 export const nyxAgentRecoverySchema = z.object({
-  status: z.enum(["available", "review"]),
+  status: historyEnum(["available", "review"]),
   reason: z.string(),
   text: z.string().nullable(),
   attachments: z.array(z.string()),
 });
 export type NyxAgentRecovery = z.infer<typeof nyxAgentRecoverySchema>;
+const nyxAgentFailureReasonSchema = z.object({
+  model_route: z.object({ reason: z.string(), unknown_fields: z.array(z.string()) }).nullish(),
+  source: z.string(),
+  stage: z.string(),
+  code: z.string(),
+  http_status: z.number().int().nullish(),
+  nyxid_error_code: z.number().int().nullish(),
+});
+export type NyxAgentFailureReason = z.infer<typeof nyxAgentFailureReasonSchema>;
+const turnMetadataSchema = z.object({
+  attempts: z.number().int().nonnegative().nullish(),
+  capacity_wait_ms: z.number().nonnegative().nullish(),
+  failure_reason: nyxAgentFailureReasonSchema.nullish(),
+  channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
+});
+export const nyxAgentActionOutcomeSchema = z.object({
+  summary: z.string(),
+  complete: z.boolean(),
+  actions: z.array(z.object({
+    activity_id: z.string(), label: z.string(), status: z.string(), summary: z.string(),
+  })),
+  retry_warning: z.string().nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
+  voice: z.object({
+    session_id: z.string(),
+    segment_id: z.string(),
+    sealed: z.boolean(),
+    complete: z.boolean(),
+    interrupted: z.boolean().optional(),
+  }).nullish(),
+  artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative(), filename: z.string(), reason: z.string()})).default([])}).nullable().optional(),
+  action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
-  feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
-  steering: nyxAgentSteeringSchema.nullish(),
+  feedback: z.object({ vote: historyEnum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
+  steering: nyxAgentSteeringSchema.extend({ outcome: historyEnum(["applied", "may_not_have_applied", "refused"]) }).nullish(),
   continuation_of: z.string().nullish(),
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
   role: nyxAgentMessageRoleSchema,
   text: z.string(),
-  status: z.enum(["completed", "failed"]),
+  status: historyEnum(["completed", "failed"]),
   error_code: z.string().nullable(),
   upstream_error_code: z.string().nullable().optional(),
-  turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+  turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z.object({
     attempts: z.number().int().nonnegative().nullish(),
     capacity_wait_ms: z.number().nonnegative().nullish(),
@@ -178,6 +220,10 @@ export const nyxAgentMessageSchema = z.object({
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
+  /** Who started the turn this message opens; absent on older rows. */
+  origin: z.string().nullish(),
+  /** The automation an automation-started message came from, while its run is retained. */
+  automation: z.object({ trigger_id: z.string(), run_id: z.string(), label: z.string() }).nullish(),
 });
 /** How NyxBot asks before acting: never, for sensitive/destructive actions, or for every change. */
 export const nyxAgentAccessModeSchema = z.enum(["autopilot", "nyxmode", "ask_every_time"]);
@@ -187,7 +233,7 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 export const nyxAgentActionConfirmationSchema = z.object({
   risk: z.enum(["read", "change", "sensitive", "destructive"]),
   access_mode: nyxAgentAccessModeSchema.nullish(),
-  reason: z.enum(["access_mode", "webhook", "policy", "approval"]).catch("access_mode"),
+  reason: z.enum(["access_mode", "webhook", "policy", "approval", "org_connection", "delegation"]).catch("access_mode"),
 });
 export type NyxAgentActionConfirmation = z.infer<typeof nyxAgentActionConfirmationSchema>;
 
@@ -197,11 +243,19 @@ export const nyxAgentModelSchema = z.object({
   label: z.string(),
   available: z.boolean(),
   description: z.string().nullish(),
+  input_modalities: z.array(z.string()).nullish().catch(undefined),
 });
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  review_path: z.string().optional(),
+  connect_own: z.object({
+    supported: z.boolean(), catalog_service_id: z.string().optional(), service_slug: z.string().optional(),
+    reason: z.string().optional(), instructions: z.string().optional(),
+  }).nullish(),
   creation_turn_id: z.string().nullish(),
+  /** The tool call (turn activity) this card or receipt belongs to. */
+  activity_id: z.string().nullish(),
   authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),
@@ -228,6 +282,9 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  execution_proposal: executionProposalSchema.nullish(),
+  status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
+  review_path: z.string().optional(),
   id: z.string(),
   service_slug: z.string(),
   service_name: z.string(),
@@ -252,14 +309,25 @@ export const nyxAgentWaitingSchema = z.object({
 });
 export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
 
-export const nyxAgentHistorySchema = z.object({
+const historyBodySchema = z.object({
+  unsupported_history_items: z.number().int().positive().optional(),
+  cma_operations: z.array(cmaOperationSchema).default([]),
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  approval_history: z.array(nyxAgentApprovalSchema).optional(),
   waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
+export const nyxAgentHistorySchema = z.preprocess(
+  (value) => isolateHistoryItems(value, {
+    acknowledgements: nyxAgentAcknowledgementSchema,
+    approvals: nyxAgentApprovalSchema,
+    approval_history: nyxAgentApprovalSchema,
+  }),
+  historyBodySchema,
+);
 export const nyxAgentIndexSchema = z.object({
   conversations: z.array(nyxAgentConversationSchema),
   next_cursor: z.string().nullable(),
@@ -306,7 +374,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     event: z.literal("turn.completed"),
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
-    turn_metadata: z.object({ attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(), channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish() }).nullish(),
+    turn_metadata: turnMetadataSchema.nullish(),
     error: z.object({
       attempts: z.number().int().nonnegative().nullish(), capacity_wait_ms: z.number().nonnegative().nullish(),
       code: z.string(), message: z.string(), upstream_error_code: z.string().nullish(),
@@ -357,6 +425,8 @@ export const nyxAgentSettingsSchema = z.object({
     .nonnegative()
     .default(600),
   specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
+  /** Additive: per-kind push switches for the Notifications feed; absent on older servers. */
+  notifications: notificationSettingsSchema.optional(),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
@@ -375,6 +445,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "max_group_handoffs"
     | "max_group_handoffs_per_hour"
     | "specialist_access_requests"
+    | "notifications"
   >
 >;
 
@@ -405,6 +476,9 @@ export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFor
 
 /** A specialist's permission request awaiting NyxBot (or the user). */
 export const assistantAgentRequestSchema = z.object({
+  status: z.string().optional(),
+  code: z.string().optional(),
+  review_path: z.string().optional(),
   request_id: z.string(),
   /** The requesting agent's name. */
   agent: z.string(),
@@ -421,8 +495,33 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
+export const ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX = 2000;
+
+export const guestReadinessSchema = z.object({
+  status: z.enum(["ready", "setting_up", "not_ready"]),
+  reason: z.string().nullish(),
+  fix: z.string().nullish(),
+});
+export type GuestReadiness = z.infer<typeof guestReadinessSchema>;
+export const agentConfigurationSchema = z.object({
+  instructions_present: z.boolean(),
+  persona_present: z.boolean(),
+  memory_notes: z.number().int().nonnegative(),
+  skills: z.number().int().nonnegative(),
+  service_grants: z.number().int().nonnegative(),
+  account_read: z.boolean(),
+});
+export type AgentConfiguration = z.infer<typeof agentConfigurationSchema>;
+export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
+  configuration: agentConfigurationSchema.nullish(),
+  conversation_overrides: z.array(z.string()).default([]),
+  conversation_overrides_truncated: z.boolean().default(false),
+});
+
 
 export const assistantAgentSchema = z.object({
+  guest_readiness: guestReadinessSchema.nullish(),
+  share_role: z.enum(["manager", "user"]).nullable().optional(),
   owner_id: z.string().optional(),
   owner_name: z.string().nullable().optional(),
   owner_kind: z.enum(["person", "org"]).optional(),
@@ -437,9 +536,12 @@ export const assistantAgentSchema = z.object({
   display_name: z.string().nullable().default(null),
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
+  voice_instructions: z.string().nullable().optional(),
   description: z.string().default(""),
   model: z.string().optional(),
+  model_unavailable: z.boolean().optional(),
   access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+  channel_checking_notice: z.boolean().optional(),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
@@ -482,6 +584,7 @@ export type AssistantAgent = z.infer<typeof assistantAgentSchema>;
 
 export const assistantAgentListSchema = z.object({
   agents: z.array(assistantAgentSchema),
+  destroyed_truncated: z.boolean().optional(),
   limits: nyxAgentSettingsSchema,
 });
 export type AssistantAgentList = z.infer<typeof assistantAgentListSchema>;
@@ -546,6 +649,10 @@ const agentPersona = z
     ASSISTANT_AGENT_PERSONA_MAX,
     `Keep the persona under ${String(ASSISTANT_AGENT_PERSONA_MAX)} characters`,
   );
+const agentVoiceInstructions = z.string().trim().max(
+  ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX,
+  `Keep voice instructions under ${String(ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX)} characters`,
+);
 
 /** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
@@ -554,6 +661,7 @@ export const assistantAgentCreateSchema = z.object({
   display_name: agentDisplayName.optional(),
   description: agentDescription,
   persona: agentPersona.optional(),
+  voice_instructions: agentVoiceInstructions.optional(),
   machines: z.array(z.string()).max(64).optional(),
   logins: z.array(z.string()).max(64).optional(),
   services: z.array(z.string()),
@@ -569,16 +677,20 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
+        voice_instructions: agentVoiceInstructions.optional(),
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       })
     : z.object({
         name: agentName,
         display_name: agentDisplayName,
         description: agentDescription,
         persona: agentPersona,
+        voice_instructions: agentVoiceInstructions.optional(),
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
+        channel_checking_notice: z.boolean().optional(),
       });
 }
 /** A PATCH to an agent: only the fields that changed. `null` clears the override. */
@@ -587,16 +699,20 @@ export type AssistantAgentUpdate = {
   description?: string;
   display_name?: string;
   persona?: string;
+  voice_instructions?: string;
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
+  channel_checking_notice?: boolean;
 };
 export type AssistantAgentProfile = {
   name: string;
   display_name: string;
   description: string;
   persona: string;
+  voice_instructions?: string;
   model?: string;
   access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
+  channel_checking_notice?: boolean;
 };
 
 export const assistantAgentGrantsSchema = z.object({
@@ -622,23 +738,48 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
-  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
+  can_manage: z.boolean().optional(),
+  guest_access_description: z.string().optional(),
+  org_specialist: z
+    .object({
+      org_id: z.string(),
+      guest_enabled: z.boolean(),
+      delegated_service_ids: z.array(z.string()),
+      daily_credits: z.string().nullish(),
+      guest_revision: z.string().optional(),
+      default_daily_credits: z.string().optional(),
+    })
+    .optional(),
+  guest_readiness: guestReadinessSchema.nullish(),
+  follow_readiness: z
+    .enum(["ready", "unavailable"])
+    .catch("unavailable")
+    .optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),
   bot_label: z.string(),
   bot_username: z.string().nullable().default(null),
   transport: z.string(),
+  gateway_source: z.object({ type: z.string() }).optional(),
+  gateway_native_phase: z.string().optional(),
+  gateway_native_activation: z.string().optional(),
+  gateway_native_activation_detail: z.string().optional(),
+  gateway_native_delivery: z.string().optional(),
+  discord_intake: discordIntakeSchema.optional(),
+  gateway_next_retry_at: z.string().optional(),
+  gateway_retry_available_at: z.string().optional(),
   /** `pending`, `active` or `failed`. */
   status: z.string(),
   last_error: z.string().nullable().default(null),
-  owner_linked: z.boolean(),
+  owner_linked: z.boolean().optional(),
   /** The agent this bot reaches; null means the owner's NyxBot. */
   agent_id: z.string().nullable().default(null),
   /** The organization that owns the bot; null for the user's own bot. */
   org_id: z.string().nullable().default(null),
   /** Who may talk to the agent in private chats with the bot. */
   private_chats: z.enum(["owner", "everyone"]).catch("owner"),
+  private_chat_posts: z.boolean().default(false),
   /** `ok`, `failing`, `interrupted`, or `media_failed`; null before a message is judged. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
@@ -672,6 +813,8 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  can_manage: z.boolean().optional(),
+  guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),
   has_thread_history: z.boolean().optional(),
   threads: z.enum(["follow", "off"]).catch("off").optional(),
@@ -738,16 +881,24 @@ export const ASSISTANT_GROUP_NAME_MAX = 60;
 
 export const assistantGroupMemberSchema = z.object({
   id: z.string(),
+  mention_handle: z.string().optional(),
   name: z.string(),
+  display_name: z.string().nullable().optional(),
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
+  unavailable: z.boolean().optional(),
+  unavailable_reason: z.string().nullable().optional(),
+  shared: z.boolean().optional(),
+  owner_name: z.string().nullable().optional(),
+  conversation_id: z.string().nullable().optional(),
   working: z.boolean().default(false),
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 
-export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
+export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string(), handle: z.string().optional() });
 
 export const assistantGroupSchema = z.object({
+  collaboration: collaborationGroupSchema.optional(),
   owner: z.object({ type: z.enum(["personal", "org"]), id: z.string(), name: z.string() }).optional(),
   participants: z.array(groupPersonSchema).optional(),
   your_role: z.enum(["creator", "admin", "participant"]).optional(),
@@ -767,6 +918,8 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  requester_user_id: z.string().optional(),
+  execution_mode: z.enum(["owner", "org_member", "shared", "guest"]).optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
@@ -777,11 +930,12 @@ export const assistantGroupMessageSchema = z.object({
   role: z.enum(["user", "agent", "notice"]),
   /** The speaking agent, set on `agent` messages. */
   agent: z
-    .object({ id: z.string(), name: z.string(), kind: assistantAgentKindSchema })
+    .object({ id: z.string(), name: z.string(), display_name: z.string().nullable().optional(), kind: assistantAgentKindSchema })
     .nullable()
     .default(null),
   text: z.string(),
   recipient_agent_ids: z.array(z.string()).optional(),
+  mentioned_participant_ids: z.array(z.string()).optional(),
   created_at: z.string(),
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;
@@ -804,6 +958,7 @@ export const assistantGroupPendingActionSchema = z.object({
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
 
 export const assistantGroupMessagesSchema = z.object({
+  collaboration_decisions: z.array(collaborationDecisionSchema).optional(),
   group: assistantGroupSchema,
   pending_actions: z.array(assistantGroupPendingActionSchema).default([]),
   /** Ascending by `seq`. */
@@ -821,6 +976,7 @@ export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
 
 /** "New group" and group settings: a name and its agents. */
 export const assistantGroupFormSchema = z.object({
+  collaboration: z.boolean().optional(),
   org: z.string().optional(),
   participant_user_ids: z.array(z.string()).max(16).optional(),
   lead_agent_id: z.string().optional(),
