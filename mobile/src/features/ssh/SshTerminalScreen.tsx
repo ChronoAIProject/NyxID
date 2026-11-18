@@ -65,6 +65,7 @@ const serverMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("closed"), reason: z.string().optional() }),
 ]);
 const TERMINAL_BACKGROUND_GRACE_MS = 15_000;
+const TERMINAL_CONNECTION_LOOKUP_TIMEOUT_MS = 20_000;
 export function SshTerminalScreen({
   route,
 }: {
@@ -176,16 +177,28 @@ export function SshTerminalScreen({
   }, [navigation, t]);
   useEffect(() => {
     let current = true;
+    let timedOut = false;
     const account = getAuthAccountId();
+    const controller = new AbortController();
     setConnection(undefined);
     setNotConnected(false);
     setLoadUnavailable(false);
     setError(undefined);
     setState("Connecting…");
+    const lookupTimer = setTimeout(() => {
+      if (!current) return;
+      timedOut = true;
+      current = false;
+      controller.abort();
+      if (account !== getAuthAccountId()) return;
+      setLoadUnavailable(true);
+      setState("Unavailable");
+      setError(undefined);
+    }, TERMINAL_CONNECTION_LOOKUP_TIMEOUT_MS);
     const load = connectionId
-      ? servicesApi.connection(connectionId)
+      ? servicesApi.connection(connectionId, controller.signal)
       : servicesApi
-          .connections()
+          .connections(controller.signal)
           .then((values) =>
             values.find(
               (value) =>
@@ -197,7 +210,8 @@ export function SshTerminalScreen({
           );
     void load
       .then((value) => {
-        if (!current || account !== getAuthAccountId()) return;
+        if (!current || timedOut || account !== getAuthAccountId()) return;
+        clearTimeout(lookupTimer);
         if (!value) {
           setNotConnected(true);
           return;
@@ -226,14 +240,16 @@ export function SshTerminalScreen({
         setPrincipalPickerOpen(!nextPrincipal && allowedPrincipals.length > 0);
       })
       .catch(() => {
-        if (current) {
-          setLoadUnavailable(true);
-          setState("Unavailable");
-          setError(undefined);
-        }
+        if (!current || timedOut || account !== getAuthAccountId()) return;
+        clearTimeout(lookupTimer);
+        setLoadUnavailable(true);
+        setState("Unavailable");
+        setError(undefined);
       });
     return () => {
       current = false;
+      clearTimeout(lookupTimer);
+      controller.abort();
     };
   }, [serviceId, connectionId, attempt, route.params.principal]);
 
@@ -323,6 +339,7 @@ export function SshTerminalScreen({
         );
         socket.current = ws;
         ws.binaryType = "arraybuffer";
+        let connected = false;
         let transportError = false;
         let terminalSettled = false;
         const fail = (status?: number) => {
@@ -352,6 +369,7 @@ export function SshTerminalScreen({
           try {
             const message = serverMessage.parse(JSON.parse(event.data));
             if (message.type === "connected") {
+              connected = true;
               resetForAttempt();
               send({ type: "reset" });
               setState("Connected");
@@ -393,6 +411,7 @@ export function SshTerminalScreen({
           const status = terminalUpgradeStatus(
             event as unknown as { message?: string; status?: number },
           );
+          if (connected && !status) return;
           transportError = true;
           // RN 0.83 emits an empty error Event, then a CloseEvent whose reason
           // contains the native upgrade failure. Preserve that second event.
@@ -613,6 +632,17 @@ export function SshTerminalScreen({
               : "This SSH service is not connected to your account. Open Services to connect it first.",
           )}
         >
+          {loadUnavailable ? (
+            <SettingsRow
+              label={t("Retry")}
+              tone="action"
+              onPress={() => {
+                setLoadUnavailable(false);
+                setState("Connecting…");
+                setAttempt((value) => value + 1);
+              }}
+            />
+          ) : null}
           <SettingsRow
             label={t("Open Services")}
             tone="action"
@@ -688,6 +718,8 @@ export function SshTerminalScreen({
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
+          // Android's shared page-level KeyboardViewport owns IME overlap correction.
+          enabled={Platform.OS === "ios"}
         >
           <View style={styles.statusBar}>
             {principals.length > 1 || invalidPrincipal ? (
@@ -779,7 +811,8 @@ export function SshTerminalScreen({
               allowFileAccessFromFileURLs={false}
               allowUniversalAccessFromFileURLs={false}
               mixedContentMode="never"
-              dataDetectorTypes="none"
+              // Android Fabric requires an array; only iOS normalizes the string shorthand.
+              dataDetectorTypes={["none"]}
               sharedCookiesEnabled={false}
               thirdPartyCookiesEnabled={false}
               domStorageEnabled={false}

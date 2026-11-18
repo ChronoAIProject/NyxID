@@ -42,6 +42,8 @@ function setup(initialAccount: string | null = null) {
     `e30.${Buffer.from(JSON.stringify({ sub, revision })).toString("base64url")}.sig`;
   const telemetry: any[] = [];
   const browsers: string[] = [];
+  const browserOptions: unknown[] = [];
+  let browserLookups = 0;
   let state: any = { ...fixture(), routes: [{ name: "Auth" }] };
   const guards = { current: new Set<symbol>() };
   const actions: any[] = [];
@@ -68,6 +70,7 @@ function setup(initialAccount: string | null = null) {
       },
     },
     "react-native": {
+      Platform: { OS: "android" },
       Linking: {
         getInitialURL: async () => initialUrl,
         addEventListener: (_: string, listener: typeof directLink) => {
@@ -81,7 +84,17 @@ function setup(initialAccount: string | null = null) {
       },
     },
     "../features/services/serviceOAuthStore": { recordServiceOAuthReturn: () => {} },
-    "expo-web-browser": { openBrowserAsync: async (url: string) => { browsers.push(url); return { type: "dismiss" }; } },
+    "expo-web-browser": {
+      getCustomTabsSupportingBrowsersAsync: async () => {
+        browserLookups++;
+        return { preferredBrowserPackage: "com.android.chrome", browserPackages: [], servicePackages: [] };
+      },
+      openBrowserAsync: async (url: string, options?: unknown) => {
+        browsers.push(url);
+        browserOptions.push(options);
+        return { type: "dismiss" };
+      },
+    },
     "../lib/env": {
       getFrontendUrl: () => "https://nyx.example",
       NYXID_APP_SCHEME: "nyxid",
@@ -121,6 +134,9 @@ function setup(initialAccount: string | null = null) {
   const sessions = h.load(
     fileURLToPath(new URL("../lib/auth/sessionStore.ts", import.meta.url)),
   ) as typeof import("../lib/auth/sessionStore");
+  h.mock("../lib/inAppBrowser", h.load(
+    fileURLToPath(new URL("../lib/inAppBrowser.ts", import.meta.url)),
+  ));
   const linking = h.load(
     fileURLToPath(new URL("./linking.ts", import.meta.url)),
   ) as any;
@@ -156,6 +172,8 @@ function setup(initialAccount: string | null = null) {
     failRead: () => { failRead = true; },
     telemetry,
     browsers,
+    browserOptions,
+    browserLookups: () => browserLookups,
     cached,
     linking,
     directLink: (url: string) => {
@@ -674,7 +692,10 @@ test("unsupported first-party HTTPS pages open in-app warm and cold, deduplicate
   assert.equal(await f.linking.appLinking.getInitialURL(), null);
   f.directLink("https://api.nyx.example/developer/apps?tab=oauth");
   f.directLink("https://nyx.example/settings/advanced?tab=limits");
+  await f.h.settle();
   assert.deepEqual(f.browsers, ["https://nyx.example/developer/apps?tab=oauth", "https://nyx.example/settings/advanced?tab=limits"]);
+  assert.deepEqual(f.browserOptions.map((options) => ({ ...options as object })), [{ browserPackage: "com.android.chrome" }, { browserPackage: "com.android.chrome" }]);
+  assert.equal(f.browserLookups(), 1);
   assert.deepEqual(routed, []);
   for (const url of ["https://evil.example/developer/apps", "https://nyx.onelink.me/developer/apps"]) f.directLink(url);
   assert.equal(f.browsers.length, 2);

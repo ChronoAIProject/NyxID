@@ -2,7 +2,7 @@ import {
   getStateFromPath,
   type LinkingOptions,
 } from "@react-navigation/native";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../lib/inAppBrowser";
 import {
   nativeWebFallback,
   deduplicatedWebFallback,
@@ -56,7 +56,7 @@ function consumeServiceOAuthReturn(url: string): boolean {
 }
 
 const openFallback = deduplicatedWebFallback((url) =>
-  WebBrowser.openBrowserAsync(url),
+  openInAppBrowser(url),
 );
 function consumeWebFallback(url: string): boolean {
   if (isSupportedDirectLink(url)) return false;

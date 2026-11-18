@@ -70,7 +70,7 @@ import {
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
 import { MoreHorizontal, RotateCcw, SquarePen, X } from "lucide-react-native";
 import type {
@@ -685,7 +685,7 @@ export function AssistantScreen({
           }),
         );
       } else {
-        void WebBrowser.openBrowserAsync(href).catch(() => undefined);
+        void openInAppBrowser(href).catch(() => undefined);
       }
       return false;
     },

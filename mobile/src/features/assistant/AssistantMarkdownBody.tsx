@@ -12,7 +12,7 @@ import Markdown, {
   renderRules,
   type RenderRules,
 } from "react-native-markdown-display";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { useTheme } from "../../theme/ThemeContext";
 import { TRANSCRIPT_SIDE_PADDING } from "../display/chatLayout";
 import { fonts, radius } from "../../theme/designTokens";
@@ -62,7 +62,7 @@ function connectLinks(
 
 function openLink(url: string) {
   const safe = safeAssistantLinkUrl(url);
-  if (safe) void WebBrowser.openBrowserAsync(safe).catch(() => undefined);
+  if (safe) void openInAppBrowser(safe).catch(() => undefined);
   return false;
 }
 

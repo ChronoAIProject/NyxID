@@ -1,6 +1,6 @@
 import React from "react";
 import { act, fireEvent, render, waitFor } from "@testing-library/react-native";
-import { AppState, type AppStateStatus } from "react-native";
+import { AppState, Platform, type AppStateStatus } from "react-native";
 import { SshTerminalScreen } from "./SshTerminalScreen";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { refreshAccessTokenIfNeeded } from "../../lib/api/http";
@@ -13,6 +13,16 @@ const mockNavigation = {
   push: jest.fn(),
 };
 const mockAppHandlers: ((value: AppStateStatus) => void)[] = [];
+// Keep the keyboard wrapper's props observable; the native implementation
+// consumes `enabled` and `behavior` before passing the remaining props to View.
+jest.mock("react-native/Libraries/Components/Keyboard/KeyboardAvoidingView", () => {
+  const React = require("react");
+  const KeyboardAvoidingView = React.forwardRef((props: any, ref: any) => {
+    const { View } = require("react-native");
+    return <View {...props} ref={ref} testID="terminal-keyboard-avoiding-view" />;
+  });
+  return { default: KeyboardAvoidingView };
+});
 jest.mock("@react-navigation/native", () => ({
   useIsFocused: () => mockFocused,
   useNavigation: () => mockNavigation,
@@ -208,6 +218,50 @@ test("bearer stays in the RN socket header; inline HTML, bridge and every inject
   expect(socket.close).toHaveBeenCalledWith(1000);
 });
 
+test.each(["ios", "android"] as const)(
+  "%s receives the array form for the WebView data detector prop",
+  async (platform) => {
+    jest.replaceProperty(Platform, "OS", platform);
+    const screen = await renderTerminal(
+      <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: true } }} />,
+    );
+    // Android Fabric parses this native prop as an array; the iOS string
+    // shorthand can crash while creating the WebView node.
+    const value = screen.getByTestId("terminal-webview").props.dataDetectorTypes;
+    expect(Array.isArray(value)).toBe(true);
+    expect(value).toEqual(["none"]);
+    await screen.unmount();
+  },
+);
+
+test.each(["ios", "android"] as const)(
+  "%s uses the correct keyboard avoidance owner for the terminal",
+  async (platform) => {
+    jest.replaceProperty(Platform, "OS", platform);
+    const screen = await renderTerminal(
+      <SshTerminalScreen
+        route={{
+          params: {
+            serviceId: "catalog",
+            connectionId: "connection",
+            autoConnect: true,
+          },
+        }}
+      />,
+    );
+    const keyboard = screen.getByTestId("terminal-keyboard-avoiding-view");
+    if (platform === "android") {
+      // KeyboardViewport already corrects Android Fabric's IME coordinates;
+      // the terminal must not apply a second adjustment.
+      expect(keyboard.props.enabled).toBe(false);
+    } else {
+      expect(keyboard.props.enabled).toBe(true);
+      expect(keyboard.props.behavior).toBe("padding");
+    }
+    await screen.unmount();
+  },
+);
+
 test("background grace keeps the socket for 15 seconds while inactive stays harmless; 401 retries once", async () => {
   jest.useFakeTimers();
   const screen = await renderTerminal(
@@ -309,7 +363,15 @@ test.each([
     mockAppHandlers.forEach((handler) => handler("active"));
   });
   expect(socket.close).toHaveBeenCalledTimes(closes ? 1 : 0);
-  if (!closes) expect(Socket.instances).toHaveLength(1);
+  if (closes) {
+    // Android pauses JS timers in the background; active-return wall-clock
+    // enforcement must still close the session with the normal code.
+    expect(socket.close).toHaveBeenCalledWith(1000);
+    expect(screen.getByText("Disconnected")).toBeTruthy();
+  } else {
+    expect(Socket.instances).toHaveLength(1);
+    expect(socket.close).not.toHaveBeenCalled();
+  }
   await screen.unmount();
   jest.useRealTimers();
 });
@@ -530,6 +592,95 @@ test.each(["The credential node is offline", "SSH host key mismatch"])(
     await screen.unmount();
   },
 );
+
+test("a connected Android transport error followed by close is a clean session close", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await message(view, { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  await act(async () => {
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "connected", cols: 80, rows: 24 }),
+    });
+    socket.onerror?.({});
+    socket.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(screen.getByText("Disconnected")).toBeTruthy();
+  expect(screen.getByText("Reconnect")).toBeTruthy();
+  expect(
+    mockInject.mock.calls.some(
+      ([script]) =>
+        script.includes('"type":"session-ended"') &&
+        script.includes("Connection closed."),
+    ),
+  ).toBe(true);
+  expect(
+    screen.queryByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeNull();
+  await screen.unmount();
+});
+
+test("a pre-connect Android transport error still shows the network fallback", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  await message(screen.getByTestId("terminal-webview"), { type: "ready" });
+  await waitForSocket();
+  const socket = Socket.instances[0]!;
+  await act(async () => {
+    socket.onerror?.({});
+    socket.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(
+    screen.getByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeTruthy();
+  await screen.unmount();
+});
+
+test("a clean close resets connected state before the next pre-connect attempt", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  const screen = await renderTerminal(
+    <SshTerminalScreen route={{ params: { serviceId: "catalog", connectionId: "connection" } }} />,
+  );
+  const view = screen.getByTestId("terminal-webview");
+  await message(view, { type: "ready" });
+  await waitForSocket();
+  const first = Socket.instances[0]!;
+  await act(async () => {
+    first.onmessage?.({
+      data: JSON.stringify({ type: "connected", cols: 80, rows: 24 }),
+    });
+    first.onclose?.({ code: 1000, reason: "" });
+  });
+  expect(screen.getByText("Disconnected")).toBeTruthy();
+  expect(
+    screen.queryByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeNull();
+  await fireEvent.press(screen.getByText("Reconnect"));
+  await waitFor(() => expect(Socket.instances).toHaveLength(2));
+  const second = Socket.instances[1]!;
+  await act(async () => {
+    second.onerror?.({});
+    second.onclose?.({ code: 1006, reason: "" });
+  });
+  expect(
+    screen.getByText(
+      "Couldn't open the terminal connection. Check your network and reconnect.",
+    ),
+  ).toBeTruthy();
+  await screen.unmount();
+});
 
 test("remote close and invalid bridge data never replay shell input; resizing is debounced", async () => {
   jest.useFakeTimers();
@@ -765,6 +916,101 @@ test("a connection load failure has an unavailable state without terminal chrome
   expect(screen.queryByText("Connecting…")).toBeNull();
   expect(screen.queryByTestId("terminal-webview")).toBeNull();
   await screen.unmount();
+});
+
+test("a connection lookup timeout shows unavailable with Retry and aborts the lookup", async () => {
+  jest.useFakeTimers();
+  let signal!: AbortSignal;
+  jest.mocked(servicesApi.connection).mockImplementationOnce((_id, providedSignal) => {
+    signal = providedSignal!;
+    return new Promise(() => {});
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  expect(signal.aborted).toBe(true);
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  expect(screen.getByText("Retry")).toBeTruthy();
+  expect(screen.queryByTestId("terminal-webview")).toBeNull();
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("Retry starts a new connection lookup and reaches pre-connect", async () => {
+  jest.useFakeTimers();
+  jest.mocked(servicesApi.connection).mockClear();
+  jest
+    .mocked(servicesApi.connection)
+    .mockImplementationOnce(() => new Promise(() => {}))
+    .mockResolvedValueOnce(connection);
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  await fireEvent.press(screen.getByText("Retry"));
+  await waitFor(() => {
+    expect(servicesApi.connection).toHaveBeenCalledTimes(2);
+    // The test language mock leaves interpolation placeholders untouched.
+    expect(
+      screen.getByText("Connect to {{connection}} as {{principal}}?"),
+    ).toBeTruthy();
+  });
+  expect(screen.queryByText("This SSH connection could not be loaded.")).toBeNull();
+  expect(Socket.instances).toHaveLength(0);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("a late connection lookup result after timeout is ignored", async () => {
+  jest.useFakeTimers();
+  jest.mocked(servicesApi.connection).mockClear();
+  let resolveFirst!: (value: any) => void;
+  jest.mocked(servicesApi.connection).mockImplementationOnce(
+    () => new Promise((resolve) => { resolveFirst = resolve; }),
+  );
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20_000);
+  });
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  await act(async () => {
+    resolveFirst(connection);
+    await Promise.resolve();
+  });
+  expect(screen.getByText("This SSH connection could not be loaded.")).toBeTruthy();
+  expect(screen.queryByText("Connect to SSH as ops?")).toBeNull();
+  expect(servicesApi.connection).toHaveBeenCalledTimes(1);
+  await screen.unmount();
+  jest.useRealTimers();
+});
+
+test("unmount aborts an in-flight connection lookup", async () => {
+  let signal!: AbortSignal;
+  jest.mocked(servicesApi.connection).mockImplementationOnce((_id, providedSignal) => {
+    signal = providedSignal!;
+    return new Promise(() => {});
+  });
+  const screen = await renderTerminal(
+    <SshTerminalScreen
+      route={{ params: { serviceId: "catalog", connectionId: "connection", autoConnect: false } }}
+    />,
+  );
+  expect(signal.aborted).toBe(false);
+  await screen.unmount();
+  expect(signal.aborted).toBe(true);
 });
 
 test("a disallowed deep-link principal shows the picker instead of hanging", async () => {

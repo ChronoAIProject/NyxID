@@ -2,6 +2,7 @@ import { mfaPrompt } from "./mfaPrompt";
 import { accountWebUrl } from "../account/accountWebHandoff";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { useIsFocused } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -442,7 +443,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     setRegistrationPending(true);
     setRegistrationNotice("Registration opens on the NyxID website. Close the browser to return here and sign in after verifying your email.");
     try {
-      await WebBrowser.openBrowserAsync(
+      await openInAppBrowser(
         accountWebUrl(getFrontendUrl(), "/register"),
       );
       if (isMountedRef.current) setRegistrationNotice("Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.");

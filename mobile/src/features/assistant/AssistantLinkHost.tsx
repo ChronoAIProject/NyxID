@@ -13,7 +13,7 @@ import {
   View,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { X } from "lucide-react-native";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { firstPartyFrontendUrls } from "../../lib/env";
@@ -289,7 +289,7 @@ export function ScopedAssistantLinkHost({
                     label="Continue on the web"
                     onPress={() => {
                       if (available.current())
-                        void WebBrowser.openBrowserAsync(target.href).catch(
+                        void openInAppBrowser(target.href).catch(
                           () => undefined,
                         );
                     }}

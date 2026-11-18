@@ -27,10 +27,14 @@ function setup() {
   });
   const module = harness.load(
     fileURLToPath(new URL("./MachineUI.tsx", import.meta.url)),
-  ) as { useMachineWrite: () => any };
+  ) as {
+    openMachineWeb: (path: string) => Promise<void>;
+    useMachineWrite: () => any;
+  };
   harness.mount(() => module.useMachineWrite());
   return {
     harness,
+    module,
     app,
     setEpoch: (value: number) => {
       epoch = value;
@@ -41,6 +45,21 @@ function setup() {
     },
   };
 }
+
+test("in-app browser uses a WebBrowser mock registered after harness creation", async () => {
+  const x = setup();
+  const opened: string[] = [];
+  x.harness.mock("expo-web-browser", {
+    openBrowserAsync: async (url: string) => {
+      opened.push(url);
+      return { type: "dismiss" };
+    },
+  });
+  await x.module.openMachineWeb("/assistant/machines/one");
+  assert.deepEqual(opened, ["https://example.test/assistant/machines/one"]);
+  x.harness.unmount();
+});
+
 test("machine writes synchronously lock double submission and fence account/background changes", async () => {
   const x = setup();
   const gate = deferred<void>();

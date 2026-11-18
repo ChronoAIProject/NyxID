@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import * as Clipboard from "expo-clipboard";
 import { ChevronRight, ChevronDown } from "lucide-react-native";
 import {
@@ -361,7 +361,7 @@ export function ServicesScreen({
           validateBrowserUrl(getFrontendUrl()),
         );
         url.searchParams.set("tab", target);
-        await WebBrowser.openBrowserAsync(url.href);
+        await openInAppBrowser(url.href);
         await reload();
       }, false);
     // Removal is irreversible, so it is confirmed in a system alert. A shared
@@ -1168,7 +1168,7 @@ function ConnectForm({
     try {
       const url = new URL("/keys", validateBrowserUrl(getFrontendUrl()));
       url.searchParams.set("slug", entry.slug);
-      await WebBrowser.openBrowserAsync(url.href);
+      await openInAppBrowser(url.href);
       await onRefresh();
     } catch (cause) {
       setLinkError(messageOf(cause));

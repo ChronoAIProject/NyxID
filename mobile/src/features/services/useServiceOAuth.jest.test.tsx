@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react-native";
 import * as WebBrowser from "expo-web-browser";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { AppState, type AppStateStatus } from "react-native";
+import { AppState, Platform, type AppStateStatus } from "react-native";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { ApiError } from "../../lib/api/ApiError";
 import { setAuthAccountId } from "../../lib/auth/authAccount";
@@ -24,6 +24,7 @@ jest.mock("@react-native-async-storage/async-storage", () =>
 jest.mock("expo-web-browser", () => ({
   WebBrowserResultType: { CANCEL: "cancel", DISMISS: "dismiss" },
   openAuthSessionAsync: jest.fn(),
+  getCustomTabsSupportingBrowsersAsync: jest.fn(),
 }));
 jest.mock("../../lib/env", () => ({ NYXID_APP_SCHEME: "nyxid" }));
 jest.mock("../../lib/api/servicesApi", () => ({
@@ -129,6 +130,32 @@ test.each(["cancel", "dismiss"] as const)(
     await unmount();
   },
 );
+
+test("Android names its Custom Tabs browser and preserves ephemeral service OAuth", async () => {
+  jest.replaceProperty(Platform, "OS", "android");
+  jest.mocked(WebBrowser.getCustomTabsSupportingBrowsersAsync).mockResolvedValue({
+    preferredBrowserPackage: "com.android.chrome",
+    defaultBrowserPackage: "com.android.chrome",
+    browserPackages: ["com.android.chrome"],
+    servicePackages: ["com.android.chrome"],
+  });
+  const { result, unmount } = await renderHook(() => useServiceOAuth(true, changed));
+  await flush();
+  let task!: Promise<void>;
+  await act(async () => {
+    task = result.current.start(connection, entry);
+  });
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(500);
+    await task;
+  });
+  expect(WebBrowser.openAuthSessionAsync).toHaveBeenCalledWith(
+    "https://provider.example/authorize",
+    "nyxid://services/oauth-return",
+    { preferEphemeralSession: true, browserPackage: "com.android.chrome" },
+  );
+  await unmount();
+});
 
 test("success URL still needs a changed active server connection", async () => {
   jest.mocked(WebBrowser.openAuthSessionAsync).mockResolvedValue({

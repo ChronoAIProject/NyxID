@@ -15,7 +15,7 @@ import Reanimated, {
 } from "react-native-reanimated";
 import { useIsFocused } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../../lib/inAppBrowser";
 import { Ellipsis, Mic, MicOff, PhoneOff, X } from "lucide-react-native";
 import {
   ActionButton,
@@ -762,7 +762,7 @@ function VoiceConversation({
   async function openBilling() {
     setBillingOpenError(false);
     try {
-      await WebBrowser.openBrowserAsync(
+      await openInAppBrowser(
         new URL("/billing", environment.origin).href,
       );
     } catch {

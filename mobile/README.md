@@ -65,7 +65,7 @@ App Store review checklist: [docs/APP_STORE_REVIEW_CHECKLIST.md](docs/APP_STORE_
 
 ### Per-profile vars (`DEV_*` / `PROD_*`)
 
-Each field except the Firebase file path and Android App Links opt-in falls back to the other profile if its primary is empty. Both empty for the canonical signal (`*_API_BASE_URL`) aborts the build. Firebase paths and the App Links opt-in stay profile-local. When `DEV_GOOGLE_SERVICES_FILE` is omitted, an existing `./google-services.json` is reused only if it contains the resolved dev Android package; an explicit empty value disables dev FCM. Firebase validation runs during Android native generation, so iOS builds do not require an Android Firebase file.
+Each field except the Firebase file path, native association host set and Android App Links opt-in falls back to the other profile if its primary is empty. Both empty for the canonical signal (`*_API_BASE_URL`) aborts the build. Firebase paths, the host set and the App Links opt-in stay profile-local. When `DEV_GOOGLE_SERVICES_FILE` is omitted, an existing `./google-services.json` is reused only if it contains the resolved dev Android package; an explicit empty value disables dev FCM. Firebase validation runs during Android native generation, so iOS builds do not require an Android Firebase file.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -79,6 +79,7 @@ Each field except the Firebase file path and Android App Links opt-in falls back
 | `*_ANDROID_VERSION_CODE` | for release builds | Android `versionCode` — bump per release |
 | `*_UNIVERSAL_LINK_HOST` | optional | iOS `associatedDomains` + Android intent filter |
 | `*_UNIVERSAL_LINK_PATH_PREFIX` | optional | Android intent-filter path |
+| `*_NATIVE_LINK_HOSTS` | optional, empty = `api` | Profile-local association host set: `api` uses the embedded API hosts; `api+frontend` also includes that profile's explicitly configured `FRONTEND_URL` and the new-domain frontend (it never uses the legal URL fallback). Other values abort the build. The owner's A/B decision is pending; publish the well-known files before adding frontend hosts and rebuilding. |
 | `*_ANDROID_HTTPS_APP_LINKS` | optional, default false | Profile-local HTTPS App Links opt-in for the selected API-only or API-plus-frontend host set. Enable only after every selected host serves valid Asset Links; see the native integration runbook. |
 | `*_LEGAL_BASE_URL` | for Privacy / Terms screens | Origin serving `/legal/{privacy,terms}.md` — same files the web dashboard renders. Empty = legal screens show an error. |
 | `*_ALLOWED_EMAILS` | optional | Comma-separated allowlist; empty = allow all signed-in users |
@@ -88,7 +89,7 @@ Each field except the Firebase file path and Android App Links opt-in falls back
 
 Production builds embed the existing `PROD_API_BASE_URL`, `PROD_FRONTEND_URL` and `PROD_LEGAL_BASE_URL` plus an optional second set, `PROD_NEW_API_BASE_URL`, `PROD_NEW_FRONTEND_URL` and `PROD_NEW_LEGAL_BASE_URL` (all three HTTPS URLs or none). The NyxID admin feature flag `mobile:new-domains` (global only, default off) selects the set at every launch: before the app renders, it asks both API hosts' `/public/config` and applies the flag, falling back to the last saved answer, then the original domains, within 5 seconds. If the chosen host is unreachable at launch and the other host answered, that launch uses the reachable set (the saved choice still follows the flag). Switching the flag needs no rebuild; users restart or reload the app.
 
-QR login, iOS associated domains and React Navigation accept both embedded sets. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay unchanged. App identifiers, signing and version numbers keep using the existing variables. See [Domain migration](docs/DOMAIN_MIGRATION.md) for the selection rules, backend requirements, rollout and rollback.
+QR login and React Navigation accept both embedded sets. iOS associates both API hosts by default; `PROD_NATIVE_LINK_HOSTS=api+frontend` adds both frontend hosts after their well-known files are published. The owner's A/B decision is pending. The existing `PROD_UNIVERSAL_LINK_HOST` and `PROD_UNIVERSAL_LINK_PATH_PREFIX` stay unchanged. App identifiers, signing and version numbers keep using the existing variables. See [Domain migration](docs/DOMAIN_MIGRATION.md) for the selection rules, backend requirements, rollout and rollback.
 
 The active API URL lives in `src/lib/domains.ts`; HTTP requests, token refresh and social login use `buildApiUrl(path)` from `src/lib/api/baseUrl.ts`. The resolver trims surrounding whitespace and trailing slashes and supports the legacy `/mobile` suffix. Missing configuration raises an error before an API request.
 
@@ -338,7 +339,7 @@ All under `/api/v1` on the configured `*_API_BASE_URL`. The workspace API famili
 - Device login scheme: `nyxid://login/device?user_code=...` -> prefills the confirmation screen without previewing or approving
 - The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
-- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
+- Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. `*_NATIVE_LINK_HOSTS` defaults to `api`, associating the embedded API hosts on iOS; `api+frontend` adds the embedded frontend hosts. Android HTTPS filters for that set additionally require `*_ANDROID_HTTPS_APP_LINKS=true` and skip non-HTTPS URLs.
 - React Navigation accepts the configured app scheme and every embedded API/frontend origin plus the link host; the universal-link settings are the same for both domain sets (see [Domain migration](docs/DOMAIN_MIGRATION.md)).
 
 ## Session

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Alert } from "react-native";
-import * as WebBrowser from "expo-web-browser";
+import { openInAppBrowser } from "../../lib/inAppBrowser";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SkeletonRows } from "../../components/Skeleton";
 import { Notice } from "../../components/workspace/WorkspaceUI";
@@ -116,7 +116,7 @@ export function AccountOrganizations({
     setBusy(true);
     setMessage(null);
     try {
-      await WebBrowser.openBrowserAsync(
+      await openInAppBrowser(
         accountWebUrl(
           getFrontendUrl(),
           `/orgs/${encodeURIComponent(selected.id)}?tab=${tab}`,
