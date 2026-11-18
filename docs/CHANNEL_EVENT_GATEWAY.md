@@ -953,8 +953,8 @@ existing assistant history owns answer content; additive `nyxbot_events.delivery
 metadata arbitrates streamed versus delayed answers. Late gateway answers now recover
 expired text preparations under current authority, with a fenced MongoDB-time
 lease. The claim becomes irreversible immediately before the gateway request;
-a missing or ambiguous receipt still forbids a new send. The two closed
-reply-target retry responses described below permit re-asking the same operation. Interrupted sends add
+a missing or ambiguous receipt still forbids a new operation. The bounded
+reply-target cases described below permit re-asking the same operation. Interrupted sends add
 a fixed notice only to an existing authorized owner thread. No
 public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
@@ -964,18 +964,28 @@ is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-deli
 `POST /reply-targets/{ref}/messages` with exactly `409` and
 `detail: "routed_reply_in_progress"` proves gateway admission without a receipt.
 Exactly `503` and `detail: "routed_reply_unavailable"` permits the same retry but
-does not prove admission. NyxID re-asks only these responses with the same target,
+does not prove admission. NyxID also re-asks after no HTTP response, any other
+5xx, or a 2xx body that cannot be read or JSON-parsed, always with the same target,
 serialized body and Idempotency-Key. Delays are 15, 30, 60, 120, then 300 seconds;
 valid `Retry-After` can lengthen them. The deadline is the earliest original
 target expiry, event expiry and first retryable observation plus 24 hours.
-Timeouts, connection failures, other 5xx and broken 2xx stop as unknown. Definite
-4xx refusals, including idempotency conflict and operation limit, stop as rejected.
+A 2xx with valid JSON and a missing/unrecognized outcome or explicit `unknown`,
+`rate_limited` or `unsupported` delivery stops as unknown; explicit `rejected`
+stops as rejected. Other definite 4xx refusals, including idempotency conflict
+and operation limit, stop as rejected even if their bodies cannot be read.
+Legacy unkeyed `/events/{ref}/replies` operations never re-ask these failures.
 
-Receipt waits reuse the text preparation claim and lease. Their compatible outer
-state is `unknown`, with a versioned pending receipt marker; old sweepers ignore
-them and old recovery readers suppress their output. A new worker can resume the
-identical operation. An old `sending` row without a durable retryable observation
-never authorizes a re-ask.
+Receipt waits reuse the text preparation claim and lease. The provider-boundary
+write renews the live polling lease and its crash wake-up together, without
+extending the absolute deadline. Their compatible outer
+state is `unknown`, with pending receipt marker version 2. New workers acquire
+v1 or v2 and upgrade v1 atomically; #2561 workers claim only v1. Older recovery
+readers suppress all unknown output. A stale `sending` row can resume only with
+preparation v1, frozen request hash v1, the committed encrypted target and
+expiry, and an expired database-time lease. Its persisted original `checked_at`
+anchors the 24-hour bound. Missing or invalid anchors never permit recovery;
+older unfrozen rows retain terminal behavior. Deadlines never move later.
+Rollback pauses v2 waits; upgrading resumes only inside their original bound.
 
 `GET /api/v1/nyxbot/dispatches` authenticates with the original channel provider
 bearer and `Idempotency-Key` header. Optional `dispatched_at` is Unix seconds.
@@ -990,7 +1000,10 @@ Successful responses are:
 ```
 
 `outcome` is `completed` or `failed`, independent of chat delivery.
-`provider_delivery` is `none`, `started`, `confirmed` or `unconfirmed`.
+`provider_delivery` is `none`, `started`, `confirmed` or `unconfirmed`. Every
+pending v1/v2 wait is `started`, describing NyxID’s attempt still in progress,
+regardless of gateway admission. Terminal uncertainty is `unconfirmed`. During
+rolling deployment, a #2561 reader reports a v2 wait as `unconfirmed`.
 `stored_response` means retained output is retrievable; it is false when the
 local sender owns the answer. Lookup does not reserve that ownership: the later
 GET or repeated POST arbitrates it atomically against the local send barrier,
@@ -1525,14 +1538,60 @@ types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
 #1152, #1156, #1157, #1159. CMA's broader features do not
 imply NyxID support for media, templates, reactions, controls or groups.
 
+### Locally delivered response lifecycle (#2588)
+
+New relay admissions without stored turn output retain a version-1
+`response_read` mapping on `nyxbot_events` for 24 hours. This includes Lark/Feishu
+thread-follow candidates and events excluded from stored output by flag,
+readiness, discovery, metadata or binding. GET `/nyxbot/responses/{id}`, `/events`
+and repeated POST share the existing response renderer. Turn reads return
+created/queued at sequence 0 and in-progress at 1 while work runs, then completed
+at 2 with `output: []` after settlement, including failure. Settlement queries
+only assistant-message status. No read acquires delivery ownership, changes turn
+delivery or sets `gateway_response_id`; dispatch lookup remains
+`stored_response: false`.
+
+For these mapped events, valid exact four-key `cmaeg.*` metadata, a binding and
+the existing `response_recovery_providers: ["nyxbot"]` advertisement enable
+`X-CMA-Response-ID` and a `response.created` first frame with SSE id `0`,
+`sequence_number: 0`, status `queued`, object `response`, empty output, stable
+`conversation.id` and original metadata. The resolved `thread_reply` choice is
+frozen before acceptance and retained on both original and replayed created
+frames. The live stream still carries its answer and completion. A replica
+consumer drops after acceptance; NyxID's existing late sender delivers turn
+answers to the original thread target. Requests without this negotiated prefix
+retain legacy prefix bytes; their mapping echoes only bounded original strings
+from the four allowed metadata keys.
+
+No-turn replies under the conforming prefix (linking, membership, busy and
+unavailable notices) retain a separate encrypted `response_reply` on the event,
+using the existing `Payload` serializer, encryption and size bound. The original
+command's GET/events/repeated POST expose that reply as normal response output:
+created 0, progress 1, output-item 2, completed 3. Duplicate aliases remain empty.
+Only the gateway parent delivers this output; NyxID never sends it locally.
+Consuming or buffering the original stream does not consume its recovery copy,
+as with ordinary stored no-turn replies. An atomic no-turn/status fence prevents
+storing a reply on a bound turn, and turn reads never decrypt this field. The
+existing gateway delivery journal owns deduplication; reads are replayable.
+Silent no-turn outcomes remain completed with empty output.
+
+The mapping and encrypted reply expire at admission + 24 hours, including for
+seven-day media events; conversation deletion removes both. Indexed maintenance
+uses the existing sweep. There is no new flag/capability and no backfill: old
+admissions and expired identities remain 404. Old replicas ignore the additive
+fields and return 404. Live source/thread authority remains required by gateway
+send: a prepared org thread without a committed conversation can still refuse
+its no-turn notice at the existing thread resolver.
+
 ### Channel turn reliability (#2089, #2091, #2095)
 
 Relay-sourced provider responses can opt into the same encrypted, 24-hour durable
 snapshots and numbered event replay as native responses. The registered flag
 `nyxbot:relay-response-recovery` defaults off and resolves for the channel’s
 linking person (`row.user_id`), including live organization overrides. Flag-off
-returns to the existing live-stream path before recovery metadata validation or
-any capability request. In addition to this owner opt-in, NyxID requires the
+keeps output on the existing live-stream/local-delivery path before stored
+recovery metadata validation. Metadata-only lifecycle acceptance described above has its
+own scoped discovery check. In addition to this owner opt-in, NyxID requires the
 four exact `cmaeg.*` command identity fields and gateway discovery advertising
 `relay_authoring.response_recovery_providers` containing `nyxbot`. Gateways that
 omit these additive capabilities retain the existing live stream and late-reply
@@ -1614,8 +1673,8 @@ readiness environment configuration is required. The separately negotiated Lark/
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.
 
-Only after the owner flag check, capability discovery uses a bounded in-process
-cache (64 gateway bases) with one refresh in flight per base. Positive results
+Stored-output capability discovery follows the owner flag check; conforming
+metadata-only admissions also use this same bounded in-process cache (64 gateway bases) with one refresh in flight per base. Positive results
 last five minutes, explicit negatives thirty seconds, and transport/HTTP errors
 only one second. A cache miss is best effort and bounded to two seconds: an
 unavailable capability endpoint leaves the legacy path available within CMA’s
@@ -1628,8 +1687,8 @@ Rollout: deploy all compatible readers first, then enable
 `nyxbot:relay-response-recovery` for one owner. Verify normal replies, observer
 disconnect recovery, exactly-once late delivery, and the metadata-only delivery
 audits for that owner before widening the flag to more people or organizations.
-Readiness and CMA advertisement alone never enable recovery. Turning the flag
-off restores legacy admission for new events; already accepted durable
+Readiness and CMA advertisement alone never enable stored-output recovery.
+Turning the flag off keeps new output locally delivered; already accepted durable
 responses retain their recovery and delivery barriers.
 
 Diagnostic correlation: `nyxbot_channel_delivery_failing` describes callback or

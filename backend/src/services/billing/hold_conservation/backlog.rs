@@ -541,56 +541,159 @@ async fn scan(db: &Database, collection: &str, limit: usize) -> Result<Inventory
     }
 }
 
-pub(super) async fn diagnostics(
-    db: &Database,
-) -> AppResult<Vec<super::super::BillingStartupDiagnostic>> {
+impl Inventory {
+    fn sentence(&self, kind: &str) -> String {
+        use super::super::diagnostic_text::{counted, oldest};
+        let decoded = (self.rows - self.invalid) as u64;
+        if decoded == 0 {
+            return String::new();
+        }
+        let resources: BTreeSet<_> = self.totals.values().flat_map(|g| &g.resources).collect();
+        if resources.is_empty() {
+            return format!(
+                "{} unfinished {kind} billing {} {} no remaining holds.",
+                super::super::diagnostic_text::number(decoded),
+                if decoded == 1 { "row" } else { "rows" },
+                if decoded == 1 { "has" } else { "have" },
+            );
+        }
+        let (held, singular, plural) = match kind {
+            "wallet" => ("Wallet credits", "wallet", "wallets"),
+            "grant" => ("Grant credits", "grant", "grants"),
+            "allowance" => ("Allowance units", "period", "periods"),
+            _ => unreachable!(),
+        };
+        let age = oldest(
+            self.groups
+                .iter()
+                .filter(|(_, group)| group.held > Credits::ZERO)
+                .map(|((_, age, _), _)| AGE_LABELS[*age]),
+        );
+        format!(
+            "{held} are held in {} across {}. {age}",
+            counted(resources.len() as u64, singular, plural),
+            counted(decoded, "unfinished billing row", "unfinished billing rows")
+        )
+    }
+}
+
+struct KindScan {
+    kind: &'static str,
+    inventory: Result<Inventory, ReadFailure>,
+    elapsed_ms: u128,
+}
+
+fn describe(
+    scans: Vec<KindScan>,
+    detected_at: DateTime<Utc>,
+) -> Option<super::super::BillingStartupDiagnostic> {
+    use super::super::diagnostic_text::{InventoryIssue, inventory_status};
+    let mut issues = BTreeSet::new();
     let mut lines = Vec::new();
+    let mut problems = Vec::new();
+    let mut sentences = Vec::new();
     let mut present = false;
     let mut unread = false;
-    for (kind, collection) in [
-        ("wallet", WALLETS),
-        ("grant", GRANTS),
-        ("allowance", PERIODS),
-    ] {
-        let started = Instant::now();
-        match scan(db, collection, MAX_ROWS).await {
+    let mut partial = false;
+    for KindScan {
+        kind,
+        inventory,
+        elapsed_ms,
+    } in scans
+    {
+        match inventory {
             Ok(inventory) => {
-                present |= inventory.rows > 0;
+                present |= inventory.rows > 0 || inventory.truncated;
                 lines.extend(inventory.detail(kind));
                 let reason = if inventory.invalid != 0 {
+                    issues.insert(InventoryIssue::InvalidRows);
+                    problems.push(format!(
+                        "{} {kind} {} could not be decoded.",
+                        super::super::diagnostic_text::number(inventory.invalid as u64),
+                        if inventory.invalid == 1 {
+                            "row"
+                        } else {
+                            "rows"
+                        }
+                    ));
                     "reason=row_decode_error stage=decode"
                 } else if inventory.truncated {
                     "reason=row_limit stage=inventory"
                 } else {
                     "reason=ok"
                 };
-                lines.push(format!(
-                    "{kind}: {reason} elapsed_ms={}",
-                    started.elapsed().as_millis()
-                ));
+                if inventory.truncated {
+                    issues.insert(InventoryIssue::RowLimit);
+                    problems.push(format!(
+                        "The {kind} scan stopped before all rows were read."
+                    ));
+                }
+                partial |= inventory.invalid != 0 || inventory.truncated;
+                lines.push(format!("{kind}: {reason} elapsed_ms={elapsed_ms}"));
+                let sentence = inventory.sentence(kind);
+                if !sentence.is_empty() {
+                    sentences.push(sentence);
+                }
             }
             Err(failure) => {
+                issues.insert(InventoryIssue::scan_failure(failure.reason));
                 present = true;
                 unread = true;
+                problems.push(format!("The {kind} inventory could not be read."));
                 lines.push(format!(
-                    "{kind}: complete=false; {} elapsed_ms={}; no totals available",
+                    "{kind}: complete=false; {} elapsed_ms={elapsed_ms}; no totals available",
                     failure.metadata(),
-                    started.elapsed().as_millis()
                 ));
             }
         }
     }
     if !present {
-        return Ok(Vec::new());
+        return None;
     }
-    Ok(vec![super::super::BillingStartupDiagnostic {
-        code:"billing_hold_backlog".into(),
-        summary:if unread {"Billing hold inventory could not be fully read"} else {"Unfinished billing reservations by status and age"}.into(),
-        detail:lines.join("\n"),
-        remediation:"Read-only inventory, not a leak or abandonment verdict. Each kind is an independent consistent snapshot. Age uses meter creation and database time. Held excludes recorded returns and matching applied locks. Resources count positive outstanding holds; rows include zero-hold handoffs. Wallets/owners are distinct row identities. Allowance units are separated by metric; groups overlap in resources/owners. Incomplete totals are not population totals. No counters or charging decisions are changed.".into(),
-        detected_at:Utc::now(),
-    }])
+    let (severity, remediation) = inventory_status(&issues);
+    if partial {
+        problems.push("Counts cover only decoded rows.".into());
+    }
+    problems.extend(sentences);
+    Some(super::super::BillingStartupDiagnostic {
+        code: "billing_hold_backlog".into(),
+        severity,
+        technical_details: Some(lines.join("\n")),
+        summary: if unread {
+            "Billing hold inventory could not be fully read"
+        } else {
+            "Holds for unfinished requests"
+        }
+        .into(),
+        detail: problems.join(" "),
+        remediation,
+        detected_at,
+    })
 }
+
+pub(super) async fn diagnostics(
+    db: &Database,
+) -> AppResult<Vec<super::super::BillingStartupDiagnostic>> {
+    let mut scans = Vec::new();
+    for (kind, collection) in [
+        ("wallet", WALLETS),
+        ("grant", GRANTS),
+        ("allowance", PERIODS),
+    ] {
+        let started = Instant::now();
+        let inventory = scan(db, collection, MAX_ROWS).await;
+        scans.push(KindScan {
+            kind,
+            inventory,
+            elapsed_ms: started.elapsed().as_millis(),
+        });
+    }
+    Ok(describe(scans, Utc::now()).into_iter().collect())
+}
+
+#[cfg(test)]
+mod presentation_tests;
+
 /// Share the hold verifier's decoders, receipt and applied-lock subtraction.
 /// The caller's one snapshot aggregate supplies the three indexed resource joins.
 pub(in crate::services::billing) fn request_holds(
@@ -644,6 +747,23 @@ mod tests {
     use super::*;
     use mongodb::bson::Bson;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn integrity_inventory_uses_operator_sentences() {
+        let (db, _) = fixture().await;
+        db.collection::<Document>(METERS)
+            .insert_one(row("request", "forwarded", 1))
+            .await
+            .unwrap();
+        let result = diagnostics(&db).await.unwrap();
+        db.drop().await.unwrap();
+        assert!(
+            !result[0].detail.contains("complete="),
+            "{}",
+            result[0].detail
+        );
+        assert!(result[0].detail.contains("under an hour old"));
+    }
 
     tokio::task_local! {
         static CURSOR_PAUSE: Duration;
@@ -895,7 +1015,7 @@ mod tests {
         assert!(inventory.summary.contains("could not be fully read"));
         assert!(
             inventory
-                .detail
+                .technical_details.as_ref().unwrap()
                 .contains("grant: complete=false; reason=index_unavailable stage=aggregate database_code=2 elapsed_ms=")
         );
         indexes
@@ -991,7 +1111,7 @@ mod tests {
         commands.lock().unwrap().clear();
         let result = diagnostics(&db).await.unwrap();
         let read_commands = commands.lock().unwrap().clone();
-        let detail = &result[0].detail;
+        let detail = &result[0].technical_details.as_ref().unwrap();
         assert!(
             detail.contains(
                 "grant total unit=credits rows=24 held=24.0000192 resources=2 wallets=1 owners=1"
@@ -1185,7 +1305,7 @@ mod tests {
             .await
             .unwrap();
         let result = diagnostics(&db).await.unwrap();
-        let detail = &result[0].detail;
+        let detail = &result[0].technical_details.as_ref().unwrap();
         assert!(
             detail.contains(
                 "allowance total unit=tokens rows=1 held=1 resources=1 wallets=0 owners=1"
@@ -1209,10 +1329,16 @@ mod tests {
         let failed = diagnostics(&db).await.unwrap();
         assert!(
             failed[0]
-                .detail
+                .technical_details.as_ref().unwrap()
                 .contains("grant: complete=false; reason=index_unavailable stage=aggregate database_code=2 elapsed_ms=")
         );
-        assert!(failed[0].detail.contains("allowance: complete=true"));
+        assert!(
+            failed[0]
+                .technical_details
+                .as_ref()
+                .unwrap()
+                .contains("allowance: complete=true")
+        );
         db.drop().await.unwrap();
     }
 

@@ -27,6 +27,7 @@ pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
 pub mod assistant_cma_gateway;
+pub(crate) mod assistant_cma_legacy_service;
 pub mod assistant_cma_sandbox_service;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
@@ -622,3 +623,5 @@ pub mod nyxbot_dispatch_identity;
 pub(crate) mod service_account_connection_audit;
 #[cfg(test)]
 mod service_account_connection_audit_tests;
+
+pub mod nyxbot_response_read;

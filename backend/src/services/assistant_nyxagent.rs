@@ -2824,7 +2824,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.role == AgentRole::Subagent
         && match row.group_id.as_deref() {
             Some(group_id) => {
-                let nyxbot = super::assistant_team_service::ensure_nyxbot(db, user_id).await?;
+                let nyxbot =
+                    super::assistant_team_service::ensure_nyxbot_in_session(db, user_id, session)
+                        .await?;
                 group_has_nyxbot_in_session(db, user_id, group_id, &nyxbot.id, session).await?
             }
             None => false,
@@ -6707,6 +6709,14 @@ pub(crate) async fn delete_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        // Lifecycle aliases and encrypted replies follow the deleted conversation;
+        // retain the admission tombstone so a duplicate cannot recreate them.
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .update_many(doc! {"response_read.version":1,"$and":[
+                {"$or":[{"user_id":user_id},{"delivery.origin.org_execution.actor_id":user_id}]},
+                {"$or":[{"conversation_id":id},{"resolved_conversation_id":id}]}
+            ]},doc! {"$unset":{"response_read":"","response_reply":""}})
+            .session(&mut *session).await?;
         // A channel permission result may retain the original encrypted reply
         // capability after the initial stream settles. Deletion removes that
         // material together with its outbox; never reopen the original claim.

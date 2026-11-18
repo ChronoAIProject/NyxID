@@ -469,14 +469,11 @@ pub async fn register_observed_reference(
         },
         ..Default::default()
     };
-    let reference = super::assistant_cma_agent_service::register_live(
-        db,
-        &gateway,
-        &watch.user_id,
-        agent,
-        Some(&source),
-    )
-    .await?;
+    let Some(reference) =
+        register_observed_agent(db, &gateway, &watch.user_id, agent, &source).await?
+    else {
+        return Ok(false);
+    };
     let updated=db.collection::<mongodb::bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
         .update_one(doc! {"_id":&watch.id,"user_id":&watch.user_id,"cma.agent_id":agent,"cma.checked_at":cma.checked_at.map(mongodb::bson::DateTime::from_chrono)},
             doc! {"$set":{"cma.agent_ref_id":&reference.id,"cma.response_id":&response}}).await?;
@@ -493,6 +490,28 @@ pub async fn register_observed_reference(
         return observe_approval(state, watch, cma, &gateway, agent, response).await;
     }
     Ok(false)
+}
+
+// Watches retain delivery state for untracked parents without adopting them.
+// Keep register_live's existing reads and command order for tracked parents.
+pub(super) async fn register_observed_agent(
+    db: &mongodb::Database,
+    gateway: &dyn super::assistant_cma_gateway::CmaGateway,
+    owner: &str,
+    agent: &str,
+    source: &super::assistant_cma_agent_service::AgentSource,
+) -> crate::errors::AppResult<Option<crate::models::assistant_cma_agent::AssistantCmaAgent>> {
+    match super::assistant_cma_agent_service::register_live(db, gateway, owner, agent, Some(source))
+        .await
+    {
+        Ok(reference) => Ok(Some(reference)),
+        Err(crate::errors::AppError::NotFound(message))
+            if message == "Sandbox was not created through NyxID" =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn control_target(value: &Value, response: &str) -> Option<(i64, i64)> {

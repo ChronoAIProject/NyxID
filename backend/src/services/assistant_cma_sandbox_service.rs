@@ -1099,17 +1099,31 @@ pub async fn resolve_created(
     owner_id: &str,
     remote_id: &str,
 ) -> AppResult<AssistantCmaSandbox> {
+    let row = find_created(db, gateway, owner_id, remote_id)
+        .await?
+        .ok_or_else(missing_creation)?;
+    observe(db, gateway, owner_id, &row.id, row.generation).await
+}
+
+pub(super) fn missing_creation() -> AppError {
+    AppError::NotFound("Sandbox was not created through NyxID".into())
+}
+
+pub(super) async fn find_created(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner_id: &str,
+    remote_id: &str,
+) -> AppResult<Option<AssistantCmaSandbox>> {
     validate_remote_id(remote_id)?;
     let service_id = gateway.service_id(owner_id).await?;
     let mut filter = created_filter(owner_id);
     filter.insert("cma_service_id", service_id);
     filter.insert("cma_sandbox_id", remote_id);
-    let row = db
+    Ok(db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(filter)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
-    observe(db, gateway, owner_id, &row.id, row.generation).await
+        .await?)
 }
 
 #[derive(Clone, Debug, Serialize)]

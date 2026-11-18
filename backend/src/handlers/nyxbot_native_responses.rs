@@ -485,6 +485,13 @@ async fn snapshot_inner(
         Ok(v) => v,
         Err(r) => return r,
     };
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) => {
+            return ([("cache-control", "no-store")], Json(view.payload.snapshot)).into_response();
+        }
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
+    }
     let output = match relay_responses::claim_replay(&state, &row, &id).await {
         Ok(output) => output,
         Err(error) => return provider_refusal::error(error),
@@ -531,6 +538,14 @@ async fn events_inner(
         Ok(v) => v,
         Err(e) => return provider_refusal::error(e),
     };
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) if after.is_none_or(|n| n < view.payload.frames.len() as u64) => {
+            return response_read::stream(state, row, headers, id, after);
+        }
+        Ok(Some(_)) => return problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
+    }
     let output = match relay_responses::claim_replay(&state, &row, &id).await {
         Ok(output) => output,
         Err(error) => return provider_refusal::error(error),
