@@ -170,7 +170,9 @@ export function ComposerConnectionPicker({
                         {(reason || checkingId === key.id) && (
                           <span
                             id={`${reasonId}-${key.id}`}
-                            className="block type-secondary text-destructive"
+                            className={checkingId === key.id
+                              ? "block type-secondary text-muted-foreground"
+                              : "block type-secondary text-destructive"}
                           >
                             {checkingId === key.id ? translateUi("Checking availability…") : reason && formatComposerConnectionReason(reason)}
                           </span>
@@ -210,6 +212,8 @@ export function ComposerConnectionChip({
   onRemove,
   onChange,
   changeButtonRef,
+  checking = false,
+  announceChecking = false,
 }: {
   readonly connection?: KeyInfo;
   readonly changeButtonRef?: RefObject<HTMLButtonElement | null>;
@@ -217,8 +221,16 @@ export function ComposerConnectionChip({
   readonly disabled: boolean;
   readonly onRemove: () => void;
   readonly onChange: () => void;
+  readonly checking?: boolean;
+  readonly announceChecking?: boolean;
 }) {
   useUiTranslation();
+  const [settledReason, setSettledReason] = useState(unavailableReason);
+  if (!checking && settledReason !== unavailableReason) setSettledReason(unavailableReason);
+  // Background refreshes leave the live region's settled text intact. Only a
+  // refused send announces checking; the background visual is hidden from AT.
+  const statusReason = checking ? settledReason : unavailableReason;
+  const quietChecking = checking && !announceChecking;
   return (
     <div
       role="group"
@@ -243,21 +255,26 @@ export function ComposerConnectionChip({
         <span
           role="status"
           className={
-            unavailableReason ? "text-destructive" : "text-muted-foreground"
+            quietChecking ? "sr-only" : !checking && statusReason ? "text-destructive" : "text-muted-foreground"
           }
         >
-          {unavailableReason ? (
+          {checking && announceChecking ? (
+            <>{" · "}{translateUi("Checking availability…")}</>
+          ) : statusReason ? (
             <>
               {translateUi(
                 " · Unavailable — choose another connection or remove",
               )}
               {" · "}
-              {unavailableReason}
+              {statusReason}
             </>
           ) : (
             translateUi(" · This message")
           )}
         </span>
+        {quietChecking && <span aria-hidden="true" className="text-muted-foreground">
+          {" · "}{translateUi("Checking availability…")}
+        </span>}
       </span>
       <Button
         type="button"

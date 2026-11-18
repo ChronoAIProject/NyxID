@@ -412,6 +412,8 @@ test("held refresh checks an activated option and fences selected-connection sen
   await expect(dialog).toBeVisible();
   await expect(work).toHaveAttribute("aria-busy", "true");
   await expect(work).toHaveAccessibleDescription("Checking availability…");
+  await expect(work.getByText("Checking availability…")).toHaveClass(/text-muted-foreground/);
+  await expect(work.getByText("Checking availability…")).not.toHaveClass(/text-destructive/);
   await remediationEvidence(page, testInfo, "held-option");
   held.release({ credential_missing: true });
   await expect(work).toHaveAccessibleDescription("Credential missing");
@@ -433,18 +435,61 @@ test("held refresh checks an activated option and fences selected-connection sen
   await page.keyboard.press("Escape");
   const input = page.locator("[data-composer-textbox]");
   await input.fill("Keep until checked");
+  const chip = page.getByRole("group", { name: "Connection for this message" });
+  await expect(chip).not.toContainText("Unavailable");
+  await expect(chip.getByRole("status")).not.toContainText("Checking");
+  await expect(chip.getByText("Checking availability…")).toHaveClass(/text-muted-foreground/);
+  await expect(chip.getByText("Checking availability…")).not.toHaveClass(/text-destructive/);
   await page.getByRole("button", { name: "Send message" }).click();
   await input.press("Enter");
   await expect(input).toHaveText("Keep until checked");
   await expect(page.getByRole("group", { name: "Connection for this message" })).toContainText("Checking availability…");
+  await expect(chip).not.toContainText("Unavailable");
+  await expect(chip.getByRole("status")).toContainText("Checking availability…");
+  await expect(chip.getByRole("status")).toHaveClass(/text-muted-foreground/);
+  await expect(chip.getByRole("status")).not.toHaveClass(/text-destructive/);
   await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
   await remediationEvidence(page, testInfo, "checking-chip-retained-text");
   refresh.release({ credential_missing: false });
   await expect(page.getByRole("group", { name: "Connection for this message" })).not.toContainText("Checking availability…");
+  await expect(chip.getByRole("status")).toContainText("This message");
   await input.press("Enter");
   await expect(page.getByLabel("Submitted messages")).toHaveText("/service work\nKeep until checked");
   await expect(page.getByText("Local send log · 1 messages")).toBeVisible();
 });
+
+for (const unavailable of [false, true]) {
+  test(`background checking stays quiet and settles ${unavailable ? "unavailable" : "available"}`, async ({ page }, testInfo) => {
+    const dialog = await openPicker(page);
+    await dialog.getByRole("button", { name: /Work documents/ }).click();
+    const held = await holdKeys(page);
+    await openPicker(page); await held.started;
+    await page.keyboard.press("Escape");
+    const chip = page.getByRole("group", { name: "Connection for this message" });
+    const status = chip.getByRole("status");
+    await expect(chip).toContainText("Checking availability…");
+    await expect(chip).not.toContainText("Unavailable");
+    await expect(status).toContainText("This message");
+    await expect(status).not.toContainText("Checking");
+    const checking = chip.getByText("Checking availability…");
+    await expect(checking).toHaveAttribute("aria-hidden", "true");
+    await expect(checking).toHaveClass(/text-muted-foreground/);
+    await expect(checking).not.toHaveClass(/text-destructive/);
+    await expect(chip.getByRole("button", { name: "Change connection for this message" })).toBeEnabled();
+    await expect(chip.getByRole("button", { name: "Remove connection for this message" })).toBeEnabled();
+    await remediationEvidence(page, testInfo, `background-checking-${unavailable ? "unavailable" : "available"}`);
+    held.release({ credential_missing: unavailable });
+    await expect(chip).not.toContainText("Checking availability…");
+    if (unavailable) {
+      await expect(status).toContainText("Unavailable — choose another connection or remove · Credential missing");
+      await expect(status).toHaveClass(/text-destructive/);
+    } else {
+      await expect(status).toContainText("This message");
+      await expect(status).toHaveClass(/text-muted-foreground/);
+    }
+    await expect(page.getByLabel("Submitted messages")).toHaveText("No messages sent yet.");
+  });
+}
 
 test("activation catches expiry when the wall clock advances without timer delivery", async ({ page }, testInfo) => {
   await page.clock.install();

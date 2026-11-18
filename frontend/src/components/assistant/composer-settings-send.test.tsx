@@ -13,6 +13,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -360,6 +361,10 @@ it("A1: refuses pointer and Enter before clearing text or uploads while an openi
   const gate = transport.hold();
   const user = await workPicker();
   await user.keyboard("{Escape}");
+  const chip = screen.getByRole("group", { name: "Connection for this message" });
+  expect(chip).toHaveTextContent("Checking availability…");
+  expect(chip).not.toHaveTextContent("Unavailable");
+  expect(within(chip).getByRole("status")).not.toHaveTextContent("Checking");
   const clear = vi.spyOn(useAssistantDraftStore.getState(), "clearDraft");
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
@@ -370,6 +375,7 @@ it("A1: refuses pointer and Enter before clearing text or uploads while an openi
   expect(screen.getByText("Ready")).toBeVisible();
   expect(useAssistantDraftStore.getState().getDraft("screen:nyxagent:assistant")).toBe("Read my notes");
   expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Checking availability…");
+  expect(within(chip).getByRole("status")).toHaveTextContent("Checking availability…");
   await act(async () => gate.resolve({ keys: [{ ...liveKey, credential_missing: true }] }));
   await waitFor(() => expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Credential missing"));
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));

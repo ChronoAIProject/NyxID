@@ -73,8 +73,8 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
   }, [connections.data, now]);
   const connection = connections.data?.find((key) => key.id === connectionId);
   const unavailableReason = connection && composerConnectionUnavailableReason(connection, now);
-  const connectionUnavailableReason = connections.isFetching || checkingSend
-    ? translateUi("Checking availability…") : connections.isError
+  const connectionChecking = connections.isFetching || checkingSend;
+  const connectionUnavailableReason = connections.isError
     ? translateUi("Could not load connections.")
     : connection ? unavailableReason ? formatComposerConnectionReason(unavailableReason) : null : translateUi("No longer listed");
   // Model setup may await a request before sending. Recheck the latest keys
@@ -158,7 +158,10 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
       (current.authority !== renderedAuthority || current.isError || current.isFetching || !row || reason))) {
       if (current.isFetching) setCheckingSend(true);
       const message = "The selected connection is unavailable. Choose another connection or remove it before sending.";
-      toast.error(translateUi(message), {
+      const title = current.isFetching
+        ? "Checking the selected connection. Send again when it's ready."
+        : message;
+      toast.error(translateUi(title), {
         id: "composer-connection-unavailable",
         description: current.isFetching ? translateUi("Checking availability…")
           : current.isError ? translateUi("Could not load connections.")
@@ -207,6 +210,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverr
         loading={connections.isPending} error={connections.isError} onRetry={() => void connections.refetch()}
         disabled={connectionLocked} />
       {connectionId && <ComposerConnectionChip connection={connection} unavailableReason={connectionUnavailableReason}
+        checking={connectionChecking} announceChecking={checkingSend}
         changeButtonRef={connectionChange} onChange={() => openConnectionPicker("change")}
         disabled={connectionLocked} onRemove={() => { setConnectionId(undefined); focusComposer("attachment"); }} />}
       {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">

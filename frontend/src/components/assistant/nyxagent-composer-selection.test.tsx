@@ -533,6 +533,36 @@ it("A2: consumes the override after an admitted interruption before the next mes
   ]);
 });
 
+it.each([
+  ["en", "Checking the selected connection. Send again when it's ready."],
+  ["zh-CN", "正在检查所选连接。就绪后请再次发送。"],
+  ["zh-TW", "正在檢查所選連線。就緒後請再次傳送。"],
+] as const)("R6-4: distinguishes checking and unavailable refusal toasts in %s", async (language, checkingTitle) => {
+  const error = vi.spyOn(toast, "error").mockReturnValue("refused");
+  try {
+    const view = mount(); await choose();
+    appI18n.addResourceBundle("zh-CN", "app", zhCN, true, true);
+    appI18n.addResourceBundle("zh-TW", "app", zhTW, true, true);
+    await act(() => appI18n.changeLanguage(language));
+    state.fetching = true; view.rerender();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: translateUi("Send message") }));
+    expect(error).toHaveBeenCalledExactlyOnceWith(checkingTitle, {
+      id: "composer-connection-unavailable", description: translateUi("Checking availability…"),
+    });
+    state.fetching = false; state.data = [{ ...connection, credential_missing: true }]; view.rerender();
+    fireEvent.click(screen.getByRole("button", { name: translateUi("Send message") }));
+    expect(error).toHaveBeenLastCalledWith(translateUi("The selected connection is unavailable. Choose another connection or remove it before sending."), {
+      id: "composer-connection-unavailable", description: translateUi("Credential missing"),
+    });
+    expect(screen.getByRole("textbox")).toHaveValue("Keep this draft");
+    expect(view.onSend).not.toHaveBeenCalled();
+  } finally {
+    error.mockRestore();
+    await act(() => appI18n.changeLanguage("en"));
+  }
+});
+
 it.each(["click", "Enter", "Space"])("A3: refuses %s activation at wall-clock expiry without timer delivery", async (method) => {
   const start = Date.now();
   state.data = [{ ...connection, credential_type: "api_key", expires_at: new Date(start + 60000).toISOString() }];

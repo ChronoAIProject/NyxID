@@ -51,6 +51,7 @@
   "Check this assistant's configured model and model connection. Visitor setup retries automatically.": "Check this assistant's configured model and model connection. Visitor setup retries automatically.",
   "Checking availability…": "Checking availability…",
   "Checking file…": "Checking file…",
+  "Checking the selected connection. Send again when it's ready.": "Checking the selected connection. Send again when it's ready.",
   "Checking…": "Checking…",
   "Choose attachments": "Choose attachments",
   "Choose model": "Choose model",

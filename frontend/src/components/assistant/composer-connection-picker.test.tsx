@@ -94,6 +94,61 @@ it.each([
   expect(option).toHaveAttribute("aria-busy", "true");
   expect(option).toHaveAccessibleDescription(description);
   expect(screen.getByText(description)).toBeVisible();
+  expect(screen.getByText(description)).toHaveClass("text-muted-foreground");
+  expect(screen.getByText(description)).not.toHaveClass("text-destructive");
+});
+
+it.each([null, "Credential missing"])("R6-1: checking stays neutral and quiet until a refused send, then settles to %s", (reason) => {
+  const chipProps = {
+    connection: { ...key, credential_missing: false },
+    unavailableReason: null,
+    disabled: false,
+    onChange: vi.fn(),
+    onRemove: vi.fn(),
+  };
+  const view = render(<ComposerConnectionChip {...chipProps} />);
+  const status = screen.getByRole("status");
+  const previousText = status.textContent;
+  view.rerender(<ComposerConnectionChip {...chipProps} checking />);
+  const checking = screen.getByText(/Checking availability/);
+  expect(checking).toBeVisible();
+  expect(checking).toHaveClass("text-muted-foreground");
+  expect(checking).not.toHaveClass("text-destructive");
+  expect(checking).toHaveAttribute("aria-hidden", "true");
+  expect(status.textContent).toBe(previousText);
+  expect(status).not.toHaveTextContent("Checking");
+  expect(screen.getByRole("group")).not.toHaveTextContent("Unavailable");
+  expect(screen.getByRole("button", { name: "Change connection for this message" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Remove connection for this message" })).toBeEnabled();
+  view.rerender(<ComposerConnectionChip {...chipProps} checking announceChecking />);
+  expect(status).toHaveTextContent("Checking availability…");
+  expect(status).toHaveClass("text-muted-foreground");
+  expect(status).not.toHaveClass("text-destructive");
+  expect(screen.getByRole("group")).not.toHaveTextContent("Unavailable");
+  view.rerender(<ComposerConnectionChip {...chipProps} unavailableReason={reason} />);
+  expect(status).not.toHaveTextContent("Checking");
+  if (reason) {
+    expect(status).toHaveTextContent("Unavailable — choose another connection or remove · Credential missing");
+    expect(status).toHaveClass("text-destructive");
+  } else {
+    expect(status).toHaveTextContent("This message");
+    expect(status).toHaveClass("text-muted-foreground");
+  }
+});
+
+it("R6-1: preserves the previous unavailable announcement while a background refresh is pending", () => {
+  const chipProps = { connection: key, disabled: false, onChange: vi.fn(), onRemove: vi.fn() };
+  const view = render(<ComposerConnectionChip {...chipProps} unavailableReason="Credential missing" />);
+  const status = screen.getByRole("status");
+  const previousText = status.textContent;
+  view.rerender(<ComposerConnectionChip {...chipProps} unavailableReason={null} checking />);
+  expect(status.textContent).toBe(previousText);
+  expect(status).toHaveClass("sr-only");
+  expect(status).not.toHaveTextContent("Checking");
+  expect(screen.getByText(/Checking availability/)).toHaveClass("text-muted-foreground");
+  view.rerender(<ComposerConnectionChip {...chipProps} unavailableReason={null} />);
+  expect(status).toHaveTextContent("This message");
+  expect(status).not.toHaveClass("sr-only");
 });
 
 it("localizes node and personal copy with literal names, and preserves unknown backend text", async () => {

@@ -51,6 +51,7 @@
   "Check this assistant's configured model and model connection. Visitor setup retries automatically.": "請檢查此助理設定的模型及模型連線。訪客設定會自動重試。",
   "Checking availability…": "正在檢查可用性…",
   "Checking file…": "正在檢查檔案…",
+  "Checking the selected connection. Send again when it's ready.": "正在檢查所選連線。就緒後請再次傳送。",
   "Checking…": "檢查中…",
   "Choose attachments": "選擇附件",
   "Choose model": "選擇模型",

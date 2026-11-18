@@ -494,6 +494,8 @@ Node names and other unknown backend reasons remain literal text.
 chip 和提示均显示检查状态；没有选择连接的发送及 steering 不受影响。每次 dispatch
 （包括 model 设置之后及恢复发送）均同步读取当前账号的查询缓存，避免 React 更新
 延迟漏过撤销。激活时也检查当前时间，到期凭证不关闭选择器。
+检查状态使用中性弱化文字。后台刷新仅更新可见文字，保留 live region 的上次结果，
+避免每次窗口聚焦都播报；只有因刷新而拒绝发送后才播报检查状态，并提示就绪后再次发送。
 
 While the opening keys refresh is pending, cached rows stay visible and an
 activated option shows **Checking availability…**, exposed through busy state
@@ -506,6 +508,10 @@ the chip and refusal toast show the checking state. Sends without an override
 and steering remain available. Every dispatch, including after model setup and
 recovery sends, reads the current actor's query cache synchronously. Activation
 also checks wall time, so an expired credential cannot close the picker.
+Checking uses neutral muted text. Background refreshes update the visual text
+while preserving the live region's last settled result, avoiding announcements
+on every window focus. Only a refused send announces checking and asks the owner
+to send again when the connection is ready.
 
 成功或已被服务端接纳的发送会消耗该消息的连接选择，即使后续响应流中断也不保留
 给下一条消息。已接纳的恢复发送同时消耗恢复提示，避免重复提交；接纳前明确拒绝
