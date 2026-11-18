@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import { Platform } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -17,6 +19,7 @@ export function MachineDesktopRoute({
   route,
   navigation,
 }: NativeStackScreenProps<RootStackParamList, "MachineDesktop">) {
+  const appLanguage = useAppLanguage().language;
   const focused = useIsFocused();
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string>();
@@ -38,7 +41,9 @@ export function MachineDesktopRoute({
     }).catch(() => {
       if (mounted)
         setError(
-          "Desktop privacy protection is unavailable. Install the current development build and try again.",
+          translateApp(
+            "Desktop privacy protection is unavailable. Install the current development build and try again.",
+          ),
         );
     });
     return () => {
@@ -51,30 +56,34 @@ export function MachineDesktopRoute({
         await privacy.allowScreenCaptureAsync("machine-desktop");
       }).catch(() => {});
     };
-  }, [focused]);
+  }, [focused, appLanguage]);
   let params;
   try {
     params = desktopRouteParams(route.params);
   } catch {
     return (
-      <WorkspacePage title="Live desktop">
+      <WorkspacePage title={translateApp("Live desktop")}>
         <Notice
           tone="error"
-          message="This desktop link contains invalid or conflicting selectors."
+          message={translateApp(
+            "This desktop link contains invalid or conflicting selectors.",
+          )}
         />
-        <ActionButton label="Close desktop" onPress={navigation.goBack} />
+        <ActionButton label={translateApp("Close desktop")}
+          onPress={navigation.goBack} />
       </WorkspacePage>
     );
   }
   if (!focused || !ready || error)
     return (
-      <WorkspacePage title="Live desktop">
+      <WorkspacePage title={translateApp("Live desktop")}>
         {error ? (
           <Notice tone="error" message={error} />
         ) : (
-          <Label muted>Protecting desktop privacy…</Label>
+          <Label muted>{translateApp("Protecting desktop privacy…")}</Label>
         )}
-        <ActionButton label="Close desktop" onPress={navigation.goBack} />
+        <ActionButton label={translateApp("Close desktop")}
+          onPress={navigation.goBack} />
       </WorkspacePage>
     );
   return (

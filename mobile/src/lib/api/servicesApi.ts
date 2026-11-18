@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { requestJson } from "./http";
 import {
@@ -35,7 +36,7 @@ export const servicesApi = {
     );
     if (entry.slug !== slug)
       throw new Error(
-        "The server returned a different service. Please reload.",
+        translateApp("The server returned a different service. Please reload."),
       );
     return entry;
   },
@@ -45,7 +46,9 @@ export const servicesApi = {
     );
     if (connection.id !== id)
       throw new Error(
-        "The server returned a different connection. Please reload.",
+        translateApp(
+          "The server returned a different connection. Please reload.",
+        ),
       );
     return connection;
   },

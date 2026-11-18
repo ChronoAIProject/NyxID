@@ -1579,9 +1579,16 @@ The mapping and encrypted reply expire at admission + 24 hours, including for
 seven-day media events; conversation deletion removes both. Indexed maintenance
 uses the existing sweep. There is no new flag/capability and no backfill: old
 admissions and expired identities remain 404. Old replicas ignore the additive
-fields and return 404. Live source/thread authority remains required by gateway
-send: a prepared org thread without a committed conversation can still refuse
-its no-turn notice at the existing thread resolver.
+fields and return 404.
+
+For prepared org threads, both stream formats record a fixed refusal on the
+terminal event before emitting it. The original negotiated command completes
+with that notice for the authenticated provider even if membership, guest
+exposure or funding changed. If transport authority closed while the provider
+can still authenticate to the original binding, it completes with empty output.
+Retirement revokes the provider credential. The relay checks the live audience
+before any platform send. Old relay replicas still refuse these notices until
+all admission, read and relay replicas are upgraded.
 
 ### Channel turn reliability (#2089, #2091, #2095)
 

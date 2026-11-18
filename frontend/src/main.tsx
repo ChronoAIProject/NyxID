@@ -25,6 +25,9 @@ import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 import { installNyxbotErrorFallback } from "./lib/assistant/error-telemetry";
 
+import { installCrashReporting, crashRootOptions } from "./lib/crash-reporting/install";
+import { subscribeCrashPermission } from "./lib/crash-reporting/permission-refresh";
+installCrashReporting();
 installNyxbotErrorFallback();
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -42,7 +45,7 @@ window.addEventListener("vite:preloadError", (event) => {
 
 const accountQueries = createAccountQueryScope({
   defaultOptions: { queries: { staleTime: 60 * 1000, retry: shouldRetryQuery } },
-});
+}, subscribeCrashPermission);
 installAccountSessionSync();
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
@@ -197,7 +200,7 @@ if (!rootElement) {
 }
 
 // All route and runtime query observers share the current account client.
-void appLanguageReady.then(() => createRoot(rootElement).render(
+void appLanguageReady.then(() => createRoot(rootElement, crashRootOptions).render(
   <StrictMode>
     <AppProviders />
   </StrictMode>,

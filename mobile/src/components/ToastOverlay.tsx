@@ -4,6 +4,7 @@ import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanim
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../theme/designTokens";
+import { useFloatingTrailingInset } from "./workspace/workspaceFloatingInset";
 
 export type ToastKind = "success" | "error" | "info";
 
@@ -41,6 +42,8 @@ let nextId = 0;
 export function ToastOverlay({ toast, duration = 2400 }: Props) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  // In-page toasts center in the area left of the Duo's floating rail.
+  const floatingInset = useFloatingTrailingInset();
   const [queue, setQueue] = useState<ToastEntry[]>([]);
   const prevToastRef = useRef<ToastState | null>(null);
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -65,7 +68,10 @@ export function ToastOverlay({ toast, duration = 2400 }: Props) {
   if (queue.length === 0) return null;
 
   return (
-    <View style={styles.wrap} pointerEvents="box-none">
+    <View
+      style={[styles.wrap, floatingInset ? { right: floatingInset } : null]}
+      pointerEvents="box-none"
+    >
       {queue.map((entry) => (
         <Animated.View
           key={entry.id}

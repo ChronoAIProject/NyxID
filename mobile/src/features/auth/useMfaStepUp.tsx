@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, View, Text } from "react-native";
@@ -16,6 +18,7 @@ import {
 } from "./mfaStepUp";
 
 export function useMfaStepUp(scope: string) {
+  useAppLanguage();
   // Keep the originating login even when its refusal arrives after a switch.
   const generation = authSessionGeneration();
   const [pending, setPending] = useState<{
@@ -75,7 +78,7 @@ export function useMfaStepUp(scope: string) {
     if (decision !== "prompt") return false;
     setPending({
       retry,
-      message: error instanceof Error ? error.message : "Verification required",
+      message: error instanceof Error ? error.message : translateApp("Verification required"),
       generation,
       scope,
     });
@@ -107,7 +110,7 @@ export function useMfaStepUp(scope: string) {
                         authSessionGeneration(),
                       )
                     )
-                      throw Object.assign(new Error("Verification cancelled"), {
+                      throw Object.assign(new Error(translateApp("Verification cancelled")), {
                         name: "AbortError",
                       });
                   },
@@ -143,6 +146,7 @@ function MfaStepUpPrompt({
   cancel: () => void;
   verify: (code: string) => Promise<void>;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = createDeviceLoginStyles(colors);
   const mounted = useRef(true);
@@ -169,7 +173,7 @@ function MfaStepUpPrompt({
         setError(
           failure instanceof Error
             ? failure.message
-            : "Verification failed. Try again.",
+            : translateApp("Verification failed. Try again."),
         );
     } finally {
       submitting.current = false;
@@ -182,12 +186,16 @@ function MfaStepUpPrompt({
   return (
     <View
       style={[styles.detailPanel, { padding: spacing.xxl, gap: spacing.lg }]}
-      accessibilityLabel="Verify this session"
+      accessibilityLabel={translateApp("Verify this session")}
     >
-      <Text style={[styles.title, { flex: 0 }]}>Verify this session</Text>
+      <Text style={[styles.title, { flex: 0 }]}>
+        {translateApp("Verify this session")}
+      </Text>
       <Text style={styles.signInText}>{message}</Text>
       <AuthTextInput
-        accessibilityLabel={recovery ? "Recovery code" : "Authenticator code"}
+        accessibilityLabel={recovery ? translateApp("Recovery code")
+            : translateApp("Authenticator code")
+        }
         value={code}
         onChangeText={setCode}
         style={styles.codeInput}
@@ -206,7 +214,9 @@ function MfaStepUpPrompt({
       <PrimaryButton
         kind="ghost"
         disabled={busy}
-        label={recovery ? "Use an authenticator code" : "Use a recovery code"}
+        label={recovery ? translateApp("Use an authenticator code")
+            : translateApp("Use a recovery code")
+        }
         onPress={() => {
           setRecovery(!recovery);
           setCode("");
@@ -214,13 +224,15 @@ function MfaStepUpPrompt({
       />
       <AuthSubmitButton loading={busy}
         disabled={busy || !code.trim()}
-        label={busy ? "Verifying..." : "Verify & continue"}
+        label={busy ? translateApp("Verifying...")
+            : translateApp("Verify & continue")
+        }
         onPress={() => void submit()}
       />
       <PrimaryButton
         kind="ghost"
         disabled={busy}
-        label="Cancel"
+        label={translateApp("Cancel")}
         onPress={cancel}
       />
     </View>

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import {
   ActivityIndicator,
   Pressable,
@@ -23,6 +25,7 @@ import type { ChallengeDetail } from "../../lib/api/types";
 import { spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 export type ApprovalListState = {
   items: readonly ChallengeDetail[];
@@ -63,12 +66,12 @@ export function activityHistorySections(
     const valid = Number.isFinite(date.getTime());
     const key = valid ? date.toDateString() : "unknown";
     const title = !valid
-      ? "Date not recorded"
+      ? translateApp("Date not recorded")
       : key === now.toDateString()
-        ? "Today"
+        ? translateApp("Today")
         : key === yesterday.toDateString()
-          ? "Yesterday"
-          : date.toLocaleDateString("en-US", {
+          ? translateApp("Yesterday")
+          : date.toLocaleDateString(appLocale(), {
               month: "short",
               day: "numeric",
             });
@@ -109,15 +112,18 @@ export function ApprovalsOverview({
   onOpenDetail: (item: ChallengeDetail, source: string) => void;
   onDecide: (item: ChallengeDetail, decision: "APPROVE" | "DENY") => void;
 }) {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = createStyles(colors);
   const listName = (key: string) =>
-    key === "pending" ? "pending approvals" : "approval history";
+    key === "pending" ? translateApp("pending approvals")
+      : translateApp("approval history");
   const dates = activityHistorySections(history.items);
   const sections = [
     {
       key: "pending",
-      title: "Incoming",
+      title: translateApp("Incoming"),
       historyDate: undefined,
       lastHistory: false,
       data: [...pending.items].sort((a, b) =>
@@ -128,7 +134,7 @@ export function ApprovalsOverview({
     ...(dates.length ? dates : [{ title: undefined, data: [] }]).map(
       (group, index, all) => ({
         key: index === 0 ? "history" : `history:${index}`,
-        title: "History",
+        title: translateApp("History"),
         historyDate: group.title,
         data: group.data,
         state: history,
@@ -156,12 +162,13 @@ export function ApprovalsOverview({
         <View style={styles.intro}>
           <View style={styles.introRow}>
             <Text style={[styles.description, styles.introCopy]}>
-              Requests gated by your NyxID policy wait here for your decision.
-              Decisions in Web, Telegram and mobile stay in sync.
+              {translateApp(
+                "Requests gated by your NyxID policy wait here for your decision. Decisions in Web, Telegram and mobile stay in sync.",
+              )}
             </Text>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Refresh activity"
+              accessibilityLabel={translateApp("Refresh activity")}
               accessibilityState={{
                 disabled: refreshDisabled,
                 busy: refreshing,
@@ -181,11 +188,11 @@ export function ApprovalsOverview({
           <SettingsGroup>
             <SettingsRow
               icon={ShieldCheck}
-              label="Active grants"
+              label={translateApp("Active grants")}
               value={
                 activeGrantCount == null ? undefined : String(activeGrantCount)
               }
-              accessibilityHint="Opens your active grants"
+              accessibilityHint={translateApp("Opens your active grants")}
               onPress={onOpenGrants}
             />
           </SettingsGroup>
@@ -208,33 +215,34 @@ export function ApprovalsOverview({
             </View>
             {section.state.isError && (
               <View accessibilityRole="alert" style={styles.errorNote}>
-                <Text style={styles.description}>
-                  Could not load {listName(section.key)}.
-                  {section.data.length
-                    ? " Displayed requests may be out of date."
-                    : " Retry to check for requests."}
+                <Text style={styles.description}>{(section.data.length ? translateApp("Could not load {{name}}. Displayed requests may be out of date.", { name: listName(section.key)}) : translateApp("Could not load {{name}}. Retry to check for requests.", { name: listName(section.key) }))}
                 </Text>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Retry ${listName(section.key)}`}
+                  accessibilityLabel={translateApp("Retry {{listName}}", {
+                    listName: listName(section.key),
+                  })}
                   disabled={offline}
                   onPress={section.state.onRetry}
                   style={[styles.textButton, offline && styles.disabled]}
                 >
-                  <Text style={styles.linkText}>Retry</Text>
+                  <Text style={styles.linkText}>{translateApp("Retry")}</Text>
                 </Pressable>
               </View>
             )}
             {offline && !section.data.length ? (
               <GroupedCell first last inset={false}>
                 <Text style={[styles.emptyDescription, styles.emptyRow]}>
-                  Connect to check {listName(section.key)}.
+                  {translateApp("Connect to check {{list}}.", {
+                    list: listName(section.key)})}
                 </Text>
               </GroupedCell>
             ) : section.state.isLoading && !section.data.length ? (
               <SkeletonRows
                 rows={section.key === "pending" ? 2 : 3}
-                accessibilityLabel={`Loading ${listName(section.key)}`}
+                accessibilityLabel={translateApp("Loading {{listName}}", {
+                  listName: listName(section.key),
+                })}
               />
             ) : !section.data.length && !section.state.isError ? (
               <GroupedCell first last inset={false}>
@@ -242,16 +250,17 @@ export function ApprovalsOverview({
                   <View style={styles.emptyRow}>
                     <ShieldCheck size={28} color={colors.success} />
                     <Text style={styles.emptyTitle}>
-                      Nothing waiting on you
+                      {translateApp("Nothing waiting on you")}
                     </Text>
                     <Text style={styles.emptyDescription}>
-                      Approval requests appear here when an action needs your
-                      sign-off.
+                      {translateApp(
+                        "Approval requests appear here when an action needs your sign-off.",
+                      )}
                     </Text>
                   </View>
                 ) : (
                   <Text style={[styles.emptyDescription, styles.emptyRow]}>
-                    Decided approvals will show up here.
+                    {translateApp("Decided approvals will show up here.")}
                   </Text>
                 )}
               </GroupedCell>
@@ -293,8 +302,8 @@ export function ApprovalsOverview({
             accessibilityRole="button"
             accessibilityLabel={
               section.key === "pending"
-                ? "Load more pending approvals"
-                : "Load older approvals"
+                ? translateApp("Load more pending approvals")
+                : translateApp("Load older approvals")
             }
             accessibilityState={{
               disabled: offline || section.state.isFetchingNextPage,
@@ -308,13 +317,14 @@ export function ApprovalsOverview({
             ) : (
               <Text style={styles.linkText}>
                 {section.key === "pending"
-                  ? "Load More Requests"
-                  : "Load Older Approvals"}
+                  ? translateApp("Load More Requests")
+                  : translateApp("Load Older Approvals")}
               </Text>
             )}
           </Pressable>
         ) : null
       }
+      {...railIndicator}
     />
   );
 }

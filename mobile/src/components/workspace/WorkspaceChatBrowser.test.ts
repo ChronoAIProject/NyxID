@@ -380,10 +380,10 @@ test("busy and disabled refresh controls block taps and pulls, including queued 
         refreshed++;
       },
     });
-    const queuedTap = env.button("Refresh hr admin bot").props.onPress;
+    const queuedTap = env.button("Refresh HR Admin Bot").props.onPress;
     const queuedPull = env.list().props.refreshControl.props.onRefresh;
     env.update(blocked);
-    const button = env.button("Refresh hr admin bot");
+    const button = env.button("Refresh HR Admin Bot");
     assert.equal(button.props.disabled, true);
     assert.equal(button.props.accessibilityState.disabled, true);
     assert.equal(button.props.accessibilityState.busy, "refreshing" in blocked);
@@ -418,7 +418,7 @@ test("queued refresh uses the current action and stops when refresh support is r
       previous++;
     },
   });
-  const queued = env.button("Refresh hr admin bot").props.onPress;
+  const queued = env.button("Refresh HR Admin Bot").props.onPress;
   env.update({
     onRefresh: () => {
       current++;

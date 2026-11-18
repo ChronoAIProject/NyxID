@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AppState, ScrollView, StyleSheet, View, Text } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -23,6 +25,7 @@ import { DictationWaveform } from "../assistant/DictationWaveform";
 import { voiceSpeechText } from "../assistant/voice/voiceSpeechText";
 import { useComposerDictation } from "../assistant/useComposerDictation";
 import type { GroupMessage } from "./groupContracts";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 type Props = {
   scope: string;
@@ -46,6 +49,8 @@ const MICROPHONE_RETRY = "Can't hear the microphone. Tap to retry.";
 
 /** Native speech uses the ordinary crew sender and its recipient/authority fences. */
 export function CrewVoiceComposer(props: Props) {
+  const railIndicator = useRailScrollIndicator();
+  const appLanguage = useAppLanguage().language;
   const { colors } = useTheme();
   const focused = useIsFocused();
   const reducedMotion = useReducedMotion();
@@ -111,7 +116,7 @@ export function CrewVoiceComposer(props: Props) {
       rapidSilences.current =
         durationMs < RAPID_SILENCE_MS ? rapidSilences.current + 1 : 0;
       if (rapidSilences.current >= MAX_RAPID_SILENCES) {
-        setError(MICROPHONE_RETRY);
+        setError(translateApp(MICROPHONE_RETRY));
         return;
       }
       setRearming(true);
@@ -135,12 +140,16 @@ export function CrewVoiceComposer(props: Props) {
         const delivered = await sendUtterance(text);
         if (available() && !delivered)
           setError(
-            "Your spoken message was not sent. Review the draft in chat before trying again.",
+            translateApp(
+              "Your spoken message was not sent. Review the draft in chat before trying again.",
+            ),
           );
       } catch {
         if (available())
           setError(
-            "Your spoken message could not be sent. Review the crew before trying again.",
+            translateApp(
+              "Your spoken message could not be sent. Review the crew before trying again.",
+            ),
           );
       } finally {
         sendLock.current = false;
@@ -350,7 +359,9 @@ export function CrewVoiceComposer(props: Props) {
           onError: () => {
             if (!available() || ticket !== playback.current || finished) return;
             setError(
-              "The reply could not be read aloud. It is available in the transcript.",
+              translateApp(
+                "The reply could not be read aloud. It is available in the transcript.",
+              ),
             );
             finished = true;
             stopPlayback();
@@ -358,7 +369,11 @@ export function CrewVoiceComposer(props: Props) {
           },
         });
       } catch {
-        setError("Speech playback is unavailable. Continue in the transcript.");
+        setError(
+          translateApp(
+            "Speech playback is unavailable. Continue in the transcript.",
+          ),
+        );
         stopPlayback();
         setSpeaking(false);
       }
@@ -373,21 +388,22 @@ export function CrewVoiceComposer(props: Props) {
     foreground,
     error,
     dictation.error,
+    appLanguage,
   ]);
 
   const notice = error ?? dictation.error;
   const status =
     !props.enabled || paused || sheetOpen || !foreground
-      ? "Microphone paused"
+      ? translateApp("Microphone paused")
       : notice
-        ? "Voice paused"
+        ? translateApp("Voice paused")
         : speaking
-          ? "Reading crew reply…"
+          ? translateApp("Reading crew reply…")
           : sending || props.busy
-            ? "Sending to crew…"
+            ? translateApp("Sending to crew…")
             : dictation.recording
-              ? "Listening…"
-              : "Connecting…";
+              ? translateApp("Listening…")
+              : translateApp("Connecting…");
   const seconds =
     connectedAt === undefined
       ? undefined
@@ -434,6 +450,7 @@ export function CrewVoiceComposer(props: Props) {
           style={{ maxHeight: Math.max(44, panelHeight - 24) }}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.content}
+          {...railIndicator}
         >
           <VoiceComposerHeader
             name={props.crewName}
@@ -453,8 +470,7 @@ export function CrewVoiceComposer(props: Props) {
               {dictation.text}
             </Text>
           ) : null}
-          <Label muted style={styles.recipient}>
-            To {props.recipientLabel}
+          <Label muted style={styles.recipient}>{translateApp("To {{recipientLabel}}", { recipientLabel: props.recipientLabel })}
           </Label>
           {notice ? (
             <Label accessibilityRole="alert" style={{ color: colors.danger }}>
@@ -467,10 +483,10 @@ export function CrewVoiceComposer(props: Props) {
               <VoiceMainButton
                 label={
                   notice
-                    ? "Retry crew voice"
+                    ? translateApp("Retry crew voice")
                     : paused
-                      ? "Resume crew microphone"
-                      : "Pause crew microphone"
+                      ? translateApp("Resume crew microphone")
+                      : translateApp("Pause crew microphone")
                 }
                 fill={paused || notice ? colors.danger : colors.textPrimary}
                 disabled={!props.enabled || !foreground}
@@ -497,7 +513,8 @@ export function CrewVoiceComposer(props: Props) {
                 )}
               </VoiceMainButton>
             </View>
-            <VoiceIconButton large label="End voice and close" onPress={close}>
+            <VoiceIconButton large label={translateApp("End voice and close")}
+              onPress={close}>
               <PhoneOff color={colors.danger} size={20} />
             </VoiceIconButton>
           </VoiceComposerControls>

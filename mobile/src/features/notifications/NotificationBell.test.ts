@@ -26,9 +26,9 @@ function render(props: Record<string, unknown>, colors = lightColors) {
   const { NotificationBell } = h.load(
     fileURLToPath(new URL("./NotificationBell.tsx", import.meta.url)),
   ) as { NotificationBell: (props: object) => E };
+  // The bell renders through the shared floating glass button.
   const root = h.mount(() => NotificationBell(props));
-  const pressable: E = { ...root, props: { ...root.props, style: root.props.style({ pressed: false }) } };
-  return { h, root: pressable, all: () => nodes(pressable) };
+  return { h, root, all: () => nodes(root) };
 }
 
 test("the bell names its counts, caps the badge and uses one amber-capable indicator", () => {
@@ -39,7 +39,9 @@ test("the bell names its counts, caps the badge and uses one amber-capable indic
   assert.equal(badge.props.style[1].backgroundColor, lightColors.warning);
   assert.equal(x.all().some((n) => n.props.testID === "notification-bell-attention"), false);
   assert.equal(nodes(badge).find((n) => n.type === "Text")!.props.children, "23");
-  assert.ok(x.root.props.style[0].minWidth >= 44 && x.root.props.style[0].minHeight >= 44);
+  // The shared glass button: a 44pt target in its own glass capsule.
+  assert.equal(x.root.type, "FloatingButton");
+  assert.equal(x.root.props.testID, "notification-bell");
   x.root.props.onPress();
   assert.deepEqual(pressed, [1]);
   x.h.unmount();

@@ -53,6 +53,9 @@ function getPasswordStrength(password: string): {
   return { score, label: "Strong", color: "bg-success" };
 }
 
+/** `AppError::AuthenticationFailed`: wrong email or password (and other first-factor refusals). */
+const AUTHENTICATION_FAILED_ERROR_CODE = 2000;
+
 const INVITE_PATTERN = /^NYX-[A-Z0-9]{8,}$/;
 
 /** Map backend social-auth error keys to user-friendly messages. */
@@ -103,6 +106,7 @@ interface AuthFlowProps {
   readonly socialError?: string;
   readonly initialInviteCode?: string;
   readonly enableEmailLogin?: boolean;
+  readonly allowAppHandoff?: boolean;
 }
 
 export function AuthFlow({
@@ -111,6 +115,7 @@ export function AuthFlow({
   socialError,
   initialInviteCode,
   enableEmailLogin = false,
+  allowAppHandoff = false,
 }: AuthFlowProps) {
   useUiTranslation();
   const normalizedInitialInviteCode =
@@ -223,7 +228,11 @@ export function AuthFlow({
         void navigate({ to: "/assistant" as string });
       }
     } catch (error) {
-      if (error instanceof ApiError) {
+      if (error instanceof ApiError && error.errorCode === AUTHENTICATION_FAILED_ERROR_CODE) {
+        // The server's text carries an "Authentication failed:" prefix and
+        // never matches the translated catalog entry.
+        loginForm.setError("root", { message: translateUi("Invalid email or password") });
+      } else if (error instanceof ApiError) {
         loginForm.setError("root", { message: error.message });
       } else {
         loginForm.setError("root", {
@@ -310,6 +319,7 @@ export function AuthFlow({
           )}
 
           <LoginMethods
+            allowAppHandoff={allowAppHandoff}
             enableEmailLogin={enableEmailLogin}
             returnTo={returnTo}
             disabled={loginMutation.isPending}

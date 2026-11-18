@@ -1,0 +1,40 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { useAuthStore } from "@/stores/auth-store";
+import { useConsentStore } from "@/stores/consent-store";
+import type { User } from "@/types/api";
+import { createAccountQueryScope } from "./account-query-cache";
+import { subscribeCrashPermission } from "./crash-reporting/permission-refresh";
+
+const reporter = vi.hoisted(() => ({ refreshCrashPermission: vi.fn(), invalidateCrashPermission: vi.fn() }));
+vi.mock("./crash-reporting/reporter", () => reporter);
+afterEach(() => vi.clearAllMocks());
+
+it("rebinds discovery once to the active client and cleans up the retired subscription", () => {
+  useAuthStore.getState().setUser({ id: "A" } as User);
+  const bind = vi.fn(subscribeCrashPermission);
+  const scope = createAccountQueryScope({}, bind);
+  const a = scope.getClient();
+  a.setQueryData(["public-config"], { crash_diagnostics_offered: true });
+  expect(reporter.refreshCrashPermission).toHaveBeenLastCalledWith(true);
+  useAuthStore.getState().setUser({ id: "B" } as User);
+  const b = scope.getClient();
+  expect(b).not.toBe(a);
+  expect(bind).toHaveBeenCalledTimes(2);
+  expect(reporter.invalidateCrashPermission).toHaveBeenCalledOnce();
+  b.setQueryData(["public-config"], { crash_diagnostics_offered: true });
+  expect(reporter.refreshCrashPermission).toHaveBeenLastCalledWith(true);
+  reporter.refreshCrashPermission.mockClear();
+  a.setQueryData(["public-config"], { crash_diagnostics_offered: false });
+  a.setQueryData(["public-config"], { crash_diagnostics_offered: true });
+  expect(reporter.refreshCrashPermission).not.toHaveBeenCalled();
+  useConsentStore.setState({ revision: useConsentStore.getState().revision + 1 });
+  expect(reporter.refreshCrashPermission).toHaveBeenCalledExactlyOnceWith(true);
+  useAuthStore.getState().setUser({ id: "B", display_name: "updated" } as User);
+  expect(bind).toHaveBeenCalledTimes(2);
+  scope.dispose();
+  expect(reporter.invalidateCrashPermission).toHaveBeenCalledTimes(2);
+  reporter.refreshCrashPermission.mockClear();
+  b.setQueryData(["public-config"], { crash_diagnostics_offered: false });
+  useConsentStore.setState({ revision: useConsentStore.getState().revision + 1 });
+  expect(reporter.refreshCrashPermission).not.toHaveBeenCalled();
+});

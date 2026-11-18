@@ -28,7 +28,9 @@ pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
 pub mod assistant_cma_gateway;
 pub(crate) mod assistant_cma_legacy_service;
+pub mod assistant_cma_reservation_service;
 pub mod assistant_cma_sandbox_service;
+pub(crate) mod assistant_cma_slot_audit;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
@@ -594,6 +596,7 @@ pub mod assistant_cma_admission;
 pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
+pub(crate) mod org_thread_notice;
 
 pub mod generated_artifacts;
 pub(crate) mod invocation_diagnostic_service;
@@ -623,5 +626,9 @@ pub mod nyxbot_dispatch_identity;
 pub(crate) mod service_account_connection_audit;
 #[cfg(test)]
 mod service_account_connection_audit_tests;
+
+pub mod crash_report_service;
+
+pub mod crash_report_export;
 
 pub mod nyxbot_response_read;

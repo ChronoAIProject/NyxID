@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { groupsApi } from "../../lib/api/groupsApi";
@@ -81,7 +82,9 @@ export function useCollaborationSession(
   const guard = () => {
     if (!valid())
       throw new Error(
-        "This view is inactive or the account changed. Reopen it before continuing.",
+        translateApp(
+          "This view is inactive or the account changed. Reopen it before continuing.",
+        ),
       );
   };
   async function run<T>(
@@ -96,20 +99,26 @@ export function useCollaborationSession(
     try {
       const actor = await groupsApi.identity();
       if (!valid())
-        throw new Error("Keep this view open and connected to continue.");
+        throw new Error(
+          translateApp("Keep this view open and connected to continue."),
+        );
       // null explicitly drops only the feature admission gate for revocation.
       // Omitted/undefined keeps the caller's default gate in place.
       const feature =
         authority?.feature === undefined ? requiredFeature : authority.feature;
       if (feature && !actor.enabled_features.includes(feature))
         throw new Error(
-          "This feature is no longer enabled for your account. Reload to review availability.",
+          translateApp(
+            "This feature is no longer enabled for your account. Reload to review availability.",
+          ),
         );
       if (authority?.capability ?? requireCapability) {
         const ready = await collaborationApi.available();
         if (!valid() || !ready)
           throw new Error(
-            "Collaboration is unavailable until the server rollout is ready.",
+            translateApp(
+              "Collaboration is unavailable until the server rollout is ready.",
+            ),
           );
       }
       const result = await action();
@@ -129,7 +138,7 @@ export function useCollaborationSession(
           message:
             cause instanceof Error
               ? cause.message
-              : "Could not save. Reload and try again.",
+              : translateApp("Could not save. Reload and try again."),
         });
       if (valid()) void client.invalidateQueries({ queryKey: key });
       return undefined;

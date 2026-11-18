@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import {
   createAssistantVoiceApi,
   trustedVoiceOrigin,
@@ -21,12 +22,14 @@ export async function assistantVoiceFeatures(signal?: AbortSignal) {
 export function nativeVoiceEnvironment() {
   const configured = new URL(getFrontendUrl());
   if (configured.username || configured.password)
-    throw new Error("Voice requires a trusted NyxID frontend address.");
+    throw new Error(
+      translateApp("Voice requires a trusted NyxID frontend address."),
+    );
   const origin = trustedVoiceOrigin(configured.origin);
   const epoch = getAuthEpoch();
   const api = createAssistantVoiceApi((path, options) => {
     if (getAuthEpoch() !== epoch)
-      throw Object.assign(new Error("Voice account changed."), {
+      throw Object.assign(new Error(translateApp("Voice account changed.")), {
         name: "AbortError",
       });
     return requestJson(path, options);

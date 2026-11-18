@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
 
 export type UploadStatus = {
@@ -16,12 +17,14 @@ export function assistantUploadStatus(
     ? Math.max(0, Math.min(100, row.progress))
     : 0;
   if (progress >= 99)
-    return { text: "Checking file…", loader: "indeterminate", progress };
+    return { text: translateApp("Checking file…"), loader: "indeterminate", progress };
   if (progress > 0)
     return {
-      text: `Uploading ${Math.round(progress)}%`,
+      text: translateApp("Uploading {{percent}}%", {
+        percent: Math.round(progress),
+      }),
       loader: "determinate",
       progress,
     };
-  return { text: "Waiting to upload…", loader: "indeterminate", progress: 0 };
+  return { text: translateApp("Waiting to upload…"), loader: "indeterminate", progress: 0 };
 }

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { ActivityDecision } from "./assistantActivityDecision";
 import type { AssistantAcknowledgement } from "./assistantTypes";
 
@@ -11,22 +12,24 @@ export function isAutomatic(row: Decision): boolean {
 
 /** Who decided and how, in a couple of words. */
 export function decisionLabel(row: Decision): string {
-  if (isAutomatic(row)) return "Full access";
+  if (isAutomatic(row)) return translateApp("Full access");
   const by =
     row.decided_by === "orchestrator"
       ? "NyxBot"
       : row.decided_by === "user"
-        ? "You"
+        ? translateApp("You")
         : undefined;
   switch (row.status) {
     case "allowed":
-      return by ? `${by} allowed` : "Allowed";
+      return by ? translateApp("{{by}} allowed", { by: by})
+        : translateApp("Allowed");
     case "denied":
-      return by ? `${by} denied` : "Denied";
+      return by ? translateApp("{{by}} denied", {by: by })
+        : translateApp("Denied");
     case "used":
-      return "Used";
+      return translateApp("Used");
     default:
-      return "Expired";
+      return translateApp("Expired");
   }
 }
 
@@ -79,15 +82,27 @@ export function countDecisions(rows: readonly Decision[], links: readonly Activi
 /** Header fragments for a turn's decisions, most important first. */
 export function decisionSummary(counts: DecisionCounts): string[] {
   return [
-    counts.waiting ? `${String(counts.waiting)} waiting` : "",
-    counts.cancelled ? `${String(counts.cancelled)} cancelled` : "",
-    counts.unavailable ? `${String(counts.unavailable)} outcome unavailable` : "",
-    counts.denied ? `${String(counts.denied)} denied` : "",
-    counts.allowed ? `${String(counts.allowed)} allowed` : "",
-    counts.automatic
-      ? `${String(counts.automatic)} allowed by Full access`
+    counts.waiting ? translateApp("{{count}} waiting", { count: String(counts.waiting)})
       : "",
-    counts.expired ? `${String(counts.expired)} expired` : "",
+    counts.cancelled ? translateApp("{{count}} cancelled", {
+          count: String(counts.cancelled),
+        })
+      : "",
+    counts.unavailable ? translateApp("{{count}} outcome unavailable", {
+          count: String(counts.unavailable),
+        })
+      : "",
+    counts.denied ? translateApp("{{by}} denied", { by: String(counts.denied)})
+      : "",
+    counts.allowed ? translateApp("{{by}} allowed", { by: String(counts.allowed)})
+      : "",
+    counts.automatic
+      ? translateApp("{{count}} allowed by Full access", {
+          count: String(counts.automatic),
+        })
+      : "",
+    counts.expired ? translateApp("{{count}} expired", { count: String(counts.expired)})
+      : "",
   ].filter(Boolean);
 }
 
@@ -110,9 +125,9 @@ export function decisionTitle(row: Decision): string {
   const bypass = isAutomatic(row)
     ? (
         {
-          webhook: "automation confirmation",
-          policy: "policy confirmation",
-          approval: "service approval",
+          webhook: translateApp("automation confirmation"),
+          policy: translateApp("policy confirmation"),
+          approval: translateApp("service approval"),
           access_mode: "",
         } as const
       )[
@@ -125,9 +140,9 @@ export function decisionTitle(row: Decision): string {
     : "";
   return [
     isAutomatic(row)
-      ? "Allowed automatically by Full access"
+      ? translateApp("Allowed automatically by Full access")
       : decisionLabel(row),
-    bypass ? `bypassed ${bypass}` : "",
+    bypass ? translateApp("bypassed {{bypass}}", { bypass: bypass }) : "",
     row.summary,
     row.reason?.trim() ?? "",
   ]

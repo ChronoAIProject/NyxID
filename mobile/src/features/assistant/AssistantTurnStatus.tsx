@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
@@ -23,6 +25,7 @@ export function AssistantTurnStatus({
   pendingApproval: boolean;
   interrupted: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -51,14 +54,14 @@ export function AssistantTurnStatus({
     (activity) => activity.status === "running",
   );
   const label = turn?.stop_requested
-    ? "Stopping"
+    ? translateApp("Stopping")
     : capacity
       ? queued
-        ? "Queued until another reply finishes"
-        : "Waiting for the assistant"
+        ? translateApp("Queued until another reply finishes")
+        : translateApp("Waiting for the assistant")
       : status?.phase === "tool" && tool
         ? `${describeToolActivity(tool.label, "running")}…`
-        : (status?.label ?? "Thinking");
+        : (status?.label ?? translateApp("Thinking"));
   const elapsed = elapsedLabel(status?.startedAt, undefined, now);
   const from = Date.parse(
     turn?.capacity_wait_started_at ??
@@ -72,24 +75,20 @@ export function AssistantTurnStatus({
   const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
   return (
     <View style={styles.container}>
-      {capacity ? <Label>{CAPACITY_ACKNOWLEDGEMENT}</Label> : null}
+      {capacity ? (
+        <Label>{translateApp(CAPACITY_ACKNOWLEDGEMENT)}</Label>
+      ) : null}
       <View
         style={styles.row}
         accessibilityRole="text"
         accessibilityLiveRegion="polite"
-        accessibilityLabel={`${label}${interrupted ? ". Connection interrupted; checking every few seconds" : ""}`}
+        accessibilityLabel={(interrupted ? translateApp("{{label}}. Connection interrupted; checking every few seconds", { label: label }) : label)}
       >
         <ActivityIndicator size="small" color={colors.primary} />
         <Label muted style={styles.label}>
-          {label}
-          {interrupted
-            ? " Connection interrupted; checking every few seconds"
-            : ""}
-          {capacity && Number.isFinite(bound)
-            ? ` · ${formatElapsed(waited)} / ${formatElapsed(bound)}`
-            : elapsed
-              ? ` · ${elapsed} total`
-              : ""}
+          {(interrupted
+            ? (capacity && Number.isFinite(bound)
+            ? translateApp("{{label}} Connection interrupted; checking every few seconds · {{elapsed}} / {{limit}}", { label: label, elapsed: formatElapsed(waited), limit: formatElapsed(bound) }) : (elapsed ? translateApp("{{label}} Connection interrupted; checking every few seconds · {{elapsed}} total", { label: label, elapsed: elapsed }) : translateApp("{{label}} Connection interrupted; checking every few seconds", { label: label }))) : (capacity && Number.isFinite(bound) ? translateApp("{{label}} · {{elapsed}} / {{limit}}", { label: label, elapsed: formatElapsed(waited), limit: formatElapsed(bound) }) : (elapsed ? translateApp("{{label}} · {{elapsed}} total", { label: label, elapsed: elapsed }) : label)))}
         </Label>
       </View>
       {live?.notice &&

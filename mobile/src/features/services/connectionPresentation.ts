@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import {
   canEditConnection,
   type CatalogEntry,
@@ -17,9 +18,10 @@ export function describeConnection(
 ): ConnectionDescription {
   if (connection.credential_missing) {
     return {
-      label: "Credential missing",
-      description:
+      label: translateApp("Credential missing"),
+      description: translateApp(
         "The stored credential is missing. Reconnect or remove this connection.",
+      ),
       tone: "error",
       recovery: "reconnect",
     };
@@ -30,33 +32,37 @@ export function describeConnection(
   switch (connection.status) {
     case "pending_auth":
       return {
-        label: "Authorization incomplete",
-        description:
+        label: translateApp("Authorization incomplete"),
+        description: translateApp(
           "Authorization has started, but the provider has not returned a credential to NyxID. Continue authentication to finish setup.",
+        ),
         tone: "warning",
         recovery: "continue",
       };
     case "failed":
       return {
-        label: "Authorization failed",
-        description:
+        label: translateApp("Authorization failed"),
+        description: translateApp(
           "Authorization did not complete, or the provider rejected the stored credential. Reconnect to restore access.",
+        ),
         tone: "error",
         recovery: "reconnect",
       };
     case "refresh_failed":
       return {
-        label: "Credential renewal failed",
-        description:
+        label: translateApp("Credential renewal failed"),
+        description: translateApp(
           "NyxID could not renew this credential automatically. Reconnect to restore access.",
+        ),
         tone: "error",
         recovery: "reconnect",
       };
     case "revoked":
       return {
-        label: "Credential revoked",
-        description:
+        label: translateApp("Credential revoked"),
+        description: translateApp(
           "This credential was revoked and can no longer be used. Add a new connection to authorize access again.",
+        ),
         tone: "error",
       };
     case "expired":
@@ -67,55 +73,70 @@ export function describeConnection(
       }
       if (connection.credential_binding === "platform") {
         return {
-          label: "Platform credential",
-          description:
+          label: translateApp("Platform credential"),
+          description: translateApp(
             "This connection uses a platform key. Access follows the current platform policy.",
+          ),
           tone: "muted",
         };
       }
       if (connection.credential_type === "none") {
         return {
-          label: "No authentication required",
-          description: "This service does not require a stored credential.",
+          label: translateApp("No authentication required"),
+          description: translateApp(
+            "This service does not require a stored credential.",
+          ),
           tone: "muted",
         };
       }
       if (connection.credential_type === "node_managed") {
         return {
-          label: "Managed on your node",
-          description:
+          label: translateApp("Managed on your node"),
+          description: translateApp(
             "Credentials are stored and managed on the connected node. Manage them on that node.",
+          ),
           tone: "muted",
         };
       }
       if (isSavedCredential(connection)) {
         const verification = connection.credential_verification;
         if (verification?.state === "verified") return {
-          label: "Verified", tone: "success",
-          description: "The provider accepted this credential at the last check. Other operations may require more permissions.",
+          label: translateApp("Verified"), tone: "success",
+          description: translateApp(
+              "The provider accepted this credential at the last check. Other operations may require more permissions.",
+            ),
         };
         if (verification?.state === "rejected") return {
-          label: "Rejected by provider", tone: "error",
+          label: translateApp("Rejected by provider"), tone: "error",
           description: verification.reason_code === "provider_forbidden"
-            ? "The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid."
-            : "The provider rejected authentication. Check or replace the credential, then check again.",
+            ? translateApp(
+                    "The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid.",
+                  )
+                : translateApp(
+                    "The provider rejected authentication. Check or replace the credential, then check again.",
+                  ),
         };
-        return { label: "Saved, not verified", tone: "warning",
-          description: "NyxID saved this credential. Provider authentication has not been verified." };
+        return { label: translateApp("Saved, not verified"), tone: "warning",
+          description: translateApp(
+            "NyxID saved this credential. Provider authentication has not been verified.",
+          ),
+        };
       }
       return {
-        label: "Credential available",
-        description:
+        label: translateApp("Credential available"),
+        description: translateApp(
           "NyxID has an active stored credential for this connection.",
+        ),
         tone: "success",
       };
     default:
       return {
         label:
           connection.status.replaceAll("_", " ").trim() ||
-          "Unknown credential status",
-        description:
+          translateApp("Unknown credential status"),
+        description: translateApp(
           "NyxID returned an unrecognized credential status. Open this connection in Web for more details.",
+        ),
         tone: "warning",
       };
   }
@@ -123,9 +144,10 @@ export function describeConnection(
 
 function expiredDescription(): ConnectionDescription {
   return {
-    label: "Credential expired",
-    description:
+    label: translateApp("Credential expired"),
+    description: translateApp(
       "The stored credential has expired. NyxID renews supported credentials automatically. Check the connection again for an updated status.",
+    ),
     tone: "warning",
   };
 }
@@ -183,6 +205,8 @@ export function reconnectScopeOverride(
 }
 
 export function isSavedCredential(connection: ServiceConnection): boolean {
-  return ["api_key", "bearer"].includes(connection.credential_type)
-    && connection.credential_binding !== "platform" && !connection.node_id && !connection.has_node_binding;
+  return (
+    ["api_key", "bearer"].includes(connection.credential_type)
+    && connection.credential_binding !== "platform" && !connection.node_id && !connection.has_node_binding
+  );
 }

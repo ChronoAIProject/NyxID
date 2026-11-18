@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AppState } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
@@ -32,7 +33,7 @@ export function useAccountSecurityRefresh(
       isCurrent,
       assertCurrent: () => {
         if (!isCurrent())
-          throw Object.assign(new Error("Account action cancelled"), {
+          throw Object.assign(new Error(translateApp("Account action cancelled")), {
             name: "AbortError",
           });
       },

@@ -6,7 +6,7 @@ import { URL, fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import type { StoredAuthSession } from "../auth/sessionCoordinator";
-import { createSessionRefresh } from "../auth/sessionRefresh";
+import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import { createAssistantVoiceApi } from "./assistantVoiceTransport";
 
 function setup(
@@ -48,6 +48,7 @@ function setup(
       createSessionRefresh: realRefresh
         ? createSessionRefresh
         : () => async () => null,
+      isRefreshRefusal,
     },
     "../auth/sessionStore": {
       authSessionGeneration: () => generation,
@@ -531,5 +532,26 @@ test("terminal 401 can force one shared refresh despite a future or unknown loca
     assert.equal(await env.refresh(true), true);
     assert.equal(env.sends(), 1);
     assert.equal(env.session().accessToken, "successor");
+  }
+});
+
+test("a temporary refresh failure keeps the session instead of signing out", async () => {
+  for (const status of [429, 500, 502, 503]) {
+    const env = setup(
+      async (url) =>
+        url.endsWith("/auth/refresh")
+          ? Response.json({ error: "unavailable" }, { status })
+          : Response.json({ error: "unauthorized" }, { status: 401 }),
+      true,
+    );
+    const before = env.session().refreshToken;
+    await assert.rejects(
+      env.request("/users/me", {}),
+      (error: unknown) =>
+        (error as { statusCode: number }).statusCode === status,
+    );
+    assert.equal(env.commits(), 0);
+    assert.equal(env.invalidations(), 0, `status ${status} must not sign out`);
+    assert.equal(env.session().refreshToken, before);
   }
 });

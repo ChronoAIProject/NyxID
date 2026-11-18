@@ -11,6 +11,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
   - [Health](#health)
+  - [Public Configuration](#public-configuration)
   - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
   - [Social Auth](#social-auth)
@@ -204,6 +205,25 @@ curl http://localhost:3001/health
 ```
 
 ---
+
+### Public Configuration
+
+#### GET /api/v1/public/config
+
+Returns public deployment configuration without authentication: frontend, MCP and
+node URLs, version, configured social providers, registration/email gates,
+`mobile_new_domains`, and optional telemetry configuration.
+
+The optional boolean `crash_diagnostics_offered` is included only as `true` when
+the diagnostics rollout is Global or Cohort; Off or Killed omits the field. It is
+a process-local discovery hint with no per-person data and adds no database reads
+to this endpoint. It starts false until the first successful startup evaluation.
+A tracked worker refreshes it every 60 seconds; local admin flag writes refresh
+it immediately through cache invalidation with a 200 ms read bound. Other replicas
+converge on the next successful refresh; failures keep the previous value. The
+manifest refresh remains a separate 15-minute task. Clients may use the hint to
+ask for preferences; actual offer and consent authority remain in the authenticated
+`/users/me/preferences/analytics` response.
 
 ### Interactive Documentation
 
@@ -531,12 +551,15 @@ grant. This route remains compatible with existing account-only clients.
   "user_code": "7KM2RQ9D",
   "verification_uri": "https://app.nyxid.dev/login/device",
   "verification_uri_complete": "https://app.nyxid.dev/login/device?user_code=7KM2RQ9D",
+  "app_verification_uri": "https://api.nyxid.dev/login/device?user_code=7KM2RQ9D",
   "expires_in": 600,
   "interval": 5
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. `app_verification_uri` is optional: it requires an origin-only HTTPS `BASE_URL`, a different `FRONTEND_URL` origin, and a configured Apple (nonblank `APNS_TEAM_ID` + `APNS_TOPIC`) or Android app-link identity. This includes selectable v2 and request-bound app-login responses; configuration does not establish live OS association. Only `/login` (including its MFA app option) opts into native QR payloads. On coarse-pointer mobile web, tapping the ready, live QR button opens “Open NyxID app?” confirmation; only the affirmative link opens a new tab with `noopener noreferrer` and no referrer, preserving the original poll. The dialog binds the exact request/URL, rechecks original expiry on tap and confirmation, and retires on close, expiry, terminal state, replacement or eligibility loss. No automatic opening occurs on Continue, generation, mount, polling or resume. Fine-pointer `/login` uses a plain native QR for external scanning. Other consumers, including request-bound identity verification and onboarding, use plain `verification_uri_complete` QR payloads with no handoff UI. Older responses and HTTP development also use that web fallback. Configuration does not detect installation or guarantee OS handoff. Verified native links load the public mobile preview without scanning; approval remains a separate authenticated action. Without native opening, `GET /login/device` on the API origin redirects to the configured frontend with only the validated, hyphenated public code. Missing, invalid or duplicate codes return 400; a same-origin fallback returns 404. The original browser must collect an approved delivery within the existing 60-second window; resuming prompts a poll while respecting the minimum interval and server backoff. See the [app-link runbook](../mobile/docs/APP_LINKS.md).
+
+Older clients may continue using `verification_uri_complete`. The web page validates before formatting, retains validated codes in the URL, and loads a non-mutating public preview on mount. Manual entry previews after Continue; malformed codes show an explanation. Review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -9721,6 +9744,91 @@ writes remain first-party human only. Flag-off preserves authorized retained
 history, cancellation, departure and deletion; binary rollback requires the
 archive/drain procedure in the design.
 
+
+## Admin CMA sandbox reservations
+
+These routes require a first-party human platform administrator. Operators,
+API keys, OAuth-client, delegated (including `account:read`), service-account
+and relay tokens cannot use them. No personal CMA-management flag is required.
+
+### GET `/api/v1/admin/cma-sandbox-reservations`
+
+Query: optional `owner_id`, comma-separated admission `states`, opaque `after`
+(the preceding row's local ID), and `limit` (default 50, clamped to 1–100).
+Response: `{ "items": [...], "next_cursor": "..." | null }`. A full page may
+return a cursor followed by an empty final page. Only slot-holding rows appear,
+including legacy sources. Each item projects local/owner/catalog-service IDs,
+source, admission/submission/observation states, generation, parent `revision`,
+`creation_revision`, known remote sandbox and lifecycle operation IDs, `associated`
+(whether the parent is bound rather than only carrying a creation receipt), creation/
+update/observation timestamps, and `holding`: `live_sandbox`, `creation_unknown`,
+`creation_in_progress`, or `retiring`. Missing matching creation metadata is null.
+Request ciphertext, request bytes, idempotency keys, and request hashes are omitted.
+
+### POST `/api/v1/admin/cma-sandbox-reservations/{id}/inspect`
+
+No request body. Performs exact owner-authenticated CMA GET observations using
+saved Sandbox, lifecycle operation and Agent identities. Never lists to infer
+absence, replays a creation, or sends a lifecycle mutation. It writes only an
+admin-attributed audit. Sandbox/creation documents, observation timestamps,
+recovery cooldown and revision fences stay unchanged, on success or failure. Response:
+`{ "reservation": {...}, "outcome": {...}, "next_step": null }` (`next_step`
+contains owner-retry guidance when applicable), where `outcome.kind` is:
+
+- `exists`: `remote_sandbox_id` and normalized remote `state`.
+- `proven_absent`: `evidence: "confirmed_not_created"`, the durable non-creation
+  state already established by normal admission/recovery. Legacy rows do not
+  retain which accepted refusal produced that state; no subtype is invented.
+- `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
+  `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
+  `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
+  `owner_retry_will_recover` means the dispatched generic Sandbox creation is
+  inside the 23-hour replay window: the owner's next allocating create or retry
+  of the original request automatically attempts the existing recovery. If CMA
+  is still unavailable or uncertain, the slot remains held.
+
+### POST `/api/v1/admin/cma-sandbox-reservations/{id}/resolve`
+
+Use the latest inspection's three fences (`creation_revision` is null for a legacy
+row with no matching creation; such a row cannot authorize settlement). Example
+association body:
+
+```json
+{"generation":1,"revision":2,"creation_revision":3,"action":"associate","remote_sandbox_id":"sandbox-id"}
+```
+
+For release use `"action":"release"` and omit `remote_sandbox_id`. Caller-supplied
+proof is not accepted. `associate` requires a saved creation receipt or exact
+lifecycle/Agent lineage, then freshly verifies that sandbox's existence and owner.
+Same-owner ownership alone refuses with `cma_creation_provenance_required`; it
+cannot prove that NyxID created one of the owner's other CMA sandboxes. It reuses normal
+association folding for an existing metadata-only discovered reference, preserving
+retirement intent and dependent Agent generations; another creation is never folded. `release` requires
+already durable `confirmed_not_created` with no resource/operation receipt. It clears
+the encrypted requests/context while preserving the existing idempotency identity
+and hash replay fences. A live
+associated sandbox cannot be released: create Agents in its workspace or ask its
+owner to retire it. Stale fences return HTTP 409/code 1004; erasure fences refuse
+without a change. No new error code or existing refusal change is introduced.
+
+Inspection appends metadata-only `admin_cma_sandbox_reservation_inspected` under
+the admin actor and makes no owner state change. Resolution appends
+`admin_cma_sandbox_reservation_resolved` in the same transaction as the local
+change. Exact CMA GETs use the owner identity only for resource authorization;
+this direct management boundary does not create owner `service_request`/usage
+rows, charge billing or consume the owner's proxy rate limits. Refused resolutions also emit a best-effort metadata audit.
+Occupied-slot admission keeps its existing HTTP 409/code 1004/message bytes and
+emits `cma_sandbox_slot_occupied` at most once per owner/reservation per hour across
+upgraded replicas. A bounded process-local suppression cache precedes a separate
+one-hour TTL claim collection; that claim and the audit commit together, without
+writing the reservation or creation. Existing lifecycle writers cannot conflict
+with this diagnostic write. No field is added to existing models.
+
+An old unknown creation cannot be released on a 404, list omission, timeout or
+elapsed time. CMA must supply durable, owner-authenticated evidence tied to that
+exact creation identity that neither a resource nor a pending creation exists.
+The current read contract cannot supply this proof when every remote receipt is
+missing; inspection reports unknown and leaves the slot held.
 
 ## CMA Sandbox billing producer API
 

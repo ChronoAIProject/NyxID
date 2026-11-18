@@ -128,6 +128,8 @@ import {
   AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
+  AdminCrashReportsPage,
+  AdminCrashReportPage,
   AdminCreditsPage,
   AdminBillingPage,
   AdminInviteCodesPage,
@@ -1218,6 +1220,17 @@ const adminUsageRoute = createRoute({
   },
 });
 
+const adminCrashReportsRoute = createRoute({
+  path: "crash-reports",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportsPage,
+});
+const adminCrashReportRoute = createRoute({
+  path: "crash-reports/$id",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportPage,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
@@ -1394,6 +1407,8 @@ const routeTree = rootRoute.addChildren([
       adminUsageRoute,
       adminAnalyticsRoute,
       adminIntegrityRoute,
+      adminCrashReportsRoute,
+      adminCrashReportRoute,
       adminCreditsRoute,
       adminBillingRoute,
       adminModelsRoute,

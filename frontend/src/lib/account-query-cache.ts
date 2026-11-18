@@ -63,22 +63,29 @@ export function bindAccountQueryClient(client: QueryClient): () => void {
 }
 
 /** Retire clients so a callback already awaiting inside onSuccess cannot reach B. */
-export function createAccountQueryScope(config: QueryClientConfig) {
+export function createAccountQueryScope(
+  config: QueryClientConfig,
+  onClient?: (client: QueryClient) => () => void,
+) {
   let client = new QueryClient(config);
   let stopBinding = bindAccountQueryClient(client);
+  let stopClient = onClient?.(client);
   const stopIdentity = subscribeAssistantIdentity((_next, previous) => {
     if (previous === null) return;
     void client.cancelQueries();
     client.clear();
     stopBinding();
+    stopClient?.();
     client = new QueryClient(config);
     stopBinding = bindAccountQueryClient(client);
+    stopClient = onClient?.(client);
   });
   return {
     getClient: () => client,
     dispose: () => {
       stopIdentity();
       stopBinding();
+      stopClient?.();
       client.clear();
     },
   };

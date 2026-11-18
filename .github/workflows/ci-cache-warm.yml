@@ -6,7 +6,7 @@ name: CI Cache Warm
 # a cache warm failure must never gate a merge or release.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -38,7 +38,7 @@ on:
 
 concurrency:
   group: ci-cache-warm-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/dev' }}
 
 permissions:
   contents: read
@@ -192,6 +192,56 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: resources-warm-rust-clippy
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+
+  rust-clippy-dev:
+    name: Warm dev clippy cache
+    if: github.ref == 'refs/heads/dev'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 1
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
+      - uses: ./.github/actions/ci-rust-cache
+        id: rust-cache
+        with:
+          backend-reserve: 'true'
+          save-if: 'true'
+          shared-key: rust-clippy-dev
+          incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Compile clippy
+        run: >-
+          python3 .github/scripts/retry_incremental.py
+          --log-file "$RUNNER_TEMP/clippy.log" --
+          python3 .github/scripts/ci_resources.py clippy
+          cargo clippy --workspace --lib --bins --locked -- -D warnings
+      - name: Release compile reserve before caching
+        run: bash .github/scripts/prepare-backend-runner.sh --release
+      - name: Save incremental cache
+        if: success() && steps.rust-cache.outputs.save-enabled == 'true'
+        uses: ./.github/actions/ci-rust-incremental-save
+        with:
+          key: ${{ steps.rust-cache.outputs.incremental-key }}
+          path: ${{ steps.rust-cache.outputs.incremental-path }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-warm-rust-clippy-dev
           path: ${{ runner.temp }}/nyxid-ci-resources
           if-no-files-found: ignore
           retention-days: 14

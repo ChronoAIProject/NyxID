@@ -1,5 +1,6 @@
 import { ApiError } from "./ApiError";
 import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
+import { translateApp } from "../../i18n/appTranslation";
 
 export type ErrorHeaders = { get(name: string): string | null };
 export const TEMPORARILY_UNAVAILABLE =
@@ -62,6 +63,7 @@ export function buildApiError(
         errorKey: symbolic ? String(obj.error) : `request_failed_${status}`,
         errorCode: typeof obj.error_code === "number" ? obj.error_code : 0,
         statusCode: status,
+        hasErrorEnvelope: Number.isInteger(obj.error_code) && Number(obj.error_code) >= 0,
         message:
           typeof obj.message === "string" && obj.message.length
             ? obj.message
@@ -91,7 +93,8 @@ export function buildApiError(
     errorKey: status === 0 ? "network_error" : "invalid_error_response",
     errorCode: 0,
     statusCode: status,
-    message,
+    hasErrorEnvelope: false,
+    message: translateApp(message),
     ...diagnostics,
   });
 }

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type {
   ConnectLinkPreview,
   CompleteConnectLinkInput,
@@ -69,7 +70,9 @@ export function connectDeviceChallenge(
   const url = result.device_verification_uri ?? previous?.url;
   if (!state || !code || !url)
     throw new Error(
-      "The provider did not return a complete authorization code. Get a new code.",
+      translateApp(
+        "The provider did not return a complete authorization code. Get a new code.",
+      ),
     );
   return {
     state,

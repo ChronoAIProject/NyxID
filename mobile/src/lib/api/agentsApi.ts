@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { requestJson } from "./http";
 import type { RequestOptions } from "./authenticatedTransport";
@@ -36,7 +37,9 @@ export const agentsApi = {
       await requestJson(agentPath(id), { signal }),
     );
     if (detail.agent.id !== id)
-      throw new Error("The server returned a different agent. Please reload.");
+      throw new Error(
+        translateApp("The server returned a different agent. Please reload."),
+      );
     return detail;
   },
   async create(input: AgentCreate) {

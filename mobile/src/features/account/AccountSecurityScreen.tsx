@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
@@ -38,7 +39,9 @@ type Feedback = { message: string; tone: "error" | "info" | "success" };
 
 function accountError(error: unknown): string {
   if (isApiError(error) && error.errorCode === 2000)
-    return "The password or authenticator code is incorrect. Please try again.";
+    return translateApp(
+      "The password or authenticator code is incorrect. Please try again.",
+    );
   return resolveErrorMessage(error);
 }
 
@@ -224,7 +227,7 @@ export function AccountSecurityScreen() {
     const result = totpCodeSchema.safeParse(totpCode);
     if (!result.success) {
       setFeedback({
-        message: result.error.issues[0]?.message ?? "Enter a valid code",
+        message: result.error.issues[0]?.message ?? translateApp("Enter a valid code"),
         tone: "error",
       });
       return;
@@ -249,7 +252,7 @@ export function AccountSecurityScreen() {
           setFeedback(
             isVisible.current
               ? {
-                  message: "Two-factor authentication enabled",
+                  message: translateApp("Two-factor authentication enabled"),
                   tone: "success",
                 }
               : null,
@@ -272,19 +275,22 @@ export function AccountSecurityScreen() {
     });
     if (!result.success) {
       setFeedback({
-        message:
+        message: translateApp(
           "Enter your authenticator or recovery code and, if required, your current password.",
+        ),
         tone: "error",
       });
       return;
     }
     Alert.alert(
-      "Turn off two-factor authentication?",
-      "Your account will no longer require an authenticator code when you sign in with a password.",
+      translateApp("Turn off two-factor authentication?"),
+      translateApp(
+        "Your account will no longer require an authenticator code when you sign in with a password.",
+      ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: "Turn off",
+          text: translateApp("Turn off"),
           style: "destructive",
           onPress: () => {
             if (!currentEpoch(epoch)) return;
@@ -292,7 +298,7 @@ export function AccountSecurityScreen() {
               await accountApi.disableMfa(result.data, {
                 authorityGuard: () => {
                   if (!currentEpoch(epoch))
-                    throw Object.assign(new Error("Account action cancelled"), {
+                    throw Object.assign(new Error(translateApp("Account action cancelled")), {
                       name: "AbortError",
                     });
                 },
@@ -301,7 +307,7 @@ export function AccountSecurityScreen() {
                 void refreshProfile();
                 clearPrivateState();
                 setFeedback({
-                  message: "Two-factor authentication turned off",
+                  message: translateApp("Two-factor authentication turned off"),
                   tone: "success",
                 });
               }
@@ -322,13 +328,16 @@ export function AccountSecurityScreen() {
   function exportCodes() {
     void runPrivate("share", async (epoch) => {
       const result = await Share.share({
-        title: "NyxID recovery codes",
-        message: `NyxID recovery codes\n\n${recoveryCodes.join("\n")}`,
+        title: translateApp("NyxID recovery codes"),
+        message: translateApp("NyxID recovery codes\n\n{{code}}", {
+          code: recoveryCodes.join("\n"),
+        }),
       });
       if (currentEpoch(epoch) && result.action === Share.sharedAction)
         setFeedback({
-          message:
+          message: translateApp(
             "Confirm you saved a private copy before closing. You can export again.",
+          ),
           tone: "info",
         });
     });
@@ -424,12 +433,15 @@ export function AccountSecurityScreen() {
                       ? t(
                           "Add a six-digit authenticator code to password sign-in.",
                         )
-                      : `This account uses ${profile.data.social_provider} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.`
+                      : translateApp(
+                          "This account uses {{socialProvider}} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.",
+                          { socialProvider: profile.data.social_provider},
+                        )
             }
           >
             <SettingsRow
               label={t("Two-factor authentication")}
-              value={mfaEnabled ? "On" : "Off"}
+              value={mfaEnabled ? translateApp("On") : translateApp("Off")}
             />
             {recovery.count > 0 && !appActive ? (
               <SettingsRow
@@ -451,7 +463,9 @@ export function AccountSecurityScreen() {
                   label={
                     revealCodes
                       ? recoveryCodes.join("\n")
-                      : `${recoveryCodes.length} private codes · hidden`
+                      : translateApp("{{count}} private codes · hidden", {
+                          count: recoveryCodes.length,
+                        })
                   }
                 />,
                 <SettingsRow
@@ -468,7 +482,9 @@ export function AccountSecurityScreen() {
                   onPress={() =>
                     copyPrivate(
                       recoveryCodes.join("\n"),
-                      "Codes copied. Paste them into a private password manager.",
+                      translateApp(
+                        "Codes copied. Paste them into a private password manager.",
+                      ),
                     )
                   }
                 />,
@@ -517,7 +533,9 @@ export function AccountSecurityScreen() {
                     onPress={() =>
                       copyPrivate(
                         enrollment.secret,
-                        "Setup key copied. Add it to your authenticator.",
+                        translateApp(
+                          "Setup key copied. Add it to your authenticator.",
+                        ),
                       )
                     }
                   />
@@ -533,8 +551,9 @@ export function AccountSecurityScreen() {
                       void Linking.openURL(url).catch(() => {
                         if (isFocused.current)
                           setFeedback({
-                            message:
+                            message: translateApp(
                               "No authenticator opened. Copy the setup key and add the account manually.",
+                            ),
                             tone: "info",
                           });
                       });
@@ -697,8 +716,10 @@ export function AccountSecurityScreen() {
               <SettingsRow
                 key={session.id}
                 label={sessionDeviceLabel(session.user_agent)}
-                detail={`Signed in ${formatSessionDate(session.created_at)}`}
-                value={session.is_current ? "This session" : undefined}
+                detail={translateApp("Signed in {{date}}", {
+                  date: formatSessionDate(session.created_at),
+                })}
+                value={session.is_current ? translateApp("This session") : undefined}
                 onPress={() =>
                   navigation.navigate("SessionDetail", {
                     sessionId: session.id,

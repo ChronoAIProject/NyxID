@@ -117,3 +117,37 @@ test('mobile choices restore only for their account; late hydration preserves lo
   const legacy = createAnalyticsConsentState(); legacy.hydrate(JSON.stringify({ enabled: true, asked: true })); legacy.bindAccount('a');
   assert.equal(legacy.getSnapshot().enabled, false);
 });
+
+for (const current of ['1', '2', undefined]) test(`updated mobile permission negotiates advertised policy ${current}`, async () => {
+  const { state } = setup();
+  const calls: Array<Parameters<RelayRequest>[1]> = [];
+  const request: RelayRequest = async <T>(_path: string, options?: Parameters<RelayRequest>[1]) => {
+    options?.authorityGuard?.(); calls.push(options);
+    return { ...permission, current_policy_version: current } as T;
+  };
+  await saveAnalyticsPermission('a', true, request, state.getSnapshot, state.setConsent, 2);
+  assert.deepEqual(calls[1]?.body, { account_id: 'a', enabled: true, ...(current === '2' ? { policy_version: '2' } : {}) });
+  assert.equal(state.getSnapshot().policy, current === '2' ? 2 : 1);
+});
+
+test('device withdrawal during mobile policy negotiation prevents PUT', async () => {
+  const { state } = setup();
+  let release!: (value: unknown) => void;
+  let calls = 0;
+  const request: RelayRequest = async <T>() => { calls++; return new Promise<T>(resolve => { release = value => resolve(value as T); }); };
+  const pending = saveAnalyticsPermission('a', true, request, state.getSnapshot, state.setConsent, 2);
+  assert.equal(state.getSnapshot().enabled, true);
+  state.setConsent(false);
+  release({ ...permission, current_policy_version: '2' });
+  await assert.rejects(pending, /analytics_authority_changed/);
+  assert.equal(calls, 1);
+});
+
+test('failed policy-two re-ack preserves an existing device opt-in; first opt-in stays off', async()=>{
+  for (const initiallyEnabled of [true,false]) {
+    const {state}=setup(); state.setConsent(initiallyEnabled,1);
+    await assert.rejects(saveAnalyticsPermission('a',true,async()=>{throw new Error('offline');},state.getSnapshot,state.setConsent,2),/offline/);
+    assert.equal(state.getSnapshot().enabled,initiallyEnabled);
+    assert.equal(state.getSnapshot().policy,1);
+  }
+});

@@ -42,7 +42,7 @@ function setup(theme = "light") {
       ScrollView: "ScrollView",
       View: "View",
       ActivityIndicator: "Spinner",
-      StyleSheet: { absoluteFill: { position: "absolute" } },
+      StyleSheet: { absoluteFill: { position: "absolute" }, hairlineWidth: 0.5 },
     },
     "lucide-react-native": {
       Check: "Check",
@@ -54,7 +54,13 @@ function setup(theme = "light") {
       useTheme: () => ({
         preference: theme,
         mode: theme === "system" ? "dark" : theme,
-        colors: { card: "surface", sheetScrim: "scrim" },
+        colors: {
+          card: "surface",
+          sheetScrim: "scrim",
+          composerBg: "composer",
+          composerBorder: "composer-border",
+          shadowColor: "shadow",
+        },
       }),
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
@@ -124,6 +130,72 @@ function setup(theme = "light") {
     },
   };
 }
+
+test("the mode chip is a plain pill with the current mode only: no chevron, same picker, hint and 44pt target", async () => {
+  for (const theme of ["light", "dark"]) {
+    const x = setup(theme);
+    const trigger = x.find("Permissions: Auto");
+    const inside = nodes(trigger);
+    assert.equal(inside.some((n) => n.type === "ChevronDown"), false);
+    assert.equal(trigger.props.accessibilityHint, "Changes the permission mode");
+    const style = (pressed: boolean) => trigger.props.style({ pressed });
+    assert.equal(style(false).minHeight, 44);
+    assert.equal(style(false).minWidth, 44);
+    assert.equal(style(false).opacity, 1);
+    assert.ok(style(true).opacity < 1, "pressed state");
+    const pill = inside.find((n) => n.props.testID === "composer-access-mode-pill")!;
+    const pillStyle = Object.assign({}, ...[pill.props.style].flat());
+    // The floating surface the header controls and the composer use.
+    assert.equal(pillStyle.backgroundColor, "composer");
+    assert.equal(pillStyle.borderColor, "composer-border");
+    assert.equal(pillStyle.borderWidth, 0.5);
+    assert.equal(pillStyle.shadowRadius, theme === "light" ? 10 : undefined);
+    assert.equal(pillStyle.borderRadius, 15);
+    const label = inside.find((n) => n.type === "Label")!;
+    assert.equal(label.props.children, "Auto");
+    assert.equal(label.props.numberOfLines, 1);
+    assert.equal(label.props.ellipsizeMode, "tail");
+    // Same existing picker, opened by the same press.
+    x.open();
+    x.h.unmount();
+  }
+  const { setAppTranslationLanguage, translateApp } = await import(
+    "../../i18n/appTranslation"
+  );
+  try {
+    for (const language of ["zh-CN", "zh-TW"] as const) {
+      setAppTranslationLanguage(language);
+      assert.notEqual(
+        translateApp("Changes the permission mode"),
+        "Changes the permission mode",
+        language,
+      );
+    }
+  } finally {
+    setAppTranslationLanguage("en");
+  }
+});
+
+test("the pill's visible label is the current mode for every mode, and the settings read retries transient failures", () => {
+  const x = setup();
+  for (const [mode, label] of [
+    ["autopilot", "Full access"],
+    ["nyxmode", "Auto"],
+    ["ask_every_time", "Ask every time"],
+  ] as const) {
+    x.settings.data = { access_mode: mode };
+    x.h.render();
+    const trigger = x.find(`Permissions: ${label}`);
+    const visible = nodes(trigger).find((n) => n.type === "Label")!;
+    assert.equal(visible.props.children, label, mode);
+    assert.equal(trigger.props.accessibilityHint, "Changes the permission mode");
+  }
+  // One failed read must not strand the pill on the generic word.
+  const query = x.queries.at(-1);
+  assert.ok(query.retry > 0, "retries transient failures");
+  assert.equal(query.refetchOnReconnect, true);
+  x.h.unmount();
+});
 
 test("native settings expose only permissions and the three descriptions, with no discovery or model transport", () => {
   const x = setup();
