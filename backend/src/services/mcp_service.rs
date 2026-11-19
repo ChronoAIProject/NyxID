@@ -939,6 +939,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
