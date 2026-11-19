@@ -1703,6 +1703,7 @@ mod tests {
             },
             SocialRedirectTarget::Mobile {
                 redirect_uri: "nyxid://auth/social/callback".into(),
+                code_challenge: None,
             },
         ] {
             let id = uuid::Uuid::new_v4().to_string();
