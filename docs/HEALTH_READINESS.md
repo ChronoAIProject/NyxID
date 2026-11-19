@@ -2,6 +2,7 @@
 
 Implements [NyxID #2715](https://github.com/ChronoAIProject/NyxID/issues/2715)
 for [chrono-probe #21](https://github.com/ChronoAIProject/chrono-probe/issues/21).
+Implementation: [PR #2723](https://github.com/ChronoAIProject/NyxID/pull/2723).
 Release status: **unreleased**. A merged PR is not evidence that the public
 ingress has deployed these routes. Record the released image tag/digest and
 public verification below before enabling fixed production probes.
