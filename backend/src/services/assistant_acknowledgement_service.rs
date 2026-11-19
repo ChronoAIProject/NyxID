@@ -1051,6 +1051,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -1093,6 +1094,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) key_version: i64,
     pub(crate) voice_parent_conversation_id: Option<String>,
     pub(crate) platform_model_context: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
@@ -1567,6 +1569,7 @@ pub fn guest_method_override_refusal(service: &str) -> Value {
         that only the bot's owner can ask for that.")})
 }
 
+#[cfg(test)]
 pub async fn for_key(
     db: &Database,
     user: &str,
@@ -1610,13 +1613,18 @@ async fn voice_execution(db: &Database, row: &AssistantConversation) -> AppResul
     }
 }
 
-pub async fn for_key_with_access(
+pub(crate) async fn bound_thread_for_key(
     db: &Database,
     user: &str,
-    key: Option<&str>,
+    key: &str,
+    authenticated_version: i64,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
-) -> AppResult<Option<ChatAuthority>> {
-    let Some(key) = key else { return Ok(None) };
+) -> AppResult<
+    Option<(
+        AssistantConversation,
+        crate::models::assistant_agent::AssistantAgent,
+    )>,
+> {
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
         .find_one(doc! {"user_id": user, "api_key_id": key})
@@ -1655,6 +1663,81 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
+    if agent.destroyed_at.is_some() {
+        return Err(not_found());
+    }
+    if let Some(fence) = &conversation.thread_secret_fence
+        && fence.api_key_id == key
+        && authenticated_version < fence.min_state_version
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid authentication credentials".into(),
+        ));
+    }
+    Ok(Some((conversation, agent)))
+}
+
+#[cfg(test)]
+pub async fn for_key_with_access(
+    db: &Database,
+    user: &str,
+    key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<Option<ChatAuthority>> {
+    Box::pin(chat_for_key_version(db, user, key, 0, access)).await
+}
+
+pub(crate) async fn chat_for_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<Option<ChatAuthority>> {
+    Box::pin(chat_for_key_version(
+        db,
+        &row.user_id,
+        Some(&row.credential_api_key_id),
+        row.credential_version_floor(),
+        None,
+    ))
+    .await
+}
+
+pub(crate) async fn chat_for_authenticated_key(
+    db: &Database,
+    key: &crate::models::api_key::ApiKey,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<Option<ChatAuthority>> {
+    Box::pin(chat_for_key_version(
+        db,
+        &key.user_id,
+        Some(&key.id),
+        key.state_version,
+        access,
+    ))
+    .await
+}
+
+pub(crate) async fn chat_for_key_version(
+    db: &Database,
+    user: &str,
+    key: Option<&str>,
+    version: i64,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<Option<ChatAuthority>> {
+    let Some(key) = key else { return Ok(None) };
+    let Some((conversation, agent)) =
+        Box::pin(bound_thread_for_key(db, user, key, version, access)).await?
+    else {
+        return Ok(None);
+    };
+    if conversation.stopped_window.is_some()
+        || conversation.active_turn.as_ref().is_some_and(|turn| {
+            turn.restart_admission.as_ref().is_some_and(|admission| {
+                turn.stop_requested || admission.credential_ended || admission.credential_id != key
+            })
+        })
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
     let resolved = if access.is_none() {
         match super::org_channel_service::conversation_access(db, &conversation).await? {
             Some(access) => Some(access),
@@ -1667,9 +1750,6 @@ pub async fn for_key_with_access(
         None
     };
     let access = access.or(resolved.as_ref());
-    if agent.destroyed_at.is_some() {
-        return Err(not_found());
-    }
     let confirmation_policy = if let Some(work) = conversation
         .active_turn
         .as_ref()
@@ -1706,6 +1786,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        key_version: version,
         voice_parent_conversation_id: conversation.voice_parent_conversation_id.clone(),
         platform_model_context: live.and_then(|t| t.platform_model_context.clone()),
         automation_work: live.and_then(|t| t.automation_work.clone()),
@@ -1774,7 +1855,7 @@ pub async fn for_key_with_access(
         },
         user_id: user.into(),
         api_key_id: key.into(),
-        conversation_id: conversation_id.into(),
+        conversation_id: conversation.id,
         role: if agent.is_nyxbot() {
             AgentRole::Orchestrator
         } else {
@@ -3351,6 +3432,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        key_version: target.credential_version_floor(),
         voice_parent_conversation_id: target.voice_parent_conversation_id.clone(),
         platform_model_context: None,
         automation_work: None,

@@ -979,6 +979,7 @@ pub async fn check_non_mcp_context(
         db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        auth.thread_key_version(),
         auth.org_agent_access.as_ref(),
         &auth.assistant_operation_scopes,
         service,
@@ -994,6 +995,7 @@ pub async fn check_non_mcp_key_context(
     db: &Database,
     actor: &str,
     key: Option<&str>,
+    key_version: i64,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     scopes: &OperationScopes,
     service: &str,
@@ -1001,9 +1003,14 @@ pub async fn check_non_mcp_key_context(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<bool> {
-    let Some(chat) =
-        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
-            .await?
+    let Some(chat) = super::assistant_acknowledgement_service::chat_for_key_version(
+        db,
+        actor,
+        key,
+        key_version,
+        access,
+    )
+    .await?
     else {
         return Err(AppError::ApiKeyScopeForbidden(
             "Specialist operation authority requires a live conversation".into(),
@@ -1028,12 +1035,19 @@ pub async fn key_is_guest(
     db: &Database,
     actor: &str,
     key: Option<&str>,
+    key_version: i64,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<bool> {
     Ok(
-        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
-            .await?
-            .is_some_and(|chat| chat.guest),
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            actor,
+            key,
+            key_version,
+            access,
+        )
+        .await?
+        .is_some_and(|chat| chat.guest),
     )
 }
 

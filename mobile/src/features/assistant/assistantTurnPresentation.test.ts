@@ -286,6 +286,7 @@ test("context reset, steering, model interruption and billing notices match web 
     "Guidance applied to this reply.",
   );
   assert.match(steeringNotice("stop_pending"), /stopping/);
+  assert.match(storedError("credential_revoked"), /Review completed actions before retrying/);
   assert.match(
     storedError("model_interrupted"),
     /Some actions may already have completed/,

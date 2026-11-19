@@ -3328,6 +3328,12 @@ async fn execute_proxy_inner(
         )
         .await?;
         crate::services::shutdown::diagnostics::resolved_proxy(&resolved.target);
+        if let Some(destination) = request
+            .extensions()
+            .get::<crate::services::platform_manager_contract::NyxAgentDestination>(
+        ) {
+            destination.verify(&resolved.target.service.id, &resolved.target.base_url)?;
+        }
         super::invocation_diagnostics::Target::record_request(
             &request,
             resolved.resolved_user_service_id.as_deref(),

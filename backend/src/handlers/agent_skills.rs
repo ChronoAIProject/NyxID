@@ -752,7 +752,7 @@ pub(crate) async fn preload_for_turn(
     if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn) {
         return Ok(String::new());
     }
-    let chat = acks::for_key(&state.db, &row.user_id, Some(&row.credential_api_key_id))
+    let chat = acks::chat_for_conversation(&state.db, row)
         .await?
         .filter(|chat| {
             chat.turn_live
@@ -1463,6 +1463,7 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,

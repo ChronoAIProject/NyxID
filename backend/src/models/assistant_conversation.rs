@@ -385,6 +385,8 @@ pub struct EngineWorkerInstance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StreamReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<SubscriberCheckpoint>,
     pub message_id: String,
     pub block_id: String,
     pub cursor: i64,
@@ -392,7 +394,23 @@ pub struct StreamReply {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubscriberCheckpoint {
+    pub window_key: String,
+    pub response_id: String,
+    pub sequence: u64,
+    pub window_text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_eligibility: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_offer: Option<RestartOffer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_admission: Option<Box<RestartAdmission>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_attempt: Option<ExecutionAttempt>,
     /// This personal crew reply and its hand-offs commit with engine settlement.
     /// Old turns retain the legacy callback path until they have settled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -573,6 +591,124 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAttempt {
+    pub epoch: i64,
+    pub claim_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartAdmission {
+    pub version: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reattach: Option<ReattachDeployment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<ReattachWindow>,
+    pub source: RestartSource,
+    pub initiating_message_id: String,
+    pub initiating_seq: i64,
+    pub reply_id: String,
+    pub actor_id: String,
+    pub agent_id: String,
+    pub agent_owner_id: String,
+    pub model: String,
+    pub credential_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub credential_ended: bool,
+    pub event_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReattachDeployment {
+    pub destination_hash: String,
+    pub limits: ReattachLimits,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoppedWindow {
+    pub turn_id: String,
+    pub credential_id: String,
+    pub window_key: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSecretFence {
+    pub api_key_id: String,
+    pub min_state_version: i64,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReattachWindow {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<mongodb::bson::Binary>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub capacity_deadline: DateTime<Utc>,
+    #[serde(
+        default,
+        with = "super::bson_datetime::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub absence_retry_before: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ReattachWindow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReattachWindow")
+            .finish_non_exhaustive()
+    }
+}
+
+fn contract_absence_retention_seconds() -> u32 {
+    7 * 24 * 60 * 60
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReattachLimits {
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_watch: Option<CredentialWatchLimits>,
+    pub recent_events: u32,
+    pub max_events: u32,
+    pub max_event_bytes: u32,
+    #[serde(default = "contract_absence_retention_seconds")]
+    pub absence_retention_seconds: u32,
+    pub retention_seconds: u32,
+    pub max_subscribers_per_response: u32,
+    pub max_subscribers_per_owner: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialWatchLimits {
+    pub interval_seconds: u32,
+    pub model_request_max_age_seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RestartSource {
+    FirstPartyOwner,
+    Trigger {
+        run_id: String,
+    },
+    Automation {
+        work: super::trigger_run::AutomationWork,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestartOffer {
+    pub from_worker: String,
+    pub reason: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub offered_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub due_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+}
+
 /// Runtime identity captured before a machine operation is issued.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineTurnScope {
@@ -608,6 +744,10 @@ pub struct AssistantConversation {
     /// The invocation generation allowed to reuse this encrypted credential.
     #[serde(default)]
     pub credential_invocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_window: Option<StoppedWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_secret_fence: Option<ThreadSecretFence>,
     #[serde(default)]
     pub platform_thread: Option<PlatformThread>,
     /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.
@@ -733,6 +873,13 @@ impl std::fmt::Debug for InstructionBinding {
 }
 
 impl AssistantConversation {
+    pub(crate) fn credential_version_floor(&self) -> i64 {
+        self.thread_secret_fence
+            .as_ref()
+            .filter(|fence| fence.api_key_id == self.credential_api_key_id)
+            .map_or(0, |fence| fence.min_state_version)
+    }
+
     pub fn is_subagent(&self) -> bool {
         self.role == AgentRole::Subagent
     }

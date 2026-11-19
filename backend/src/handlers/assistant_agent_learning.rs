@@ -122,7 +122,7 @@ pub async fn consent(
 pub(crate) async fn owner_chat(state: &AppState, owner: &str) -> AppResult<acks::ChatAuthority> {
     let bot = team::ensure_nyxbot(&state.db, owner).await?;
     let home = team::home_thread_for(&state.db, &state.encryption_keys, owner, &bot).await?;
-    acks::for_key(&state.db, owner, Some(&home.credential_api_key_id))
+    acks::chat_for_conversation(&state.db, &home)
         .await?
         .ok_or_else(|| AppError::Forbidden("NyxBot owner card is unavailable".into()))
 }

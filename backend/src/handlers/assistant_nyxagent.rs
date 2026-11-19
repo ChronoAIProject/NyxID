@@ -1785,7 +1785,25 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    match engine::request_stop_target(&state.db, &user_id, &id).await? {
+    let target = engine::get(&state.db, &user_id, &id).await?;
+    let stopped = engine::request_stop_row_target(&state.db, &target).await?;
+    if let Some(row) = stopped.as_ref().filter(|row| {
+        row.active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.restart_admission.is_some())
+    }) {
+        let state = state.clone();
+        let row = row.clone();
+        state
+            .shutdown
+            .clone()
+            .spawn(async move { survivor::cancel(&state, &row).await });
+    }
+    match if target.automation_v2 {
+        engine::StopTarget::Scoped(stopped.map(Box::new))
+    } else {
+        engine::StopTarget::Legacy
+    } {
         engine::StopTarget::Scoped(snapshot) => {
             super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
                 .await?;
@@ -1850,7 +1868,9 @@ pub async fn delete(
         related.push(child?);
     }
     for row in &related {
-        engine::request_stop(&state.db, &user_id, &row.id).await?;
+        if let Some(stopped) = engine::request_stop_row_target(&state.db, row).await? {
+            survivor::cancel(&state, &stopped).await;
+        }
         super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &row.id)
             .await?;
         super::machine_cancel::conversation(&state, &user_id, &row.id).await?;
@@ -1919,18 +1939,21 @@ pub struct ModelResponse {
     id: String,
     label: String,
     available: bool,
+    #[serde(skip)]
+    inference_credential: Option<InferenceCredential>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     input_modalities: Option<Vec<String>>,
 }
-use crate::services::assistant_nyxagent_model_cache::{MODELS, ModelInfo};
+use crate::services::assistant_nyxagent_model_cache::{InferenceCredential, MODELS, ModelInfo};
 impl From<ModelInfo> for ModelResponse {
     fn from(row: ModelInfo) -> Self {
         Self {
             id: row.id,
             label: row.label,
             available: row.available,
+            inference_credential: row.inference_credential,
             description: row.description,
             input_modalities: row.input_modalities,
         }
@@ -1942,6 +1965,7 @@ impl From<ModelResponse> for ModelInfo {
             id: row.id,
             label: row.label,
             available: row.available,
+            inference_credential: row.inference_credential,
             description: row.description,
             input_modalities: row.input_modalities,
         }
@@ -1970,6 +1994,11 @@ fn model_response(row: &Value) -> Option<ModelResponse> {
             })
             .into(),
         available: row["available"].as_bool() != Some(false),
+        inference_credential: match row["inference_credential"].as_str() {
+            Some("thread") => Some(InferenceCredential::Thread),
+            Some("platform") => Some(InferenceCredential::Platform),
+            _ => None,
+        },
         description: row["description"].as_str().map(str::to_owned),
         input_modalities: input_modalities(row),
     })
@@ -2181,6 +2210,7 @@ pub async fn models(
                 id: engine::DEFAULT_MODEL.into(),
                 label: "Default model".into(),
                 available: true,
+                inference_credential: None,
                 description: None,
                 input_modalities: None,
             }]
@@ -2209,6 +2239,7 @@ async fn proxy(
         path,
         body,
         turn_id,
+        None,
         policy,
     )
     .await
@@ -2223,6 +2254,7 @@ async fn proxy_raw(
     path: &str,
     body: Option<Value>,
     turn_id: Option<&str>,
+    destination: Option<crate::services::platform_manager_contract::NyxAgentDestination>,
     policy: Option<BillingRoutePolicy>,
 ) -> AppResult<Response> {
     let service =
@@ -2280,6 +2312,9 @@ async fn proxy_raw(
     }
     if let Some(proof) = platform_model {
         request.extensions_mut().insert(proof);
+    }
+    if let Some(destination) = destination {
+        request.extensions_mut().insert(destination);
     }
     if method == "POST" && path == "v1/responses" {
         request
@@ -2531,6 +2566,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
                     request.body,
                     (!request.idempotency_key.is_empty())
                         .then_some(request.idempotency_key.as_str()),
+                    request.destination,
                     request.billing_policy,
                 )
                 .await
@@ -2602,6 +2638,9 @@ pub async fn turns(
 pub(crate) const SERVER_TURN_POLICY: BillingRoutePolicy =
     BillingRoutePolicy::Metered(crate::services::billing::route_inventory::BillingIngress::Proxy);
 
+#[path = "assistant_nyxagent_survivor.rs"]
+pub(crate) mod survivor;
+
 /// Claim a turn and run it detached. The caller subscribes to the returned
 /// receiver before any event is emitted, so even an immediate completion is
 /// observable. `auth` is the owner acting (a browser session, or the owner
@@ -2628,26 +2667,25 @@ pub(crate) async fn start_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
     let user_id = auth.user_id.to_string();
-    let mut row = if voice_request_id.is_some() {
-        Box::pin(engine::begin_turn_with_voice(
-            &state.db,
-            &user_id,
-            start,
-            &state.encryption_keys,
-            voice_request_id,
-        ))
-        .await?
-    } else {
-        Box::pin(engine::begin_turn(
-            &state.db,
-            &user_id,
-            start,
-            &state.encryption_keys,
-        ))
-        .await?
-    };
+    let claim = Box::pin(engine::claim_turn(
+        &state.db,
+        &user_id,
+        start,
+        &state.encryption_keys,
+        voice_request_id,
+    ))
+    .await?;
+    let mut row = claim.conversation;
+    let credential = claim.credential;
     #[cfg(test)]
     crate::test_utils::pause_committed_admission(&state.db).await;
+    let (sender, receiver) = broadcast::channel(256);
+    if !crate::services::assistant_turn_restart::owns_subscriber(
+        &row,
+        &crate::services::assistant_engine_worker::instance().id,
+    ) {
+        return Ok((row, receiver));
+    }
     if let Some(watch) = crate::services::async_service_operation::bound(&state.db, &row).await? {
         crate::services::async_service_operation::apply_delivery(&mut row, &watch);
     }
@@ -2657,11 +2695,7 @@ pub(crate) async fn start_turn_with_voice(
     {
         text.push_str(&prelude);
     }
-    let credential =
-        credentials::load_for_conversation(&state.db, &state.encryption_keys, &user_id, &row.id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Assistant credential not found".into()))?;
-    let (sender, receiver) = broadcast::channel(256);
+    credentials::validate_claimed(&state.db, &row, &credential).await?;
     state.shutdown.spawn(
         run_turn(
             state.clone(),

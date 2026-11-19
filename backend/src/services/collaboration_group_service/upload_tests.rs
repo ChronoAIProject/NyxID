@@ -400,6 +400,7 @@ async fn collaboration_guest_worker_obeys_image_modality_capability_and_expiry()
                     Some(vec![ModelInfo {
                         id: row.model.clone(),
                         label: "Text-only model".into(),
+                        inference_credential: None,
                         available: true,
                         description: None,
                         input_modalities: Some(vec!["text".into()]),

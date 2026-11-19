@@ -6501,7 +6501,14 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
@@ -10790,6 +10797,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,

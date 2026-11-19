@@ -367,7 +367,7 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
     .unwrap();
     session.commit_transaction().await.unwrap();
     let row = claim.conversation;
-    let old = claim.credential.api_key_id;
+    let old = claim.credential.api_key_id.clone();
     use super::super::assistant_agent_credential_service as credentials;
     // Generic metadata/ordinary replacement cannot borrow a platform turn.
     assert!(
@@ -375,9 +375,10 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
             .await
             .is_err()
     );
-    let successor = credentials::replace_for_turn(db, &state.encryption_keys, &row, &old)
-        .await
-        .unwrap();
+    let successor =
+        credentials::replace_for_turn(db, &state.encryption_keys, &row, &claim.credential)
+            .await
+            .unwrap();
     assert_ne!(old, successor.api_key_id);
     let rebound = engine::get(db, &row.user_id, &row.id).await.unwrap();
     assert_eq!(rebound.credential_api_key_id, successor.api_key_id);
@@ -439,7 +440,7 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
         .await
         .unwrap();
     assert!(
-        credentials::replace_for_turn(db, &state.encryption_keys, &row, &successor.api_key_id)
+        credentials::replace_for_turn(db, &state.encryption_keys, &row, &successor)
             .await
             .is_err()
     );

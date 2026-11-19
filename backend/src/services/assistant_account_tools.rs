@@ -702,10 +702,11 @@ impl AccountTools<'_> {
         let chat = if let Some(chat) = auth.assistant_chat.as_deref() {
             Ok(Some(chat.clone()))
         } else if auth.auth_method == AuthMethod::ApiKey {
-            Box::pin(acks::for_key_with_access(
+            Box::pin(acks::chat_for_key_version(
                 self.db,
                 &user,
                 auth.api_key_id.as_deref(),
+                auth.thread_key_version(),
                 auth.org_agent_access.as_ref(),
             ))
             .await
@@ -845,7 +846,9 @@ impl AccountTools<'_> {
     async fn mutable_key(&self, user: &str, id: &str) -> AppResult<ApiKey> {
         let key = key_service::get_api_key(self.db, user, id).await?;
         if key.platform.as_deref() == Some(ASSISTANT_PLATFORM)
-            || acks::for_key(self.db, user, Some(id)).await?.is_some()
+            || acks::chat_for_authenticated_key(self.db, &key, None)
+                .await?
+                .is_some()
         {
             return Err(AppError::ValidationError(
                 "Assistant chat keys cannot be modified by chat tools".into(),
