@@ -319,6 +319,12 @@ async fn discovery_repairs_missed_joins_and_pause_skips_elapsed_periods() {
     user.group_ids = vec!["group".into()];
     db.collection::<User>(USERS).insert_one(user).await.unwrap();
     assert_eq!(tick(&db, start).await.grants_created, 1);
+    let recipient = db
+        .collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .find_one(recipient_filter(&schedule.id, "person"))
+        .await
+        .unwrap()
+        .unwrap();
     update_schedule(
         &db,
         &schedule.id,
@@ -329,7 +335,10 @@ async fn discovery_repairs_missed_joins_and_pause_skips_elapsed_periods() {
     )
     .await
     .unwrap();
-    let later = start.checked_add_months(Months::new(3)).unwrap();
+    let later = recipient
+        .anchor_at
+        .checked_add_months(Months::new(3))
+        .unwrap();
     assert_eq!(tick(&db, later).await.grants_created, 0);
     update_schedule(
         &db,
@@ -440,28 +449,51 @@ async fn registered_members_receive_spendable_credits_even_after_a_missed_enroll
         .unwrap();
         assert!(registration.actually_created);
         let owner = registration.user_id;
-        // Signup does not imply group membership. The audited membership
-        // mutation establishes eligibility and normally captures the anchor.
-        assert_eq!(tick(&db, Utc::now()).await.grants_created, 0);
-        crate::services::group_service::add_member(&db, "group", &owner)
-            .await
-            .unwrap();
+        let grants = db.collection::<CreditGrant>(CREDIT_GRANTS);
+        let grant_filter =
+            doc! { "recipient_user_id": &owner, "schedule_origin.schedule_id": &schedule.id };
+        assert_eq!(
+            grants.count_documents(grant_filter.clone()).await.unwrap(),
+            0
+        );
         if missed_hook {
-            // Model a crash after the membership transaction commits but before
-            // its best-effort enrollment persists. Recovery must use membership.
-            db.collection::<CreditScheduleRecipient>(RECIPIENTS)
-                .delete_one(recipient_filter(&schedule.id, &owner))
+            // Commit the membership write by itself to model an interrupted hook.
+            let joined = db
+                .collection::<User>(USERS)
+                .update_one(
+                    doc! { "_id": &owner },
+                    doc! { "$addToSet": { "group_ids": "group" } },
+                )
+                .write_concern(mongodb::options::WriteConcern::majority())
+                .await
+                .unwrap();
+            assert_eq!(joined.modified_count, 1);
+            assert!(
+                db.collection::<CreditScheduleRecipient>(RECIPIENTS)
+                    .find_one(recipient_filter(&schedule.id, &owner))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                grants.count_documents(grant_filter.clone()).await.unwrap(),
+                0
+            );
+            let recovered = tick(&db, Utc::now()).await;
+            assert_eq!(recovered.grants_created, 1);
+            assert_eq!(recovered.grants_ledgered, 1);
+        } else {
+            crate::services::group_service::add_member(&db, "group", &owner)
                 .await
                 .unwrap();
         }
-        assert_eq!(tick(&db, Utc::now()).await.grants_created, 1);
-        let grant = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .find_one(doc! { "recipient_user_id": &owner })
+        let grant = grants
+            .find_one(grant_filter.clone())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(grant.amount, Credits::from_whole(100));
+        assert!(grant.issued_ledgered_at.is_some());
 
         // A zero-balance wallet proves the scheduled grant actually funds the
         // request, rather than merely appearing as an active grant in the UI.
@@ -539,6 +571,7 @@ async fn registered_members_receive_spendable_credits_even_after_a_missed_enroll
         assert_eq!(spent.remaining, Credits::from_whole(75));
         assert_eq!(spent.reserved, Credits::ZERO);
         assert_eq!(tick(&db, Utc::now()).await.grants_created, 0);
+        assert_eq!(grants.count_documents(grant_filter).await.unwrap(), 1);
         assert_eq!(
             db.collection::<CreditGrant>(CREDIT_GRANTS)
                 .find_one(doc! { "_id": &grant.id })
@@ -601,12 +634,34 @@ async fn recipient_discovery_respects_each_target_kind_and_personal_membership()
         )
         .await
         .unwrap();
-        let expected = match kind {
-            BillingTargetKind::AllUsers => 3,
-            BillingTargetKind::SelectedUsers => 2,
-            _ => 1,
+        let expected: &[&str] = match kind {
+            BillingTargetKind::AllUsers => &["org", "other", "person"],
+            BillingTargetKind::SelectedUsers => &["org", "person"],
+            BillingTargetKind::OrgMembers | BillingTargetKind::Groups => &["person"],
         };
-        assert_eq!(tick(&db, start).await.grants_created, expected);
+        assert_eq!(tick(&db, start).await.grants_created, expected.len());
+        let recipients = db.collection::<CreditScheduleRecipient>(RECIPIENTS);
+        let discovered: Vec<_> = recipients
+            .find(doc! { "schedule_id": &schedule.id })
+            .sort(doc! { "recipient_user_id": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|recipient| recipient.recipient_user_id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        // Discovery can observe eligibility after the supplied first tick time.
+        let renewal = discovered
+            .iter()
+            .map(|recipient| recipient.next_due_at)
+            .max()
+            .unwrap();
         db.collection::<User>(USERS)
             .update_one(
                 doc! { "_id": "person" },
@@ -614,12 +669,13 @@ async fn recipient_discovery_respects_each_target_kind_and_personal_membership()
             )
             .await
             .unwrap();
-        assert_eq!(
-            tick(&db, start.checked_add_months(Months::new(1)).unwrap())
-                .await
-                .grants_created,
-            expected - 1
-        );
+        assert_eq!(tick(&db, renewal).await.grants_created, expected.len() - 1);
+        let deactivated = recipients
+            .find_one(recipient_filter(&schedule.id, "person"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!deactivated.is_eligible);
     }
 }
 
