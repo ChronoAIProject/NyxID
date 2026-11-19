@@ -3430,7 +3430,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         .and_then(|t| t.automation_work.clone())
         .filter(|w| w.role == "group")
     {
-        super::trigger_schedule::group::admit(db, &row, &work, turn_id, session).await?;
+        use super::trigger_schedule::group::{self, Admission};
+        let admission = if start.origin == TurnOrigin::Event {
+            Admission::Continuation
+        } else {
+            Admission::Dispatch
+        };
+        group::admit(db, &row, &work, turn_id, admission, session).await?;
     }
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
@@ -3570,7 +3576,8 @@ pub(crate) async fn begin_owner_turn_in_session(
                 )
                 .await?;
                 if work.role == "group" {
-                    super::trigger_schedule::group::admit(db, &row, work, turn_id, session).await?;
+                    use super::trigger_schedule::group::{self, Admission};
+                    group::admit(db, &row, work, turn_id, Admission::Continuation, session).await?;
                 }
             }
         }
