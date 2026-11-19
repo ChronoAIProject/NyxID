@@ -142,6 +142,19 @@ export async function openInvoiceReceipt(lagoInvoiceId: string, ownerId?: string
   window.open(file_url, "_blank", "noopener,noreferrer");
 }
 
+export async function createStripePortal(ownerId?: string): Promise<string> {
+  const response = await api.post<unknown>("/billing/stripe-portal", ownerId ? { owner_id: ownerId } : {});
+  return invoiceDownloadResponseSchema.parse(response).file_url;
+}
+
+export async function openStripePurchaseDocument(orderId: string, ownerId?: string): Promise<void> {
+  const response = await api.get<unknown>(
+    billingOwnerPath(`/billing/topups/${encodeURIComponent(orderId)}/document`, ownerId),
+  );
+  const { file_url } = invoiceDownloadResponseSchema.parse(response);
+  window.open(file_url, "_blank", "noopener,noreferrer");
+}
+
 export function useCurrentBill(enabled = true, ownerId?: string) {
   return useQuery({
     queryKey: ownerKey(BILLING_BILL_KEY, ownerId),

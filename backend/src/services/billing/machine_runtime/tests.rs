@@ -188,6 +188,7 @@ async fn fixture(label: &str) -> Fixture {
     let config = Arc::new(AppConfig {
         billing_enabled: true,
         billing_allocations_enabled: false,
+        billing_stripe_purchases: None,
         lago_api_url: None,
         lago_api_key: None,
         ..crate::test_utils::test_app_config()

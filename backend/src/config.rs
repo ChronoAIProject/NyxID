@@ -717,6 +717,7 @@ pub struct AppConfig {
     /// Master billing switch. P1 uses this only as passive configuration;
     /// later phases wire the charging gate behind it.
     pub billing_enabled: bool,
+    pub billing_stripe_purchases: Option<crate::services::billing::stripe::StripeSettings>,
     /// Enable allocation policy authoring only after every billing writer is upgraded.
     pub billing_allocations_enabled: bool,
     /// Lago API URL for later phases. Empty means no Lago sink configured.
@@ -1270,6 +1271,7 @@ impl AppConfig {
     /// Panics on missing required variables to fail fast at startup.
     pub fn from_env() -> Self {
         let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
+        let billing_stripe_purchases = crate::services::billing::stripe::StripeSettings::from_env();
         let is_dev = environment == "development" || environment == "dev";
 
         let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
@@ -1770,6 +1772,7 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
             billing_enabled: parse_bool_env("BILLING_ENABLED", false),
+            billing_stripe_purchases,
             billing_allocations_enabled: parse_bool_env("BILLING_ALLOCATIONS_ENABLED", false),
             lago_api_url: env::var("LAGO_API_URL")
                 .ok()
@@ -2403,6 +2406,7 @@ mod tests {
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
             billing_enabled: false,
             billing_allocations_enabled: false,
+            billing_stripe_purchases: None,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),

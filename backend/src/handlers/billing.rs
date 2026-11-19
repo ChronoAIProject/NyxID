@@ -3,7 +3,7 @@ use crate::services::billing::amounts::credit_expr;
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -160,6 +160,9 @@ pub struct BillingWalletResponse {
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
     pub created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_purchase_offer: Option<crate::services::billing::purchases::PurchaseOffer>,
+    pub stripe_funded: bool,
     pub balance: Credits,
     pub reserved: Credits,
     pub pending_debits: Credits,
@@ -188,6 +191,7 @@ pub struct TopUpResponse {
     pub idempotency_key: String,
     pub checkout_url: String,
     pub payment_provider: Option<String>,
+    pub stripe_funded: bool,
     pub lago_wallet_transaction_id: Option<String>,
     pub lago_invoice_id: Option<String>,
     pub status: BillingTopUpStatus,
@@ -213,11 +217,33 @@ pub struct TopUpHistoryEntry {
     pub checkout_url: Option<String>,
     /// True when a receipt PDF can be downloaded for this top-up.
     pub receipt_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe: Option<StripePurchaseHistory>,
     pub paid_at: Option<chrono::DateTime<Utc>>,
     pub credits_expire_at: Option<chrono::DateTime<Utc>>,
     pub expired_credits_micros: i64,
     pub expired_credits: Credits,
     pub credits_expired_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StripePurchaseHistory {
+    pub currency: String,
+    pub subtotal_minor: i64,
+    pub tax_minor: Option<i64>,
+    pub total_minor: Option<i64>,
+    pub document_available: bool,
+    pub refunded_minor: i64,
+    pub reversals: Vec<StripePurchaseReversalHistory>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StripePurchaseReversalHistory {
+    pub kind: String,
+    pub amount_minor: i64,
+    pub returned_credits: i64,
+    pub provider_status: String,
+    pub resolution_status: Option<crate::models::billing_topup_session::StripeReversalState>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -720,7 +746,9 @@ pub async fn get_wallet(
     ensure_billing_rollout(&state, &owner.owner_id, &auth_user.user_id.to_string()).await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
         return Ok(Json(Some(BillingWalletResponse::from_wallet(
-            wallet, false,
+            wallet,
+            false,
+            &state.billing,
         )?)));
     }
     // Explicit owner views are read-only, even when an organization-owned
@@ -734,6 +762,7 @@ pub async fn get_wallet(
     Ok(Json(Some(BillingWalletResponse::from_wallet(
         provisioned.wallet,
         provisioned.created,
+        &state.billing,
     )?)))
 }
 
@@ -810,6 +839,7 @@ pub async fn provision_wallet(
     Ok(Json(BillingWalletResponse::from_wallet(
         wallet,
         provisioned.created,
+        &state.billing,
     )?))
 }
 
@@ -851,6 +881,7 @@ pub async fn create_topup(
         idempotency_key: checkout.session.idempotency_key,
         checkout_url,
         payment_provider: checkout.session.payment_provider,
+        stripe_funded: checkout.session.stripe_purchase.is_some(),
         lago_wallet_transaction_id: checkout.session.lago_wallet_transaction_id,
         lago_invoice_id: checkout.session.lago_invoice_id,
         status: checkout.session.status,
@@ -910,11 +941,16 @@ pub async fn list_topups(
     // on the credit invoice. Lago being unreachable degrades to local
     // statuses rather than failing the page.
     let invoices = match state.billing.lago_client() {
-        Some(lago) => lago
-            .credit_invoices(&owner.owner_id)
-            .await
-            .unwrap_or_default(),
-        None => Vec::new(),
+        Some(lago)
+            if sessions
+                .iter()
+                .any(|session| session.stripe_purchase.is_none()) =>
+        {
+            lago.credit_invoices(&owner.owner_id)
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
     };
     let invoices_by_id: std::collections::HashMap<
         &str,
@@ -934,7 +970,9 @@ pub async fn list_topups(
         let wallets_needing_backfill: std::collections::BTreeSet<&str> = sessions
             .iter()
             .filter(|session| {
-                session.lago_invoice_id.is_none() && session.lago_wallet_transaction_id.is_some()
+                session.stripe_purchase.is_none()
+                    && session.lago_invoice_id.is_none()
+                    && session.lago_wallet_transaction_id.is_some()
             })
             .map(|session| session.lago_wallet_id.as_str())
             .collect();
@@ -958,22 +996,35 @@ pub async fn list_topups(
             let invoice = lago_invoice_id
                 .as_deref()
                 .and_then(|id| invoices_by_id.get(id).copied());
-            let status = match invoice {
-                Some(invoice) if invoice.status == "voided" => "voided",
-                Some(invoice) if invoice.payment_status == "succeeded" => "paid",
-                Some(invoice) if invoice.payment_status == "failed" => "failed",
-                _ if matches!(
-                    session.status,
-                    crate::models::billing_topup_session::BillingTopUpStatus::Failed
-                ) =>
-                {
-                    "failed"
+            let status = if let Some(purchase) = &session.stripe_purchase {
+                match () {
+                    _ if purchase.reversal_review_required => "reversal_review",
+                    _ if purchase.reversals.iter().any(|event| event.decision.as_ref().is_some_and(|d|
+                        d.state == crate::models::billing_topup_session::StripeReversalState::Applied)) => "payment_reversed",
+                    _ if purchase.credits_available_at.is_some() => "credits_available",
+                    _ if session.paid_at.is_some() => "paid_credits_pending",
+                    _ if purchase.expired => "expired",
+                    _ if purchase.async_failed => "failed",
+                    _ => "pending",
                 }
-                // Stripe checkout sessions expire after 24 hours and Lago
-                // returns the same cached session per transaction, so an
-                // old pending checkout can no longer be completed.
-                _ if session.created_at < checkout_expiry_cutoff => "expired",
-                _ => "pending",
+            } else {
+                match invoice {
+                    Some(invoice) if invoice.status == "voided" => "voided",
+                    Some(invoice) if invoice.payment_status == "succeeded" => "paid",
+                    Some(invoice) if invoice.payment_status == "failed" => "failed",
+                    _ if matches!(
+                        session.status,
+                        crate::models::billing_topup_session::BillingTopUpStatus::Failed
+                    ) =>
+                    {
+                        "failed"
+                    }
+                    // Stripe checkout sessions expire after 24 hours and Lago
+                    // returns the same cached session per transaction, so an
+                    // old pending checkout can no longer be completed.
+                    _ if session.created_at < checkout_expiry_cutoff => "expired",
+                    _ => "pending",
+                }
             };
             TopUpHistoryEntry {
                 id: session.id,
@@ -982,10 +1033,36 @@ pub async fn list_topups(
                 status: status.to_string(),
                 invoice_number: invoice.map(|invoice| invoice.number.clone()),
                 lago_invoice_id,
-                checkout_url: (status == "pending")
-                    .then_some(session.payment_url)
-                    .flatten(),
+                checkout_url: (status == "pending"
+                    && session
+                        .stripe_purchase
+                        .as_ref()
+                        .is_none_or(|p| p.checkout_expires_at > Utc::now()))
+                .then_some(session.payment_url)
+                .flatten(),
                 receipt_available: status == "paid",
+                stripe: session
+                    .stripe_purchase
+                    .map(|purchase| StripePurchaseHistory {
+                        currency: purchase.currency,
+                        subtotal_minor: purchase.subtotal_minor,
+                        tax_minor: purchase.tax_minor,
+                    refunded_minor: purchase.refunded_minor,
+                    reversals: purchase.reversals.into_iter().map(|event| {
+                        let resolution_status = event.decision.as_ref().map(|d| d.state);
+                        StripePurchaseReversalHistory {
+                            kind: if event.provider_id.starts_with("re_") {"refund"} else {"dispute"}.into(),
+                            amount_minor: event.amount_minor,
+                            returned_credits: event.decision.filter(|d| d.state == crate::models::billing_topup_session::StripeReversalState::Applied)
+                                .map(|d| d.credits).unwrap_or_default(),
+                            provider_status: event.status,
+                            resolution_status,
+                        }
+                    }).collect(),
+                        total_minor: purchase.total_minor,
+                        document_available: purchase.stripe_invoice_id.is_some()
+                            && session.paid_at.is_some(),
+                    }),
                 paid_at: session.paid_at,
                 credits_expire_at: session.credits_expire_at,
                 expired_credits_micros: session.expired_credits.display_micros(),
@@ -1285,6 +1362,61 @@ pub async fn lago_webhook(
             action: outcome.action.as_str().to_string(),
         }),
     ))
+}
+
+pub async fn create_stripe_portal(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<ProvisionWalletRequest>,
+) -> AppResult<Json<InvoiceDownloadResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor_id, body.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+    let file_url = state.billing.stripe_portal(&owner.owner_id).await?;
+    Ok(Json(InvoiceDownloadResponse { file_url }))
+}
+
+pub async fn download_stripe_purchase(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(order_id): Path<String>,
+    Query(query): Query<ProvisionWalletRequest>,
+) -> AppResult<Json<InvoiceDownloadResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+    let file_url = state
+        .billing
+        .stripe_purchase_document(&owner.owner_id, &order_id)
+        .await?;
+    Ok(Json(InvoiceDownloadResponse { file_url }))
+}
+
+pub async fn stripe_billing_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<StatusCode> {
+    let signature = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("Stripe webhook signature is required".into()))?;
+    match state.billing.stripe_billing_webhook(signature, &body).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(AppError::BillingProviderUnavailable(error)) => {
+            tracing::warn!(%error, "Stripe billing webhook requires retry");
+            Ok(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn verify_lago_signature(
@@ -1698,7 +1830,13 @@ impl WalletViewResponse {
 }
 
 impl BillingWalletResponse {
-    fn from_wallet(wallet: BillingWallet, created: bool) -> AppResult<Self> {
+    fn from_wallet(
+        wallet: BillingWallet,
+        created: bool,
+        billing: &crate::services::billing::BillingService,
+    ) -> AppResult<Self> {
+        let stripe_purchase_offer = billing.stripe_purchase_offer(&wallet);
+        let stripe_funded = wallet.stripe_enrollment.is_some();
         let available_credits = wallet.available_credits()?;
         let available_with_overdraft_credits = wallet.available_with_overdraft_credits()?;
         let suspended = wallet.is_suspended();
@@ -1730,6 +1868,8 @@ impl BillingWalletResponse {
             created_at: wallet.created_at,
             updated_at: wallet.updated_at,
             created,
+            stripe_purchase_offer,
+            stripe_funded,
         })
     }
 }

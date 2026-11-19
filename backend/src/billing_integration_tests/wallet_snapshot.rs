@@ -266,12 +266,19 @@ async fn tax_ordering_retry_admission_command_counts() {
             entered.notified().await;
             let before = std::mem::take(&mut *commands.lock().unwrap());
             // Admission is paused at its provider read: exclude only the
-            // administrator's two invalidation commands from its count.
+            // administrator's plan, enrolled-wallet and profile invalidations.
             crate::services::billing::taxes::invalidate_plan(&db, &plan)
                 .await
                 .unwrap();
             let invalidation = std::mem::take(&mut *commands.lock().unwrap());
-            assert_eq!(invalidation.len(), 2, "{invalidation:?}");
+            assert_eq!(
+                invalidation,
+                [
+                    "update:billing_tax_plan_epoch",
+                    "update:billing_wallet",
+                    "update:billing_tax_profiles",
+                ]
+            );
             resume.notify_one();
             before
         });

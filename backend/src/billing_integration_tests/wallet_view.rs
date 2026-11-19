@@ -94,6 +94,7 @@ async fn insert_wallet(db: &mongodb::Database, owner: &str) -> BillingWallet {
     let wallet = BillingWallet {
         snapshot_generation: 0,
         tax_generation: 0,
+        stripe_enrollment: None,
         tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner.into(),

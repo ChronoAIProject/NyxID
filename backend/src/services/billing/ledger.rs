@@ -219,6 +219,7 @@ pub fn exact_entry(
         balance_credits: None,
         dedupe_key: Some(dedupe),
         wallet_id: row.and_then(|r| r.wallet_id.clone()),
+        stripe_payment: None,
         created_at: Utc::now(),
     }
 }
@@ -234,7 +235,7 @@ pub fn validate_postings(entry: &BillingLedgerEntry) -> AppResult<()> {
     if entry.postings.is_empty()
         && matches!(
             movement,
-            "topup_created" | "opening_balance" | "wallet_credited"
+            "topup_created" | "opening_balance" | "wallet_credited" | "stripe_purchase"
         )
     {
         return Ok(());
@@ -302,6 +303,41 @@ pub async fn record_wallet_credited(
     );
     entry.balance_credits = Some(balance_credits.display_whole());
     append_best_effort(db, entry).await;
+}
+
+pub(super) async fn record_stripe_purchase(
+    db: &mongodb::Database,
+    owner_id: &str,
+    wallet_id: &str,
+    payment: &super::lago_client::external_purchases::ExternalPayment,
+    balance: Credits,
+) -> AppResult<()> {
+    let mut entry = exact_entry(
+        owner_id,
+        &payment.purchase_id,
+        "stripe_purchase",
+        format!("wallet-credit:stripe:{}", payment.purchase_id),
+        Vec::new(),
+        None,
+    );
+    entry.wallet_id = Some(wallet_id.into());
+    entry.amount_credits = Some(payment.credits);
+    entry.balance_credits = Some(balance.display_whole());
+    entry.stripe_payment = Some(crate::models::billing_ledger::StripeLedgerPayment {
+        account_id: payment.stripe_account_id.clone(),
+        checkout_id: payment.stripe_checkout_id.clone(),
+        payment_intent_id: payment.stripe_payment_intent_id.clone(),
+        currency: payment.currency.clone(),
+        subtotal_minor: payment.subtotal_minor,
+        tax_minor: payment.tax_minor,
+        total_minor: payment.total_minor,
+    });
+    if !append_and_confirm_dedupe(db, entry).await {
+        return Err(AppError::BillingProviderUnavailable(
+            "Stripe purchase ledger confirmation failed".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -683,6 +719,20 @@ fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
                 },
             );
             field(&mut output, &posting.amount.to_string());
+        }
+        if let Some(payment) = &entry.stripe_payment {
+            field(&mut output, "stripe_payment_v1");
+            for value in [
+                &payment.account_id,
+                &payment.checkout_id,
+                &payment.payment_intent_id,
+                &payment.currency,
+                &payment.subtotal_minor.to_string(),
+                &payment.tax_minor.to_string(),
+                &payment.total_minor.to_string(),
+            ] {
+                field(&mut output, value);
+            }
         }
         return output;
     }
@@ -1416,6 +1466,7 @@ mod tests {
             balance_credits: None,
             dedupe_key: None,
             wallet_id: Some("wallet-1".to_string()),
+            stripe_payment: None,
             created_at: Utc::now(),
         }
     }

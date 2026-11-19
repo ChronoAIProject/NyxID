@@ -1859,6 +1859,7 @@ mod tests {
             allowance_reservations: vec![],
             grant_reservations: vec![],
             tax_cache_ttl_secs: 900,
+            credit_only: false,
             applied_tax: None,
         };
         reserve_and_open_ordinary(db, &ctx, &wallet, vec![layer]).await

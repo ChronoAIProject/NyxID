@@ -892,6 +892,9 @@ pub enum AppError {
 
     #[error("Billing wallet suspended")]
     WalletSuspended,
+
+    #[error("Billing wallet is held for payment review")]
+    WalletPaymentReview,
 }
 
 impl AppError {
@@ -1150,6 +1153,7 @@ impl AppError {
             | Self::BillingProviderUnavailable(_)
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
+            Self::WalletPaymentReview => StatusCode::CONFLICT,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -1405,6 +1409,7 @@ impl AppError {
             Self::PlanEntitlementRequired(_) => 11303,
             Self::AnonymousIncompatibleBilling(_) => 11304,
             Self::WalletSuspended => 11307,
+            Self::WalletPaymentReview => 11308,
             Self::GrantCascadeConfirmationRequired(_) => 11500,
         }
     }
@@ -1709,6 +1714,7 @@ impl AppError {
             Self::PlanEntitlementRequired(_) => "plan_entitlement_required",
             Self::AnonymousIncompatibleBilling(_) => "anonymous_incompatible_billing",
             Self::WalletSuspended => "wallet_suspended",
+            Self::WalletPaymentReview => "wallet_payment_review",
         }
     }
 }

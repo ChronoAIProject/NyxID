@@ -709,3 +709,37 @@ mod routes;
 mod settings;
 
 mod rates;
+
+#[tokio::test]
+async fn stripe_sandbox_admission_persists_credit_only_for_each_component() {
+    let f = fixture("stripe_sandbox_credit_only").await;
+    let before = wallet(&f).await;
+    f.db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    f.db.collection::<Document>(WALLETS).update_one(doc! {"owner_id": &f.owner}, doc! {"$set": {"stripe_enrollment": {
+        "stripe_account_id": "acct_fixture", "stripe_customer_id": "cus_fixture", "lago_wallet_id": before.lago_wallet_id,
+        "lago_subscription_id": before.lago_subscription_id, "plan_code": "fixture", "livemode": false,
+        "usage_verified_until": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(5)),
+    }}}).await.unwrap();
+    let input = request(&f, 60).await;
+    let accepted = f
+        .billing
+        .reserve_sandbox_window(&f.producer, input)
+        .await
+        .unwrap();
+    let rows =
+        f.db.collection::<crate::models::usage_meter::UsageMeterRow>(USAGE);
+    assert_eq!(accepted.components.len(), 3);
+    for component in accepted.components {
+        let usage = rows
+            .find_one(doc! {"_id": component.usage_row_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let funding = usage.funding.unwrap();
+        assert!(!funding.tax_accounting);
+        assert!(funding.applied_tax.is_none());
+    }
+}

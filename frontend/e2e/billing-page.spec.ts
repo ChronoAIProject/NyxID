@@ -708,7 +708,7 @@ for (const width of [1440, 768, 390, 320]) {
   });
 }
 
-test("top-up and receipt buttons use the real API actions", async ({
+test("top-up and receipt buttons use the billing API", async ({
   page,
   context,
 }) => {
@@ -719,13 +719,14 @@ test("top-up and receipt buttons use the real API actions", async ({
   const checkouts: Record<string, unknown>[] = [];
   await page.route("**/api/v1/billing/topup", async (route) => {
     expect(route.request().method()).toBe("POST");
-    checkouts.push(route.request().postDataJSON());
+    const request = route.request().postDataJSON();
+    checkouts.push(request);
     await route.fulfill({
       json: {
         owner_id: "test-user",
         checkout_url: "https://billing.example.test/checkout",
-        amount_credits: 100,
-        idempotency_key: checkouts[0]!.idempotency_key,
+        amount_credits: request.amount_credits,
+        idempotency_key: request.idempotency_key,
         reused: false,
         status: "checkout_created",
       },
@@ -743,11 +744,90 @@ test("top-up and receipt buttons use the real API actions", async ({
   await expect(receipt).toHaveURL("https://billing.example.test/receipt");
   await receipt.close();
   await page.getByRole("button", { name: "Add credits" }).click();
-  await page.getByRole("button", { name: "Continue to payment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add credits" });
+  const input = dialog.getByRole("spinbutton");
+  const continueButton = dialog.getByRole("button", { name: "Continue to payment" });
+  await expect(input).toHaveValue("20");
+  const presets = dialog.getByRole("button", { name: /^(20|50|100|500)$/ });
+  await expect(presets).toHaveText(["20", "50", "100", "500"]);
+  for (const amount of ["20", "50", "100", "500"]) {
+    await presets.filter({ hasText: new RegExp(`^${amount}$`) }).click();
+    await expect(input).toHaveValue(amount);
+  }
+  await input.fill("9");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("10");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("10000000");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("10000001");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("20");
+  await continueButton.click();
   await expect(page).toHaveURL("https://billing.example.test/checkout");
   expect(checkouts).toHaveLength(1);
-  expect(checkouts[0]).toMatchObject({ amount_credits: 100 });
+  expect(checkouts[0]).toMatchObject({ amount_credits: 20 });
   expect(checkouts[0]!.idempotency_key).toMatch(/^[\da-f-]{36}$/);
+});
+
+test("Stripe purchases display credits, payment totals, and the hosted document independently", async ({
+  page,
+  context,
+}) => {
+  await billingApi(page);
+  await page.route("**/api/v1/billing/wallet", (route) => route.fulfill({
+    json: {
+      ...billingWallet(),
+      stripe_funded: true,
+      stripe_purchase_offer: { unit_amount_minor: 80, minimum_credits: 13, maximum_credits: 500 },
+    },
+  }));
+  await page.route("**/api/v1/billing/topups?**", (route) => route.fulfill({
+    json: {
+      owner_id: "test-user", total: 2, page: 1, per_page: 10,
+      topups: [{
+        id: "stripe-purchase", amount_credits: 100, status: "credits_available",
+        created_at: "2026-09-25T00:00:00Z", receipt_available: false,
+        stripe: { currency: "usd", subtotal_minor: 10000, tax_minor: 900,
+          total_minor: 10900, document_available: true },
+      }, {
+        id: "adjusted-purchase", amount_credits: 100, status: "payment_reversed",
+        created_at: "2026-09-24T00:00:00Z", receipt_available: false,
+        stripe: { currency: "usd", subtotal_minor: 10000, tax_minor: 900,
+          total_minor: 10900, refunded_minor: 1090, document_available: true,
+          reversals: [{ kind: "refund", provider_status: "succeeded", resolution_status: "applied",
+            amount_minor: 1090, returned_credits: 10 }] },
+      }],
+    },
+  }));
+  await page.route("**/api/v1/billing/topups/stripe-purchase/document", (route) =>
+    route.fulfill({ json: { file_url: "https://invoice.stripe.com/i/purchase-fixture" } }),
+  );
+  await context.route("https://invoice.stripe.com/**", (route) => route.fulfill({ body: "Fixture document" }));
+  await page.goto("/billing");
+  await expect(page.getByRole("button", { name: "Manage billing details" })).toBeVisible();
+  const purchase = page.getByRole("row").filter({ hasText: "Credits available" });
+  await expect(purchase.getByRole("cell", { name: "100", exact: true })).toBeVisible();
+  await expect(purchase.getByRole("cell", { name: "$109.00 Includes $9.00 tax", exact: true })).toBeVisible();
+  await expect(purchase.getByText("Includes $9.00 tax")).toBeVisible();
+  const adjusted = page.getByRole("row").filter({ hasText: "Payment adjustment" });
+  await expect(adjusted.getByText("Refunded $10.90")).toBeVisible();
+  await expect(adjusted.getByText("Credits reversed: 10")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add credits" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add credits" });
+  await expect(dialog.getByRole("spinbutton")).toHaveValue("25");
+  await expect(dialog.getByText("$20.00", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/Purchased credits expire one year after payment/)).toBeVisible();
+  await dialog.getByRole("button", { name: "62", exact: true }).click();
+  await expect(dialog.getByText("$49.60", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  const popup = page.waitForEvent("popup");
+  await purchase.getByRole("button", { name: "View purchase document" }).click();
+  const document = await popup;
+  await expect(document).toHaveURL("https://invoice.stripe.com/i/purchase-fixture");
+  await document.close();
 });
 
 test("top-up history pages on the server and resumes a pending payment", async ({

@@ -849,6 +849,7 @@ async fn tax_ordering_publication_and_invalidation_command_counts() {
         "plan_invalidation",
         &[
             "update:billing_tax_plan_epoch",
+            "update:billing_wallet",
             "update:billing_tax_profiles",
         ],
     );

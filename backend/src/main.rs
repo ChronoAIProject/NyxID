@@ -3078,6 +3078,7 @@ mod tests {
                 balance_credits: None,
                 dedupe_key: None,
                 wallet_id: None,
+                stripe_payment: None,
                 created_at: chrono::Utc::now(),
             },
             old.billing_ledger().as_slice(),

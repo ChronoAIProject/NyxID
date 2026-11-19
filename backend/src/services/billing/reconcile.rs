@@ -61,6 +61,7 @@ pub struct BillingReconciler {
     db: mongodb::Database,
     lago: Option<Arc<dyn LagoApi>>,
     config: Arc<AppConfig>,
+    stripe: Option<super::stripe::Stripe>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -178,7 +179,17 @@ impl BillingReconciler {
         lago: Option<Arc<dyn LagoApi>>,
         config: Arc<AppConfig>,
     ) -> Self {
-        Self { db, lago, config }
+        Self {
+            db,
+            lago,
+            config,
+            stripe: None,
+        }
+    }
+
+    pub(super) fn with_stripe(mut self, stripe: Option<super::stripe::Stripe>) -> Self {
+        self.stripe = stripe;
+        self
     }
 
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
@@ -428,6 +439,22 @@ impl BillingReconciler {
             return Ok(stats);
         };
 
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        if let Some(stripe) = &self.stripe {
+            report.record(
+                "stripe_usage_periods",
+                super::purchases::reconcile_wallets(&self.db, lago.as_ref(), stripe).await,
+            );
+            if !continue_reconcile() {
+                return Ok(stats);
+            }
+            report.record(
+                "stripe_purchases",
+                super::purchases::reconcile(&self.db, lago.as_ref(), stripe).await,
+            );
+        }
         if !continue_reconcile() {
             return Ok(stats);
         }
@@ -1125,6 +1152,7 @@ mod tests {
         crate::config::AppConfig {
             billing_enabled: true,
             billing_allocations_enabled: false,
+            billing_stripe_purchases: None,
             ..test_app_config()
         }
     }

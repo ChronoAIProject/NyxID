@@ -3634,6 +3634,29 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    billing_wallet.create_index(
+        IndexModel::builder()
+            .keys(doc! {"stripe_enrollment.stripe_account_id": 1, "stripe_enrollment.last_verification_attempt": 1, "_id": 1})
+            .options(IndexOptions::builder()
+                .partial_filter_expression(doc! {"stripe_enrollment.stripe_account_id": {"$type": "string"}})
+                .build())
+            .build(),
+    ).await?;
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"stripe_enrollment.plan_code": 1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"stripe_enrollment.plan_code": {"$type": "string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── billing_topup_sessions ──
     let billing_topup_sessions = db.collection::<Document>(BILLING_TOPUP_SESSIONS);
     billing_topup_sessions
@@ -3659,6 +3682,40 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    for field in [
+        "stripe_purchase.checkout_session_id",
+        "stripe_purchase.payment_intent_id",
+        "stripe_purchase.used_reversal_decision_ids",
+    ] {
+        billing_topup_sessions
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {field: 1})
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! {field: {"$type": "string"}})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+    billing_topup_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"stripe_purchase.account_id": 1, "updated_at": 1, "_id": 1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"stripe_purchase.account_id": {"$type": "string"}},
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;

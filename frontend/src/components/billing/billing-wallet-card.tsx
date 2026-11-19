@@ -7,7 +7,13 @@ import { Label } from "@/components/ui/label";
 import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
 import { useState } from "react";
 import { ExternalLink, Plus } from "lucide-react";
-import type { BillingWalletResponse } from "@/schemas/billing";
+import {
+  MAX_TOP_UP_CREDITS,
+  MIN_TOP_UP_CREDITS,
+  TOP_UP_PRESETS_USD,
+  topUpAmountSchema,
+  type BillingWalletResponse,
+} from "@/schemas/billing";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -26,9 +32,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-
-const DEFAULT_TOP_UP_CREDITS = 100;
-const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 interface BillingWalletActionsProps {
   readonly wallet: BillingWalletResponse | undefined;
@@ -107,7 +110,8 @@ export function BillingWalletActions({
     );
   return (
     <AddCreditsDialog
-      billingReady={billingReady}
+      billingReady={billingReady && (!wallet.stripe_funded || !!wallet.stripe_purchase_offer)}
+      offer={wallet.stripe_purchase_offer}
       pending={topUpPending}
       onTopUp={onTopUp}
       open={topUpOpen}
@@ -190,8 +194,10 @@ function AddCreditsDialog({
   onTopUp,
   open: controlledOpen,
   onOpenChange,
+  offer,
 }: {
   readonly billingReady: boolean;
+  readonly offer?: BillingWalletResponse["stripe_purchase_offer"];
   readonly pending: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
   readonly open?: boolean;
@@ -204,10 +210,17 @@ function AddCreditsDialog({
     setUncontrolledOpen(next);
     onOpenChange?.(next);
   };
-  const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
+  const minimum = offer?.minimum_credits ?? MIN_TOP_UP_CREDITS;
+  const maximum = offer?.maximum_credits ?? MAX_TOP_UP_CREDITS;
+  const unitAmountMinor = offer?.unit_amount_minor ?? 100;
+  // Each preset is a dollar budget. Offer whole credits within that budget.
+  const quantities = TOP_UP_PRESETS_USD.map((usd) => Math.floor((usd * 100) / unitAmountMinor));
+  const presets = [...new Set(quantities.filter((value) => value >= minimum && value <= maximum))];
+  const initialAmount = Math.min(maximum, Math.max(quantities[0]!, minimum));
+  const [credits, setCredits] = useState(String(initialAmount));
   const amount = Number(credits);
-  const amountValid =
-    Number.isInteger(amount) && amount > 0 && amount <= 10_000_000;
+  const amountValid = topUpAmountSchema.safeParse(amount).success && amount >= minimum && amount <= maximum;
+  const subtotal = (amount * unitAmountMinor) / 100;
   const trigger = (
     <Button variant="primary" disabled={!billingReady || pending}>
       <ButtonIcon variant="primary">
@@ -232,13 +245,15 @@ function AddCreditsDialog({
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
           <DialogTitle>{translateUi("Add credits")}</DialogTitle>
-          <DialogDescription>{translateUi("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
+          <DialogDescription>{offer
+            ? translateUi("Minimum purchase: {{minimum}} credits. Stripe calculates applicable tax at checkout. Purchased credits expire one year after payment.", { minimum: formatNumber(minimum) })
+            : translateUi("1 credit = 1 USD. Minimum purchase: {{minimum}} credits. Purchased credits expire one year after payment.", { minimum: formatNumber(minimum) })}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
             <span className="type-row-title">{translateUi("Amount")}</span>
             <div className="flex flex-wrap gap-2">
-              {TOP_UP_PRESETS.map((preset) => (
+              {presets.map((preset) => (
                 <Button
                   key={preset}
                   variant={amount === preset ? "secondary" : "outline"}
@@ -257,8 +272,8 @@ function AddCreditsDialog({
               <Input
                 id="topup-credits"
                 type="number"
-                min={1}
-                max={10_000_000}
+                min={minimum}
+                max={maximum}
                 step={1}
                 value={credits}
                 onChange={(event) => setCredits(event.target.value)}
@@ -269,7 +284,7 @@ function AddCreditsDialog({
                 id="topup-total"
                 className="min-w-0 break-all type-body tabular-nums text-muted-foreground"
               >
-                {formatUsd(amount)}
+                {formatUsd(subtotal)}
               </span>
             </div>
           </div>

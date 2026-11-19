@@ -22,6 +22,7 @@ mod plan_sync;
 pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
+pub mod purchases;
 pub(crate) mod rate_cache;
 pub(crate) mod realtime_usage;
 pub mod reconcile;
@@ -35,6 +36,7 @@ pub mod sandbox_runtime;
 mod sandbox_runtime_math;
 pub mod sandbox_settings;
 pub mod schedules;
+pub mod stripe;
 pub(crate) mod stuck_requests;
 mod targets;
 pub mod taxes;
@@ -222,6 +224,7 @@ pub async fn startup_diagnostics(
     items.extend(reconcile_status::diagnostics(db).await);
     items.extend(usage_comparison::diagnostics(db).await?);
     items.extend(topup_expiry::unresolved_diagnostics(db).await?);
+    items.extend(purchases::diagnostics(db).await?);
     items.extend(hold_conservation::diagnostics(db).await?);
     items.extend(stuck_requests::diagnostics(db).await?);
     Ok(items)
@@ -233,6 +236,7 @@ pub struct BillingService {
     config: Arc<AppConfig>,
     owner_resolver: BillingOwnerResolver,
     lago: Option<Arc<dyn LagoApi>>,
+    stripe: Option<stripe::Stripe>,
     #[cfg(test)]
     pub(crate) settlement_gate: Option<Arc<SettlementGate>>,
     #[cfg(test)]
@@ -265,10 +269,26 @@ impl SettlementGate {
 
 impl BillingService {
     pub fn new(db: DbHandle, config: Arc<AppConfig>) -> Self {
+        let stripe = config
+            .billing_stripe_purchases
+            .clone()
+            .and_then(
+                |settings| match stripe::Stripe::new(settings, &config.frontend_url) {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        tracing::error!(%error, "Stripe billing configuration is incomplete");
+                        None
+                    }
+                },
+            );
         let lago = match (&config.lago_api_url, &config.lago_api_key) {
             (Some(url), Some(key)) => match LagoClient::new(url.clone(), key.clone()) {
                 Ok(client) => Some(Arc::new(
-                    client.with_payment_provider_code(config.lago_payment_provider_code.clone()),
+                    client
+                        .with_payment_provider_code(config.lago_payment_provider_code.clone())
+                        .with_credit_period_config(
+                            stripe.as_ref().map(stripe::Stripe::credit_period_config),
+                        ),
                 ) as Arc<dyn LagoApi>),
                 Err(error) => {
                     tracing::warn!(error = %error, "Lago billing client is not configured");
@@ -281,6 +301,7 @@ impl BillingService {
         Self {
             db: db.clone(),
             config,
+            stripe,
             owner_resolver: BillingOwnerResolver::new(db),
             lago,
             #[cfg(test)]
@@ -301,6 +322,7 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
+            stripe: None,
             settlement_gate: None,
             before_send_gate: None,
         }
@@ -407,6 +429,7 @@ impl BillingService {
 
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
         reconcile::BillingReconciler::new(self.db.clone(), self.lago.clone(), self.config.clone())
+            .with_stripe(self.stripe.clone())
     }
 
     /// Overdraft cap for newly provisioned wallets: the global admin default,
@@ -492,6 +515,19 @@ impl BillingService {
                 "Lago client is not configured".to_string(),
             )
         })?;
+        if let Some(wallet) = self.get_wallet(owner_id).await?
+            && wallet.stripe_enrollment.is_some()
+        {
+            return purchases::create(
+                &self.db,
+                lago,
+                self.stripe_client()?,
+                &wallet,
+                amount_credits,
+                idempotency_key,
+            )
+            .await;
+        }
         let cap = self.default_overdraft_cap().await?;
         provisioning::create_topup_checkout(
             &self.db,
@@ -506,6 +542,137 @@ impl BillingService {
             idempotency_key,
         )
         .await
+    }
+
+    fn stripe_client(&self) -> AppResult<&stripe::Stripe> {
+        self.stripe.as_ref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Stripe billing is unavailable".into())
+        })
+    }
+
+    pub fn stripe_purchase_offer(
+        &self,
+        wallet: &BillingWallet,
+    ) -> Option<purchases::PurchaseOffer> {
+        let enrollment = wallet.stripe_enrollment.as_ref()?;
+        let stripe = self.stripe.as_ref()?;
+        (enrollment.stripe_account_id == stripe.settings.account_id
+            && enrollment.livemode == stripe.settings.mode.livemode())
+        .then(|| purchases::offer(stripe))
+    }
+
+    pub async fn enroll_stripe_wallet(
+        &self,
+        owner_id: &str,
+        customer_id: &str,
+        actor: &crate::services::audit_service::AuditActor,
+        audit_key: &[u8],
+    ) -> AppResult<()> {
+        let stripe = self.stripe_client()?;
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        let wallet = self
+            .get_wallet(owner_id)
+            .await?
+            .ok_or_else(|| crate::errors::AppError::NotFound("Billing wallet not found".into()))?;
+        purchases::enroll_wallet(
+            &self.db,
+            lago,
+            stripe,
+            wallet,
+            customer_id,
+            actor,
+            audit_key,
+        )
+        .await
+    }
+
+    pub async fn stripe_portal(&self, owner_id: &str) -> AppResult<String> {
+        let stripe = self.stripe_client()?;
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        let wallet = self
+            .get_wallet(owner_id)
+            .await?
+            .ok_or_else(|| crate::errors::AppError::NotFound("Billing wallet not found".into()))?;
+        let customer_id = purchases::verify_wallet(lago, stripe, &wallet).await?;
+        stripe.portal(owner_id, &customer_id).await
+    }
+
+    pub async fn stripe_reversals(
+        &self,
+        order_id: &str,
+    ) -> AppResult<Vec<crate::models::billing_topup_session::StripeReversal>> {
+        purchases::reversals::list(&self.db, order_id).await
+    }
+
+    pub async fn resolve_stripe_reversal(
+        &self,
+        order_id: &str,
+        provider_id: &str,
+        resolution: purchases::reversals::Resolution,
+        actor: &crate::services::audit_service::AuditActor,
+        audit_key: &[u8],
+    ) -> AppResult<()> {
+        let stripe = self.stripe_client()?;
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        purchases::reversals::resolve(
+            &self.db,
+            lago,
+            stripe,
+            order_id,
+            provider_id,
+            resolution,
+            purchases::reversals::ReversalAudit {
+                actor,
+                key: audit_key,
+            },
+        )
+        .await
+    }
+
+    pub async fn stripe_purchase_document(
+        &self,
+        owner_id: &str,
+        order_id: &str,
+    ) -> AppResult<String> {
+        purchases::document(&self.db, self.stripe_client()?, owner_id, order_id).await
+    }
+
+    pub async fn acknowledge_stripe_finance_correction(
+        &self,
+        order_id: &str,
+        provider_id: &str,
+        input: purchases::reversals::FinanceCorrection,
+        actor: &crate::services::audit_service::AuditActor,
+        audit_key: &[u8],
+    ) -> AppResult<()> {
+        purchases::reversals::acknowledge_finance_correction(
+            &self.db,
+            order_id,
+            provider_id,
+            input,
+            actor,
+            audit_key,
+        )
+        .await
+    }
+
+    pub async fn stripe_billing_webhook(&self, signature: &str, body: &[u8]) -> AppResult<()> {
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        purchases::handle_event(&self.db, lago, self.stripe_client()?, signature, body).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stripe(mut self, stripe: stripe::Stripe) -> Self {
+        self.stripe = Some(stripe);
+        self
     }
 
     pub async fn backfill_existing_owner_wallets(
@@ -2552,6 +2719,7 @@ mod tests {
             .insert_one(BillingWallet {
                 snapshot_generation: 0,
                 tax_generation: 0,
+                stripe_enrollment: None,
                 tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),

@@ -1,8 +1,11 @@
 # Billing rollout and merchant taxes
 
-This runbook covers the manual v0 merchant rollout. NyxID owns admission and
-exact wallet accounting; Lago owns tax configuration, invoices and prepaid
-credits. Billing in Studio and the assistant account panel has a **Billing owner**
+For wallets enrolled in Stripe purchases, Stripe calculates tax at Checkout,
+collects payment and issues the purchase document. Lago manages the purchased
+credits and rates their use. The legacy rollout below applies to wallets using
+Lago tax on redemption. See [Stripe-owned credit purchases](#stripe-owned-credit-purchases).
+
+Billing in Studio and the assistant account panel has a **Billing owner**
 selector: Personal and organizations where the signed-in person is an admin.
 Balance, setup, top-ups/history, usage, grants/allowances, current bill and finalized
 usage invoices follow that selection. Organization wallet management and views
@@ -563,3 +566,131 @@ write can overwrite a new result. The new writer detects a changed starting
 snapshot, including an old replacement without a revision, but cannot fence an
 old writer's subsequent write. These are the pre-existing mixed-fleet races;
 no financial format, movement or per-row fence changes in this release.
+
+## Stripe-owned credit purchases
+
+The separate Stripe purchase path is disabled until it has provider settings
+and a wallet enrollment. Existing wallets and historical reservations retain
+their original billing treatment. Upgrade every billing reader and writer and
+drain their admitted legacy operations before the first enrollment. A binary
+that predates this change can admit redemption-tax charges for an enrolled
+wallet. After the first enrollment, keep a release that understands Stripe
+orders, their holds and in-flight reservations serving that wallet. To pause a
+rollout, stop enrolling owners and keep webhooks and reconciliation running for
+existing payments. Downgrading below the first Stripe-aware release requires a
+separate cutover for enrolled owners. The chained purchase entry includes the
+Stripe payment amounts. An older chain verifier omits those fields and will
+report a false integrity failure on the first such entry.
+
+A fresh enrolled wallet uses a zero-base,
+zero-usage-tax Lago period and a prepaid balance. The captured treatment applies
+to ordinary proxy requests, machine and Sandbox windows, and benefit estimates
+that spill into the wallet. The wallet must lack a Lago payment provider and
+saved methods. Lago still rates usage and applies wallet credits at close. It
+cannot collect a residual from this payer.
+
+Install the pinned [Lago credit purchase extension](../integrations/lago-stripe-purchases/README.md).
+Configure `BILLING_STRIPE_PURCHASES` as JSON with `mode` (`test` or `live`),
+`account_id`, `portal_configuration_id`, `product_tax_code`, `offer_version`,
+`unit_amount_minor` and `maximum_subtotal_minor`. The launch offer uses 100 USD
+minor units per credit. Choose the subtotal ceiling with room for automatic tax
+within Stripe's payment limit. The provider verifies the actual gross amount.
+Set `BILLING_STRIPE_PURCHASE_KEY`, `BILLING_STRIPE_PURCHASE_WEBHOOK_SECRET` and
+`BILLING_LAGO_EXTERNAL_PURCHASE_SECRET` as secrets. During webhook key rotation,
+put the retiring secret in `BILLING_STRIPE_PURCHASE_PREVIOUS_WEBHOOK_SECRET`
+until Stripe stops signing deliveries with it. Configure reconciliation
+to renew the ten-minute Lago period verification. Admission also attempts a
+bounded, fenced readback for an expired verification. Healthy wallets can
+continue even when the background sweep has a backlog.
+
+Before provisioning a new Stripe payer, leave `LAGO_PAYMENT_PROVIDER_CODE`
+unset in the provisioning environment. A configured code automatically links
+a newly created Lago customer to a payment provider, which makes that customer
+ineligible. Check the effective overdraft default in **Admin → Billing** and
+the resulting wallet cap. Enrollment requires a cap of zero.
+
+Provision the new owner's empty prepaid wallet on the verified Lago plan. Create
+a dedicated Stripe Customer with `nyxid_owner_id` set to that NyxID owner ID.
+Enable the appropriate Customer Portal actions in Stripe, including billing
+details and tax identifiers. Apply the Stripe product classification and tax
+registrations approved for that cohort. A platform administrator then calls
+`POST /api/v1/admin/billing/stripe/enroll` with JSON fields `owner_id` and
+`stripe_customer_id`. Enrollment checks both providers and refuses historical
+usage and purchases. The wallet constraint is per owner. Moving an owner who
+has already bought or spent credits requires a separate migration for earlier
+balances, open usage and purchase documents. Enrollment records the provider
+identity and an audit event.
+
+Use a NyxID merchant test account for the walkthrough. Enable billing for the
+actual payer of the NyxBot request. An ordinary member using a platform key
+spends from their personal wallet. An authorized organization-channel guest
+can spend from the organization's wallet. Confirm that the owner shown in
+Billing matches the execution payer before buying the test credits.
+
+The November 2026 pricing policy (D6) classifies the existing product as a
+multi-redemption voucher and charges Singapore GST on redemption. The
+purchase-tax walkthrough exercises a different treatment in Stripe test mode.
+Production enrollment requires Finance's applicable product classification
+and its treatment of unused, expired and refunded balances for that cohort.
+
+Send Checkout completion, asynchronous success and failure, and expiry events
+to `/api/v1/webhooks/stripe-billing`. Also deliver charge refund and dispute
+events. NyxID verifies the signature and retrieves authoritative Stripe state
+before recording money or delivering credits. Billing provides the Stripe
+Portal and owner-authorized purchase document links. Verify the document with
+the target seller and buyer configuration. Inspect the finalized purchase PDF
+for the seller GST number, “Tax Invoice” title, customer legal name, address
+and applicable tax and business identifiers (including UEN where required).
+For a USD sale compare subtotal, GST and total against their SGD equivalents
+using Finance's approved MAS exchange-rate convention. Stripe's standard
+filing-currency presentation documents the converted tax. The SGD subtotal,
+SGD gross and FX source need separate evidence from the merchant document.
+Record any missing field for Finance before accepting the document.
+[Stripe invoice presentation](https://docs.stripe.com/tax/invoicing#display-tax-in-the-filing-currency)
+
+## Resolve a Stripe refund or dispute
+
+Stripe records the money returned and the outcome of a dispute. NyxID holds
+further spending while a refund or dispute needs review. A successful refund
+requires an explicit credit decision. Failed or canceled refunds and won
+disputes release their hold when every other event on the purchase is resolved.
+
+A platform administrator can inspect the purchase at
+`GET /api/v1/admin/billing/stripe/purchases/{purchase_id}/reversals`. For a
+confirmed refund or a closed dispute requiring action, POST to the same path
+with `/{provider_id}` appended. Supply a UUID `decision_id`, a `reason`, an
+`action` and a whole `credits` quantity.
+
+| Action | When to use it |
+| --- | --- |
+| `reverse_credits` | Finance approved removing a positive quantity of unused credits from this purchase. Lago checks the remaining lot and protects accrued usage before recording the void. |
+| `release` | The event requires zero credits to be removed, such as a tax-only refund. Supply `credits: 0`. |
+| `write_off` | Finance accepts the loss on credits that were spent or can no longer be recovered. Supply `credits: 0`. |
+
+For a payment held before credit delivery, `release` and `write_off` authorize
+delivery of the full original credit quantity. Use `reverse_credits` to remove
+the approved quantity, including the full lot when appropriate. An unresolved
+hold prevents spending between delivery and the approved void.
+
+Retry an ambiguous response with the same decision ID and payload. Read back
+the decision state. A pending decision is retried by reconciliation. If Lago
+refuses the requested quantity, submit a corrected decision with a new UUID
+and a reason. Each decision, replacement and applied credit void is auditable.
+If Stripe subsequently reports that an already-applied refund failed, compare
+the Stripe refund with the recorded Lago void and escalate the discrepancy to
+Finance for a corrective credit. Integrity lists the purchase and reversal IDs
+under `stripe_purchase_finance_correction`. After Finance records the correction,
+read the existing Lago void ID from the admin reversal list. A platform admin
+can then PUT to
+`/api/v1/admin/billing/stripe/purchases/{purchase_id}/reversals/{provider_id}/finance-correction`
+with `lago_void_transaction_id` and the accounting `reference`. An exact replay
+uses the original acknowledgment. The operation records the reference and actor
+in the audit chain. The manual correction is a separate accounting step.
+
+For a persistently pending reversal, repair provider authorization or connectivity
+and replay the existing decision with its original decision ID, action, and
+approved quantity. The connector uses that identity to recover either a
+committed void or a refusal. A draft or otherwise unfinished Lago subscription
+invoice, including its grace period, can delay reversal. The same decision
+remains pending through period close and reconciliation retries it after Lago
+can verify the unused balance.

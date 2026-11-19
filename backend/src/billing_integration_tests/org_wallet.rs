@@ -104,6 +104,20 @@ async fn org_wallet_read_is_non_provisioning_and_admin_setup_checkout_history_ar
     let (_, read) = request(&app, &token, Method::GET, &wallet_path, Value::Null).await;
     assert_eq!(read["owner_id"], org);
     assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
+    let (status, rejected) = request(
+        &app,
+        &token,
+        Method::POST,
+        "/api/v1/billing/topup",
+        json!({"owner_id":org,"amount_credits":9,"idempotency_key":"org-below-minimum"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(
+        rejected["message"],
+        "Bad request: Minimum credit purchase is 10 credits"
+    );
+    assert!(lago.topup_wallets.lock().unwrap().is_empty());
     let (status, checkout) = request(
         &app,
         &token,

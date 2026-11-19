@@ -200,7 +200,7 @@ pub(super) async fn invalidate_owner(
         .collection::<BillingWallet>(WALLETS)
         .find_one_and_update(
             doc! {"owner_id":owner},
-            doc! {"$inc":{"tax_generation":1_i64}},
+            doc! {"$inc":{"tax_generation":1_i64}, "$unset":{"stripe_enrollment.usage_verified_until":""}},
         )
         .return_document(ReturnDocument::After)
         .await?;
@@ -234,6 +234,11 @@ pub(super) async fn invalidate_plan(db: &Database, plan: &str) -> AppResult<()> 
     }
     #[cfg(test)]
     super::ordering_tests::point(super::ordering_tests::Phase::InvalidationAdvanced).await;
+    db.collection::<BillingWallet>(WALLETS)
+        .update_many(
+            doc! {"stripe_enrollment.plan_code": {"$eq": plan, "$type": "string"}},
+            doc! {"$inc": {"tax_generation": 1_i64}, "$unset": {"stripe_enrollment.usage_verified_until": ""}},
+        ).await?;
     db.collection::<Document>(COLLECTION_NAME)
         .update_many(doc! {"plan_code":plan}, invalidated_fields(true))
         .await?;

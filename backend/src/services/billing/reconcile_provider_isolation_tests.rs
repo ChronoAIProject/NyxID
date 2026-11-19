@@ -8,7 +8,10 @@ use crate::{
     },
     services::billing::{self, lago_client::*},
 };
-use mongodb::event::{EventHandler, command::CommandEvent};
+use mongodb::{
+    bson::Bson,
+    event::{EventHandler, command::CommandEvent},
+};
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -235,6 +238,22 @@ impl Fixture {
             "provider_step_isolation",
             EventHandler::callback(move |e| {
                 if let CommandEvent::Started(e) = e {
+                    if e.command_name == "update"
+                        && e.command.get_str("update") == Ok(BILLING_WALLET)
+                        && e.command.get_array("updates").is_ok_and(|updates| {
+                            updates.iter().filter_map(Bson::as_document).any(|update| {
+                                update.get_bool("multi") == Ok(true)
+                                    && update.get_document("q").is_ok_and(|query| {
+                                        query.contains_key("stripe_enrollment.plan_code")
+                                    })
+                            })
+                        })
+                    {
+                        seen.lock()
+                            .unwrap()
+                            .push("update:billing_wallet:stripe_plan".into());
+                        return;
+                    }
                     seen.lock().unwrap().push(format!(
                         "{}:{}",
                         e.command_name,
@@ -503,17 +522,36 @@ async fn provider_step_clean_command_counts() {
         let healthy = f.commands.lock().unwrap().clone();
         let expected = match step {
             Step::Taxes => (1, 8),
-            Step::Prices => (2, 18),
-            Step::Machine => (1, 17),
+            Step::Prices => (2, 20),
+            Step::Machine => (1, 19),
             Step::Push => (2, 9),
             Step::Compare => (8, 8), // Six coverage/discovery commands plus the test lease.
             Step::Wallet => (1, 11),
             Step::Rates => (4, 8),
         };
+        let plan_invalidations: Vec<&[String]> = healthy
+            .windows(3)
+            .filter(|commands| commands[1] == "update:billing_wallet:stripe_plan")
+            .collect();
+        if matches!(step, Step::Prices | Step::Machine) {
+            assert_eq!(plan_invalidations.len(), 2, "{step:?}: {healthy:?}");
+            for commands in plan_invalidations {
+                assert_eq!(
+                    commands,
+                    [
+                        "update:billing_tax_plan_epoch",
+                        "update:billing_wallet:stripe_plan",
+                        "update:billing_tax_profiles"
+                    ]
+                );
+            }
+        } else {
+            assert!(plan_invalidations.is_empty(), "{step:?}: {healthy:?}");
+        }
         assert_eq!(
             (idle.len(), healthy.len()),
             expected,
-            "{step:?}: command count changed"
+            "{step:?}: command count changed. idle={idle:?}, healthy={healthy:?}"
         );
         assert!(f.healthy_done(step, &id).await, "{step:?}: invalid fixture");
         println!(

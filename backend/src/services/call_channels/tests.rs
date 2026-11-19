@@ -1575,6 +1575,7 @@ async fn admitted_funded_call_settles_frozen_usage_once_after_price_and_credenti
     let wallet = BillingWallet {
         snapshot_generation: 0,
         tax_generation: 0,
+        stripe_enrollment: None,
         tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner.clone(),
@@ -1622,6 +1623,7 @@ async fn admitted_funded_call_settles_frozen_usage_once_after_price_and_credenti
             allowance_reservations: vec![],
             grant_reservations: vec![],
             tax_cache_ttl_secs: 900,
+            credit_only: false,
             applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
         }],
     };
@@ -2279,6 +2281,7 @@ async fn fund_sms(f: &mut Fixture) {
         .insert_one(BillingWallet {
             snapshot_generation: 0,
             tax_generation: 0,
+            stripe_enrollment: None,
             tax_guard_token: None,
             id: Uuid::new_v4().to_string(),
             owner_id: f.b.user_id.clone(),

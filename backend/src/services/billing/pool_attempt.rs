@@ -328,6 +328,7 @@ mod tests {
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
                 tax_cache_ttl_secs: 900,
+                credit_only: false,
                 applied_tax: Some(crate::services::billing::taxes::zero_snapshot()),
             })
             .collect();

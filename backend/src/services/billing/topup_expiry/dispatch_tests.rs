@@ -164,6 +164,7 @@ fn receipt(operation_id: &str, number: usize) -> LagoWalletTransaction {
         credit_amount: Credits::from_whole(3),
         remaining_credit: None,
         name: Some(purchased_credit_expiry_transaction_name(operation_id)),
+        reversed_purchase_transaction_id: None,
         settled_at: Some(Utc::now()),
         created_at: Utc::now(),
     }
@@ -615,6 +616,7 @@ async fn expiry_dispatch_stale_purchase_read_cannot_start_a_second_operation() {
             credit_amount: Credits::from_whole(3),
             remaining_credit: Some(Credits::from_whole(3)),
             name: None,
+            reversed_purchase_transaction_id: None,
             settled_at: Some(Utc::now() - Duration::days(366)),
             created_at: Utc::now() - Duration::days(366),
         }]),

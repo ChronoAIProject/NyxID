@@ -24,6 +24,7 @@ fn layer(seconds: i64) -> LayerReservation {
         allowance_reservations: vec![],
         grant_reservations: vec![],
         tax_cache_ttl_secs: 900,
+        credit_only: false,
         applied_tax: None,
     }
 }
@@ -130,7 +131,7 @@ fn row(id: &str, reservation: &BillingReservation) -> UsageMeterRow {
         "funding": bson::to_bson(&UsageFunding {
             credits_per_unit_micros: layer.credits_per_unit_micros, credits_per_unit_pico: layer.credits_per_unit_pico,
             settlement_rate: Some(Credits::from_pico(super::super::super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros)).unwrap()),
-            tax_accounting: true,
+            tax_accounting: !layer.credit_only,
             applied_tax: layer.applied_tax.clone(),
             allowance_reservations: layer.allowance_reservations.clone(),
             grant_reservations: layer.grant_reservations.clone(),
@@ -953,4 +954,54 @@ async fn sandbox_bundle_reserves_exact_shared_funds_and_rolls_back_all_component
         Credits::ZERO
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stripe_machine_admission_snapshots_credit_only_and_rejects_an_expired_period_or_hold() {
+    let db = fixture("stripe_machine_credit_only", 60).await;
+    db.collection::<Document>(crate::models::billing_tax_profile::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let wallets = db.collection::<Document>(WALLETS);
+    wallets.update_one(doc! {"_id": WALLET}, doc! {"$set": {"stripe_enrollment": {
+        "stripe_account_id": "acct_fixture", "stripe_customer_id": "cus_fixture", "lago_wallet_id": "provider-wallet",
+        "lago_subscription_id": "subscription", "plan_code": "fixture", "livemode": false,
+        "usage_verified_until": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(5)),
+    }}}).await.unwrap();
+    let reservation = reserve(&db, 10, "stripe-machine-window").await.unwrap();
+    assert_eq!(reservation.total_reserved_credits, credits(10));
+    let layer = &reservation.layers[0];
+    assert!(layer.credit_only);
+    assert!(layer.applied_tax.is_none());
+    let saved = db
+        .collection::<UsageMeterRow>("usage_meter")
+        .find_one(doc! {"_id": "stripe-machine-window"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!saved.funding.unwrap().tax_accounting);
+    wallets
+        .update_one(
+            doc! {"_id": WALLET},
+            doc! {"$set": {"stripe_enrollment.reversal_holds": ["btu_held"]}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reserve(&db, 1, "stripe-machine-held").await,
+        Err(AppError::WalletPaymentReview)
+    ));
+    wallets
+        .update_one(
+            doc! {"_id": WALLET},
+            doc! {"$set": {"stripe_enrollment.reversal_holds": Vec::<String>::new(),
+            "stripe_enrollment.usage_verified_until": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reserve(&db, 1, "stripe-machine-expired").await,
+        Err(AppError::BillingProviderUnavailable(_))
+    ));
 }
