@@ -328,15 +328,9 @@ async fn expired_group_loss_is_revalidated_after_renewal_or_finish() {
                 } else {
                     let now = Utc::now();
                     assert!(
-                        engine::mark_queued(
-                            &state.db,
-                            &member,
-                            &turn.turn_id,
-                            now,
-                            now + Duration::seconds(30)
-                        )
-                        .await
-                        .unwrap()
+                        engine::mark_queued(&state.db, &member, now, now + Duration::seconds(30))
+                            .await
+                            .unwrap()
                     );
                 }
             },
@@ -386,15 +380,9 @@ async fn expired_group_loss_is_revalidated_after_renewal_or_finish() {
             );
             let now = Utc::now();
             assert!(
-                !engine::mark_queued(
-                    &state.db,
-                    &member,
-                    &turn.turn_id,
-                    now,
-                    now + Duration::seconds(30)
-                )
-                .await
-                .unwrap(),
+                !engine::mark_queued(&state.db, &member, now, now + Duration::seconds(30))
+                    .await
+                    .unwrap(),
                 "a turn that has been reported lost could still renew its lease"
             );
         }
