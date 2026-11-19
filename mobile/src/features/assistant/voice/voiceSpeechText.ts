@@ -1,6 +1,6 @@
 import { translateApp } from "../../../i18n/appTranslation";
 import MarkdownIt from "markdown-it";
-import type Token from "markdown-it/lib/token";
+import type Token from "markdown-it/lib/token.mjs";
 import { sanitizeAssistantMessageContent } from "../assistantChatContent";
 
 const markdown = new MarkdownIt({ html: false, linkify: true });

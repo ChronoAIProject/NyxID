@@ -23,6 +23,8 @@ pub struct InvocationDiagnostic {
     pub actor_user_id: String,
     pub original_auth_method: String,
     pub original_api_key_id: Option<String>,
+    #[serde(default)]
+    pub original_api_key_credential_id: Option<String>,
     pub original_client_id: Option<String>,
     pub exact_user_service_id: String,
     pub state: InvocationDiagnosticState,
@@ -63,6 +65,7 @@ mod tests {
             actor_user_id: "secret-actor".into(),
             original_auth_method: "access_token".into(),
             original_api_key_id: Some("secret-key".into()),
+            original_api_key_credential_id: Some("secret-child".into()),
             original_client_id: Some("secret-client".into()),
             exact_user_service_id: "secret-service".into(),
             state: InvocationDiagnosticState::Pending,

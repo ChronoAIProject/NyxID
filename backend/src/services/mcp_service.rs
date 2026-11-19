@@ -939,6 +939,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
@@ -2987,6 +2995,25 @@ pub fn generate_tool_definitions(
     });
 
     tools.push(McpToolDefinition {
+        name: "nyx__diagnose_invocation".to_string(),
+        description: "Redeem one short-lived NyxID invocation-diagnostic handle using this exact current identity. The original tool error remains authoritative. Call at most once, except one retry when the result explicitly reports diagnostic_not_ready; never retry the failed business operation automatically."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Opaque nyx_diag_ handle returned by the immediately preceding failed NyxID invocation"
+                }
+            },
+            "required": ["handle"],
+            "additionalProperties": false
+        }),
+    });
+
+    tools.push(McpToolDefinition {
         name: "nyx__ssh_exec".to_string(),
         description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
             and exit code. The command runs on the remote machine authenticated via NyxID \
@@ -3078,6 +3105,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
+        | "nyx__diagnose_invocation"
         | "nyx__wait_for_connection"
         | "nyx__ssh_list_services"
         | "nyx__oracle_pools"
@@ -3134,6 +3162,7 @@ pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
         "nyx__wait_for_connection" => "Wait for a connection",
         "nyx__discover_services" => "Discover services",
         "nyx__list_connected_services" => "List connected services",
+        "nyx__diagnose_invocation" => "Diagnose a failed invocation",
         "nyx__ssh_list_services" => "List SSH services",
         "nyx__ssh_exec" => "Run an SSH command",
         "nyx__oracle_pools" => "List oracle pools",
@@ -6480,7 +6509,14 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
@@ -10769,6 +10805,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -12931,8 +12968,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 8 meta-tools (6 core + 2 SSH)
-        assert_eq!(tools.len(), 8);
+        // Should only have the 9 meta-tools (7 core + 2 SSH)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -12957,8 +12994,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 8 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 9);
+        // 9 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12982,8 +13019,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 8 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 10);
+        // 9 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -13004,6 +13041,12 @@ mod tests {
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
         let tools = generate_tool_definitions(&[], None);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "nyx__diagnose_invocation"),
+            "diagnostic redemption must be available to MCP callers"
+        );
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")

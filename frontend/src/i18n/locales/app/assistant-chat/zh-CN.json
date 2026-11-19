@@ -138,6 +138,7 @@
   "NyxID event: {{value1}}": "NyxID 事件：{{value1}}",
   "NyxID knowledge": "NyxID 知识",
   "NyxID refused this call.": "NyxID 拒绝了此调用。",
+  "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.": "NyxID 在本轮对话中拒绝了助手的凭证。请先检查已完成的操作，再重试。",
   "NyxID updates": "NyxID 更新",
   "Open Automations": "打开自动化",
   "Open full preview of {{value1}}": "打开 {{value1}} 的完整预览",

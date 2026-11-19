@@ -2492,6 +2492,7 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
         &f.state,
         ImageSendContext {
             source: crate::models::image_preparation::Source::Post {
+                key_version: chat.key_version,
                 api_key_id: chat.api_key_id.clone(),
             },
             owner: OWNER,

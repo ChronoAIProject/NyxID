@@ -1858,10 +1858,12 @@ pub(crate) async fn post_turn_is_live(
         return Ok(false);
     }
     // None deliberately forces fresh owner/org/group ACL resolution.
-    let current = crate::services::assistant_acknowledgement_service::for_key(
+    let current = crate::services::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &chat.user_id,
         Some(&chat.api_key_id),
+        chat.key_version,
+        None,
     )
     .await?;
     Ok(current.is_some_and(|current| {
@@ -1966,6 +1968,7 @@ pub(crate) async fn post_current_turn(
                 state,
                 super::images::ImageSendContext {
                     source: crate::models::image_preparation::Source::Post {
+                        key_version: chat.key_version,
                         api_key_id: chat.api_key_id.clone(),
                     },
                     owner: &chat.user_id,

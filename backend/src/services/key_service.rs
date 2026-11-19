@@ -199,7 +199,7 @@ fn is_scoped_key(allow_all_services: bool, allow_all_nodes: bool) -> bool {
     !allow_all_services || !allow_all_nodes
 }
 
-fn generate_scoped_api_key() -> (String, String, String) {
+pub(super) fn generate_scoped_api_key() -> (String, String, String) {
     use rand::RngCore;
     use sha2::{Digest, Sha256};
 

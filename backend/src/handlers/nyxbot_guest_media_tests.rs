@@ -650,6 +650,7 @@ async fn channel_guest_media_text_only_model_omits_urls_and_retains_owner_image(
                     crate::services::assistant_nyxagent_model_cache::ModelInfo {
                         id: row.model.clone(),
                         label: "Text only".into(),
+                        inference_credential: None,
                         available: true,
                         description: None,
                         input_modalities: Some(vec!["text".into()]),
