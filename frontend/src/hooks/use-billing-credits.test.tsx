@@ -13,6 +13,7 @@ import {
   useCurrentAllowances,
   useIssueCreditGrant,
   useUpdateCreditSchedule,
+  useSeedCreditSchedule,
 } from "./use-billing-credits";
 
 const { mockGet, mockPost, mockPatch, mockPut } = vi.hoisted(() => ({
@@ -38,6 +39,98 @@ function wrapperFactory() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("billing credit hooks", () => {
+  it("seeds every bounded page while pinning the same current period", async () => {
+    mockPost
+      .mockResolvedValueOnce({
+        period_start: "2026-11-01T00:00:00Z",
+        created_count: 40,
+        existing_count: 10,
+        pending_activation_count: 1,
+        next_user_id: "user-50",
+      })
+      .mockResolvedValueOnce({
+        period_start: "2026-11-01T00:00:00Z",
+        created_count: 2,
+        existing_count: 0,
+        pending_activation_count: 0,
+        next_user_id: null,
+      });
+    const { result } = renderHook(() => useSeedCreditSchedule(), {
+      wrapper: wrapperFactory(),
+    });
+    const totals = await result.current.mutateAsync({
+      id: "schedule/1",
+      updatedAt: "2026-11-05T00:00:00Z",
+    });
+    expect(totals).toEqual({ created: 42, existing: 10, pending: 1 });
+    expect(mockPost).toHaveBeenNthCalledWith(
+      1,
+      "/admin/credits/schedules/schedule%2F1/seed",
+      { expected_updated_at: "2026-11-05T00:00:00Z" },
+    );
+    expect(mockPost).toHaveBeenNthCalledWith(
+      2,
+      "/admin/credits/schedules/schedule%2F1/seed",
+      {
+        period_start: "2026-11-01T00:00:00Z",
+        after_user_id: "user-50",
+        expected_updated_at: "2026-11-05T00:00:00Z",
+      },
+    );
+  });
+
+  it("refreshes balances after a partially successful seed fails", async () => {
+    mockPost
+      .mockResolvedValueOnce({
+        period_start: "2026-11-01T00:00:00Z",
+        created_count: 50,
+        existing_count: 0,
+        pending_activation_count: 0,
+        next_user_id: "user-50",
+      })
+      .mockRejectedValueOnce(new Error("Interrupted"));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const { result } = renderHook(() => useSeedCreditSchedule(), {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    await expect(
+      result.current.mutateAsync({
+        id: "schedule",
+        updatedAt: "2026-11-05T00:00:00Z",
+      }),
+    ).rejects.toThrow("Interrupted");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin", "credits"] });
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["billing", "credits"],
+    });
+    mockPost.mockResolvedValueOnce({
+      period_start: "2026-11-01T00:00:00Z",
+      created_count: 2,
+      existing_count: 0,
+      pending_activation_count: 0,
+      next_user_id: null,
+    });
+    await expect(
+      result.current.mutateAsync({
+        id: "schedule",
+        updatedAt: "2026-11-05T00:00:00Z",
+      }),
+    ).resolves.toEqual({ created: 52, existing: 0, pending: 0 });
+    expect(mockPost).toHaveBeenLastCalledWith(
+      "/admin/credits/schedules/schedule/seed",
+      {
+        expected_updated_at: "2026-11-05T00:00:00Z",
+        period_start: "2026-11-01T00:00:00Z",
+        after_user_id: "user-50",
+      },
+    );
+  });
+
   it("loads a specific admin grant page without a silent fixed cutoff", async () => {
     mockGet.mockResolvedValue({ grants: [], page: 2, per_page: 50, total: 75 });
     const grants = renderHook(() => useAdminCreditGrants(2, 50), {

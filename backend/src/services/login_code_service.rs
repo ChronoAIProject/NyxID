@@ -387,6 +387,9 @@ pub async fn redeem(
         return Err(AppError::LoginCodeInvalid);
     }
     let result = result?;
+    if matches!(&result, Delivery::Account(_)) {
+        super::billing::schedules::eligibility::after_human_login(db, &row.user_id).await;
+    }
     audit_service::log_async(
         db.clone(),
         Some(row.user_id),

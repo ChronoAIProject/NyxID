@@ -206,7 +206,16 @@ pub(super) async fn create(
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     let result = create_and_audit(db, creation, actor, &mut transaction).await;
-    org_membership_authority::finish(transaction, result).await
+    let membership = org_membership_authority::finish(transaction, result).await?;
+    // The membership has committed; scheduled credits are best effort.
+    crate::services::billing::schedules::eligibility::after_org_joined(
+        db,
+        &membership.org_user_id,
+        &membership.member_user_id,
+        membership.created_at,
+    )
+    .await;
+    Ok(membership)
 }
 async fn create_and_audit(
     db: &Database,
@@ -356,7 +365,13 @@ pub(super) async fn revoke_membership(
     let result =
         revoke_membership_in_session(db, org_user_id, member_user_id, actor, &mut transaction)
             .await;
-    org_membership_authority::finish(transaction, result).await
+    org_membership_authority::finish(transaction, result).await?;
+    crate::services::billing::schedules::eligibility::after_org_exited(
+        db,
+        org_user_id,
+        member_user_id,
+    );
+    Ok(())
 }
 async fn revoke_membership_in_session(
     db: &Database,

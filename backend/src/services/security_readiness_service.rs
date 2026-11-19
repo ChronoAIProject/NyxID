@@ -126,6 +126,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
     TURN_HANDOFF,
     super::assistant_platform_model::READINESS,

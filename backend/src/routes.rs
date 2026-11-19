@@ -1611,6 +1611,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::billing_credit_schedules::update_schedule),
         )
         .route(
+            "/credits/schedules/{schedule_id}/seed",
+            post(handlers::billing_credit_schedules::seed_schedule),
+        )
+        .route(
             "/chain-verification",
             get(handlers::admin::get_chain_verification),
         )

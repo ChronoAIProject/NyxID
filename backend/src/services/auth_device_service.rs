@@ -345,7 +345,11 @@ pub async fn poll_and_prepare(
     hmac_key: &[u8],
     device_code: &str,
 ) -> AppResult<PollClaim> {
-    poll_internal(db, hmac_key, device_code, Some(encryption), true).await
+    let claim = poll_internal(db, hmac_key, device_code, Some(encryption), true).await?;
+    if let PollClaim::Account(delivery) = &claim {
+        super::billing::schedules::eligibility::after_human_login(db, &delivery.user_id).await;
+    }
+    Ok(claim)
 }
 
 /// Convert an approved account grant to a browser session in the same commit
@@ -441,6 +445,7 @@ pub async fn poll_for_browser(
     }
     result?;
     delivery.session_id = browser_id;
+    super::billing::schedules::eligibility::after_human_login(db, &delivery.user_id).await;
     Ok(PollClaim::Account(delivery))
 }
 

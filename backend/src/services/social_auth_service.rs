@@ -741,6 +741,12 @@ pub async fn find_or_create_user_with_invite(
                     .await
                     .map_err(map_social_link_error)?;
             }
+            super::billing::schedules::eligibility::after_user_created(
+                db,
+                &new_user.id,
+                new_user.created_at,
+            )
+            .await;
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),

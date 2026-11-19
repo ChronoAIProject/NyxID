@@ -28,6 +28,7 @@ fn schedule_input() -> schedules::CreateScheduleInput {
         request_id: None,
         amount_credits: 25,
         recurrence: ScheduleRecurrence::Monthly,
+        timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
         expiry: CreditExpiryPolicy::EndOfPeriod,
         target_kind: BillingTargetKind::AllUsers,
         target_user_ids: Vec::new(),
@@ -582,5 +583,15 @@ async fn schedule_origin_index_boots_with_legacy_grants() {
             .as_ref()
             .and_then(|options| options.partial_filter_expression.as_ref())
             .is_some()
+    );
+}
+
+#[test]
+fn calendar_schedule_submission_keeps_legacy_payload_bytes() {
+    let input = schedule_input();
+    let payload = serde_json::to_value(input).unwrap();
+    assert!(
+        payload.get("timing").is_none(),
+        "legacy retry fingerprints omit default calendar timing"
     );
 }

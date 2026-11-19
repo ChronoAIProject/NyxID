@@ -1845,6 +1845,35 @@
       }
     }
   ],
+  "credit_schedule_recipients": [
+    {
+      "_id": "fixture-recipient",
+      "schedule_id": "fixture-schedule",
+      "recipient_user_id": "fixture-value",
+      "anchor_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "next_due_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "is_eligible": true,
+      "eligibility_version": 0,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
   "device_codes": [
     {
       "_id": "fixture-value",

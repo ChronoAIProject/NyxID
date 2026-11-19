@@ -50,6 +50,7 @@ pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
+pub mod credit_schedule_recipient;
 pub mod default_request_header;
 pub mod device_code;
 pub mod device_onboard_credential;

@@ -477,6 +477,7 @@ backend/src/models/consent.rs: COLLECTION_NAME=consents | user_id
 backend/src/models/credit_grant.rs: COLLECTION_NAME=credit_grants | recipient_user_id
 backend/src/models/credit_schedule.rs: COLLECTION_NAME=credit_schedules | created_by
 backend/src/models/credit_schedule_period.rs: COLLECTION_NAME=credit_schedule_periods | cursor_user_id
+backend/src/models/credit_schedule_recipient.rs: COLLECTION_NAME=credit_schedule_recipients, SCAN_COLLECTION_NAME=credit_schedule_recipient_scans | recipient_user_id, cursor_user_id
 backend/src/models/device_code.rs: COLLECTION_NAME=device_codes | approved_by_user_id
 backend/src/models/device_onboard_credential.rs: COLLECTION_NAME=device_onboard_credentials | owner_user_id
 backend/src/models/downstream_service.rs: COLLECTION_NAME=downstream_services | created_by, identity_include_email, identity_include_user_id, owner_user_id

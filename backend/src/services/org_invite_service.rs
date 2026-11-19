@@ -229,7 +229,16 @@ pub async fn redeem_invite_as(
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
     let result = redeem_in_session(db, nonce, member_user_id, actor, &mut tx).await;
-    org_membership_authority::finish(tx, result).await
+    let membership = org_membership_authority::finish(tx, result).await?;
+    // The membership has committed; scheduled credits are best effort.
+    crate::services::billing::schedules::eligibility::after_org_joined(
+        db,
+        &membership.org_user_id,
+        &membership.member_user_id,
+        membership.created_at,
+    )
+    .await;
+    Ok(membership)
 }
 async fn redeem_in_session(
     db: &mongodb::Database,
