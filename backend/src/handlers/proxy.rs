@@ -4079,6 +4079,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::Target>()
         .cloned();
+    let invocation_diagnostic_probe = request
+        .extensions()
+        .get::<super::invocation_diagnostics::DiagnosticProbe>()
+        .is_some();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4851,6 +4855,10 @@ async fn execute_resolved_proxy_inner<'a>(
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
+        // A diagnostic probe is secondary evidence for an already failed
+        // invocation. It must never author or dispatch a new execution
+        // permission proposal before the legacy approval guard below runs.
+        && !invocation_diagnostic_probe
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
@@ -5106,6 +5114,14 @@ async fn execute_resolved_proxy_inner<'a>(
             request_audit.denied(403);
             return Err(AppError::Forbidden(
                 "Ornn format check skipped: approval required".to_string(),
+            ));
+        }
+        // A caller-scoped diagnostic is secondary evidence, not a business
+        // operation. It must neither bypass approval nor leave a prompt behind.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if invocation_diagnostic_probe => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Diagnostic probe skipped: approval required".to_string(),
             ));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {

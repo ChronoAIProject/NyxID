@@ -754,6 +754,9 @@ struct McpAuthContext {
     /// No source lookup occurs for unrelated tools; Machine admission is live.
     machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
     caller_token: Option<proxy_service::CallerToken>,
+    /// Exact verified request credential retained only so this MCP caller can
+    /// redeem an opaque invocation-diagnostic handle without exposing the key.
+    diagnostic_credential: Option<proxy_service::CallerToken>,
     sender_constrained: bool,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
@@ -828,6 +831,7 @@ impl McpAuthContext {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            diagnostic_credential: None,
             sender_constrained: false,
             chat: None,
             account_acknowledged: false,
@@ -1120,6 +1124,7 @@ async fn authenticate_mcp_or_public(
                         None
                     },
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
+                    diagnostic_credential: Some(proxy_service::CallerToken::from_verified(raw_key)),
                     sender_constrained: false,
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
@@ -2459,7 +2464,11 @@ async fn handle_tools_list(
 fn audit_chat_tool(name: &str) -> bool {
     matches!(
         name,
-        "nyx__call_tool" | "nyx__connect_service" | "nyx__wait_for_connection" | "nyx__ssh_exec"
+        "nyx__call_tool"
+            | "nyx__connect_service"
+            | "nyx__wait_for_connection"
+            | "nyx__diagnose_invocation"
+            | "nyx__ssh_exec"
     ) || name.starts_with("nyx__oracle_")
         || name.starts_with("nyxid__")
 }
@@ -3060,6 +3069,7 @@ async fn dispatch_tools_call(
                 | "nyx__connect_service"
                 | "nyx__wait_for_connection"
                 | "nyx__call_tool"
+                | "nyx__diagnose_invocation"
                 | "nyx__ssh_exec"
                 | "nyx__ssh_list_services"
                 | "nyx__resource_get"
@@ -3126,6 +3136,7 @@ async fn dispatch_tools_call(
                 | "nyx__discover_services"
                 | "nyx__list_connected_services"
                 | "nyx__call_tool"
+                | "nyx__diagnose_invocation"
                 | "nyx__wait_for_connection"
                 | "nyx__ssh_list_services"
                 | "nyx__ssh_exec"
@@ -3352,6 +3363,12 @@ fn dispatch_meta_tool<'a>(
             client_accepts_sse,
             billing_egress_permit,
         )),
+        "nyx__diagnose_invocation" => Box::pin(handle_invocation_diagnostic(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
         // NyxID's built-in oracle is permanently retired. The tools are no
         // longer listed; a client that still names one is told so, as an
         // error result it can read, instead of an unknown-tool fault.
@@ -3385,6 +3402,75 @@ fn dispatch_meta_tool<'a>(
         }),
         _ => return None,
     })
+}
+
+async fn handle_invocation_diagnostic(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    if guest_turn(auth) {
+        return guest_refused(request_id);
+    }
+    let Some(handle) = arguments.get("handle").and_then(serde_json::Value::as_str) else {
+        return rpc_error(request_id, -32602, "Missing handle");
+    };
+    let auth_user = match diagnostic_dispatch_auth(auth) {
+        Ok(auth) => auth,
+        Err(_) => return tool_result(request_id, "Invocation diagnostic unavailable", true),
+    };
+    let credential = match auth.auth_method {
+        AuthMethod::AccessToken if !auth.sender_constrained => auth
+            .caller_token
+            .as_deref()
+            .map(crate::services::monitoring_service::CallerCredential::Bearer),
+        AuthMethod::ApiKey => auth
+            .diagnostic_credential
+            .as_deref()
+            .map(crate::services::monitoring_service::CallerCredential::ApiKey),
+        _ => None,
+    };
+    let result = super::invocation_diagnostics::redeem_with_credential(
+        state,
+        &auth_user,
+        handle,
+        credential,
+        &crate::telemetry::TelemetryContext::default(),
+    )
+    .await;
+    let mut response = match result {
+        Ok(crate::services::invocation_diagnostic_service::RedeemResult::Completed {
+            diagnostic,
+            ..
+        }) => {
+            let text = serde_json::to_string(&diagnostic).unwrap_or_else(|_| {
+                r#"{"observation":"unknown","assessment":"unknown","outcome":"unavailable"}"#.into()
+            });
+            rpc_success(
+                request_id,
+                serde_json::json!({
+                    "content": [{"type":"text","text":text}],
+                    "structuredContent": {"nyxid_invocation_diagnostic_result": diagnostic},
+                    "isError": false
+                }),
+            )
+        }
+        Ok(crate::services::invocation_diagnostic_service::RedeemResult::NotReady)
+        | Err(crate::errors::AppError::DiagnosticNotReady) => tool_result(
+            request_id,
+            r#"{"error":"diagnostic_not_ready","retry_after":1}"#,
+            true,
+        ),
+        Err(crate::errors::AppError::NotFound(_)) => {
+            tool_result(request_id, "Invocation diagnostic not found", true)
+        }
+        Err(_) => tool_result(request_id, "Invocation diagnostic unavailable", true),
+    };
+    response
+        .headers_mut()
+        .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn handle_resource_get(
@@ -3994,9 +4080,13 @@ async fn service_failure_handle(
 ) -> Option<crate::services::invocation_diagnostic_service::IssuedHandle> {
     use crate::services::invocation_diagnostic_service as diagnostics;
     if !state.config.invocation_diagnostics_enabled
-        || !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref())
-        || auth.chat.is_some()
+        || !diagnostics::can_probe(
+            &auth.auth_method,
+            Some(crate::models::api_key::ApiKeyPurpose::General),
+            auth.acting_client_id.as_deref(),
+        )
         || auth.sender_constrained
+        || auth.chat.as_ref().is_some_and(|chat| chat.guest)
     {
         return None;
     }
@@ -4016,12 +4106,18 @@ async fn service_failure_handle(
     match diagnostics::issue(
         &state.db,
         &state.config,
-        &auth.user_id,
-        &auth.auth_method,
-        auth.api_key_id.as_deref(),
-        auth.acting_client_id
-            .as_deref()
-            .or(auth.oauth_client_id.as_deref()),
+        diagnostics::IssueIdentity::new(
+            &auth.user_id,
+            &auth.auth_method,
+            auth.api_key_id.as_deref(),
+            auth.api_key_credential_id.as_deref(),
+            auth.acting_client_id
+                .as_deref()
+                .or(auth.oauth_client_id.as_deref()),
+        )
+        // MCP authentication rejects every non-General API-key purpose before
+        // constructing this execution context.
+        .with_api_key_purpose(crate::models::api_key::ApiKeyPurpose::General),
         user_service_id,
     )
     .await
@@ -4775,6 +4871,17 @@ fn permission_admission_failure(
 }
 
 fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
+    build_permission_dispatch_auth(auth, None)
+}
+
+fn diagnostic_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
+    build_permission_dispatch_auth(auth, auth.api_key_credential_id.clone())
+}
+
+fn build_permission_dispatch_auth(
+    auth: &McpAuthContext,
+    api_key_credential_id: Option<String>,
+) -> crate::errors::AppResult<auth::AuthUser> {
     let user_id = uuid::Uuid::parse_str(&auth.user_id)
         .map_err(|_| crate::errors::AppError::Unauthorized("Invalid caller".into()))?;
     Ok(auth::AuthUser {
@@ -4804,7 +4911,11 @@ fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<a
         allowed_node_ids: auth.allowed_node_ids.clone(),
         api_key_id: auth.api_key_id.clone(),
         api_key_name: auth.api_key_name.clone(),
-        api_key_credential_id: None,
+        // Existing execution-permission proposals were authored without a
+        // child credential identity. Keep the generic dispatch context
+        // compatible with those rows; diagnostics opt into the exact child
+        // binding through `diagnostic_dispatch_auth`.
+        api_key_credential_id,
         api_key_purpose: Default::default(),
         rate_limit_per_second: auth.rate_limit_per_second,
         rate_limit_burst: auth.rate_limit_burst,
@@ -7435,6 +7546,13 @@ async fn execute_ssh_command_internal(
 mod tests {
     use super::*;
 
+    #[test]
+    fn guest_turns_cannot_use_invocation_diagnostics() {
+        assert!(!guest_tool_allowed("nyx__diagnose_invocation"));
+        assert!(guest_tool_allowed("nyx__call_tool"));
+        assert!(guest_tool_allowed("nyx__resource_get"));
+    }
+
     #[tokio::test]
     async fn first_party_bearer_checks_active_user_and_mfa_with_one_user_read() {
         use axum::http::header;
@@ -7928,6 +8046,7 @@ mod tests {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            diagnostic_credential: None,
             sender_constrained: false,
             chat: None,
             account_acknowledged: false,
