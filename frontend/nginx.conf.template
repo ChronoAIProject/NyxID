@@ -151,14 +151,61 @@ server {
         proxy_buffering off;
     }
 
-    # Proxy health check to the backend
+    # Frontend-only probes never enter the SPA fallback or contact the backend.
+    location = /frontend/health {
+        include @@STATIC_HEADERS@@;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 200 '{"status":"ok","component":"frontend"}';
+    }
+
+    location = /frontend/ready {
+        include @@STATIC_HEADERS@@;
+        add_header Cache-Control "no-store" always;
+        proxy_hide_header Cache-Control;
+        proxy_pass http://unix:/tmp/nyxid-frontend-readiness.sock:/;
+        proxy_connect_timeout 1s;
+        proxy_read_timeout 2s;
+        proxy_send_timeout 2s;
+        proxy_cache off;
+        proxy_intercept_errors on;
+        error_page 500 502 504 = @frontend_checker_unavailable;
+    }
+
+    location @frontend_checker_unavailable {
+        include @@STATIC_HEADERS@@;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 503 '{"status":"unavailable","component":"frontend","failing":["checker"]}';
+    }
+
+    # Reserve probe prefixes: typos/suffixes must not return 200 index.html.
+    location ^~ /frontend/health { return 404; }
+    location ^~ /frontend/ready { return 404; }
+
+    # /health is also consumed by the SPA release-version checker. Preserve it.
     location ^~ /health {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
+        proxy_cache off;
         proxy_hide_header Cache-Control;
         add_header Cache-Control "no-store" always;
     }
+
+    location = /ready {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
+        proxy_set_header Host $host;
+        proxy_connect_timeout 1s;
+        proxy_read_timeout 2s;
+        proxy_send_timeout 1s;
+        proxy_cache off;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location ^~ /ready { return 404; }
 
     location = /build-version.json {
         add_header Cache-Control "no-store" always;
