@@ -740,6 +740,42 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    let mobile_flows = db.collection::<crate::models::mobile_social::MobileSocialFlow>(
+        crate::models::mobile_social::MobileSocialFlow::COLLECTION_NAME,
+    );
+    let mobile_deliveries = db.collection::<crate::models::mobile_social::MobileSocialDelivery>(
+        crate::models::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+    );
+    let expiry = IndexModel::builder()
+        .keys(doc! {"expires_at": 1})
+        .options(
+            IndexOptions::builder()
+                .expire_after(std::time::Duration::ZERO)
+                .build(),
+        )
+        .build();
+    mobile_flows.create_index(expiry.clone()).await?;
+    mobile_deliveries.create_index(expiry).await?;
+    mobile_flows
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"state_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"code_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(IndexModel::builder().keys(doc! {"user_id": 1}).build())
+        .await?;
+
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
     mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())

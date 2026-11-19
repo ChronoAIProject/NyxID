@@ -335,10 +335,10 @@ async fn issue_session_tokens(
         insert_prepared_session(db, &prepared, transaction).await?;
     } else {
         db.collection::<Session>(SESSIONS)
-            .insert_one(&prepared.session)
+            .insert_one(&prepared.rows.session)
             .await?;
         db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .insert_one(&prepared.refresh)
+            .insert_one(&prepared.rows.refresh)
             .await?;
     }
     Ok(prepared.tokens)
@@ -346,18 +346,23 @@ async fn issue_session_tokens(
 
 pub struct PreparedSessionTokens {
     pub tokens: IssuedTokens,
+    pub(super) rows: PreparedSessionRows,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PreparedSessionRows {
     session: Session,
     refresh: RefreshToken,
 }
 
 impl PreparedSessionTokens {
     pub(crate) fn set_app_policy_exempt(&mut self, exempt: bool) {
-        self.session.mfa_exemption =
+        self.rows.session.mfa_exemption =
             exempt.then_some(crate::models::session::MfaExemption::ApprovedSignInPolicy);
     }
 
     pub(crate) fn set_mfa_assured(&mut self, assured: bool) {
-        self.session.mfa_assured = Some(assured);
+        self.rows.session.mfa_assured = Some(assured);
     }
 }
 
@@ -366,16 +371,25 @@ pub async fn insert_prepared_session(
     prepared: &PreparedSessionTokens,
     transaction: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
-    // Leave commit/abort ownership with the enclosing authentication workflow.
-    db.collection::<Session>(SESSIONS)
-        .insert_one(&prepared.session)
-        .session(&mut *transaction)
-        .await?;
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&prepared.refresh)
-        .session(&mut *transaction)
-        .await?;
-    Ok(())
+    prepared.rows.insert(db, transaction).await
+}
+
+impl PreparedSessionRows {
+    pub(super) async fn insert(
+        &self,
+        db: &mongodb::Database,
+        transaction: &mut mongodb::ClientSession,
+    ) -> AppResult<()> {
+        db.collection::<Session>(SESSIONS)
+            .insert_one(&self.session)
+            .session(&mut *transaction)
+            .await?;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&self.refresh)
+            .session(transaction)
+            .await?;
+        Ok(())
+    }
 }
 
 pub async fn prepare_session_tokens(
@@ -473,8 +487,10 @@ pub async fn prepare_session_tokens_with_assurance(
     };
     Ok(PreparedSessionTokens {
         tokens,
-        session,
-        refresh: new_refresh,
+        rows: PreparedSessionRows {
+            session,
+            refresh: new_refresh,
+        },
     })
 }
 
@@ -1202,10 +1218,7 @@ pub async fn create_mobile_social_tokens(
     ua: Option<&str>,
     exempt: bool,
 ) -> AppResult<IssuedTokens> {
-    let mut prepared = prepare_session_tokens(db, config, keys, user_id, ip, ua).await?;
-    if exempt {
-        prepared.session.mfa_exemption = Some(crate::models::session::MfaExemption::MobileRollout);
-    }
+    let prepared = prepare_mobile_social_tokens(db, config, keys, user_id, ip, ua, exempt).await?;
     let mut tx = db.client().start_session().await?;
     tx.start_transaction()
         .write_concern(mongodb::options::WriteConcern::majority())
@@ -1213,6 +1226,23 @@ pub async fn create_mobile_social_tokens(
     insert_prepared_session(db, &prepared, &mut tx).await?;
     super::transaction_service::commit(&mut tx).await?;
     Ok(prepared.tokens)
+}
+
+pub(crate) async fn prepare_mobile_social_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    keys: &JwtKeys,
+    user_id: &str,
+    ip: Option<&str>,
+    ua: Option<&str>,
+    exempt: bool,
+) -> AppResult<PreparedSessionTokens> {
+    let mut prepared = prepare_session_tokens(db, config, keys, user_id, ip, ua).await?;
+    if exempt {
+        prepared.rows.session.mfa_exemption =
+            Some(crate::models::session::MfaExemption::MobileRollout);
+    }
+    Ok(prepared)
 }
 
 /// Transactional session/refresh revocation for an undelivered login grant.

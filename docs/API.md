@@ -1052,7 +1052,7 @@ Initiate an OAuth 2.0 authorization flow with a social provider.
 | Parameter      | Type   | Description |
 |----------------|--------|-------------|
 | `client`       | string | Set to `"mobile"` for native mobile deep-link mode |
-| `redirect_uri` | string | Required for mobile mode. Must be an allowed `nyxid://` or `exp://` deep link |
+| `redirect_uri` | string | Required for mobile mode. The released app uses `nyxid://auth/social/callback`. Additional exact destinations require `MOBILE_SOCIAL_REDIRECT_URIS`. Expo destinations require development mode. |
 
 **Errors:**
 - `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
@@ -1066,6 +1066,14 @@ http://localhost:3001/api/v1/auth/social/google
 ```
 
 ---
+
+#### Mobile social code delivery
+
+An app can start a verifier-bound sign-in at `GET /api/v1/auth/social/{provider}/mobile-code`. Generate a random PKCE verifier for this attempt and keep it in the app. Supply the exact `redirect_uri`, the base64url SHA-256 `code_challenge`, and `code_challenge_method=S256`. Deploy support on every API replica before enabling code delivery in the app.
+
+NyxID records the provider, API callback origin, destination, Apple nonce hash when applicable, and optional challenge for ten minutes. A provider callback consumes that attempt once. If a state cookie accompanies the callback, it must match. A sign-in started before upgrade can require a fresh attempt.
+
+A successful code-mode callback carries `status=success`, `provider`, and `code`. The app checks its active attempt and posts `{"code":"…","code_verifier":"…"}` to `POST /api/v1/auth/social/mobile-code/redeem` on its original API origin. The code expires after 60 seconds. Redemption creates the session and its refresh record in the same transaction that consumes the code. One matching exchange receives `access_token`, `refresh_token`, and `expires_in` in a non-cacheable JSON response. An invalid, expired, or used code receives HTTP 400. Handle MFA fragments and cancellation through the existing app flow. For a code-mode attempt, require the code on success and discard the verifier on completion or cancellation.
 
 #### GET /api/v1/auth/social/{provider}/callback
 

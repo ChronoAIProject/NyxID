@@ -667,6 +667,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/reset-password", post(handlers::auth::reset_password))
         .route("/password/change", post(handlers::auth::change_password))
         .route("/setup", post(handlers::auth::setup))
+        .route(
+            "/social/{provider}/mobile-code",
+            get(handlers::social_auth::authorize_mobile_code),
+        )
+        .route(
+            "/social/mobile-code/redeem",
+            post(handlers::social_auth::redeem_mobile_code),
+        )
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
             "/social/apple/callback",

@@ -77,6 +77,7 @@ pub mod managed_execution;
 pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
+pub mod mobile_social;
 pub mod node;
 pub mod node_credential_desired;
 pub mod node_pending_credential;
