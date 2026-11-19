@@ -12,8 +12,32 @@ pub(crate) struct ModelInfo {
     pub id: String,
     pub label: String,
     pub available: bool,
+    pub inference_credential: Option<InferenceCredential>,
     pub description: Option<String>,
     pub input_modalities: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InferenceCredential {
+    Thread,
+    Platform,
+}
+
+pub(super) fn inference_credential(
+    db: &mongodb::Database,
+    owner: &str,
+    model: &str,
+) -> Option<InferenceCredential> {
+    let cache = MODELS.try_lock().ok()?;
+    let (_, models) = cache
+        .get(&format!("{}:{owner}", db.name()))
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))?;
+    let mut matching = models
+        .as_ref()?
+        .iter()
+        .filter(|row| row.id == model && row.available);
+    let first = matching.next()?.inference_credential?;
+    matching.next().is_none().then_some(first)
 }
 
 type ModelCache = HashMap<String, (Instant, Option<Vec<ModelInfo>>)>;

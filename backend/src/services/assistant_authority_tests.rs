@@ -326,6 +326,7 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,

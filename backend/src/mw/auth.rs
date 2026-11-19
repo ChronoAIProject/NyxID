@@ -122,6 +122,13 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    pub(crate) fn thread_key_version(&self) -> i64 {
+        self.assistant_chat
+            .as_deref()
+            .filter(|chat| Some(chat.api_key_id.as_str()) == self.api_key_id.as_deref())
+            .map_or(0, |chat| chat.key_version)
+    }
+
     pub fn derived_mfa_authority(&self) -> crate::services::session_authority::DerivedMfaAuthority {
         crate::services::session_authority::DerivedMfaAuthority {
             mfa_enabled: self.mfa_enabled,
@@ -996,10 +1003,9 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let mut assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access(
+        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
             db,
-            &key.user_id,
-            Some(&key.id),
+            key,
             org_agent_access.as_ref(),
         )
         .await
@@ -1007,7 +1013,9 @@ async fn api_key_auth_user_inner(
             // An unavailable live turn lookup is not credential revocation.
             // Preserve the retryable authority distinction for every caller,
             // including Ornn's purpose-limited membership callback.
-            if error.status_code().is_server_error() {
+            if matches!(error, AppError::AssistantTurnRequired) {
+                error
+            } else if error.status_code().is_server_error() {
                 AppError::OAuthAuthorityUnavailable
             } else {
                 AppError::Unauthorized("Invalid authentication credentials".to_string())
@@ -1582,10 +1590,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     let assistant_chat = if let Some(key) = relay_key.as_ref()
                         && is_assistant_conversation_key_candidate(key)
                     {
-                        crate::services::assistant_acknowledgement_service::for_key(
+                        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
                             &state.db,
-                            &key.user_id,
-                            Some(&key.id),
+                            key,
+                            None,
                         )
                         .await?
                         .map(std::sync::Arc::new)

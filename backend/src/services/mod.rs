@@ -50,6 +50,7 @@ pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
 pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
+pub mod assistant_turn_restart;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;

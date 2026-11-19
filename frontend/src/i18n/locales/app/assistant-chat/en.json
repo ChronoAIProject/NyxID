@@ -138,6 +138,7 @@
   "NyxID event: {{value1}}": "NyxID event: {{value1}}",
   "NyxID knowledge": "NyxID knowledge",
   "NyxID refused this call.": "NyxID refused this call.",
+  "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.": "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.",
   "NyxID updates": "NyxID updates",
   "Open Automations": "Open Automations",
   "Open full preview of {{value1}}": "Open full preview of {{value1}}",

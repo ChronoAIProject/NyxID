@@ -447,6 +447,7 @@
   "NyxID event: {{summary}}": "NyxID 事件：{{summary}}",
   "NyxID needs camera access to take photos to attach in chats. You can allow access in Settings.": "NyxID 需要相機存取權限才能拍攝照片以附加到聊天中。您可以在「設定」中允許存取。",
   "NyxID refused this call.": "NyxID 拒絕了此呼叫。",
+  "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.": "NyxID 在本輪對話中拒絕了助理的憑證。請先檢查已完成的操作，再重試。",
   "NyxID updates": "NyxID 更新",
   "NyxID wants to connect to your {{service}}": "NyxID 想要連結到你的 {{service}}",
   "OAuth client ID": "OAuth 用戶端 ID",

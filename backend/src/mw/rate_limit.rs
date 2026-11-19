@@ -590,6 +590,14 @@ impl DirectChatRateLimiter {
         }))
     }
 
+    pub(crate) async fn recover_owner_slot(
+        self: &Arc<Self>,
+        owner: &str,
+    ) -> Result<Option<DirectChatPermit>, AppError> {
+        self.try_acquire_pool(DIRECT_CHAT_NAMESPACE, owner, self.max_in_flight)
+            .await
+    }
+
     #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
