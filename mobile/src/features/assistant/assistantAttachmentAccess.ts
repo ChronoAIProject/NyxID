@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { ApiError } from "../../lib/api/ApiError";
 import type { AssistantAttachment } from "./assistantTypes";
 import {
@@ -52,14 +54,14 @@ export function assertReadableAttachment(
   attachment: AssistantAttachment,
   actualSize?: number,
 ): void {
-  if (attachment.expired) throw new Error(ATTACHMENT_EXPIRED_MESSAGE);
+  if (attachment.expired) throw localizedError(ATTACHMENT_EXPIRED_MESSAGE);
   if (
     !Number.isSafeInteger(attachment.size) ||
     attachment.size < 1 ||
     attachment.size > MAX_ASSISTANT_ATTACHMENT_BYTES ||
     (actualSize !== undefined && actualSize !== attachment.size)
   )
-    throw new Error(ATTACHMENT_UNAVAILABLE_MESSAGE);
+    throw localizedError(ATTACHMENT_UNAVAILABLE_MESSAGE);
 }
 
 export function attachmentAccessError(cause: unknown): string {
@@ -67,9 +69,10 @@ export function attachmentAccessError(cause: unknown): string {
     cause instanceof ApiError &&
     (cause.statusCode === 410 || cause.errorCode === 12101)
   )
-    return ATTACHMENT_EXPIRED_MESSAGE;
-  if (cause instanceof Error && cause.message === ATTACHMENT_EXPIRED_MESSAGE)
-    return ATTACHMENT_EXPIRED_MESSAGE;
+    return translateApp(ATTACHMENT_EXPIRED_MESSAGE);
+  if (cause instanceof Error && cause.message === translateApp(ATTACHMENT_EXPIRED_MESSAGE)
+  )
+    return translateApp(ATTACHMENT_EXPIRED_MESSAGE);
   // Filesystem/native exceptions may contain filenames or paths.
-  return ATTACHMENT_UNAVAILABLE_MESSAGE;
+  return translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE);
 }

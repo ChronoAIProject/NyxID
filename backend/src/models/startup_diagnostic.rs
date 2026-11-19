@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "startup_diagnostics";
 pub const EXACT_SERVICE_SEMANTIC_EFFECT_INDEX: &str = "exact_service_semantic_effect_index";
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Info,
+    #[default]
+    Action,
+}
+
 /// Durable operator-facing state for a startup check that could not safely
 /// install an optional enforcement mechanism. Active diagnostics are surfaced
 /// on the admin Integrity page until a later startup verifies the condition is
@@ -14,6 +22,11 @@ pub struct StartupDiagnostic {
     pub id: String,
     pub active: bool,
     pub code: String,
+    // Persisted rows from older servers were actionable; new producers supply this field.
+    #[serde(default)]
+    pub severity: DiagnosticSeverity,
+    #[serde(default)]
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -24,3 +37,7 @@ pub struct StartupDiagnostic {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+#[path = "startup_diagnostic_tests.rs"]
+mod tests;

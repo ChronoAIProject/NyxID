@@ -148,45 +148,15 @@ pub(crate) async fn record(db: &mongodb::Database, bot: &ChannelBot, outcome: Ou
         return;
     }
     let code = outcome.code();
-    let now = bson::DateTime::now();
-    let mut set = doc! {format!("diagnostics.inbound_outcomes.{code}.at"): now};
-    if outcome.updates_latest() {
-        set.insert(
-            "diagnostics.last_inbound_outcome",
-            doc! {"code":code,"at":now},
-        );
-    }
-    if outcome == Outcome::CallbackFailed {
-        // The internal callback may already have stored a more precise refusal.
-        set.insert("diagnostics.last_inbound_outcome", doc! {"$cond":[
-            {"$in":["$diagnostics.last_inbound_outcome.code",["x_org_access_lost","x_org_access_unavailable","x_authority_changed"]]},
-            "$diagnostics.last_inbound_outcome", {"code":code,"at":now}
-        ]});
-    }
-    if outcome == Outcome::ProcessingFailed {
-        // The generic async cleanup must not obscure an uncertain send.
-        set.insert(
-            "diagnostics.last_inbound_outcome",
-            doc! {"$cond":[
-                {"$eq":["$diagnostics.last_inbound_outcome.code","x_reply_unconfirmed"]},
-                "$diagnostics.last_inbound_outcome", {"code":code,"at":now}
-            ]},
-        );
-    }
-    set.insert(
-        format!("diagnostics.inbound_outcomes.{code}.count"),
-        doc! {"$add":[
-            {"$ifNull":[format!("$diagnostics.inbound_outcomes.{code}.count"),0_i64]},1_i64
-        ]},
-    );
-    let result = db
-        .collection::<Document>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {"_id":&bot.id,"user_id":&bot.user_id},
-            vec![doc! {"$set":set}],
-        )
-        .projection(doc! {"diagnostics.inbound_outcomes":1})
-        .await;
+    let result = write_counter(
+        db,
+        &bot.id,
+        &bot.user_id,
+        code,
+        outcome.updates_latest(),
+        None,
+    )
+    .await;
     match result {
         Ok(Some(previous))
             if outcome == Outcome::EncryptedChatUnsupported
@@ -204,6 +174,125 @@ pub(crate) async fn record(db: &mongodb::Database, bot: &ChannelBot, outcome: Ou
         }
         Err(_) => tracing::warn!(bot_id=%bot.id, code, "X inbound diagnostic write unavailable"),
         _ => {}
+    }
+}
+
+async fn write_counter(
+    db: &mongodb::Database,
+    bot_id: &str,
+    owner: &str,
+    code: &'static str,
+    updates_latest: bool,
+    route_id: Option<&str>,
+) -> mongodb::error::Result<Option<Document>> {
+    let now = bson::DateTime::now();
+    let mut set = doc! {format!("diagnostics.inbound_outcomes.{code}.at"): now};
+    if updates_latest {
+        let mut latest = doc! {"code":code,"at":now};
+        if let Some(route_id) = route_id {
+            latest.insert("route_id", route_id);
+        }
+        set.insert("diagnostics.last_inbound_outcome", latest);
+    }
+    if code == Outcome::CallbackFailed.code() {
+        // The internal callback may already have stored a more precise refusal.
+        set.insert("diagnostics.last_inbound_outcome", doc! {"$cond":[
+            {"$in":["$diagnostics.last_inbound_outcome.code",["x_org_access_lost","x_org_access_unavailable","x_authority_changed"]]},
+            "$diagnostics.last_inbound_outcome", {"code":code,"at":now}
+        ]});
+    }
+    if code == Outcome::ProcessingFailed.code() {
+        // The generic async cleanup must not obscure an uncertain send.
+        set.insert(
+            "diagnostics.last_inbound_outcome",
+            doc! {"$cond":[
+                {"$eq":["$diagnostics.last_inbound_outcome.code","x_reply_unconfirmed"]},
+                "$diagnostics.last_inbound_outcome", {"code":code,"at":now}
+            ]},
+        );
+    }
+    set.insert(
+        format!("diagnostics.inbound_outcomes.{code}.count"),
+        doc! {"$add":[
+            {"$ifNull":[format!("$diagnostics.inbound_outcomes.{code}.count"),0_i64]},1_i64
+        ]},
+    );
+    db.collection::<Document>(COLLECTION_NAME)
+        .find_one_and_update(doc! {"_id":bot_id,"user_id":owner}, vec![doc! {"$set":set}])
+        .projection(doc! {"diagnostics.inbound_outcomes":1})
+        .await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TelegramRoute {
+    Bound,
+    OutsideSource { directed: bool },
+    OtherAgent { directed: bool },
+}
+
+pub(crate) struct Matched<'a> {
+    pub db: &'a mongodb::Database,
+    pub bot: &'a ChannelBot,
+    pub telegram: Option<TelegramRoute>,
+    pub route_id: &'a str,
+}
+
+impl Matched<'_> {
+    pub async fn record(&self, outcome: Outcome) {
+        if self.telegram.is_none() {
+            record(self.db, self.bot, outcome).await;
+            return;
+        }
+        let code = match outcome {
+            Outcome::AuthorityChanged => "telegram_group_authority_changed",
+            Outcome::StorageUnavailable => "telegram_group_storage_unavailable",
+            Outcome::CallbackKeyUnavailable => "telegram_group_callback_key_unavailable",
+            Outcome::ReplyTokenUnavailable => "telegram_group_reply_token_unavailable",
+            Outcome::CallbackAccepted | Outcome::CallbackRefused | Outcome::CallbackFailed => {
+                match (self.telegram, outcome) {
+                    (Some(TelegramRoute::OutsideSource { directed: true }), _) => {
+                        "telegram_group_route_outside_source"
+                    }
+                    (Some(TelegramRoute::OtherAgent { directed: true }), _) => {
+                        "telegram_group_other_agent"
+                    }
+                    (_, Outcome::CallbackFailed) => "telegram_group_callback_failed",
+                    (_, Outcome::CallbackRefused) => "telegram_group_callback_refused",
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        telegram_outcome(
+            self.db,
+            &self.bot.id,
+            &self.bot.user_id,
+            code,
+            Some(self.route_id),
+        )
+        .await;
+    }
+
+    pub async fn checked<T, E>(&self, outcome: Outcome, result: Result<T, E>) -> Result<T, E> {
+        if result.is_err() {
+            self.record(outcome).await;
+        }
+        result
+    }
+}
+
+pub(crate) async fn telegram_outcome(
+    db: &mongodb::Database,
+    bot_id: &str,
+    owner: &str,
+    code: &'static str,
+    route_id: Option<&str>,
+) {
+    if write_counter(db, bot_id, owner, code, true, route_id)
+        .await
+        .is_err()
+    {
+        tracing::warn!(bot_id, code, "Telegram group diagnostic write unavailable");
     }
 }
 

@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
@@ -23,6 +24,39 @@ use mongodb::{
 
 fn stale() -> AppError {
     AppError::Conflict("Setup authority changed; review the current setup".into())
+}
+
+/// Indexed parent-scoped export reads; these keys do not change retention.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    for (name, field) in crate::services::personal_data_registry::EXPORT_JOIN_INDEX_GAPS {
+        let collection = db.collection::<Document>(name);
+        let mut covered = false;
+        match collection.list_indexes().await {
+            Ok(mut indexes) => {
+                while let Some(index) = indexes.try_next().await? {
+                    covered |= index.keys.keys().next().is_some_and(|first| first == field);
+                }
+            }
+            Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+                {}
+            Err(error) => return Err(error),
+        }
+        if !covered {
+            collection
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! {*field:1})
+                        .options(
+                            IndexOptions::builder()
+                                .name(format!("account_export_{name}_{field}"))
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {

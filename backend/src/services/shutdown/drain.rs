@@ -12,6 +12,7 @@ use super::{Counts, Runtime};
 
 const CLEANUP_RESERVE_DIVISOR: u32 = 10;
 const MAX_CLEANUP_RESERVE: Duration = Duration::from_secs(5);
+pub(crate) const TURN_OFFER_MARGIN: Duration = Duration::from_secs(3);
 // Above half the default cleanup reserve, so that half is the effective bound.
 const SNAPSHOT_AUDIT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -80,7 +81,12 @@ impl Drain {
         tokio::select! {
             biased;
             () = self.progress_stopped.cancelled() => {},
-            () = records => {},
+            _ = async {
+                tokio::join!(records, async {
+                    tokio::time::sleep_until(self.turn_offer_at()).await;
+                    self.runtime.0.turn_offer_due.cancel();
+                })
+            } => {},
         }
         std::future::pending().await
     }
@@ -97,14 +103,37 @@ impl Drain {
         self.deadline - self.cleanup_reserve()
     }
 
+    fn turn_offer_at(&self) -> Instant {
+        self.started + (self.timeout - self.cleanup_reserve()).saturating_sub(TURN_OFFER_MARGIN)
+    }
+
     /// Zero does not change readiness or stop background intake.
     pub fn begin(state: &AppState, timeout: Duration, signal: &'static str) -> Option<Self> {
+        Self::begin_at(state, timeout, signal, None)
+    }
+
+    /// Startup has already spent part (or all) of the signal's exit budget.
+    pub fn begin_startup(
+        state: &AppState,
+        timeout: Duration,
+        received: super::signals::Received,
+    ) -> Option<Self> {
+        Self::begin_at(state, timeout, received.signal, Some(received))
+    }
+
+    fn begin_at(
+        state: &AppState,
+        timeout: Duration,
+        signal: &'static str,
+        received: Option<super::signals::Received>,
+    ) -> Option<Self> {
         if timeout.is_zero() {
             return None;
         }
         let runtime = &state.shutdown;
         let counts = runtime.begin_drain()?;
-        let started = Instant::now();
+        let observed = Instant::now();
+        let started = received.map_or(observed, |received| received.at);
         let open_http = runtime.open_http();
         tracing::info!(target: "nyxid::shutdown", signal, budget_secs = timeout.as_secs(),
             in_flight = ?counts, open_http = ?open_http, "Backend drain started; a second signal skips the wait and exits immediately after bounded cleanup");
@@ -114,7 +143,7 @@ impl Drain {
                 .checked_add(timeout)
                 .unwrap_or_else(|| started + Duration::from_secs(u32::MAX.into())),
             started,
-            started_at: Utc::now(),
+            started_at: received.map_or_else(Utc::now, |received| received.at_utc),
             counts,
             open_http,
             progress_stopped: tokio_util::sync::CancellationToken::new(),
@@ -141,7 +170,7 @@ impl Drain {
             "recent_traffic": runtime.recent_traffic(),
         });
         // Fit the completion join even when a second signal starts cleanup immediately.
-        let audit_deadline = started + drain.snapshot_audit_timeout();
+        let audit_deadline = (observed + drain.snapshot_audit_timeout()).min(drain.deadline);
         state.shutdown.spawn_cleanup(snapshot_audit(
             state.db.clone(),
             "backend_shutdown_drain_started",
@@ -385,4 +414,79 @@ pub async fn release_owned(state: &AppState, deadline: Instant) -> BTreeMap<&'st
         .buffer_unordered(5)
         .collect()
         .await
+}
+
+#[cfg(test)]
+mod startup_budget_tests {
+    use super::*;
+    use crate::services::shutdown::signals::Received;
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_offer_uses_original_work_deadline_and_saturates_for_small_budgets() {
+        for (budget, expected_ms) in [(25, 19_500), (2, 0)] {
+            let state = crate::test_utils::test_app_state_no_db().await;
+            let drain = Drain::begin(&state, Duration::from_secs(budget), "SIGTERM").unwrap();
+            assert_eq!(
+                drain.turn_offer_at() - drain.started,
+                Duration::from_millis(expected_ms)
+            );
+            let progress = drain.progress(&state);
+            tokio::pin!(progress);
+            tokio::select! {
+                biased;
+                never = &mut progress => match never {},
+                () = tokio::time::sleep_until(drain.turn_offer_at()) => {},
+            }
+            tokio::select! {
+                biased;
+                never = &mut progress => match never {},
+                () = state.shutdown.turn_offer_due() => {},
+                () = tokio::time::sleep(Duration::from_millis(1)) => panic!("turn offer was late"),
+            }
+            state.shutdown.stop();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_signal_budget_includes_completed_startup_steps() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let received = Received {
+            signal: "SIGTERM",
+            at: Instant::now(),
+            at_utc: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        tokio::time::advance(Duration::from_secs(8)).await;
+        let drain = Drain::begin_startup(&state, Duration::from_secs(25), received).unwrap();
+        assert_eq!(drain.started, received.at);
+        assert_eq!(drain.started_at, received.at_utc);
+        assert_eq!(drain.deadline - Instant::now(), Duration::from_secs(17));
+        assert_eq!(
+            drain.work_deadline() - Instant::now(),
+            Duration::from_millis(14_500)
+        );
+        state.shutdown.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_signal_expired_budget_does_not_open_another_work_wait() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let received = Received {
+            signal: "SIGTERM",
+            at: Instant::now(),
+            at_utc: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let drain = Drain::begin_startup(&state, Duration::from_secs(25), received).unwrap();
+        let now = Instant::now();
+        assert_eq!(
+            drain.deadline.saturating_duration_since(now),
+            Duration::ZERO
+        );
+        let end = drain
+            .wait(&state, drain.work_deadline(), std::future::pending())
+            .await;
+        assert_eq!(end, End::Deadline);
+        assert_eq!(Instant::now(), now);
+        state.shutdown.stop();
+    }
 }

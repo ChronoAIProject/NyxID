@@ -170,9 +170,12 @@ async fn voice_stuck_diagnostic_distinguishes_dead_and_live_voice() {
     let (f, _, _) = fixture("response:1", false).await;
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail.contains("class=eligible_voice eligible=true"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("class=eligible_voice eligible=true"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     f.db.collection::<Document>(METERS)
         .update_many(
@@ -183,10 +186,12 @@ async fn voice_stuck_diagnostic_distinguishes_dead_and_live_voice() {
         .unwrap();
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
             .contains("class=voice_live_session eligible=false"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     recover_all(&f).await;
     assert_eq!(
@@ -278,18 +283,22 @@ async fn voice_stuck_live_takeover_registry_failure_and_evidence_wait_do_not_end
         let d = diagnostics(&f.db).await.unwrap();
         if kind == "live_takeover" {
             assert!(
-                d[0].detail
+                d[0].technical_details
+                    .as_ref()
+                    .unwrap()
                     .contains("class=voice_live_session eligible=false"),
                 "{}",
-                d[0].detail
+                d[0].technical_details.as_ref().unwrap()
             );
         }
         if kind == "evidence_wait" {
             assert!(
-                d[0].detail
+                d[0].technical_details
+                    .as_ref()
+                    .unwrap()
                     .contains("class=voice_evidence_pending eligible=false"),
                 "{}",
-                d[0].detail
+                d[0].technical_details.as_ref().unwrap()
             );
         }
         assert!(

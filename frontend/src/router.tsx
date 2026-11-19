@@ -1,3 +1,4 @@
+import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -113,6 +114,7 @@ import {
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
+  DataDeletionPage,
   NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
@@ -126,6 +128,8 @@ import {
   AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
+  AdminCrashReportsPage,
+  AdminCrashReportPage,
   AdminCreditsPage,
   AdminBillingPage,
   AdminInviteCodesPage,
@@ -297,6 +301,12 @@ const termsRoute = createRoute({
   path: "/terms",
   getParentRoute: () => rootRoute,
   component: TermsPage,
+});
+
+const dataDeletionRoute = createRoute({
+  path: "/data-deletion",
+  getParentRoute: () => rootRoute,
+  component: DataDeletionPage,
 });
 
 const blogIndexRoute = createRoute({
@@ -1208,6 +1218,17 @@ const adminUsageRoute = createRoute({
   },
 });
 
+const adminCrashReportsRoute = createRoute({
+  path: "crash-reports",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportsPage,
+});
+const adminCrashReportRoute = createRoute({
+  path: "crash-reports/$id",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportPage,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
@@ -1287,6 +1308,7 @@ const routeTree = rootRoute.addChildren([
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
+  dataDeletionRoute,
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,
@@ -1383,6 +1405,8 @@ const routeTree = rootRoute.addChildren([
       adminUsageRoute,
       adminAnalyticsRoute,
       adminIntegrityRoute,
+      adminCrashReportsRoute,
+      adminCrashReportRoute,
       adminCreditsRoute,
       adminBillingRoute,
       adminModelsRoute,
@@ -1398,7 +1422,12 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
-  rewrite: channelBotSetupRewrite,
+  rewrite: {
+    input: ({ url }) =>
+      /^\/cli-auth\/?$/i.test(url.pathname)
+        ? validateCliAuthUrl(url)
+        : channelBotSetupRewrite.input({ url }),
+  },
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
   // Without an error component the router's CatchBoundary renders nothing on a

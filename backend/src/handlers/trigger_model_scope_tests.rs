@@ -53,7 +53,33 @@ async fn automation_model_2099_stateful_callback_keeps_closed_failure() {
 }
 
 async fn journey(nyxbot: bool, profile: &str, scheduled: bool, stateful: bool) {
-    let (state, _, old_server) = setup("automation_model_2099").await;
+    journey_on_pool(nyxbot, profile, scheduled, stateful, None).await;
+}
+
+type PoolProbe = (
+    mongodb::Client,
+    Arc<tokio::sync::Barrier>,
+    Arc<tokio::sync::Semaphore>,
+);
+
+async fn journey_on_pool(
+    nyxbot: bool,
+    profile: &str,
+    scheduled: bool,
+    stateful: bool,
+    pool: Option<PoolProbe>,
+) {
+    // Serialize fixture/index creation; only admitted turns are concurrent.
+    let preparation = if let Some((_, _, permits)) = &pool {
+        Some(permits.acquire().await.unwrap())
+    } else {
+        None
+    };
+    let (mut state, _, old_server) = setup("automation_model_2099").await;
+    let _fixture_lifetime = state.db.clone();
+    if let Some((client, _, _)) = &pool {
+        state.db = client.database(state.db.name());
+    }
     old_server.abort();
     let agent = if nyxbot {
         team::ensure_nyxbot(&state.db, OWNER).await.unwrap()
@@ -300,6 +326,10 @@ async fn journey(nyxbot: bool, profile: &str, scheduled: bool, stateful: bool) {
         .unwrap();
         created.trigger
     };
+    drop(preparation);
+    if let Some((_, start, _)) = &pool {
+        start.wait().await;
+    }
     tick(&state).await.unwrap();
     let run = completed(&state, &trigger).await;
     let calls = observed.lock().await;
@@ -389,4 +419,51 @@ async fn journey(nyxbot: bool, profile: &str, scheduled: bool, stateful: bool) {
     );
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "manual shared-pool load probe with local fake model/engine"]
+async fn pool_2277_scheduled_model_burst() {
+    for (size, turns) in [(1_u32, 1_usize), (10, 13), (10, 26)] {
+        let uri = std::env::var("NYXID_TEST_DATABASE_URL").unwrap();
+        let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+        options.max_pool_size = Some(size);
+        let client = mongodb::Client::with_options(options).unwrap();
+        let start = Arc::new(tokio::sync::Barrier::new(turns));
+        let preparation = Arc::new(tokio::sync::Semaphore::new(1));
+        let work = futures::future::join_all((0..turns).map(|_| {
+            Box::pin(journey_on_pool(
+                false,
+                "chat",
+                true,
+                false,
+                Some((client.clone(), start.clone(), preparation.clone())),
+            ))
+        }));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let background_stop = stop.clone();
+        let background_client = client.clone();
+        let background = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+            let mut completed = 0_usize;
+            loop {
+                tokio::select! {
+                    _ = background_stop.cancelled() => break,
+                    _ = tick.tick() => {
+                        background_client.database("admin").run_command(doc! {"ping":1}).await.unwrap();
+                        completed += 1;
+                    }
+                }
+            }
+            completed
+        });
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), work).await;
+        stop.cancel();
+        let background_reads = background.await.unwrap();
+        outcome.expect("scheduled burst watchdog");
+        eprintln!("2277_BACKGROUND pool={size} completed_pings={background_reads}");
+        eprintln!(
+            "2277_SCHEDULED pool={size} turns={turns}: all real scheduled admissions and authenticated fake model callbacks completed"
+        );
+    }
 }

@@ -294,11 +294,12 @@ async fn holdless_summary_is_one_chained_record_and_integrity_counts_fall() {
     }
     dead(&f).await;
     let before = diagnostics(&f.db).await.unwrap();
-    assert!(
-        before
-            .iter()
-            .any(|d| d.detail.contains("holdless_rows_at_least=3"))
-    );
+    assert!(before.iter().any(|d| {
+        d.technical_details
+            .as_ref()
+            .unwrap()
+            .contains("holdless_rows_at_least=3")
+    }));
     run(&f.db).await.unwrap();
     let rows: Vec<UsageMeterRow> =
         f.db.collection::<UsageMeterRow>(METERS)
@@ -349,7 +350,9 @@ async fn holdless_summary_is_one_chained_record_and_integrity_counts_fall() {
         .iter()
         .find(|d| d.code == "billing_stuck_requests")
         .unwrap()
-        .detail;
+        .technical_details
+        .as_ref()
+        .unwrap();
     assert!(detail.contains("holdless_rows_at_least=0"), "{detail}");
     assert!(
         detail.contains("holdless_ended_requests=2 holdless_ended_rows=3"),

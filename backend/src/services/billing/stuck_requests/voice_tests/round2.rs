@@ -237,7 +237,10 @@ async fn voice_r2_nonfinal_checkpoint_classification_is_shared() {
         )
         .await
         .unwrap();
-    let detail = diagnostics(&f.db).await.unwrap()[0].detail.clone();
+    let detail = diagnostics(&f.db).await.unwrap()[0]
+        .technical_details
+        .clone()
+        .unwrap();
     f.db.drop().await.unwrap();
     assert!(
         detail.contains("class=has_nonfinal_checkpoint eligible=true"),
@@ -320,7 +323,10 @@ async fn voice_r2_page_reasons_and_kinds_match_terminal_decisions() {
                 .await
                 .unwrap();
         }
-        let detail = diagnostics(&f.db).await.unwrap()[0].detail.clone();
+        let detail = diagnostics(&f.db).await.unwrap()[0]
+            .technical_details
+            .clone()
+            .unwrap();
         let before_session =
             f.db.collection::<Document>(SESSIONS)
                 .find_one(doc! {})
@@ -409,7 +415,10 @@ async fn voice_r2_nonvoice_inventory_has_no_voice_lookup() {
     for run in 0..3 {
         f.count();
         let start = std::time::Instant::now();
-        let detail = diagnostics(&f.db).await.unwrap()[0].detail.clone();
+        let detail = diagnostics(&f.db).await.unwrap()[0]
+            .technical_details
+            .clone()
+            .unwrap();
         println!(
             "VOICE_R2_NONVOICE run={run} elapsed_ms={} commands={} complete={}",
             start.elapsed().as_millis(),
@@ -649,7 +658,10 @@ async fn voice_r2_writer_report_bound_and_zero_report_semantics() {
             .update_one(doc! {}, doc! {"$set":{"responses_usage":usage}})
             .await
             .unwrap();
-        let detail = diagnostics(&f.db).await.unwrap()[0].detail.clone();
+        let detail = diagnostics(&f.db).await.unwrap()[0]
+            .technical_details
+            .clone()
+            .unwrap();
         let rows = terminal::publish(&f.db, &id).await.unwrap();
         if count > crate::services::voice::RESPONSE_USAGE_LIMIT {
             assert!(rows.is_empty());

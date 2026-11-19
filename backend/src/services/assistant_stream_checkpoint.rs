@@ -34,21 +34,17 @@ pub(crate) fn observe(reply: &mut StreamReply, event: &Value) {
 
 pub(crate) fn start(
     db: Database,
-    conversation: &str,
-    user: &str,
-    turn: &str,
+    worker_filter: bson::Document,
     message_id: String,
     block_id: String,
 ) -> (watch::Sender<StreamReply>, AbortOnDropHandle<()>) {
     let (sender, mut receiver) = watch::channel(StreamReply {
+        upstream: None,
         message_id,
         block_id,
         cursor: 0,
         text: String::new(),
     });
-    let conversation = conversation.to_owned();
-    let user = user.to_owned();
-    let turn = turn.to_owned();
     let task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(
         async move {
             let collection = db.collection::<bson::Document>(COLLECTION_NAME);
@@ -64,22 +60,27 @@ pub(crate) fn start(
                 let Ok(value) = bson::to_bson(&reply) else {
                     continue;
                 };
-                let write = collection.update_one(
-                    doc! {"_id": &conversation, "user_id": &user, "active_turn.turn_id": &turn,
-                    "active_turn.stop_requested": false,
-                    "$or": [
-                        {"active_turn.reply.cursor": {"$exists": false}},
-                        {"active_turn.reply.cursor": {"$lt": reply.cursor}}
-                    ]},
-                    doc! {"$set": {"active_turn.reply": value}},
-                );
+                let mut filter = worker_filter.clone();
+                filter.extend(doc! {"active_turn.stop_requested": false,
+                "$or": [
+                    {"active_turn.reply.cursor": {"$exists": false}},
+                    {"active_turn.reply.cursor": {"$lt": reply.cursor}}
+                ]});
+                let write =
+                    collection.update_one(filter, doc! {"$set": {"active_turn.reply": value}});
                 match tokio::time::timeout(
                     Duration::from_secs(2),
                     std::future::IntoFuture::into_future(write),
                 )
                 .await
                 {
-                    Ok(Ok(result)) if result.matched_count == 0 => break,
+                    Ok(Ok(result)) if result.matched_count == 0 => {
+                        if reply.upstream.is_some() && saved_cursor == 0 {
+                            saved_cursor = reply.cursor;
+                        } else {
+                            break;
+                        }
+                    }
                     Ok(Ok(_)) => saved_cursor = reply.cursor,
                     // Keep the latest text and retry; checkpoint outages cannot stall tokens.
                     _ => {}
@@ -98,6 +99,7 @@ mod tests {
     #[test]
     fn checkpoints_recover_unicode_and_authoritative_text_without_duplicate_deltas() {
         let mut reply = StreamReply {
+            upstream: None,
             message_id: "message".into(),
             block_id: "block".into(),
             cursor: 0,
@@ -128,9 +130,7 @@ mod tests {
         collection.insert_one(doc! {"_id":"conversation", "user_id":"owner", "active_turn":{"turn_id":"turn", "stop_requested":false}}).await.unwrap();
         let (sender, task) = start(
             db.clone(),
-            "conversation",
-            "owner",
-            "turn",
+            doc! {"_id":"conversation", "user_id":"owner", "active_turn.turn_id":"turn"},
             "message".into(),
             "block".into(),
         );
@@ -201,9 +201,7 @@ mod tests {
             collection.insert_one(doc! {"_id":id, "user_id":owner, "active_turn":{"turn_id":"turn", "stop_requested":stopped}}).await.unwrap();
             let (sender, task) = start(
                 db.clone(),
-                id,
-                "owner",
-                "turn",
+                doc! {"_id":id, "user_id":"owner", "active_turn.turn_id":"turn"},
                 "message".into(),
                 "block".into(),
             );

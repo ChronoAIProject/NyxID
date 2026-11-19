@@ -506,9 +506,13 @@ async fn stuck_request_exit_registry_failure_never_ends_a_request() {
     assert_eq!(f.row().await.quantity, None);
     let diagnostics = diagnostics(&f.db).await.unwrap();
     assert!(
-        diagnostics[0].detail.contains("registry_unavailable"),
+        diagnostics[0]
+            .technical_details
+            .as_ref()
+            .unwrap()
+            .contains("registry_unavailable"),
         "{}",
-        diagnostics[0].detail
+        diagnostics[0].technical_details.as_ref().unwrap()
     );
     f.db.drop().await.unwrap();
 }
@@ -641,9 +645,12 @@ async fn stuck_request_exit_batch_is_bounded_cursor_progresses_and_counts_are_du
     println!("STUCK_REQUEST_RECOVERY_IDLE_COMMANDS {idle}");
     let d = diagnostics(&f.db).await.unwrap();
     assert!(
-        d[0].detail.contains("ended_requests=52 ended_rows=52"),
+        d[0].technical_details
+            .as_ref()
+            .unwrap()
+            .contains("ended_requests=52 ended_rows=52"),
         "{}",
-        d[0].detail
+        d[0].technical_details.as_ref().unwrap()
     );
     clean(&f).await;
     f.db.drop().await.unwrap();

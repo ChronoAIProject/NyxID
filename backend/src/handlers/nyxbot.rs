@@ -49,6 +49,7 @@ use crate::{
             THREADS_COLLECTION_NAME as THREADS, WATCHES_COLLECTION_NAME as WATCHES,
         },
         nyxbot_event_binding::{COLLECTION_NAME as EVENT_BINDINGS, NyxbotEventBinding},
+        nyxbot_response_read::NoticeKind,
     },
     services::{
         assistant_nyxagent::{self as engine, TurnStart, excerpt, identifier},
@@ -3635,13 +3636,54 @@ enum Inbound {
     /// The owner: a turn with the linked agent is running.
     Turn(broadcast::Receiver<Value>),
     /// A reply without a turn (link confirmation, refusal, busy notice).
-    Reply(String),
+    Reply(InboundReply),
     /// Accepted work; its acknowledgement must not clear the original target.
     Queued,
     /// A bounded reason for intentional silence; retained in owner diagnostics.
     Silent(&'static str),
     /// Retry later: this chat's turn is still running or the pool is full.
     Busy,
+}
+
+struct InboundReply {
+    text: String,
+    kind: Option<NoticeKind>,
+    followed: Option<Box<response_read::SelectedThread>>,
+}
+
+impl InboundReply {
+    fn fixed(kind: NoticeKind, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: Some(kind),
+            followed: None,
+        }
+    }
+}
+
+impl<T: Into<String>> From<T> for InboundReply {
+    fn from(text: T) -> Self {
+        Self {
+            text: text.into(),
+            kind: None,
+            followed: None,
+        }
+    }
+}
+
+impl std::ops::Deref for InboundReply {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Display for InboundReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 struct Sender<'a> {
@@ -3743,7 +3785,7 @@ async fn inbound_message(
             }
             chats::Admission::Waiting => {
                 return Ok(match chats::waiting_hint(state, &current_chat).await? {
-                    Some(hint) => Inbound::Reply(hint),
+                    Some(hint) => Inbound::Reply(hint.into()),
                     None => Inbound::Silent("refused_owner_absent"),
                 });
             }
@@ -3842,10 +3884,13 @@ async fn link_owner(
         return Ok(Some(owner_linked(state, row, "bot_creator").await));
     }
     if known && private && text.trim() == "/start" {
-        return Ok(Some(Inbound::Reply(format!(
-            "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
-            channel_agent_name(state, row).await
-        ))));
+        return Ok(Some(Inbound::Reply(
+            format!(
+                "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
+                channel_agent_name(state, row).await
+            )
+            .into(),
+        )));
     }
     Ok(None)
 }
@@ -3902,10 +3947,13 @@ async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> In
             .await;
         });
     }
-    Inbound::Reply(format!(
-        "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
+    Inbound::Reply(
+        format!(
+            "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
         account here. Send me anything to get started."
-    ))
+        )
+        .into(),
+    )
 }
 
 async fn thread_conversation(
@@ -4381,17 +4429,17 @@ async fn start_chat_turn(
                 && let Some(reply) =
                     repeated_question(state, row, &conversation_id, key, &origin).await?
             {
-                return Ok(Inbound::Reply(reply));
+                return Ok(Inbound::Reply(reply.into()));
             }
             // Someone other than the owner is asked to try again (only when
             // they spoke to the bot): their messages never queue up as the
             // owner's work or use the owner's wake-ups.
             if guest {
                 return Ok(if addressed {
-                    Inbound::Reply(
-                        "I'm answering another message right now. Please try again in a moment."
-                            .into(),
-                    )
+                    Inbound::Reply(InboundReply::fixed(
+                        NoticeKind::GuestBusy,
+                        "I'm answering another message right now. Please try again in a moment.",
+                    ))
                 } else {
                     Inbound::Silent("refused_busy")
                 });
@@ -4449,9 +4497,9 @@ async fn start_chat_turn(
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
             Ok(Inbound::Busy)
         }
-        Err(AppError::ServiceSelectionInvalid { reason, message }) => {
-            Ok(Inbound::Reply(format!("{reason}: {message}")))
-        }
+        Err(AppError::ServiceSelectionInvalid { reason, message }) => Ok(Inbound::Reply(
+            InboundReply::fixed(NoticeKind::ServiceSelection, format!("{reason}: {message}")),
+        )),
         Err(error) => Err(error),
     }
 }
@@ -4650,6 +4698,44 @@ async fn provider_channel_mode(
     headers: &HeaderMap,
     observe: bool,
 ) -> Result<(NyxbotChannel, Zeroizing<String>), Response> {
+    provider_channel_classified(state, headers, observe)
+        .await
+        .map_err(|failure| failure.response)
+}
+
+/// Only confirmed transport loss after provider authentication carries a
+/// channel. A credential or dependency failure can never expose a lifecycle.
+struct ProviderChannelFailure {
+    response: Response,
+    closed: Option<Box<NyxbotChannel>>,
+}
+
+impl From<Response> for ProviderChannelFailure {
+    fn from(response: Response) -> Self {
+        Self {
+            response,
+            closed: None,
+        }
+    }
+}
+
+impl ProviderChannelFailure {
+    fn closed(row: NyxbotChannel, response: Response) -> Self {
+        let closed = (row.org_specialist.is_some()
+            && row.gateway_source.is_none()
+            && row.binding_id.is_some()
+            && crate::services::channel_thread_service::gateway::negotiated(&row))
+        .then(|| Box::new(row));
+        Self { response, closed }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_channel_classified(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
+) -> Result<(NyxbotChannel, Zeroizing<String>), ProviderChannelFailure> {
     let raw = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -4674,7 +4760,7 @@ async fn provider_channel_mode(
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
     provider_refusal::channel(&row.user_id, &row.id);
     if observe && row.status != "active" {
-        return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found"));
+        return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found").into());
     }
     match crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
@@ -4684,16 +4770,16 @@ async fn provider_channel_mode(
     {
         Ok(()) => {}
         Err(AppError::Forbidden(_)) => {
-            return Err(problem(
-                StatusCode::FORBIDDEN,
-                "shared_entry_requires_native_receipt",
+            return Err(ProviderChannelFailure::closed(
+                row,
+                problem(
+                    StatusCode::FORBIDDEN,
+                    "shared_entry_requires_native_receipt",
+                ),
             ));
         }
         Err(_) => {
-            return Err(problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "provider_unavailable",
-            ));
+            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
     match org_access(state, &row).await {
@@ -4706,13 +4792,13 @@ async fn provider_channel_mode(
                         problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
                     })?;
             }
-            return Err(problem(StatusCode::FORBIDDEN, "org_access_lost"));
+            return Err(ProviderChannelFailure::closed(
+                row,
+                problem(StatusCode::FORBIDDEN, "org_access_lost"),
+            ));
         }
         Ok(OrgAccess::Unavailable) | Err(_) => {
-            return Err(problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "provider_unavailable",
-            ));
+            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
     Ok((row, raw))
@@ -5403,11 +5489,13 @@ async fn get_event_context_inner(
 fn sse(frames: impl futures::Stream<Item = Value> + Send + 'static) -> Response {
     use futures::StreamExt;
     let stream = frames.map(|frame| {
-        Ok::<_, Infallible>(
-            axum::response::sse::Event::default()
-                .event(frame["type"].as_str().unwrap_or("message"))
-                .data(frame.to_string()),
-        )
+        let mut event = axum::response::sse::Event::default()
+            .event(frame["type"].as_str().unwrap_or("message"))
+            .data(frame.to_string());
+        if let Some(sequence) = frame["sequence_number"].as_u64() {
+            event = event.id(sequence.to_string());
+        }
+        Ok::<_, Infallible>(event)
     });
     let mut response = axum::response::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
@@ -5918,9 +6006,11 @@ async fn responses_with_producers_impl(
         Ok(None) => {}
         Err(response) => return response,
     }
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(found) => found,
-        Err(response) => return response,
+        Err(failure) => {
+            return Box::pin(response_read::closed_post(&state, &headers, &body, failure)).await;
+        }
     };
     let Some(idempotency) = headers
         .get("idempotency-key")
@@ -5932,6 +6022,7 @@ async fn responses_with_producers_impl(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
+    provider_refusal::telegram_group(&row, &request["event_context"]["activity"]);
     provider_refusal::event(
         request["event_context"]["activity"]["event_id"]
             .as_str()
@@ -6144,24 +6235,46 @@ async fn responses_with_producers_impl(
         created_at: now,
         expires_at: now + retention,
     };
+    let command = crate::services::nyxbot_response_read::command(&response_id, &request);
+    let pending_read = (row.transport == "gateway" && admitted.relay_message_id.is_some())
+        .then(|| crate::services::nyxbot_response_read::identity(&row, &admitted, command.clone()));
+    let mut newly_admitted = true;
+    let mut retry_prefix = None;
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    if let Err(error) = Box::pin(crate::services::channel_media_events::insert_event(
-        &state.db, &admitted,
-    ))
+    if let Err(error) = Box::pin(
+        crate::services::channel_media_events::insert_response_event(
+            &state.db,
+            &admitted,
+            pending_read.as_ref(),
+        ),
+    )
     .await
     {
         if !is_duplicate(&error) {
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
-        match crate::services::channel_media_events::record_duplicate(&state.db, &admitted).await {
-            Ok(true) => return sse(futures::stream::iter(
-                std::iter::once(json!({"type":"response.created","response":{"id":&response_id,"status":"in_progress"}}))
-                    .chain(message_frames(&response_id, None)))),
-            Ok(false) => {},
+        newly_admitted = false;
+        match crate::services::channel_media_events::record_response_duplicate(
+            &state.db,
+            &admitted,
+            Some(&command),
+        )
+        .await
+        {
+            Ok(Some(_)) => {
+                return match crate::services::nyxbot_response_read::load(&state.db, &row, &response_id).await {
+                    Ok(Some(view)) if view.admitted => response_read::stream(state, row, headers.clone(), response_id, None),
+                    Ok(_) => sse(futures::stream::iter(
+                        std::iter::once(json!({"type":"response.created","response":{"id":&response_id,"status":"in_progress"}}))
+                            .chain(message_frames(&response_id, None)))),
+                    Err(error) => provider_refusal::error(error),
+                };
+            }
+            Ok(None) => {}
             Err(AppError::Conflict(code)) => return problem(StatusCode::CONFLICT, &code),
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
-        match dispatch_identity::alias_result(
+        match dispatch_identity::alias_response(
             &state.db,
             &event_key,
             &row.id,
@@ -6170,6 +6283,7 @@ async fn responses_with_producers_impl(
                 .as_ref()
                 .expect("admission identity")
                 .keys[0],
+            Some(&command),
         )
         .await
         {
@@ -6185,17 +6299,32 @@ async fn responses_with_producers_impl(
             }
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
+        match crate::services::nyxbot_response_read::load(&state.db, &row, &response_id).await {
+            Ok(Some(view)) if view.admitted => {
+                return response_read::stream(state, row, headers.clone(), response_id, None);
+            }
+            Ok(Some(view)) if view.retryable => {
+                retry_prefix = view.payload.frames.into_iter().next()
+            }
+            Ok(Some(_)) => return provider_in_progress(),
+            Ok(None) => {}
+            Err(error) => return provider_refusal::error(error),
+        }
         // Only an identical, verified human request that previously started
         // no turn may resume. Keep its original budget claim and deadline;
         // concurrent retries contend on this transition before any turn work.
         let resumed = if activity["actor"]["kind"] == "human" {
+            let mut resume = doc! {"status":"resuming"};
+            if retry_prefix.is_some() {
+                resume.insert("response_read_admitted", true);
+            }
             events
                 .find_one_and_update(
                     doc! {"_id": &event_key, "channel_id": &row.id, "user_id": &row.user_id,
                     "status": "retryable", "native_bot_budget_claimed": true,
                     "retry_request_sha256": &retry_digest, "turn_id": bson::Bson::Null,
                     "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-                    doc! {"$set": {"status": "resuming"}},
+                    doc! {"$set": resume},
                 )
                 .await
         } else {
@@ -6203,11 +6332,13 @@ async fn responses_with_producers_impl(
         };
         match resumed {
             Ok(Some(prior)) => now = prior.created_at,
-            Ok(None) => return replay(&state, &row, &event_key, &response_id).await,
+            Ok(None) => return replay(&state, &row, &headers, &event_key, &response_id).await,
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
-    let stored =
+    let prepared = if retry_prefix.is_some() {
+        relay_responses::Prepared::default()
+    } else {
         match relay_responses::prepare(&state, &row, &admitted, &request, &response_id).await {
             Ok(stored) => stored,
             Err(_) => {
@@ -6217,8 +6348,9 @@ async fn responses_with_producers_impl(
                     "response_recovery_unavailable",
                 );
             }
-        };
-    if let Some(stored) = stored {
+        }
+    };
+    if let Some(stored) = prepared.stored {
         let task_state = state.clone();
         let task_row = row.clone();
         let task_response = response_id.clone();
@@ -6233,11 +6365,48 @@ async fn responses_with_producers_impl(
                 task_response,
                 now,
                 Some(stored),
+                None,
+                false,
             ))
             .await;
         });
         return native_responses::stream(state, row, headers.clone(), response_id, None);
     }
+    let mut mapped = retry_prefix.is_some();
+    let prefix = if newly_admitted {
+        match crate::services::nyxbot_response_read::admit(&state.db, &row, &admitted, command)
+            .await
+        {
+            Ok(Some(mapping)) => {
+                mapped = true;
+                if relay_responses::accepts_prefix(&state, &row, &request, prepared.discovery).await
+                {
+                    Some(
+                        crate::services::nyxbot_response_recovery::Payload::new(
+                            &response_id,
+                            &mapping.conversation_id,
+                            mapping.commands[0].metadata.clone(),
+                        )
+                        .frames
+                        .remove(0),
+                    )
+                } else {
+                    None
+                }
+            }
+            Ok(_) => None,
+            Err(error) => {
+                discard_failed_provider_event(&state.db, &event_key).await;
+                return provider_refusal::error(error);
+            }
+        }
+    } else if retry_prefix.is_some()
+        && relay_responses::accepts_prefix(&state, &row, &request, None).await
+    {
+        retry_prefix
+    } else {
+        None
+    };
     Box::pin(dispatch_relay_response(
         state,
         row,
@@ -6248,6 +6417,8 @@ async fn responses_with_producers_impl(
         response_id,
         now,
         None,
+        prefix,
+        mapped,
     ))
     .await
 }
@@ -6263,6 +6434,8 @@ async fn dispatch_relay_response(
     response_id: String,
     now: chrono::DateTime<Utc>,
     stored: Option<crate::models::nyxbot_gateway_response::GatewayResponse>,
+    prefix: Option<Value>,
+    mapped: bool,
 ) -> Response {
     let context = &request["event_context"];
     let activity = &context["activity"];
@@ -6346,6 +6519,20 @@ async fn dispatch_relay_response(
         relay_responses::settle_admission(&state, &stored, &inbound, thread_reply).await;
         return StatusCode::ACCEPTED.into_response();
     }
+    if mapped
+        && matches!(
+            &inbound,
+            Ok(Inbound::Turn(_) | Inbound::Queued | Inbound::Reply(_) | Inbound::Silent(_))
+        )
+        && let Err(error) = crate::services::nyxbot_response_read::freeze_thread(
+            &state.db,
+            &event_key,
+            thread_reply,
+        )
+        .await
+    {
+        return provider_refusal::error(error);
+    }
     let finish = |status: &'static str, conversation: Option<String>| {
         let state = state.clone();
         let event_key = event_key.clone();
@@ -6355,24 +6542,23 @@ async fn dispatch_relay_response(
                 .db
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
-                    if thread_reply {
-                        doc! {"_id": &event_key, "delivery": bson::Bson::Null,
-                        "status": {"$in": ["running", "resuming"]}, "turn_id": bson::Bson::Null}
-                    } else {
-                        unaccepted_provider_event(&event_key)
-                    },
+                    unaccepted_provider_event(&event_key),
                     doc! {"$set": {"status": status, "conversation_id": conversation},
                     "$unset": {"event_context_ciphertext": ""}},
                 )
                 .await;
         }
     };
-    let mut created = json!({"type": "response.created",
-        "response": {"id": &response_id, "status": "in_progress"}});
+    let conforming = prefix.is_some();
+    let mut created = prefix.unwrap_or_else(|| {
+        json!({"type": "response.created",
+        "response": {"id": &response_id, "status": "in_progress"}})
+    });
     if thread_reply {
         created["response"]["thread_reply"] = json!(true);
     }
-    match inbound {
+    let response_header = response_id.clone();
+    let mut response = match inbound {
         Ok(Inbound::Queued) => {
             // Queue admission and the original target were committed together.
             late_delivery::process(&state, &event_key).await;
@@ -6380,8 +6566,39 @@ async fn dispatch_relay_response(
                 std::iter::once(created).chain(message_frames(&response_id, None)),
             ))
         }
+        Ok(Inbound::Reply(text)) if conforming => {
+            match Box::pin(response_read::reply(
+                state.clone(),
+                &row,
+                event_key.clone(),
+                response_id,
+                created,
+                text,
+                thread_reply,
+            ))
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => provider_refusal::error(error),
+            }
+        }
         Ok(Inbound::Reply(text)) => {
-            finish("refused", None).await;
+            if text.followed.is_some() {
+                if let Err(error) = Box::pin(response_read::record_reply(
+                    &state.db,
+                    &row,
+                    &event_key,
+                    &response_id,
+                    &text,
+                    doc! {"status":"refused"},
+                ))
+                .await
+                {
+                    return provider_refusal::error(error);
+                }
+            } else {
+                finish("refused", None).await;
+            }
             sse(futures::stream::iter(
                 std::iter::once(created).chain(message_frames(&response_id, Some(&text))),
             ))
@@ -6411,7 +6628,10 @@ async fn dispatch_relay_response(
                             filter.insert("native_bot_budget_claimed", true);
                             filter
                         },
-                        doc! {"$set": {"status": "retryable"}},
+                        // No response has been accepted. An old replica may
+                        // choose stored recovery when it resumes this request.
+                        doc! {"$set": {"status": "retryable"},
+                        "$unset":{"response_read_admitted":""}},
                     )
                     .await;
             }
@@ -6428,7 +6648,14 @@ async fn dispatch_relay_response(
             discard_failed_provider_event(&state.db, &event_key).await;
             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
         }
+    };
+    if conforming && response.status() == StatusCode::OK {
+        response.headers_mut().insert(
+            "x-cma-response-id",
+            response_header.parse().expect("response identity"),
+        );
     }
+    response
 }
 
 /// Only pre-acceptance provider failures may discard source metadata. A
@@ -6532,7 +6759,17 @@ async fn gateway_inbound(
     ))
     .await;
     if let Some(source) = &source {
-        admission_diagnostics::outcome(state, row, source, result.as_ref().map_err(|_| ())).await?;
+        let completed =
+            admission_diagnostics::outcome(state, row, source, result.as_ref().map_err(|_| ()))
+                .await?;
+        if let Some(code) = completed
+            && activity["conversation"]["kind"] == "group"
+            && row.platform == "telegram"
+            && row.gateway_source.is_none()
+            && row.transport == "gateway"
+        {
+            admission_diagnostics::telegram_group_outcome(state, row, source, activity, code).await;
+        }
     }
     result
 }
@@ -6714,9 +6951,7 @@ async fn gateway_inbound_inner(
         Some(evidence.addressed)
     } else if let Some(addressed) = verified_address {
         let reply = if !addressed && let Some(message) = activity["event_id"].as_str() {
-            let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-            let reply_to = chats::inbound_reply_to(state, row, message).await?;
-            chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+            chats::gateway_replies_to_bot(state, row, chat_id, message).await?
         } else {
             false
         };
@@ -6739,10 +6974,7 @@ async fn gateway_inbound_inner(
                         .any(|id| id == chat_id))
                 || match activity["event_id"].as_str() {
                     Some(message_id) => {
-                        let bot =
-                            channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-                        let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
-                        chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+                        chats::gateway_replies_to_bot(state, row, chat_id, message_id).await?
                     }
                     None => false,
                 },
@@ -6759,12 +6991,35 @@ fn is_duplicate(error: &mongodb::error::Error) -> bool {
         mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000)
 }
 
+fn provider_in_progress() -> Response {
+    let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
+    response
+        .headers_mut()
+        .insert("retry-after", "5".parse().expect("static header"));
+    response
+}
+
 async fn replay(
     state: &AppState,
     row: &NyxbotChannel,
+    headers: &HeaderMap,
     event_key: &str,
     response_id: &str,
 ) -> Response {
+    match crate::services::nyxbot_response_read::load(&state.db, row, response_id).await {
+        Ok(Some(view)) if view.admitted => {
+            return response_read::stream(
+                state.clone(),
+                row.clone(),
+                headers.clone(),
+                response_id.into(),
+                None,
+            );
+        }
+        Ok(Some(_)) => return provider_in_progress(),
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
+    }
     let event = state
         .db
         .collection::<NyxbotEvent>(EVENTS)
@@ -6776,11 +7031,7 @@ async fn replay(
         "response": {"id": response_id, "status": "in_progress"}});
     match event.map(|event| event.status) {
         Some(status) if matches!(status.as_str(), "running" | "resuming" | "retryable") => {
-            let mut response = problem(StatusCode::CONFLICT, "conversation_in_progress");
-            response
-                .headers_mut()
-                .insert("retry-after", "5".parse().expect("static header"));
-            response
+            provider_in_progress()
         }
         // The answer was already produced; a lost stream is not re-run.
         _ => sse(futures::stream::iter(
@@ -7595,7 +7846,7 @@ pub async fn relay_callback(
                 .await?;
             }
             let reply = match outcome? {
-                Inbound::Reply(text) => Some(text),
+                Inbound::Reply(text) => Some(text.text),
                 Inbound::Queued => {
                     late_delivery::process(&state, &admitted.id).await;
                     None
@@ -8177,3 +8428,6 @@ pub(crate) mod supplemental;
 
 #[path = "nyxbot_dispatches.rs"]
 pub(crate) mod dispatches;
+
+#[path = "nyxbot_response_read.rs"]
+pub(crate) mod response_read;

@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -43,6 +47,7 @@ const agentsKey = (epoch: number) => ["workspace", "agents", "drawer", epoch];
 
 /** The chat's history page and the agent list, shared by details and its edit page. */
 function useChatDetailsData(conversationId?: string, requestedAgent?: string) {
+  useAppLanguage();
   const runtime = useGroupAvailability();
   const history = useQuery({
     queryKey: detailsKey(runtime.epoch, conversationId),
@@ -77,6 +82,7 @@ export function AssistantDetailsScreen({
   navigation,
   route,
 }: ContentScreenProps<"AssistantDetails">) {
+  useAppLanguage();
   const { conversationId, agentId: requestedAgent } = route.params;
   const { runtime, history, agents, conversation, agentId, agent } =
     useChatDetailsData(conversationId, requestedAgent);
@@ -84,7 +90,7 @@ export function AssistantDetailsScreen({
   const scope = `${runtime.epoch}:${conversationId ?? "new"}:${requestedAgent ?? "nyxbot"}`;
   const [busy, setBusy] = useState(false);
   const [deleted, setDeleted] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -159,9 +165,9 @@ export function AssistantDetailsScreen({
     } catch (cause) {
       if (alive())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : "Could not update the chat. Try again.",
+            : translateApp("Could not update the chat. Try again.")),
         );
     } finally {
       lock.current = false;
@@ -173,12 +179,12 @@ export function AssistantDetailsScreen({
     agent?.name ||
     conversation?.agent?.display_name ||
     conversation?.agent?.name ||
-    (requestedAgent ? "Agent" : "NyxBot");
+    (requestedAgent ? translateApp("Agent") : "NyxBot");
   const identity = agent ?? conversation?.agent;
   const permissionsFooter = [
     access.mode ? COMPOSER_ACCESS_DESCRIPTION[access.mode] : undefined,
     agent?.access_mode_override
-      ? "This agent’s override is read-only here."
+      ? translateApp("This agent’s override is read-only here.")
       : undefined,
   ]
     .filter(Boolean)
@@ -186,20 +192,24 @@ export function AssistantDetailsScreen({
   return (
     <SettingsPage>
       {!runtime.online && (
-        <Notice message="You’re offline. Reconnect to change this chat." />
+        <Notice message={translateApp(
+            "You’re offline. Reconnect to change this chat.",
+          )}
+        />
       )}
       {conversationId && history.isPending && (
-        <Label muted>Loading chat details…</Label>
+        <Label muted>{translateApp("Loading chat details…")}</Label>
       )}
       {(history.isError || agents.isError) && (
-        <Notice tone="error" message="Couldn’t load chat details." />
+        <Notice tone="error" message={translateApp("Couldn’t load chat details.")}
+        />
       )}
       {(history.isError || agents.isError) && (
         <SettingsGroup inset={false}>
           <SettingsRow
             tone="action"
-            label="Retry"
-            accessibilityLabel="Retry details"
+            label={translateApp("Retry")}
+            accessibilityLabel={translateApp("Retry details")}
             disabled={!runtime.active}
             onPress={() => {
               if (conversationId) void history.refetch();
@@ -218,12 +228,12 @@ export function AssistantDetailsScreen({
           label={agentName}
           detail={
             agent?.owner_kind === "org"
-              ? agent.owner_name || "Organization"
+              ? agent.owner_name || translateApp("Organization")
               : agent?.kind === "specialist"
-                ? "Personal specialist"
-                : "Your personal assistant"
+                ? translateApp("Personal specialist")
+                : translateApp("Your personal assistant")
           }
-          accessibilityHint={agentId ? "Opens agent details" : undefined}
+          accessibilityHint={agentId ? translateApp("Opens agent details") : undefined}
           onPress={
             agentId
               ? () => navigation.push("AgentDetail", { agentId })
@@ -234,10 +244,10 @@ export function AssistantDetailsScreen({
       <SettingsGroup inset={false}>
         {conversationId && (
           <SettingsRow
-            label="Title"
+            label={translateApp("Title")}
             value={conversation?.title}
             disabled={unavailable}
-            accessibilityHint="Opens the chat title to edit"
+            accessibilityHint={translateApp("Opens the chat title to edit")}
             onPress={() =>
               navigation.push("AssistantTitleEdit", {
                 conversationId,
@@ -247,12 +257,12 @@ export function AssistantDetailsScreen({
           />
         )}
         <SettingsRow
-          label="Chat history"
+          label={translateApp("Chat history")}
           onPress={() => navigation.push("AssistantHistory", { agentId })}
         />
         {conversationId && (
           <SettingsRow
-            label="Working context"
+            label={translateApp("Working context")}
             onPress={() =>
               navigation.push("AssistantWorkingContext", { conversationId })
             }
@@ -265,7 +275,7 @@ export function AssistantDetailsScreen({
       >
         {access.mode ? (
           <SettingsMenuRow
-            label="Permissions"
+            label={translateApp("Permissions")}
             value={access.mode}
             options={COMPOSER_ACCESS_MODES.map((mode) => ({
               value: mode,
@@ -276,12 +286,14 @@ export function AssistantDetailsScreen({
             onChange={(mode) => void access.change(mode)}
           />
         ) : (
-          <SettingsRow label="Permissions" value="Loading permissions…" />
+          <SettingsRow label={translateApp("Permissions")}
+            value={translateApp("Loading permissions…")}
+          />
         )}
         {access.loadFailed && (
           <SettingsRow
             tone="action"
-            label="Retry loading permissions"
+            label={translateApp("Retry loading permissions")}
             disabled={!runtime.active}
             onPress={access.retry}
           />
@@ -290,21 +302,26 @@ export function AssistantDetailsScreen({
       {conversationId && (
         <SettingsGroup
           inset={false}
-          footer="Deletes its saved messages and permissions. Active work will be stopped."
+          footer={translateApp(
+            "Deletes its saved messages and permissions. Active work will be stopped.",
+          )}
         >
           <SettingsRow
             centered
             destructive
-            label={busy ? "Deleting…" : "Delete Chat"}
+            label={busy ? translateApp("Deleting…") : translateApp("Delete Chat")
+            }
             disabled={unavailable}
             onPress={() =>
               Alert.alert(
-                "Delete this chat?",
-                "This deletes its saved messages and permissions. Active work will be stopped.",
+                translateApp("Delete this chat?"),
+                translateApp(
+                  "This deletes its saved messages and permissions. Active work will be stopped.",
+                ),
                 [
-                  { text: "Cancel", style: "cancel" },
+                  { text: translateApp("Cancel"), style: "cancel" },
                   {
-                    text: "Delete",
+                    text: translateApp("Delete"),
                     style: "destructive",
                     onPress: () => void remove(),
                   },
@@ -323,6 +340,7 @@ export function AssistantTitleEditScreen({
   navigation,
   route,
 }: ContentScreenProps<"AssistantTitleEdit">) {
+  useAppLanguage();
   const { conversationId, agentId: requestedAgent } = route.params;
   const { runtime, history, conversation, agent } = useChatDetailsData(
     conversationId,
@@ -334,7 +352,7 @@ export function AssistantTitleEditScreen({
   const [title, setTitle] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const mounted = useRef(true);
   const lock = useRef(false);
   const unavailable =
@@ -381,7 +399,7 @@ export function AssistantTitleEditScreen({
         title ?? conversation!.title,
       );
       if (result.id !== conversationId)
-        throw new Error("The server returned a different chat. Please reload.");
+        throw localizedError("The server returned a different chat. Please reload.");
       if (!alive()) return;
       await client.cancelQueries({ queryKey: historyKey, exact: true });
       if (!alive()) return;
@@ -399,9 +417,9 @@ export function AssistantTitleEditScreen({
     } catch (cause) {
       if (alive())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : "Could not update the chat. Try again.",
+            : translateApp("Could not update the chat. Try again.")),
         );
     } finally {
       lock.current = false;
@@ -429,8 +447,8 @@ export function AssistantTitleEditScreen({
     options,
     discardOnClose: dirty
       ? {
-          title: "Discard title changes?",
-          message: "Your unsaved chat title will be lost.",
+          title: translateApp("Discard title changes?"),
+          message: translateApp("Your unsaved chat title will be lost."),
         }
       : undefined,
   });
@@ -440,25 +458,31 @@ export function AssistantTitleEditScreen({
   return (
     <SettingsPage>
       {!runtime.online && (
-        <Notice message="You’re offline. Reconnect to change this chat." />
+        <Notice message={translateApp(
+            "You’re offline. Reconnect to change this chat.",
+          )}
+        />
       )}
-      {history.isPending && <Label muted>Loading chat details…</Label>}
+      {history.isPending && (
+        <Label muted>{translateApp("Loading chat details…")}</Label>
+      )}
       {history.isError && (
-        <Notice tone="error" message="Couldn’t load chat details." />
+        <Notice tone="error" message={translateApp("Couldn’t load chat details.")}
+        />
       )}
       {error && <Notice tone="error" message={error} />}
       <SettingsGroup
         inset={false}
-        footer="Shown in your chat list and chat history."
+        footer={translateApp("Shown in your chat list and chat history.")}
       >
         <SettingsTextField
-          accessibilityLabel="Chat title"
+          accessibilityLabel={translateApp("Chat title")}
           value={draft}
           onChangeText={(text) => {
             setTitle(text);
             setError(undefined);
           }}
-          placeholder="Chat title"
+          placeholder={translateApp("Chat title")}
           maxLength={200}
           autoCapitalize="sentences"
           autoFocus
@@ -477,6 +501,7 @@ export function AssistantWorkingContextScreen({
   navigation,
   route,
 }: ContentScreenProps<"AssistantWorkingContext">) {
+  useAppLanguage();
   const runtime = useGroupAvailability();
   const [busy, setBusy] = useState(false);
   useWorkspaceBack({
@@ -486,7 +511,7 @@ export function AssistantWorkingContextScreen({
     disabled: busy,
   });
   return (
-    <WorkspacePage title="Working context" showHeading={false}>
+    <WorkspacePage title={translateApp("Working context")} showHeading={false}>
       <AssistantWorkingContext
         key={route.params.conversationId}
         conversationId={route.params.conversationId}

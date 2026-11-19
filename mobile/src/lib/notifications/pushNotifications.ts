@@ -39,6 +39,7 @@ const PENDING_UNBIND_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PUSH_NATIVE_TOKEN_TIMEOUT_MS = 15_000;
 const PUSH_NATIVE_UNREGISTER_TIMEOUT_MS = 2_000;
 const PUSH_LOGOUT_QUEUE_TIMEOUT_MS = 10_000;
+const PUSH_LOGOUT_RECOVERY_READ_TIMEOUT_MS = 250;
 const PUSH_PENDING_SYNC_SIGNAL_KEY = "nyxid.push.pending_sync_signal";
 const BACKGROUND_NOTIFICATION_TASK = "NYXID_BACKGROUND_NOTIFICATION_TASK";
 
@@ -798,21 +799,46 @@ export async function clearPendingPushSyncSignal(): Promise<void> {
   }
 }
 
-export async function deactivatePushOnLogout(): Promise<boolean> {
+type PushLogoutCapture = { accessToken?: string; registration: PendingPushUnbind | null };
+
+export async function capturePushLogout(accessToken?: string): Promise<PushLogoutCapture> {
+  const token = lastKnownNativeToken?.token ?? await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
+  const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
+  const provider = lastKnownNativeToken?.provider ?? (platform === "ios" || platform === "android" ? resolveProvider(platform) : null);
+  return { accessToken, registration: token && provider && (platform === "ios" || platform === "android")
+    ? { token, platform, provider, createdAt: new Date().toISOString(), nativeUnregisterPending: true }
+    : await loadPendingUnbind() };
+}
+
+export async function deactivatePushOnLogout(captured?: PushLogoutCapture): Promise<boolean> {
+  pushOperationRevision++;
+  const logoutGuard = pushAccountGuard();
+  if (captured) {
+    // Fence a register already in flight. Persist recovery before any network
+    // wait so a cold start suppresses stale-account notification delivery.
+    if (captured.registration) {
+      try { await setPendingUnbind(captured.registration); } catch (error) {
+        // Even a recovery-record fault must try to invalidate native delivery.
+        if (logoutGuard()) await unregisterNativePush();
+        throw error;
+      }
+    }
+  }
   let queueTimedOut = false;
   const queuedUnbind = enqueuePushOperation(async () => {
     if (queueTimedOut) return false;
-    const current = pushAccountGuard();
+    const current = logoutGuard;
+    if (!current()) return false;
     const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
     // A first registration may fail after the server accepted it. Keep the
     // token in memory until logout reaches this queue so the authenticated
     // DELETE still has a chance to detach that uncertain registration.
-    const token = lastKnownNativeToken?.token ?? storedToken;
-    const platform = lastKnownNativeToken?.platform ?? resolvePlatform();
+    const token = captured?.registration?.token ?? lastKnownNativeToken?.token ?? storedToken;
+    const platform = captured?.registration?.platform ?? lastKnownNativeToken?.platform ?? resolvePlatform();
     const pending = await loadPendingUnbind();
     if (!current()) return false;
     const provider =
-      lastKnownNativeToken?.provider ??
+      captured?.registration?.provider ?? lastKnownNativeToken?.provider ??
       (platform === "ios" || platform === "android"
         ? resolveProvider(platform)
         : null);
@@ -823,7 +849,8 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
       return !pending;
     }
     try {
-      await mobileApi.unregisterPushToken({ token, provider, platform });
+      if (captured?.accessToken) await mobileApi.unregisterPushToken({ token, provider, platform }, captured.accessToken);
+      else await mobileApi.unregisterPushToken({ token, provider, platform });
       if (!current()) return false;
       if (!pending || pending.token === token) await clearPendingUnbind();
       await clearLocalPushRegistrationState();
@@ -842,11 +869,10 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
     );
   } catch {
     queueTimedOut = true;
-    // Fence late register/rebind completions before writing recovery state.
-    // Keep the queue ordered: a later account rebind runs after that request.
-    pushOperationRevision++;
+    // The start-of-logout revision already fenced earlier work. Recovery must
+    // keep that owner: a replacement account may already be queued behind us.
     try {
-      unbound = await failPushUnbind();
+      unbound = await failPushUnbind(logoutGuard);
     } catch {
       // Local cleanup failures must not prevent clearing the auth session.
       if (__DEV__) console.warn("[push] logout recovery could not be persisted");
@@ -855,7 +881,7 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
   }
   // Each cleanup is independent: a badge failure must not retain tray entries
   // or a cached registration that could skip the next account's bind.
-  await Promise.allSettled([
+  if (logoutGuard()) await Promise.allSettled([
     withPushTimeout(
       () => Notifications.dismissAllNotificationsAsync(),
       PUSH_NATIVE_UNREGISTER_TIMEOUT_MS,
@@ -875,8 +901,17 @@ export async function deactivatePushOnLogout(): Promise<boolean> {
 async function failPushUnbind(
   current = pushAccountGuard(),
 ): Promise<false> {
-  const storedToken = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
-  const pending = await loadPendingUnbind();
+  let storedToken: string | null = null;
+  let pending: PendingPushUnbind | null = null;
+  try {
+    [storedToken, pending] = await withPushTimeout(
+      () => Promise.all([SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY), loadPendingUnbind()]),
+      PUSH_LOGOUT_RECOVERY_READ_TIMEOUT_MS,
+    );
+  } catch (error) {
+    // Missing capture or unreadable storage must still reach native invalidation.
+    if (__DEV__) console.warn("[push] logout recovery read unavailable", error);
+  }
   if (!current()) return false;
   const token = lastKnownNativeToken?.token ?? storedToken ?? pending?.token;
   const platform = lastKnownNativeToken?.platform ?? resolvePlatform();

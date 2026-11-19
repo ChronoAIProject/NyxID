@@ -171,7 +171,10 @@ pub(super) async fn inbound(
             | AppError::BillingNotConfigured(_)
             | AppError::InsufficientCredits
             | AppError::WalletSuspended,
-        ) => Ok(Inbound::Reply(org::UNAVAILABLE.into())),
+        ) => Ok(Inbound::Reply(InboundReply::fixed(
+            NoticeKind::GuestUnavailable,
+            org::UNAVAILABLE,
+        ))),
         other => other,
     }
 }

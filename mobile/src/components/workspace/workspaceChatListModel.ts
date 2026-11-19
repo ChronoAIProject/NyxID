@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantAgent } from "../../features/agents/agentContracts";
 import type { AssistantConversation } from "../../features/assistant/assistantTypes";
 
@@ -10,18 +11,19 @@ export function channelPlatformName(platform: string) {
     lark: "Lark",
     feishu: "Feishu",
     whatsapp: "WhatsApp",
-    aurinko: "Email",
+    aurinko: translateApp("Email"),
     x: "X",
   };
   return (
     names[platform] ||
-    (platform ? platform[0]!.toUpperCase() + platform.slice(1) : "Channel")
+    (platform ? platform[0]!.toUpperCase() + platform.slice(1) : translateApp("Channel"))
   );
 }
 
 export function threadTitle(thread: AssistantConversation) {
   return (
-    thread.channel?.chat_title?.trim() || thread.title.trim() || "Untitled chat"
+    thread.channel?.chat_title?.trim() || thread.title.trim() ||
+    translateApp("Untitled chat")
   );
 }
 
@@ -58,7 +60,10 @@ export function splitChannelThreads(threads: readonly AssistantConversation[]) {
         key,
         platform: channel.platform,
         label:
-          channel.bot_label || `${channelPlatformName(channel.platform)} bot`,
+          channel.bot_label ||
+          translateApp("{{platform}} bot", {
+            platform: channelPlatformName(channel.platform),
+          }),
         threads: [],
       };
       bots.set(key, bot);

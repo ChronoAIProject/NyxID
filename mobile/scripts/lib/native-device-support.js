@@ -18,6 +18,25 @@ function sameOrientations(actual, expected) {
   );
 }
 
+/**
+ * TARGETED_DEVICE_FAMILY of every build configuration that sets one, split by
+ * platform: watchOS configurations (`SDKROOT = watchos`) belong to the Apple
+ * Watch app and never take iPhone/iPad families.
+ */
+function deviceFamilies(xcodeProject) {
+  const ios = [];
+  const watch = [];
+  for (const [, settings] of xcodeProject.matchAll(
+    /buildSettings = \{([\s\S]*?)\n\t*\};/g,
+  )) {
+    const family = settings.match(/TARGETED_DEVICE_FAMILY\s*=\s*([^;]+);/);
+    if (!family) continue;
+    const value = family[1].replace(/["\s]/g, "");
+    (/\bSDKROOT\s*=\s*watchos;/.test(settings) ? watch : ios).push(value);
+  }
+  return { ios, watch };
+}
+
 /** Check the committed native project as well as the config used by future prebuilds. */
 function validateIosDeviceSupport(config, nativeInfoPlist, xcodeProject) {
   const failures = [];
@@ -34,16 +53,15 @@ function validateIosDeviceSupport(config, nativeInfoPlist, xcodeProject) {
     failures.push("app.config.ts and Info.plist must allow iPad multitasking");
   }
 
-  const deviceFamilies = [
-    ...xcodeProject.matchAll(/TARGETED_DEVICE_FAMILY\s*=\s*([^;]+);/g),
-  ];
-  if (
-    deviceFamilies.length === 0 ||
-    deviceFamilies.some(([, value]) => value.replace(/["\s]/g, "") !== "1,2")
-  ) {
+  const { ios, watch } = deviceFamilies(xcodeProject);
+  if (ios.length === 0 || ios.some((value) => value !== "1,2")) {
     failures.push(
       "every iOS app build configuration must target iPhone and iPad (1,2)",
     );
+  }
+  // The embedded Apple Watch app (`NyxIDWatch`) is the only watchOS target.
+  if (watch.some((value) => value !== "4")) {
+    failures.push("every watchOS build configuration must target Apple Watch (4)");
   }
 
   for (const [source, infoPlist] of [
@@ -97,4 +115,4 @@ function validateIosDeviceSupport(config, nativeInfoPlist, xcodeProject) {
   return failures;
 }
 
-module.exports = { validateIosDeviceSupport };
+module.exports = { validateIosDeviceSupport, deviceFamilies };

@@ -734,6 +734,24 @@ struct Attestation {
     bundle_url: Option<String>,
 }
 
+#[cfg(test)]
+#[derive(Deserialize)]
+pub(super) struct LocalReleaseFixture {
+    pub archives: std::collections::HashMap<String, String>,
+    #[serde(flatten)]
+    attestation: Attestation,
+    #[serde(rename = "trustedRoot")]
+    root: Value,
+}
+
+#[cfg(test)]
+impl LocalReleaseFixture {
+    pub fn verify(&self, digest: &str, identity: &str) -> Result<()> {
+        let root = trust::Root::from_authenticated_json(&serde_json::to_vec(&self.root)?)?;
+        verify_single_attestation(&self.attestation, &root, digest, identity)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SigstoreBundle {
     #[serde(rename = "mediaType")]

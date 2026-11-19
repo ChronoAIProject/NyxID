@@ -1435,17 +1435,14 @@ async fn revoke_approval_grant(
             true
         }
         ReceiptOutcome::Reserved(receipt) => {
-            approval_service::revoke_grant(&state.db, &grant.user_id, &grant_id).await?;
-            crate::services::audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "approval_grant_revoked",
-                Some(serde_json::json!({
-                    "grant_id": grant_id,
-                    "owner_user_id": grant.user_id,
-                    "assistant_action": true,
-                })),
-            );
+            approval_service::revoke_grant_with_audit(
+                &state.db,
+                &grant.user_id,
+                &grant_id,
+                &crate::services::audit_service::AuditActor::from_auth_user(&auth_user),
+                approval_service::GrantRevokeSource::AssistantAction,
+            )
+            .await?;
             let _ = tele;
             mark_completed(&state.db, &receipt).await?;
             false
@@ -6002,3 +5999,7 @@ impl std::fmt::Debug for AssistantDeveloperAppResponse {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "approval_audit_tests.rs"]
+mod approval_audit_tests;

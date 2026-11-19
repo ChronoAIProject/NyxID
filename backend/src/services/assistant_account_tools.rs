@@ -702,10 +702,11 @@ impl AccountTools<'_> {
         let chat = if let Some(chat) = auth.assistant_chat.as_deref() {
             Ok(Some(chat.clone()))
         } else if auth.auth_method == AuthMethod::ApiKey {
-            Box::pin(acks::for_key_with_access(
+            Box::pin(acks::chat_for_key_version(
                 self.db,
                 &user,
                 auth.api_key_id.as_deref(),
+                auth.thread_key_version(),
                 auth.org_agent_access.as_ref(),
             ))
             .await
@@ -845,7 +846,9 @@ impl AccountTools<'_> {
     async fn mutable_key(&self, user: &str, id: &str) -> AppResult<ApiKey> {
         let key = key_service::get_api_key(self.db, user, id).await?;
         if key.platform.as_deref() == Some(ASSISTANT_PLATFORM)
-            || acks::for_key(self.db, user, Some(id)).await?.is_some()
+            || acks::chat_for_authenticated_key(self.db, &key, None)
+                .await?
+                .is_some()
         {
             return Err(AppError::ValidationError(
                 "Assistant chat keys cannot be modified by chat tools".into(),
@@ -1146,7 +1149,7 @@ impl AccountTools<'_> {
             }
             "list_nodes" | "delete_node" => Box::pin(self.dispatch_nodes(user, name, args)),
             "list_approval_configs" | "set_approval_mode" | "list_pending_approvals" => {
-                Box::pin(self.dispatch_approvals(user, name, args))
+                Box::pin(self.dispatch_approvals(user, auth, name, args))
             }
             _ => Box::pin(async { Err(AppError::NotFound("Account tool not found".into())) }),
         }
@@ -1559,7 +1562,13 @@ impl AccountTools<'_> {
         }
     }
 
-    async fn dispatch_approvals(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+    async fn dispatch_approvals(
+        &self,
+        user: &str,
+        auth: &AuthUser,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<Value> {
         match name {
             "list_approval_configs" => {
                 let rows = approval_service::list_service_approval_configs(self.db, user).await?;
@@ -1583,7 +1592,7 @@ impl AccountTools<'_> {
                 let mode = serde_json::from_value(args["approval_mode"].clone())
                     .map_err(|_| AppError::ValidationError("Invalid approval mode".into()))?;
                 let id = service.catalog_service_id.as_deref().unwrap_or(&service.id);
-                let row = approval_service::set_service_approval_config(
+                let row = approval_service::set_config(
                     self.db,
                     user,
                     id,
@@ -1592,6 +1601,10 @@ impl AccountTools<'_> {
                     Some(&mode),
                     None,
                     None,
+                    approval_service::ConfigAudit {
+                        actor: audit_service::AuditActor::from_auth_user(auth),
+                        user_service_id: Some(service.id.clone()),
+                    },
                 )
                 .await?;
                 Ok(json!({

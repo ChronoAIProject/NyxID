@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 /** Closed notification kinds; the server never sends anything else (SPEC D3). */
@@ -160,16 +162,16 @@ export function notificationReadBody(
   if ("ids" in scope) {
     const ids = [...new Set(scope.ids.filter((id) => id.length > 0))];
     if (ids.length === 0)
-      throw new Error("Choose at least one notification to mark as read.");
+      throw localizedError("Choose at least one notification to mark as read.");
     if (ids.length > MAX_NOTIFICATION_READ_IDS)
-      throw new Error(
-        `Mark at most ${MAX_NOTIFICATION_READ_IDS} notifications at once.`,
-      );
+      throw localizedError("Mark at most {{count}} notifications at once.", {
+          count: MAX_NOTIFICATION_READ_IDS,
+        });
     return { ids };
   }
   if ("source" in scope) {
     notificationSourceTypeSchema.parse(scope.source.type);
-    if (!scope.source.id) throw new Error("A source needs an identifier.");
+    if (!scope.source.id) throw localizedError("A source needs an identifier.");
     return { source: { type: scope.source.type, id: scope.source.id } };
   }
   instantSchema.parse(scope.before);
@@ -184,10 +186,18 @@ export const NOTIFICATION_FILTERS = [
 ] as const;
 export type NotificationFilter = (typeof NOTIFICATION_FILTERS)[number];
 export const NOTIFICATION_FILTER_LABELS: Record<NotificationFilter, string> = {
-  all: "All",
-  needs_you: "Needs you",
-  automations: "Automations",
-  chats: "Chats",
+  get all() {
+    return translateApp("All");
+  },
+  get needs_you() {
+    return translateApp("Needs you");
+  },
+  get automations() {
+    return translateApp("Automations");
+  },
+  get chats() {
+    return translateApp("Chats");
+  },
 };
 
 /** The closed kind subset a filter asks the server for; `All` asks for none. */

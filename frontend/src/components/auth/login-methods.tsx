@@ -21,6 +21,7 @@ export function LoginMethods({
   returnTo,
   disabled = false,
   enableEmailLogin = false,
+  allowAppHandoff = false,
   appTransport,
   onAppVerified,
   onAppOpenChange,
@@ -32,6 +33,7 @@ export function LoginMethods({
   disabled?: boolean;
   /** Display override for existing-account login; never enables registration. */
   enableEmailLogin?: boolean;
+  allowAppHandoff?: boolean;
   appTransport?: WebAuthDeviceTransport;
   onAppVerified?: () => void;
   onAppOpenChange?: (open: boolean) => void;
@@ -69,6 +71,7 @@ export function LoginMethods({
             />
           ))}
         <WebDeviceLogin
+          allowAppHandoff={allowAppHandoff}
           returnTo={returnTo}
           isOpen={appOpen}
           onOpenChange={(open) => {

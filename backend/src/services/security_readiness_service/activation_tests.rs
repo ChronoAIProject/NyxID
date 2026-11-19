@@ -718,7 +718,15 @@ async fn heartbeat_command_counts_keep_steady_state_unchanged_and_add_only_inser
     let after_new = commands.lock().unwrap().clone();
     assert_eq!(
         after_new,
-        ["update", "find", "find", "update", "find", "insert"]
+        [
+            "update",
+            "find",
+            "find",
+            "update",
+            "find",
+            "insert",
+            "commitTransaction",
+        ]
     );
     commands.lock().unwrap().clear();
     publish_observation(&db, &local, &[cap]).await.unwrap();

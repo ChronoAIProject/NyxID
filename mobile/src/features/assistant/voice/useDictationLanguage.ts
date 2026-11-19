@@ -83,7 +83,9 @@ export function useDictationLanguage(active: boolean) {
     value: savedSelected ? saved! : AUTOMATIC_DICTATION_LANGUAGE,
     resolved,
     label,
-    summary: savedSelected ? label : `${t("Device language")} · ${label}`,
+    summary: savedSelected
+      ? label
+      : t("Device language · {{label}}", { label }),
     suggested: [
       ...new Set([
         ...preferred,

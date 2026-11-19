@@ -130,21 +130,25 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         .iter()
         .map(|s| json!({"id":s.id,"label":s.label}))
         .collect();
-    let effective: Vec<_> = services
-        .iter()
-        .filter(|s| {
-            s.access != "none"
-                && agent
-                    .as_ref()
-                    .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &s.id))
-        })
-        .collect();
+    let mut effective = Vec::new();
+    let mut binding_limits_guest_services = false;
+    for service in services.iter().filter(|service| service.access != "none") {
+        if agent
+            .as_ref()
+            .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &service.id))
+        {
+            effective.push(service);
+        } else if b.guests.enabled && ready && !follows {
+            binding_limits_guest_services = true;
+        }
+    }
     let reason = crate::services::channel_bot_health::org_guest_billing(db, &b.org_id).await?;
     let health = reason
         .filter(|_| b.guests.enabled)
         .map(crate::services::channel_bot_health::guest_billing_advice);
     let mut view = json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
         "grants_ready":ready,"guest_policy_mode":if follows {"grants"} else {"legacy"},
+        "binding_limits_guest_services":binding_limits_guest_services,
         "legacy_fields_ignored":ready,"effective_guest_services":effective,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
         "delegated_service_ids":b.guests.service_ids,
         "guest_revision":b.guests.revision,"channel_status":row.status,

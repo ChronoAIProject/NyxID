@@ -109,7 +109,7 @@ pub(super) async fn prepare(
     }
     let metadata = bson::to_bson(&metadata)
         .map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?;
-    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
+    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null, "org_notice": null},
         vec![doc! {"$set": {"delivery": {"$mergeObjects": [
             {"$literal": metadata},
             {"$cond": [{"$eq": ["$gateway_replay_claimed", true]}, {"state":"replay"},
@@ -474,6 +474,11 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     };
     if d.state == "sending" {
+        if d.transport == "gateway"
+            && let Some(recovered) = preparation::gateway::recover(&state.db,event_id).await?
+        {
+            return Box::pin(text::resume_receipt(state, &recovered)).await;
+        }
         if preparation::unconfirmed(&state.db,event_id,None).await? {
             x_diagnostics::for_event(&state.db,event_id,XOutcome::ReplyUnconfirmed).await;
             audit(state,&event.user_id,"nyxbot_channel_answer_delivery",
@@ -486,18 +491,22 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     };
     let now = Utc::now();
-    events
-        .update_one(
-            doc! {"_id": event_id},
-            doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}},
-        )
-        .await?;
-    if d.state == "waiting" && d.stream_deadline <= now {
+    let checked = doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}};
+    if d.state == "waiting" {
+        // Older observers could persist the disconnect and exit before detach.
+        // The stream and replay claims still arbitrate against the release.
+        let previous = state.db.collection::<bson::Document>(EVENTS)
+            .find_one_and_update(doc! {"_id": event_id, "delivery.state": "waiting"}, checked)
+            .projection(doc! {"_id": 0, "gateway_observer_detached": 1})
+            .await?;
+        let Some(previous) = previous else { return Ok(()); };
+        if d.stream_deadline > now && previous.get_bool("gateway_observer_detached") != Ok(true) {
+            return Ok(());
+        }
         delivery::detach(&state.db, event_id).await?;
         d.state = "pending".into();
-    }
-    if d.state == "waiting" {
-        return Ok(());
+    } else {
+        events.update_one(doc! {"_id": event_id}, checked).await?;
     }
     let conversation = engine::get(
         &state.db,
@@ -936,7 +945,7 @@ pub(super) async fn dispatch_occurrence(
     channel: &NyxbotChannel,
     conversation: &AssistantConversation,
     text: &str,
-    occurrence: Option<&str>,
+    deadline: chrono::DateTime<Utc>,
 ) -> AppResult<crate::models::gateway_reply::Reply> {
     use crate::models::gateway_reply::{Observation, Outcome, Reply};
     let classified = |outcome| Reply {
@@ -983,7 +992,7 @@ pub(super) async fn dispatch_occurrence(
                 );
                 (
                     Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
-                    Some(occurrence.unwrap_or(event.id.as_str())),
+                    Some(event.id.as_str()),
                 )
             } else {
                 // Compatibility with gateways predating reply targets: the original
@@ -994,7 +1003,7 @@ pub(super) async fn dispatch_occurrence(
                 let reference = event_reference(state, event).await?;
                 (
                     Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
-                    occurrence,
+                    None,
                 )
             };
             let mut message = json!({"text": text});
@@ -1008,6 +1017,7 @@ pub(super) async fn dispatch_occurrence(
                 &message,
                 idempotency,
                 d.target_ciphertext.is_some(),
+                deadline,
             )
             .await
         })

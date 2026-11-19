@@ -19,6 +19,7 @@ use mongodb::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+const SWEEP_START_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const INLINE_BACKOFF_SECS: i64 = 30;
 const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 // Both inline attempts share the five-second deadline. Allow one more second
@@ -506,44 +507,33 @@ pub async fn reconcile(db: &Database, lago: &dyn LagoApi, ttl: u64) -> AppResult
         .await?
         .try_collect()
         .await?;
-    // Tax reads must not hold up usage emission for an entire customer batch
-    // during a provider outage. The next sweep resumes from oldest profiles.
     #[cfg(test)]
     ordering_tests::point(ordering_tests::Phase::SweepSelected).await;
     let total = rows.len();
-    let mut attempted = 0;
-    let mut completed = 0;
     let mut failures = super::recovery_batch::Failures::default();
-    let refresh_batch = async {
-        for row in rows {
-            if !super::reconcile::continue_reconcile() {
-                break;
-            }
-            attempted += 1;
-            failures.unit(async {
-                let wallet: BillingWallet = super::recovery_batch::decode(&row)?;
-                // Forced refresh bypasses the inline negative-cache backoff.
-                if let Err(error) = refresh(db, lago, &wallet, ttl).await {
-                    tracing::warn!(owner_id = %wallet.owner_id, %error, "Lago tax profile refresh failed");
-                    return Err(error);
-                }
-                Ok(())
-            }).await;
-            completed += 1;
+    let deadline = tokio::time::Instant::now() + SWEEP_START_BUDGET;
+    for (completed, row) in rows.into_iter().enumerate() {
+        if !super::reconcile::continue_reconcile() {
+            break;
         }
-    };
-    if tokio::time::timeout(std::time::Duration::from_secs(20), refresh_batch)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            attempted,
-            completed,
-            total,
-            "Lago tax refresh batch timed out"
-        );
-        // Only the interrupted unit failed; unattempted wallets are not counted.
-        failures.note(refresh_timeout());
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!(
+                attempted = completed,
+                completed,
+                remaining = total - completed,
+                "Lago tax refresh batch reached its time budget"
+            );
+            break;
+        }
+        failures.unit(async {
+            let wallet: BillingWallet = super::recovery_batch::decode(&row)?;
+            // Forced refresh bypasses the inline negative-cache backoff.
+            if let Err(error) = refresh(db, lago, &wallet, ttl).await {
+                tracing::warn!(owner_id = %wallet.owner_id, %error, "Lago tax profile refresh failed");
+                return Err(error);
+            }
+            Ok(())
+        }).await;
     }
     failures.finish(())
 }

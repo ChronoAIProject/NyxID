@@ -271,19 +271,24 @@ async fn process_messages(
         metadata.activity = activity.clone();
         // Socket-derived Discord facts accompany every admitted route. Other
         // adapters retain the existing flag-gated direct NyxBot projection.
+        let mut telegram = None;
         if let Some((_, facts)) = gateway {
             metadata.thread_context = Some(facts.clone());
         } else if !notification {
-            match super::channel_thread_service::inbound_facts(
+            match super::channel_thread_service::inbound_context(
                 state.db,
                 bot,
                 &route.api_key_id,
+                Some(&route.conversation.id),
                 adapter,
                 inbound,
             )
             .await
             {
-                Ok(facts) => metadata.thread_context = facts,
+                Ok(context) => {
+                    metadata.thread_context = context.thread;
+                    telegram = context.telegram_group;
+                }
                 Err(_) => tracing::debug!(bot_id = %bot.id, "Channel thread facts unavailable"),
             }
         }
@@ -292,12 +297,30 @@ async fn process_messages(
             metadata.thread_id = None;
             metadata.content_type = "unknown".into();
         }
+        let matched = diagnostics::Matched {
+            db: state.db,
+            bot,
+            telegram,
+            route_id: &route.conversation.id,
+        };
         let stored = if let Some((fence, _)) = gateway {
             super::channel_admission_service::store_discord(state.db, metadata, fence).await
         } else if adapter.atomic_inbound_admission() {
             super::channel_admission_service::store(state.db, metadata).await
         } else {
-            super::channel_admission_service::store_current_owner(state.db, metadata).await
+            let stored =
+                super::channel_admission_service::store_current_owner(state.db, metadata).await;
+            if matches!(stored, Ok(None)) && telegram.is_some() {
+                diagnostics::telegram_outcome(
+                    state.db,
+                    &bot.id,
+                    &bot.user_id,
+                    "telegram_group_owner_unavailable",
+                    Some(&route.conversation.id),
+                )
+                .await;
+            }
+            stored
         };
         let stored_message = match stored {
             Ok(Some(message)) => message,
@@ -324,11 +347,11 @@ async fn process_messages(
                     Ok(None) => Outcome::AdmissionRefused,
                     Err(_) => Outcome::StorageUnavailable,
                 };
-                diagnostics::record(state.db, bot, outcome).await;
+                matched.record(outcome).await;
                 continue;
             }
             Err(error) => {
-                diagnostics::record(state.db, bot, Outcome::StorageUnavailable).await;
+                matched.record(Outcome::StorageUnavailable).await;
                 tracing::error!(bot_id = %bot.id, stage = "storage", error_code = error.error_code(), "failed to admit inbound message");
                 complete = false;
                 continue;
@@ -374,7 +397,7 @@ async fn process_messages(
         {
             Ok(k) if route.conversation.platform == bot.platform => k,
             _ => {
-                diagnostics::record(state.db, bot, Outcome::CallbackKeyUnavailable).await;
+                matched.record(Outcome::CallbackKeyUnavailable).await;
                 tracing::warn!(
                     api_key_id = %route.api_key_id,
                     "API key not found for callback signing"
@@ -397,18 +420,17 @@ async fn process_messages(
             )
         });
         if notification && !extended {
-            diagnostics::checked(
-                state.db,
-                bot,
-                Outcome::StorageUnavailable,
-                super::channel_activity_service::update_callback_status(
-                    state.db,
-                    &stored_message,
-                    "not_enabled",
+            matched
+                .checked(
+                    Outcome::StorageUnavailable,
+                    super::channel_activity_service::update_callback_status(
+                        state.db,
+                        &stored_message,
+                        "not_enabled",
+                    )
+                    .await,
                 )
-                .await,
-            )
-            .await?;
+                .await?;
             continue;
         }
 
@@ -418,14 +440,17 @@ async fn process_messages(
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
-            || diagnostics::checked(
-                state.db,
-                bot,
-                Outcome::StorageUnavailable,
-                channel_relay_service::is_linked_org_nyxbot_route(state.db, &bot.id, &api_key.id)
+            || matched
+                .checked(
+                    Outcome::StorageUnavailable,
+                    channel_relay_service::is_linked_org_nyxbot_route(
+                        state.db,
+                        &bot.id,
+                        &api_key.id,
+                    )
                     .await,
-            )
-            .await?
+                )
+                .await?
         {
             None
         } else {
@@ -437,14 +462,15 @@ async fn process_messages(
             let agent_scope = crate::crypto::jwt::RelayAgentScope {
                 api_key_id: api_key.id.clone(),
                 api_key_name: api_key.name.clone(),
-                allowed_service_ids: diagnostics::checked(
-                    state.db,
-                    bot,
-                    Outcome::StorageUnavailable,
-                    crate::services::key_service::effective_allowed_service_ids(state.db, &api_key)
+                allowed_service_ids: matched
+                    .checked(
+                        Outcome::StorageUnavailable,
+                        crate::services::key_service::effective_allowed_service_ids(
+                            state.db, &api_key,
+                        )
                         .await,
-                )
-                .await?,
+                    )
+                    .await?,
                 allowed_node_ids: api_key.allowed_node_ids.clone(),
                 allow_all_services: api_key.allow_all_services,
                 allow_all_nodes: api_key.allow_all_nodes,
@@ -473,7 +499,7 @@ async fn process_messages(
             ) {
                 Ok(token) => Some(token),
                 Err(e) => {
-                    diagnostics::record(state.db, bot, Outcome::ReplyTokenUnavailable).await;
+                    matched.record(Outcome::ReplyTokenUnavailable).await;
                     tracing::error!(
                         message_id = %stored_message.id,
                         error_code = e.error_code(),
@@ -528,7 +554,7 @@ async fn process_messages(
                     current.state_version == api_key.state_version
                         && current.key_hash == api_key.key_hash
                 });
-        let current_route = diagnostics::checked(state.db,bot,Outcome::StorageUnavailable,
+        let current_route = matched.checked(Outcome::StorageUnavailable,
             state.db.collection::<crate::models::channel_conversation::ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME)
             .find_one(bson::doc! {"_id": &route.conversation.id, "user_id": &bot.user_id, "is_active": true, "agent_api_key_id": &api_key.id, "retired_by_transfer": {"$ne": true}}).await).await?;
         let route_is_current = current_route.as_ref().is_some_and(|current| {
@@ -542,7 +568,7 @@ async fn process_messages(
                 })
         });
         if !key_is_current || !route_is_current {
-            diagnostics::record(state.db, bot, Outcome::AuthorityChanged).await;
+            matched.record(Outcome::AuthorityChanged).await;
             let _ = super::channel_activity_service::update_callback_status(
                 state.db,
                 &stored_message,
@@ -551,13 +577,12 @@ async fn process_messages(
             .await;
             continue;
         }
-        diagnostics::checked(
-            state.db,
-            bot,
-            Outcome::AuthorityChanged,
-            super::ownership_transfer_service::require_current_bot(state.db, bot).await,
-        )
-        .await?;
+        matched
+            .checked(
+                Outcome::AuthorityChanged,
+                super::ownership_transfer_service::require_current_bot(state.db, bot).await,
+            )
+            .await?;
         if let Some((fence, _)) = gateway
             && !fence.current(state.db).await?
         {
@@ -570,7 +595,7 @@ async fn process_messages(
                 .is_some_and(|text| !text.trim().is_empty())
                 || !inbound.attachments.is_empty())
         {
-            diagnostics::record(state.db, bot, Outcome::CallbackPending).await;
+            matched.record(Outcome::CallbackPending).await;
         }
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
@@ -613,7 +638,7 @@ async fn process_messages(
                 } else {
                     Outcome::CallbackAccepted
                 };
-                diagnostics::record(state.db, bot, outcome).await;
+                matched.record(outcome).await;
                 let _ = super::channel_activity_service::update_callback_status(
                     state.db,
                     &stored_message,
@@ -622,7 +647,7 @@ async fn process_messages(
                 .await;
             }
             Err(e) => {
-                diagnostics::record(state.db, bot, Outcome::CallbackFailed).await;
+                matched.record(Outcome::CallbackFailed).await;
                 tracing::warn!(
                     message_id = %stored_message.id,
                     upstream_status = ?delivery.http_status,

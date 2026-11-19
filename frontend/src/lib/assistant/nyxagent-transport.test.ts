@@ -2157,6 +2157,7 @@ it.each([
   ["model_org_approval_required", "organization requires approval"],
   ["plan_entitlement_required", "Check your plan"],
   ["model_interrupted", "Some actions may already have completed"],
+  ["credential_revoked", "Review completed actions before retrying"],
   ["model_unavailable", "Choose another model"],
 ])("provides specific remedy copy for %s", (code, copy) => expect(storedError(code)).toContain(copy));
 

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { activityDecisionPresentation, type ActivityDecision } from "../assistant/assistantActivityDecision";
 import { useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -40,6 +42,7 @@ export function MachineToolCard({
   attachments?: AssistantAttachment[];
   onOpenDesktop?: (params: MachineDesktopParams) => void;
 }) {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const [ids, setIds] = useState(false);
   const [excerpt, setExcerpt] = useState(false);
@@ -121,43 +124,50 @@ export function MachineToolCard({
   }
   const image = attachments.find((a) => a.id === receipt.screenshot_id);
   return (
-    <View accessibilityLabel="Machine action" style={styles.receipt}>
+    <View accessibilityLabel={translateApp("Machine action")}
+      style={styles.receipt}>
       <SettingsGroup inset={false}>
         <SettingsRow
           label={receipt.action.replaceAll(".", " · ").replaceAll("_", " ")}
           value={gated?.label ?? receipt.status}
         />
         {receipt.exit_code != null ? (
-          <SettingsRow label="Exit code" value={String(receipt.exit_code)} />
+          <SettingsRow label={translateApp("Exit code")}
+            value={String(receipt.exit_code)} />
         ) : null}
         {receipt.bytes != null ? (
           <SettingsRow
-            label="Output"
-            value={`${receipt.bytes.toLocaleString()} bytes`}
+            label={translateApp("Output")}
+            value={translateApp("{{size}} bytes", {
+              size: receipt.bytes.toLocaleString(appLocale()),
+            })}
           />
         ) : null}
         <SettingsRow
           label={
             receipt.machine_name?.trim() ||
-            `Machine ${receipt.node_id.slice(0, 8)}`
+            translateApp("Machine {{machineId}}", {
+              machineId: receipt.node_id.slice(0, 8),
+            })
           }
           detail={
             receipt.context_mode === "separated"
-              ? "Separate workspace and browser for this agent"
-              : receipt.context_mode === "unknown" ? "Workspace details unavailable" : "Shared workspace and browser"
+              ? translateApp("Separate workspace and browser for this agent")
+              : receipt.context_mode === "unknown" ? translateApp("Workspace details unavailable")
+                : translateApp("Shared workspace and browser")
           }
         />
         <Disclosure
-          label="Correlation IDs"
+          label={translateApp("Correlation IDs")}
           open={ids}
           onPress={() => setIds(!ids)}
         />
         {ids
           ? [
-              ["Machine", receipt.node_id],
-              ["Agent", receipt.agent_id],
-              ["Operation", receipt.operation_id],
-              ["Job", receipt.job_id],
+              [translateApp("Machine"), receipt.node_id],
+              [translateApp("Agent"), receipt.agent_id],
+              [translateApp("Operation"), receipt.operation_id],
+              [translateApp("Job"), receipt.job_id],
             ]
               .filter(([, v]) => v)
               .map(([label, value]) => (
@@ -171,14 +181,14 @@ export function MachineToolCard({
           : null}
         {receipt.preview_id && root ? (
           <Disclosure
-            label={`${excerpt ? "Hide" : "Show"} saved excerpt`}
+            label={(excerpt ? translateApp("Hide saved excerpt") : translateApp("Show saved excerpt"))}
             open={excerpt}
             onPress={() => setExcerpt(!excerpt)}
           />
         ) : null}
         {command && root ? (
           <Disclosure
-            label="Command excerpt preference"
+            label={translateApp("Command excerpt preference")}
             open={preference}
             onPress={() => setPreference(!preference)}
           />
@@ -186,7 +196,9 @@ export function MachineToolCard({
       </SettingsGroup>
       {gated ? <Notice message={gated.detail} /> : null}
       {(!gated || gated.status === "error") && receipt.error_code != null ? (
-        <Notice tone="error" message={`Machine error ${receipt.error_code}`} />
+        <Notice tone="error" message={translateApp("Machine error {{code}}", {
+            code: receipt.error_code,
+          })} />
       ) : null}
       {image ? (
         <AssistantAttachmentView
@@ -205,16 +217,18 @@ export function MachineToolCard({
       {command && root && preference ? (
         <SettingsGroup
           inset={false}
-          footer="Off by default. Save bounded, redacted output from future commands in this conversation for up to 30 days. Output can contain private data."
+          footer={translateApp(
+            "Off by default. Save bounded, redacted output from future commands in this conversation for up to 30 days. Output can contain private data.",
+          )}
         >
           <SettingsRow
             tone="action"
             label={
               saving
-                ? "Saving…"
+                ? translateApp("Saving…")
                 : policy.data?.enabled
-                  ? "Stop saving excerpts"
-                  : "Save future excerpts"
+                  ? translateApp("Stop saving excerpts")
+                  : translateApp("Save future excerpts")
             }
             disabled={
               !runtime.active || saving || !policy.data || policy.isFetching
@@ -224,10 +238,12 @@ export function MachineToolCard({
         </SettingsGroup>
       ) : null}
       {command && root && preference && error ? (
-        <Notice tone="error" message="Could not change excerpt preference." />
+        <Notice tone="error" message={translateApp("Could not change excerpt preference.")}
+        />
       ) : null}
       {command && root && preference && policy.isError ? (
-        <Notice tone="error" message="Could not load excerpt preference." />
+        <Notice tone="error" message={translateApp("Could not load excerpt preference.")}
+        />
       ) : null}
       {onOpenDesktop ? (
         <MachineDesktopEntries
@@ -248,6 +264,7 @@ function Disclosure({
   open: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const Icon = open ? ChevronDown : ChevronRight;
   return (
@@ -267,6 +284,7 @@ export function CommandExcerpt({
   endpoint: string;
   active: boolean;
 }) {
+  useAppLanguage();
   const [text, setText] = useState<string>();
   const [failed, setFailed] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -294,13 +312,13 @@ export function CommandExcerpt({
   return (
     <Label selectable mono accessibilityLiveRegion="polite">
       {!active
-        ? "Excerpt unavailable."
+        ? translateApp("Excerpt unavailable.")
         : expired
-          ? "Command excerpt expired per retention policy."
+          ? translateApp("Command excerpt expired per retention policy.")
           : failed
-            ? "Excerpt unavailable."
+            ? translateApp("Excerpt unavailable.")
             : text === undefined
-              ? "Loading excerpt…"
+              ? translateApp("Loading excerpt…")
               : text}
     </Label>
   );

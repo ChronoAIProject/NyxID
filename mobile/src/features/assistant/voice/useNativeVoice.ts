@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../../i18n/useLocalizedState";
+import { localizedError } from "../../../i18n/localizedError";
+import { translateApp } from "../../../i18n/appTranslation";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
@@ -64,7 +67,7 @@ export function useNativeVoice(
   const [holding, setHolding] = useState(false);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [microphonePermission, setMicrophonePermission] =
     useState<MicrophonePermission>();
   const permissionState = useRef(microphonePermission);
@@ -131,16 +134,16 @@ export function useNativeVoice(
   const quieting = (open: boolean) => (open ? sameScope() : sameChat());
 
   function reportError(
-    message?: string,
+    message?: string | (() => string),
     nextRecovery?: VoiceStartRecovery,
     origin: "call" | "status" | "playback" = "call",
   ) {
     errorOrigin.current = message || nextRecovery ? origin : undefined;
-    setError(message);
+    setError(typeof message === 'function' ? message : message === undefined ? undefined : () => translateApp(message));
     setRecovery(nextRecovery);
   }
 
-  function reportStatusError(message?: string) {
+  function reportStatusError(message?: string | (() => string)) {
     if (errorOrigin.current === "call") return;
     reportError(message, undefined, "status");
   }
@@ -337,9 +340,9 @@ export function useNativeVoice(
               return;
             stopRef.current();
             reportError(
-              translate.current(
+              () => (translateApp(
                 "The call ended while NyxID was in the background. Start a new call.",
-              ),
+              )),
             );
           });
         }
@@ -377,13 +380,13 @@ export function useNativeVoice(
       stopRef.current();
       if (hadVoiceWork)
         reportError(
-          translate.current(
+          () => (translateApp(
             wasConnecting
               ? "The call ended because NyxID went to the background while it was still connecting."
               : Platform.OS === "android"
                 ? "The call ended because NyxID went to the background. Android can't keep the microphone on in the background."
                 : "The call ended because this voice service can't keep the microphone on in the background.",
-          ),
+          )),
         );
     });
     return () => {
@@ -510,7 +513,7 @@ export function useNativeVoice(
       if (!selected?.available)
         throw new Error(
           selected?.unavailable_reason ??
-            "This voice source is no longer available.",
+            translateApp("This voice source is no longer available."),
         );
       if (
         !savedPreferences ||
@@ -548,9 +551,9 @@ export function useNativeVoice(
             if (permissionAttempt.current !== attempt) return;
             stopRef.current();
             reportError(
-              translate.current(
+              () => (translateApp(
                 "Microphone permission took too long. Try voice again and respond to the permission prompt.",
-              ),
+              )),
             );
           }, MICROPHONE_PERMISSION_TIMEOUT_MS);
           permission = await Camera.requestMicrophonePermissionsAsync();
@@ -646,10 +649,10 @@ export function useNativeVoice(
         onInputChanged: (enabled) => {
           if (valid() && current.current === next) setInputEnabled(enabled);
         },
-        onError: (message, nextRecovery, kind) => {
+        onError: (message, nextRecovery, kind, source) => {
           if (valid())
             reportError(
-              message,
+              source ?? (() => translateApp(message)),
               nextRecovery,
               kind === "conflict" ? "status" : (kind ?? "call"),
             );
@@ -712,17 +715,17 @@ export function useNativeVoice(
     } catch (cause) {
       if (ownsOperation())
         reportError(
-          cause &&
+          () => (cause &&
             typeof cause === "object" &&
             "name" in cause &&
             cause.name === "VoiceRequestTimeoutError"
-            ? translate.current("Voice could not start. Try again.")
+            ? translateApp("Voice could not start. Try again.")
             : cause &&
                 typeof cause === "object" &&
                 "message" in cause &&
                 typeof cause.message === "string"
               ? cause.message
-              : "Voice could not start. Try again.",
+              : translateApp("Voice could not start. Try again.")),
         );
     } finally {
       // A deadline abort still owns its UI until a newer action takes over.
@@ -785,7 +788,9 @@ export function useNativeVoice(
     ) {
       if (manual)
         reportStatusError(
-          "The previous voice start is still settling. Check again shortly.",
+          () => (translateApp(
+            "The previous voice start is still settling. Check again shortly.",
+          )),
         );
       return false;
     }
@@ -985,7 +990,9 @@ export function useNativeVoice(
       if (ownsOperation()) {
         remember({ ...priorTarget, unknown: true }, owner);
         reportStatusError(
-          "Call status could not be verified. Check status again before starting voice.",
+          () => (translateApp(
+            "Call status could not be verified. Check status again before starting voice.",
+          )),
         );
       }
       return false;
@@ -1042,7 +1049,7 @@ export function useNativeVoice(
               controller.signal,
             ),
           );
-          if (next.id !== conflict.id) throw new Error("Voice session changed");
+          if (next.id !== conflict.id) throw localizedError("Voice session changed");
           if (valid()) {
             const terminal = next.state === "closed" || next.state === "failed";
             setConfirmedEnded(terminal);
@@ -1063,7 +1070,9 @@ export function useNativeVoice(
         } catch {
           if (!valid()) return false;
           reportError(
-            "The existing call could not be ended. Refresh its state and try again.",
+            () => (translateApp(
+              "The existing call could not be ended. Refresh its state and try again.",
+            )),
           );
           try {
             const active = await discoverActiveVoiceCall(
@@ -1092,7 +1101,9 @@ export function useNativeVoice(
     } catch {
       if (ownsOperation())
         reportError(
-          "Ending the call could not be confirmed. Return to chat or check status again.",
+          () => (translateApp(
+            "Ending the call could not be confirmed. Return to chat or check status again.",
+          )),
         );
       return false;
     } finally {
@@ -1125,7 +1136,11 @@ export function useNativeVoice(
       if (valid()) refresh();
     } catch {
       if (valid())
-        reportError("The task could not be stopped. Try again from the chat.");
+        reportError(
+          () => (translateApp(
+            "The task could not be stopped. Try again from the chat.",
+          )),
+        );
     } finally {
       if (taskCancellations.current.get(id) === controller)
         taskCancellations.current.delete(id);
@@ -1150,11 +1165,11 @@ export function useNativeVoice(
       void Linking.openSettings().catch(() => {
         if (sameScope())
           reportError(
-            translate.current(
+            () => (translateApp(
               Platform.OS === "ios"
                 ? "Open Settings › NyxID Mobile › Microphone to allow microphone access."
                 : "Open Settings › Apps › NyxID Mobile › Permissions › Microphone to allow microphone access.",
-            ),
+            )),
           );
       });
     },
@@ -1192,7 +1207,7 @@ export function useNativeVoice(
       if (!sameScope()) return;
       if (
         current.current &&
-        error === "Tap Resume audio to hear the assistant."
+        error === translateApp("Tap Resume audio to hear the assistant.")
       )
         reportError();
       return current.current?.resumeAudio();

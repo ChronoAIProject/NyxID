@@ -298,6 +298,51 @@ async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exa
 }
 
 #[tokio::test]
+async fn approved_node_proposal_refused_at_writer_is_terminal_not_sent() {
+    use crate::services::node_service;
+    let (f, row) = assistant("proposal_node_refusal").await;
+    let db = &f.state.db;
+    let (_, token, _) =
+        node_service::create_registration_token(db, &f.owner, "proposal-node", 5, 120)
+            .await
+            .unwrap();
+    let (node, _, _) = node_service::register_node(db, &f.state.encryption_keys, &token, None)
+        .await
+        .unwrap();
+    db.collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id":&f.connection},
+            doc! {"$set":{"node_id":&node.id}},
+        )
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    test_utils::register_test_node_connection(&f.state, &node.id, tx).await;
+    let _ = f.call("/proxy/s/execution-fixture/status").await;
+    let request = proposal(&f).await;
+    proposals::decide(
+        &f.state,
+        &f.owner,
+        &request.id,
+        &decision(&request, "persistent"),
+    )
+    .await
+    .unwrap();
+    finish(&f, &row, "Waiting").await;
+    let resumed = event_turn(&f, &row).await;
+    drop(rx);
+    let text = resume(&f, &resumed).await;
+    assert!(text.contains("Nothing was sent"), "{text}");
+    let result = proposal(&f).await;
+    let terminal = proposals::proposal(&result).unwrap();
+    assert_eq!(terminal.state, "not_sent");
+    assert_eq!(terminal.failure_code.as_deref(), Some("operation_not_sent"));
+    assert!(resume(&f, &resumed).await.contains("not sent"));
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_even_persistent() {
     let (f, row) = assistant("execution_proposal_duplicates").await;
     let _ = f.call("/proxy/s/execution-fixture/status").await;

@@ -7,6 +7,7 @@ import {
 } from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { useChatColumn } from "../display/ChatLayoutContext";
+import { FloatingButton } from "../../components/FloatingControl";
 
 /** Private and crew pages use the same transcript rhythm and composer grid. */
 export const chatSurfaceStyles = StyleSheet.create({
@@ -110,12 +111,21 @@ export function ChatIconButton({
   label,
   onPress,
   disabled,
+  floating = false,
 }: {
   children: ReactNode;
   label: string;
   onPress: () => void;
   disabled?: boolean;
+  /** Header bars: the shared floating glass button (a 44pt capsule). */
+  floating?: boolean;
 }) {
+  if (floating)
+    return (
+      <FloatingButton accessibilityLabel={label} onPress={onPress} disabled={disabled}>
+        {children}
+      </FloatingButton>
+    );
   return (
     <Pressable
       accessibilityRole="button"

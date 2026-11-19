@@ -36,7 +36,9 @@ jobs:
     name: Coverage PR Comment
     # Only PR-triggered CI runs carry a coverage payload + PR number. Skips
     # push / workflow_call (release-gate) runs.
-    if: github.event.workflow_run.event == 'pull_request'
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0].base.ref != 'dev'
     runs-on: ubuntu-latest
     steps:
       - name: Download prebuilt coverage comment
@@ -47,7 +49,7 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: payload
-        # A docs-only PR (or a CI run that died before the payload job) has no
+        # A fast dev PR (or a run that ended before producing coverage) has no
         # artifact -- that's expected, not a failure.
         continue-on-error: true
 

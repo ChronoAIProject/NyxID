@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import {
@@ -27,6 +29,7 @@ export function MachineDesktopEntries({
   conversationId?: string;
   onOpen: (params: MachineDesktopParams) => void;
 }) {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const query = useQuery({
     queryKey: [
@@ -71,7 +74,7 @@ export function MachineDesktopEntries({
     refetchIntervalInBackground: false,
   });
   const displayName = (display: "secure" | "dev") =>
-    display === "dev" ? "Developer" : "Secure";
+    display === "dev" ? translateApp("Developer") : translateApp("Secure");
   if (query.error)
     return <Notice tone="error" message={machineError(query.error)} />;
   if (query.isPending)
@@ -81,22 +84,29 @@ export function MachineDesktopEntries({
         icon={false}
         detail={false}
         title
-        accessibilityLabel="Checking desktop sessions"
+        accessibilityLabel={translateApp("Checking desktop sessions")}
       />
     );
   return (
     <SettingsGroup
-      title="Desktop"
+      title={translateApp("Desktop")}
       inset={false}
-      footer="Viewing leaves the task running. Desktop availability is checked when opened."
+      footer={translateApp(
+        "Viewing leaves the task running. Desktop availability is checked when opened.",
+      )}
     >
       {query.data?.rows.map((row) => (
         <SettingsRow
           key={row.session_id}
-          label={`${displayName(row.display)} desktop`}
+          label={translateApp("{{displayName}} desktop", {
+            displayName: displayName(row.display),
+          })}
           value={row.status}
-          accessibilityLabel={`View desktop · ${displayName(row.display)} · ${row.status}`}
-          accessibilityHint="Opens the live desktop viewer"
+          accessibilityLabel={translateApp(
+            "View desktop · {{displayName}} · {{code}}",
+            { displayName: displayName(row.display), code: row.status },
+          )}
+          accessibilityHint={translateApp("Opens the live desktop viewer")}
           disabled={!runtime.active}
           onPress={() => onOpen(desktopEntryParams(row, conversationId))}
         />
@@ -116,9 +126,21 @@ export function MachineDesktopEntries({
               <SettingsRow
                 key={`${context.context_id}:${display}`}
                 label={context.agent_name}
-                detail={`${context.actor_label} · ${displayName(display)} desktop`}
-                accessibilityLabel={`View desktop · ${context.agent_name} · ${context.actor_label} · ${displayName(display)}`}
-                accessibilityHint="Opens the live desktop viewer"
+                detail={translateApp("{{label}} · {{displayName}} desktop", {
+                  label: context.actor_label,
+                  displayName: displayName(display),
+                })}
+                accessibilityLabel={translateApp(
+                  "View desktop · {{agentName}} · {{label}} · {{displayName}}",
+                  {
+                    agentName: context.agent_name,
+                    label: context.actor_label,
+                    displayName: displayName(display),
+                  },
+                )}
+                accessibilityHint={translateApp(
+                  "Opens the live desktop viewer",
+                )}
                 disabled={!runtime.active}
                 onPress={() =>
                   onOpen({ nodeId, contextId: context.context_id, display })
@@ -131,11 +153,12 @@ export function MachineDesktopEntries({
         !query.data.rows.length &&
         !query.data.contexts.length &&
         (conversationId ? (
-          <SettingsRow label="No desktop is linked to this conversation." />
+          <SettingsRow label={translateApp("No desktop is linked to this conversation.")}
+          />
         ) : (
           <SettingsRow
-            label="View Desktop"
-            accessibilityHint="Opens the live desktop viewer"
+            label={translateApp("View Desktop")}
+            accessibilityHint={translateApp("Opens the live desktop viewer")}
             disabled={!runtime.active}
             onPress={() => onOpen({ nodeId })}
           />

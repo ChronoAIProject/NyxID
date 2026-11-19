@@ -261,6 +261,7 @@ mod tests {
     #[tokio::test]
     async fn from_config_builds_correctly() {
         let config = crate::config::AppConfig {
+            crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,

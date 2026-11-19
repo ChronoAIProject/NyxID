@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_bot::ChannelBot;
+use crate::models::channel_bot::{ChannelBot, ChannelInboundOutcome};
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 
 /// Stable `diagnostics.failure_reason` and `last_outbound_error.reason` codes.
@@ -124,7 +124,7 @@ pub struct HealthFacts<'a> {
     pub failure_reason: Option<&'a str>,
     pub outbound_reason: Option<&'a str>,
     pub thread_reason: Option<&'a str>,
-    pub inbound_outcome: Option<&'a str>,
+    pub inbound_outcome: Option<&'a ChannelInboundOutcome>,
     pub subscription_registered: Option<bool>,
     pub backoff_active: bool,
     /// The bot is delivered through the Agent Event Gateway.
@@ -137,11 +137,10 @@ impl<'a> HealthFacts<'a> {
         Self {
             org_guest_billing: None,
             platform: &bot.platform,
-            inbound_outcome: bot
-                .diagnostics
-                .last_inbound_outcome
-                .as_ref()
-                .map(|o| o.code.as_str()),
+            inbound_outcome: bot.diagnostics.last_inbound_outcome.as_ref().filter(|o| {
+                !o.code.starts_with("telegram_group_")
+                    || bot.diagnostics.last_inbound_at.is_none_or(|at| o.at >= at)
+            }),
             status: &bot.status,
             webhook_registered: bot.webhook_registered,
             failure_reason: bot.diagnostics.failure_reason.as_deref(),
@@ -336,6 +335,71 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
     })
 }
 
+fn telegram_group_advice(outcome: &ChannelInboundOutcome) -> Option<Recommendation> {
+    let (action, text) = match outcome.code.as_str() {
+        "telegram_group_route_outside_source" => (
+            "verify",
+            "The selected route uses the gateway key, but the connected NyxBot only receives its registered route. Check the destination of this group’s route in Conversation Routes.",
+        ),
+        "telegram_group_other_agent" => (
+            "verify",
+            "The group message went to another agent key. Open Conversation Routes and check the assigned agent. Choose View messages to see its callback status.",
+        ),
+        "telegram_group_partition_missing" => (
+            "gateway",
+            "NyxBot could not find the gateway conversation for this group. Check this bot’s connection status under Channels in NyxBot. If it is active and the problem repeats, contact support.",
+        ),
+        "telegram_group_source_refused" | "telegram_group_provider_refused" => (
+            "gateway",
+            "NyxBot declined the gateway request before starting a turn. Check this bot’s connection status under Channels in NyxBot. If it is active and the problem repeats, contact support.",
+        ),
+        "telegram_group_callback_refused" => (
+            "verify",
+            "The receiver declined the group message. Under Conversation Routes, choose View messages on the group’s route to review the callback.",
+        ),
+        "telegram_group_authority_changed" | "telegram_group_callback_key_unavailable" => (
+            "verify",
+            "NyxID could not verify the route before sending the message. Check the active route and its assigned agent in Conversation Routes.",
+        ),
+        "telegram_group_owner_unavailable" => (
+            "verify",
+            "NyxID could not save the group message because its owner account was unavailable. If the account is active and this happens again, contact support.",
+        ),
+        "telegram_group_storage_unavailable" => (
+            "verify",
+            "NyxID could not save the group message. Send a new message. If it also fails, contact support.",
+        ),
+        "telegram_group_reply_token_unavailable" | "telegram_group_callback_failed" => (
+            "verify",
+            "NyxID could not deliver the group callback. Under Conversation Routes, choose View messages on the group’s route and check the callback status.",
+        ),
+        "telegram_group_processing_failed" => (
+            "verify",
+            "NyxBot could not process the group message. Send a new message. If it also fails, contact support.",
+        ),
+        "telegram_group_owner_absent" => (
+            "verify",
+            "This group is waiting for its verified owner or organization admin to speak. Address the bot in the group from the verified account.",
+        ),
+        "telegram_group_members_refused"
+        | "telegram_group_sender_refused"
+        | "telegram_group_policy_refused" => (
+            "verify",
+            "NyxBot declined this sender’s group message. In NyxBot, open Channels, choose this chat and check Who can talk.",
+        ),
+        "telegram_group_bot_budget" => (
+            "verify",
+            "The group reached its limit for bot-to-bot messages. Have a person address the bot before trying another handoff.",
+        ),
+        _ => return None,
+    };
+    let text = match &outcome.route_id {
+        Some(route) => format!("{text} Selected route ID {route}."),
+        None => text.to_owned(),
+    };
+    Some(advice(action, text))
+}
+
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     if let Some(code) = facts.failure_reason
@@ -375,11 +439,35 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
         _ => {},
     }
     match facts.outbound_reason {
+        Some(reason @ ("gateway_reply_no_response" | "gateway_reply_no_response_pending"
+            | "gateway_reply_server_error" | "gateway_reply_server_error_pending"
+            | "gateway_reply_unreadable_response" | "gateway_reply_unreadable_response_pending"
+            | "gateway_reply_interrupted" | "gateway_reply_interrupted_pending")) => {
+            let observed = match reason {
+                "gateway_reply_no_response" | "gateway_reply_no_response_pending" => "No response came back from the gateway.",
+                "gateway_reply_server_error" | "gateway_reply_server_error_pending" => "The gateway returned a server error.",
+                "gateway_reply_unreadable_response" | "gateway_reply_unreadable_response_pending" => "The gateway response could not be read.",
+                _ => "NyxID stopped before recording the gateway response.",
+            };
+            let progress = match reason {
+                "gateway_reply_no_response_pending" | "gateway_reply_server_error_pending"
+                | "gateway_reply_unreadable_response_pending" | "gateway_reply_interrupted_pending" => "NyxBot is still trying with the same reply.",
+                _ => "Delivery could not be confirmed before checking stopped.",
+            };
+            return advice("none", format!("{observed} {progress} No action is needed unless a later reply has the same problem; if it does, report it to NyxID support."));
+        }
         Some("gateway_reply_unconfirmed") => return advice("none", "The gateway accepted this reply, but delivery was not confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
         Some("gateway_reply_unavailable") => return advice("none", "The gateway was temporarily unavailable. This reply has no confirmed delivery. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
         Some("gateway_reply_rejected") => return advice("none", "The gateway refused this reply. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
         Some("gateway_reply_unknown") => return advice("none", "Delivery of this reply could not be confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
         _ => {}
+    }
+    if facts.gateway
+        && facts.org_guest_billing.is_none()
+        && super::channel_platform::canonical_platform(facts.platform) == "telegram"
+        && let Some(recommendation) = facts.inbound_outcome.and_then(telegram_group_advice)
+    {
+        return recommendation;
     }
     // Preserve existing gateway advice when no org-guest billing fact was added.
     if facts.gateway && facts.org_guest_billing.is_none() {
@@ -395,7 +483,8 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     {
         return found;
     }
-    if facts.inbound_outcome == Some("x_bot_inactive") {
+    let inbound_code = facts.inbound_outcome.map(|o| o.code.as_str());
+    if inbound_code == Some("x_bot_inactive") {
         return super::channel_inbound_diagnostics::recommendation("x_bot_inactive")
             .expect("mapped code");
     }
@@ -420,10 +509,7 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     if facts.backoff_active {
         return for_code(codes::RATE_LIMITED, facts, false).expect("mapped code");
     }
-    if let Some(found) = facts
-        .inbound_outcome
-        .and_then(super::channel_inbound_diagnostics::recommendation)
-    {
+    if let Some(found) = inbound_code.and_then(super::channel_inbound_diagnostics::recommendation) {
         return found;
     }
     if let Some(reason) = facts.org_guest_billing {

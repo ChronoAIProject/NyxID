@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { OverflowScrollView } from "../../components/workspace/ScrollEdgeFades";
 import { useEffect, useState } from "react";
 import {
@@ -27,6 +28,7 @@ export function AssistantPendingUploads({
   disabled: boolean;
   showMentionHandles?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const chipHeight = Math.max(
@@ -72,7 +74,9 @@ export function AssistantPendingUploads({
                   {image ? (
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`Preview ${row.file.name}`}
+                      accessibilityLabel={t("Preview {{name}}", {
+                        name: row.file.name,
+                      })}
                       onPress={() => setPreview(row)}
                     >
                       <Image
@@ -110,7 +114,9 @@ export function AssistantPendingUploads({
                 </View>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Remove ${row.file.name}`}
+                  accessibilityLabel={t("Remove {{name}}", {
+                    name: row.file.name,
+                  })}
                   accessibilityState={{ disabled }}
                   disabled={disabled}
                   onPress={() => remove(row.key)}
@@ -126,8 +132,8 @@ export function AssistantPendingUploads({
       ) : null}
       <AssistantImagePreview
         uri={preview?.file.uri}
-        label={preview?.file.name ?? "Image"}
-        closeLabel="Close file preview"
+        label={preview?.file.name ?? t("Image")}
+        closeLabel={t("Close file preview")}
         onClose={() => setPreview(undefined)}
       />
     </>

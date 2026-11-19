@@ -55,6 +55,8 @@ export interface SecurityPreferences {
 }
 
 export interface ProfileConfig {
+  /** Display state only; never enables analytics on this device. */
+  readonly analytics?: { readonly prompt_seen: boolean };
   readonly security?: SecurityPreferences;
   readonly services_view?: ServiceViewFilters | null;
   readonly service_views?: ServiceViewsPreferences | null;
@@ -787,6 +789,7 @@ export interface PublicConfig {
   readonly telemetry_dsn?: string;
   readonly telemetry_host?: string;
   readonly telemetry_share_analytics?: boolean;
+  readonly crash_diagnostics_offered?: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";

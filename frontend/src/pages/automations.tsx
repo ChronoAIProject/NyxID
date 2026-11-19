@@ -1076,6 +1076,6 @@ function AutomationHistory({
 }
 
 function automationPauseReason(reason: string): string {
-  if (["insufficient_credits", "wallet_suspended", "plan_entitlement_required", "credential_invalid", "model_unavailable", "model_not_configured"].includes(reason)) return storedError(reason);
+  if (["insufficient_credits", "wallet_suspended", "plan_entitlement_required", "credential_invalid", "credential_revoked", "model_unavailable", "model_not_configured"].includes(reason)) return storedError(reason);
   return reason.replaceAll("_", " ");
 }

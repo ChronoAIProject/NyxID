@@ -110,6 +110,57 @@ pub struct CmaSandbox {
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
+/// Request-local authority evidence. It is never persisted or used by management.
+pub(super) struct CmaSandboxProvenance {
+    pub(super) id: String,
+    body: Value,
+}
+
+impl CmaSandboxProvenance {
+    pub(super) fn created_before(&self, owner: &str, cutoff: DateTime<Utc>) -> bool {
+        let value = self.body.get("sandbox").unwrap_or(&self.body);
+        if value.get("id").and_then(Value::as_str) != Some(self.id.as_str())
+            || value.get("owner").and_then(Value::as_str) != Some(owner)
+            || ["owner_id", "user_id"].iter().any(|field| {
+                value
+                    .get(field)
+                    .is_some_and(|value| value.as_str() != Some(owner))
+            })
+            || value
+                .get("sandbox_id")
+                .is_some_and(|value| value.as_str() != Some(self.id.as_str()))
+            || value
+                .get("access")
+                .is_some_and(|value| value.as_str() != Some("personal"))
+            || value
+                .get("shared")
+                .is_some_and(|value| value.as_bool() != Some(false))
+        {
+            return false;
+        }
+        if self.body.get("sandbox").is_some()
+            && [
+                "id",
+                "owner",
+                "owner_id",
+                "user_id",
+                "created_at",
+                "access",
+                "shared",
+            ]
+            .iter()
+            .any(|field| {
+                self.body
+                    .get(field)
+                    .is_some_and(|outer| value.get(field) != Some(outer))
+            })
+        {
+            return false;
+        }
+        date(value, "created_at").is_some_and(|created_at| created_at < cutoff)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CmaPage<T> {
     pub items: Vec<T>,
@@ -265,13 +316,6 @@ pub trait CmaGateway: Send + Sync {
         _owner_id: &str,
         _cursor: Option<&str>,
     ) -> CmaResult<CmaPage<CmaAgent>> {
-        Err(CmaGatewayError::Unavailable)
-    }
-    async fn get_workspace_sandbox(
-        &self,
-        _owner_id: &str,
-        _workspace_id: &str,
-    ) -> CmaResult<String> {
         Err(CmaGatewayError::Unavailable)
     }
     async fn write_agent_file(
@@ -430,6 +474,49 @@ impl CatalogCmaGateway {
             native_authority: None,
             watch_authority: None,
         }
+    }
+
+    pub(super) async fn get_sandbox_provenance(
+        &self,
+        owner: &str,
+        sandbox: &str,
+    ) -> CmaResult<CmaSandboxProvenance> {
+        let (_, body) = self
+            .request(
+                owner,
+                reqwest::Method::GET,
+                &["api", "v1", "sandboxes", sandbox],
+                None,
+                None,
+            )
+            .await?;
+        let observed = parse_exact_sandbox(body.get("sandbox").unwrap_or(&body), owner, sandbox)?;
+        Ok(CmaSandboxProvenance {
+            id: observed.id,
+            body,
+        })
+    }
+
+    pub(super) async fn get_workspace_provenance(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> CmaResult<CmaSandboxProvenance> {
+        let (_, body) = self
+            .request(
+                owner,
+                reqwest::Method::GET,
+                &["api", "v1", "workspaces", workspace_id],
+                None,
+                None,
+            )
+            .await?;
+        let workspace = body.get("workspace").unwrap_or(&body);
+        if id(workspace, "id")? != workspace_id {
+            return Err(CmaGatewayError::InvalidResponse);
+        }
+        self.get_sandbox_provenance(owner, &id(workspace, "sandbox_id")?)
+            .await
     }
 
     pub(crate) fn with_native_authority(
@@ -2135,24 +2222,6 @@ impl CmaGateway for CatalogCmaGateway {
                 .collect::<CmaResult<Vec<_>>>()?,
             next_cursor: next_cursor(&body)?,
         })
-    }
-    async fn get_workspace_sandbox(&self, owner_id: &str, workspace_id: &str) -> CmaResult<String> {
-        let (_, body) = self
-            .request(
-                owner_id,
-                reqwest::Method::GET,
-                &["api", "v1", "workspaces", workspace_id],
-                None,
-                None,
-            )
-            .await?;
-        let workspace = body.get("workspace").unwrap_or(&body);
-        if id(workspace, "id")? != workspace_id {
-            return Err(CmaGatewayError::InvalidResponse);
-        }
-        let sandbox_id = id(workspace, "sandbox_id")?;
-        self.get_sandbox_authority(owner_id, &sandbox_id).await?;
-        Ok(sandbox_id)
     }
     async fn write_agent_file(
         &self,

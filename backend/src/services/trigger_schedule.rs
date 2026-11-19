@@ -577,9 +577,51 @@ pub async fn finish(
     reason: Option<&str>,
     frontend: &str,
 ) -> AppResult<()> {
+    finish_matching(
+        db,
+        doc! {"_id": run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
+        outcome,
+        reason,
+        frontend,
+    )
+    .await
+}
+
+pub async fn finish_thread_result(
+    db: &Database,
+    run: &TriggerRun,
+    error: Option<&str>,
+    frontend: &str,
+) -> AppResult<()> {
+    finish_matching(
+        db,
+        doc! {
+            "_id": &run.id,
+            "user_id": &run.user_id,
+            "thread_id": &run.thread_id,
+            "turn_id": &run.turn_id,
+            "outcome": RunOutcome::Started.as_str(),
+        },
+        if error.is_some() {
+            RunOutcome::Failed
+        } else {
+            RunOutcome::Completed
+        },
+        error,
+        frontend,
+    )
+    .await
+}
+
+async fn finish_matching(
+    db: &Database,
+    filter: Document,
+    outcome: RunOutcome,
+    reason: Option<&str>,
+    frontend: &str,
+) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     let work_db = db.clone();
-    let run_id = run_id.to_owned();
     let reason = reason.map(str::to_owned);
     let frontend = frontend.to_owned();
     let run = session
@@ -587,7 +629,7 @@ pub async fn finish(
         .and_run2(async move |session| {
             let result = Box::pin(finish_update(
                 &work_db,
-                doc! {"_id": &run_id, "outcome": {"$in": ["pending", "started", "waiting"]}},
+                filter.clone(),
                 outcome,
                 reason.as_deref(),
                 &frontend,

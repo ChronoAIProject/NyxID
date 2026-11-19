@@ -83,6 +83,8 @@ pub struct ChannelBotDiagnostics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelInboundOutcome {
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub at: DateTime<Utc>,
 }

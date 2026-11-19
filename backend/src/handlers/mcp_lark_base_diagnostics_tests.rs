@@ -397,6 +397,7 @@ async fn lark_base_writes_successful_contract_probes_do_not_leave_a_false_refusa
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args(&u.attachment_id),

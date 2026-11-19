@@ -103,6 +103,7 @@ interface AuthFlowProps {
   readonly socialError?: string;
   readonly initialInviteCode?: string;
   readonly enableEmailLogin?: boolean;
+  readonly allowAppHandoff?: boolean;
 }
 
 export function AuthFlow({
@@ -111,6 +112,7 @@ export function AuthFlow({
   socialError,
   initialInviteCode,
   enableEmailLogin = false,
+  allowAppHandoff = false,
 }: AuthFlowProps) {
   useUiTranslation();
   const normalizedInitialInviteCode =
@@ -310,6 +312,7 @@ export function AuthFlow({
           )}
 
           <LoginMethods
+            allowAppHandoff={allowAppHandoff}
             enableEmailLogin={enableEmailLogin}
             returnTo={returnTo}
             disabled={loginMutation.isPending}
@@ -331,7 +334,7 @@ export function AuthFlow({
                     role="alert"
                     className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
                   >
-                    {loginForm.formState.errors.root.message}
+                    {translateUi(loginForm.formState.errors.root.message ?? "")}
                   </div>
                 )}
 

@@ -114,6 +114,9 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
         if archive.len() > 1000 {
             return Err(bad("DOCX contains too many ZIP entries."));
         }
+        archive
+            .validate_header_consistency()
+            .map_err(|_| malformed())?;
         let mut remaining = MAX_EXPANDED;
         let mut word = None;
         let mut types = None;
@@ -127,7 +130,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             if file.size() > remaining {
                 return Err(bad("DOCX exceeds the 40 MiB decompression limit."));
             }
-            let name = file.name().to_owned();
+            let name = file.name().map_err(|_| malformed())?.into_owned();
             let mut expanded = Vec::new();
             (&mut file)
                 .take(remaining + 1)

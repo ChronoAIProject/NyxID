@@ -1318,6 +1318,7 @@ async fn automatic_pause_records_one_problem_with_the_notice_identity_and_no_sec
 fn chat_authority(row: &AssistantConversation, agent_id: &str) -> acks::ChatAuthority {
     let turn = row.active_turn.as_ref().expect("live turn");
     acks::ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
@@ -2828,14 +2829,26 @@ async fn a_cached_feature_snapshot_makes_admission_read_free_and_authoritative()
     let f = fixture_with(db).await;
     let db = &f.state.db;
     reset_flag_cache(db);
+    super::super::security_readiness_service::ready_test_replica(db).await;
+    super::super::security_readiness_service::stop_test_replica(db).await;
     // The cache remembers the flag as off.
     assert!(!enabled(db, &f.owner).await.unwrap());
+    assert!(!turn_handoff_enabled(db, &f.owner));
     // The engine gate then resolves a newer snapshot with the flag on and
     // seeds the cache from it: admission reads nothing and follows the gate,
     // not the older cached decision.
     flags::set_platform_override(db, FLAG_KEY, &FlagTarget::Global, true, &f.owner)
         .await
         .unwrap();
+    flags::set_platform_override(
+        db,
+        flags::TURN_HANDOFF_FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
     let features = flags::resolve_personal_features(db, &f.owner)
         .await
         .unwrap();
@@ -2843,17 +2856,20 @@ async fn a_cached_feature_snapshot_makes_admission_read_free_and_authoritative()
     cache_features(db, &f.owner, &features);
     reads.store(0, Ordering::SeqCst);
     assert!(enabled(db, &f.owner).await.unwrap());
+    assert!(turn_handoff_enabled(db, &f.owner));
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     // And the other way round: a gate snapshot without the flag wins over a
     // cached `true`.
     cache_features(db, &f.owner, &[]);
     reads.store(0, Ordering::SeqCst);
     assert!(!enabled(db, &f.owner).await.unwrap());
+    assert!(!turn_handoff_enabled(db, &f.owner));
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     // Snapshots are per database and person.
     let other = person(&f).await;
     reads.store(0, Ordering::SeqCst);
     assert!(enabled(db, &other).await.unwrap());
+    assert!(!turn_handoff_enabled(db, &other));
     assert!(reads.load(Ordering::SeqCst) > 0);
 }
 

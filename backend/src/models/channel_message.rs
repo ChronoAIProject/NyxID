@@ -57,6 +57,9 @@ pub enum CallbackRefusal {
 /// Admission metadata only. No actor/role names, mentioned IDs, text or raw payloads.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NyxbotAdmission {
+    /// A retained source must still find its exact event before a notice can be delivered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_org_notice: bool,
     pub disposition: String,
     pub bot_mentioned: Option<bool>,
     pub managed_role_mentioned: bool,
