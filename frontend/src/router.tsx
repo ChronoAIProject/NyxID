@@ -1,3 +1,4 @@
+import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -1421,7 +1422,12 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
-  rewrite: channelBotSetupRewrite,
+  rewrite: {
+    input: ({ url }) =>
+      /^\/cli-auth\/?$/i.test(url.pathname)
+        ? validateCliAuthUrl(url)
+        : channelBotSetupRewrite.input({ url }),
+  },
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
   // Without an error component the router's CatchBoundary renders nothing on a
