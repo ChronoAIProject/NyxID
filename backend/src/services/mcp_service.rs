@@ -4301,6 +4301,38 @@ impl PreparedProxyCall {
         service: &McpToolService,
         endpoint: &McpToolEndpoint,
     ) -> AppResult<()> {
+        let (body, mime) = self.scope_input();
+        self.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            super::agent_operation_scope_service::InputBody::Request(body, mime),
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn scope_input(&self) -> (&[u8], Option<&str>) {
+        if let Some(json) = self
+            .attachment_binding
+            .as_ref()
+            .and_then(|b| b.scope_json())
+        {
+            (json, Some("application/json"))
+        } else {
+            (
+                self.body.as_deref().unwrap_or_default(),
+                self.body_content_type.as_deref(),
+            )
+        }
+    }
+
+    fn authorize_operation_inputs(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+        input: super::agent_operation_scope_service::InputBody<'_>,
+    ) -> AppResult<bool> {
         use super::agent_operation_scope_service as operations;
         if operations::applicable(
             scopes,
@@ -4310,7 +4342,7 @@ impl PreparedProxyCall {
         .next()
         .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let path = if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
@@ -4330,7 +4362,7 @@ impl PreparedProxyCall {
             self.carries_override(true),
             false,
         )?;
-        operations::check_inputs(
+        operations::evaluate_inputs(
             scopes,
             &service.service_id,
             operations::mcp_catalog_id(service),
@@ -4338,8 +4370,7 @@ impl PreparedProxyCall {
             self.method.as_str(),
             &path,
             self.query.as_deref(),
-            self.body.as_deref().unwrap_or_default(),
-            self.body_content_type.as_deref(),
+            input,
         )
     }
 
@@ -4648,6 +4679,7 @@ pub fn prepare_chat_proxy_tool_call<'a>(
     db: &'a mongodb::Database,
     keys: &'a EncryptionKeys,
     chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    scopes: &'a crate::models::agent_operation_scope::OperationScopes,
     service: &'a McpToolService,
     endpoint: &'a McpToolEndpoint,
     args: &'a serde_json::Value,
@@ -4724,10 +4756,8 @@ pub fn prepare_chat_proxy_tool_call<'a>(
             );
             return Ok(prepared);
         }
-        let materialized = Box::pin(super::lark_attachment_tool::materialize(
-            db, keys, chat, service, endpoint, args,
-        ))
-        .await?;
+        let chat =
+            super::lark_attachment_tool::require_upload_chat(db, chat, service, endpoint).await?;
         // Reuse route/policy preparation with no caller body. This private copy
         // changes only body construction; consent and identity keep the real endpoint.
         let mut route = endpoint.clone();
@@ -4735,6 +4765,31 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         route.request_body_schema = None;
         route.request_body_required = false;
         let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        use super::agent_operation_scope_service::InputBody;
+        let body_limited = prepared.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            InputBody::BeforeUpload,
+        )?;
+        let upload = super::lark_attachment_tool::UploadArguments::new(args, body_limited)?;
+        if let Some(body) = upload.scope_json() {
+            prepared.authorize_operation_inputs(
+                scopes,
+                service,
+                endpoint,
+                InputBody::Request(body, Some("application/json")),
+            )?;
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, upload,
+        ))
+        .await?;
+        if body_limited {
+            prepared
+                .server_owned_headers
+                .push(("content-type".into(), materialized.content_type.clone()));
+        }
         prepared.body = Some(materialized.body);
         prepared.body_content_type = Some(materialized.content_type);
         prepared.attachment_binding = Some(materialized.binding);
@@ -6342,6 +6397,14 @@ async fn execute_tool_resolved_inner(
         {
             return Err(super::lark_attachment_tool::refused());
         }
+        if binding.scope_json().is_some()
+            && proxy_service::credential_header_name(&target)
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "The credential conflicts with the scoped upload content type".into(),
+            ));
+        }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
     if let Some(base) = &prepared.managed_base {
@@ -6494,6 +6557,14 @@ async fn execute_tool_resolved_inner(
                 service.service_slug
             )
         });
+        let semantic_input = if prepared.attachment_binding.is_some() {
+            prepared.scope_input()
+        } else {
+            (
+                prepared.body.as_deref().unwrap_or_default(),
+                Some("application/json"),
+            )
+        };
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6515,14 +6586,7 @@ async fn execute_tool_resolved_inner(
                 prepared.acknowledgement_id.as_deref(),
                 &summary,
                 &target,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         } else {
@@ -6544,14 +6608,7 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some(&target),
                 false,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         };

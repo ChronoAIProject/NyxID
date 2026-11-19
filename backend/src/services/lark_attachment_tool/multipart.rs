@@ -24,7 +24,42 @@ fn filename(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// The caller's argument object is immutable from scope admission through field encoding.
+/// Only this trusted materializer can attach its JSON to a prepared multipart request.
+pub(crate) struct UploadArguments<'a> {
+    pub(super) args: &'a Value,
+    pub(super) scope_json: Option<Vec<u8>>,
+}
+
+impl<'a> UploadArguments<'a> {
+    pub(crate) fn new(args: &'a Value, body_limited: bool) -> AppResult<Self> {
+        let scope_json = if body_limited {
+            Some(serde_json::to_vec(args).map_err(|_| invalid())?)
+        } else {
+            None
+        };
+        Ok(Self { args, scope_json })
+    }
+
+    pub(crate) fn scope_json(&self) -> Option<&[u8]> {
+        self.scope_json.as_deref()
+    }
+
+    pub(super) fn fields(&self, label: &str, size: usize) -> AppResult<Vec<(String, String)>> {
+        build_fields(self.args, label, size, self.scope_json.is_some())
+    }
+}
+
 pub(crate) fn fields(args: &Value, label: &str, size: usize) -> AppResult<Vec<(String, String)>> {
+    build_fields(args, label, size, false)
+}
+
+fn build_fields(
+    args: &Value,
+    label: &str,
+    size: usize,
+    preserve_extra: bool,
+) -> AppResult<Vec<(String, String)>> {
     let object = args.as_object().ok_or_else(invalid)?;
     if object.keys().any(|key| {
         !matches!(
@@ -54,11 +89,20 @@ pub(crate) fn fields(args: &Value, label: &str, size: usize) -> AppResult<Vec<(S
         ));
     }
     let extra = json!({"drive_route_token":parent});
+    let mut wire_extra = extra.to_string();
     if let Some(value) = object.get("extra") {
-        let supplied: Value =
-            serde_json::from_str(value.as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
-        if supplied != extra {
+        let supplied = value.as_str().ok_or_else(invalid)?;
+        let parsed: Value = if preserve_extra {
+            // The verbatim string will reach the provider. Reject ambiguous duplicate keys.
+            nyxid_permissions::parse_json(supplied.as_bytes()).map_err(|_| invalid())?
+        } else {
+            serde_json::from_str(supplied).map_err(|_| invalid())?
+        };
+        if parsed != extra {
             return Err(invalid());
+        }
+        if preserve_extra {
+            wire_extra = supplied.to_owned();
         }
     }
     let result = vec![
@@ -66,7 +110,7 @@ pub(crate) fn fields(args: &Value, label: &str, size: usize) -> AppResult<Vec<(S
         ("parent_type".into(), kind.into()),
         ("parent_node".into(), parent.into()),
         ("size".into(), size.to_string()),
-        ("extra".into(), extra.to_string()),
+        ("extra".into(), wire_extra),
     ];
     for (_, value) in &result {
         scalar(value)?;
@@ -186,6 +230,39 @@ mod tests {
             content_type
         );
         assert_eq!(quote("a\"b"), "a\\\"b");
+    }
+
+    #[test]
+    fn lark_attachment_supplied_extra_matches_scoped_wire_bytes() {
+        let mut input = args();
+        let formatted = r#"{ "drive_route_token" : "base" }"#;
+        input["extra"] = json!(formatted);
+        let upload = UploadArguments::new(&input, true).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(upload.scope_json.as_deref().unwrap()).unwrap(),
+            input
+        );
+        let fields = upload.fields("receipt.png", 3).unwrap();
+        assert_eq!(fields[4].1, formatted);
+        let (body, _) = encode(&fields, "image/png", b"PNG").unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains(&format!("name=\"extra\"\r\n\r\n{formatted}\r\n"))
+        );
+        let ordinary = UploadArguments::new(&input, false).unwrap();
+        assert_eq!(
+            ordinary.fields("receipt.png", 3).unwrap()[4].1,
+            r#"{"drive_route_token":"base"}"#
+        );
+        for ambiguous in [
+            r#"{"drive_route_token":"other","drive_route_token":"base"}"#,
+            r#"{"drive_route_token":"other"}"#,
+        ] {
+            input["extra"] = json!(ambiguous);
+            let upload = UploadArguments::new(&input, true).unwrap();
+            assert!(upload.fields("receipt.png", 3).is_err());
+        }
     }
 
     #[test]
