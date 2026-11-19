@@ -251,7 +251,6 @@
   "Your verification challenge is invalid. Please sign in again.": "你的驗證請求無效。請重新登入。",
   "Your verification expired. Please sign in again.": "你的驗證已過期。請重新登入。",
   "or continue with email": "或使用郵箱繼續",
-  "read proxy": "讀取代理",
   "this phone": "此手機",
   "useAuthSession must be used within AuthSessionProvider": "使用AuthSession必須在AuthSessionProvider中使用",
   "{{choice}} days": "{{choice}} 天",

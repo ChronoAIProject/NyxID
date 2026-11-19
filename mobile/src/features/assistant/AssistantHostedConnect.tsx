@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { Translation } from "../../i18n/Translation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -66,9 +67,7 @@ export function AssistantHostedConnect({
         const fields: Record<string, string> = {};
         for (const field of flow.credentialFields) {
           const value = fieldValues[field.name]?.trim();
-          if (!value) throw new Error(
-              translateApp("Enter {{label}}.", { label: field.label}),
-            );
+          if (!value) throw localizedError("Enter {{label}}.", { label: field.label});
           fields[field.name] = value;
         }
         composed = JSON.stringify(fields);
@@ -81,10 +80,11 @@ export function AssistantHostedConnect({
       });
       await flow.approve(values);
     } catch (cause) {
-      flow.setError(
+      flow.setError(() => (
         cause instanceof Error
           ? cause.message
-          : translateApp("The connection request failed."),
+          : translateApp("The connection request failed.")
+        ),
       );
     } finally {
       setCredential("");

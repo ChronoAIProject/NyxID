@@ -1960,7 +1960,7 @@ async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
     let body = json!({
         "message_id": "msg-1", "correlation_id": "jti-1", "platform": "lark",
         "reply_token": "not-used", "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-        "conversation": {"id": "route", "platform_id": "chat", "type": "private"},
+        "conversation": {"id": row.route_id, "platform_id": "chat", "type": "private"},
         "sender": {"platform_id": "stranger"}, "content": {"type": "text", "text": "hello"},
         "timestamp": "2026-09-28T00:00:00Z",
     });
@@ -2003,10 +2003,13 @@ async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
     )
     .await;
     assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
-    let accepted = post(sign(&row.route_api_key_id, &digest)).await;
+    let token = sign(&row.route_api_key_id, &digest);
+    assert_eq!(post(token.clone()).await.status(), StatusCode::FORBIDDEN);
+    store_direct_source(&state, &row, &body).await;
+    let accepted = post(token.clone()).await;
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
     // Redelivery of the same message is deduplicated.
-    let again = post(sign(&row.route_api_key_id, &digest)).await;
+    let again = post(token).await;
     assert_eq!(again.status(), StatusCode::ACCEPTED);
     assert_eq!(
         state
@@ -2541,10 +2544,11 @@ async fn org_admins_link_org_bots_by_label_and_lose_them_with_their_role() {
     let body = json!({
         "message_id": "msg-org", "correlation_id": "jti-org", "platform": "lark",
         "reply_token": "not-used", "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-        "conversation": {"id": "route", "platform_id": "chat", "type": "private"},
+        "conversation": {"id": row.route_id, "platform_id": "chat", "type": "private"},
         "sender": {"platform_id": "stranger"}, "content": {"type": "text", "text": "hello"},
         "timestamp": "2026-09-28T00:00:00Z",
     });
+    store_direct_source(&state, &row, &body).await;
     let bytes = serde_json::to_vec(&body).unwrap();
     let post = |message: &'static str, jti: &'static str, bytes: Vec<u8>| {
         let token = crate::crypto::jwt::generate_relay_callback_token(
@@ -2633,7 +2637,7 @@ async fn org_admins_link_org_bots_by_label_and_lose_them_with_their_role() {
     let body = json!({
         "message_id": "msg-org-2", "correlation_id": "jti-org-2", "platform": "lark",
         "reply_token": "not-used", "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-        "conversation": {"id": "route", "platform_id": "chat", "type": "private"},
+        "conversation": {"id": row.route_id, "platform_id": "chat", "type": "private"},
         "sender": {"platform_id": "stranger"}, "content": {"type": "text", "text": "hi"},
         "timestamp": "2026-09-28T00:00:00Z",
     });
@@ -3247,17 +3251,18 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         )
         .await
         .unwrap();
-    let post = |message_id: &str, sender: (&str, &str), text: &str, mentions: Value| {
+    let post = async |message_id: &str, sender: (&str, &str), text: &str, mentions: Value| {
         let body = json!({
             "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
             "platform": "lark",
             "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-            "conversation": {"id": "route", "platform_id": "oc_group", "type": "group"},
+            "conversation": {"id": row.route_id, "platform_id": "oc_group", "type": "group"},
             "sender": {"platform_id": sender.0, "display_name": sender.1},
             "content": {"type": "text", "text": text},
             "timestamp": "2026-09-28T00:00:00Z",
             "raw_platform_data": {"event": {"sender":{"sender_type":"user","sender_id":{"open_id":sender.0}},"message": {"mentions": mentions}}},
         });
+        store_direct_source(&state, &row, &body).await;
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
             &state.jwt_keys,
@@ -3272,21 +3277,22 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         let mut headers = HeaderMap::new();
         headers.insert("x-nyxid-callback-token", token.parse().unwrap());
         let (observer, completed) = watch_relay_callback(&row.id, message_id);
-        let state = state.clone();
-        let channel_id = row.id.clone();
-        async move {
-            let _observer = observer;
-            let response =
-                relay_callback(State(state), Path(channel_id), headers, Bytes::from(bytes)).await;
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
-            // A 202 only acknowledges admission. Even a silent callback must
-            // finish before its exact zero/unchanged-call assertions are valid.
-            tokio::time::timeout(Duration::from_secs(10), completed)
-                .await
-                .expect("direct relay callback did not finish")
-                .expect("direct relay completion observer was dropped");
-            response
-        }
+        let _observer = observer;
+        let response = relay_callback(
+            State(state.clone()),
+            Path(row.id.clone()),
+            headers,
+            Bytes::from(bytes),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // A 202 only acknowledges admission. Even a silent callback must
+        // finish before its exact zero/unchanged-call assertions are valid.
+        tokio::time::timeout(Duration::from_secs(10), completed)
+            .await
+            .expect("direct relay callback did not finish")
+            .expect("direct relay completion observer was dropped");
+        response
     };
     let mention =
         || json!([{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "Helper bot"}]);
@@ -3820,6 +3826,29 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
     server.abort();
 }
 
+/// Persist the inbound metadata produced before a direct relay callback. Media
+/// fixtures may have already inserted their full source record.
+async fn store_direct_source(state: &AppState, row: &NyxbotChannel, body: &Value) {
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": body["message_id"].as_str().unwrap()},
+            doc! {"$setOnInsert": {
+                "channel_bot_id": &row.channel_bot_id, "conversation_id": &row.route_id,
+                "platform_conversation_id": body["conversation"]["platform_id"].as_str().unwrap(),
+                "agent_api_key_id": &row.route_api_key_id, "user_id": bot_owner(row),
+                "direction": "inbound", "platform": &row.platform, "content_type": "text",
+                "sender_platform_id": body["sender"]["platform_id"].as_str().unwrap(),
+                "sender_display_name": body["sender"]["display_name"].as_str(),
+                "created_at": bson::DateTime::now(),
+            }},
+        )
+        .upsert(true)
+        .await
+        .unwrap();
+}
+
 /// Post one signed direct relay message from `sender` in a private chat.
 async fn direct_private(
     state: &AppState,
@@ -3832,12 +3861,13 @@ async fn direct_private(
         "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
         "platform": "lark",
         "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-        "conversation": {"id": "route", "platform_id": format!("oc_{sender}"), "type": "private"},
+        "conversation": {"id": row.route_id, "platform_id": format!("oc_{sender}"), "type": "private"},
         "sender": {"platform_id": sender, "display_name": "Alice"},
         "content": {"type": "text", "text": text},
         "timestamp": "2026-09-28T00:00:00Z",
         "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":sender}}}},
     });
+    store_direct_source(state, row, &body).await;
     let bytes = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,
@@ -5365,18 +5395,19 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         .await
         .unwrap();
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
-    let post = |message_id: &str, sender: &str, text: &str| {
+    let post = async |message_id: &str, sender: &str, text: &str| {
         let body = json!({
             "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
             "platform": "lark",
             "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
-            "conversation": {"id": "route", "platform_id": "oc_test", "type": "group"},
+            "conversation": {"id": row.route_id, "platform_id": "oc_test", "type": "group"},
             "sender": {"platform_id": sender},
             "content": {"type": "text", "text": text},
             "timestamp": "2026-09-30T00:00:00Z",
             "raw_platform_data": {"event": {"sender":{"sender_type":"user","sender_id":{"open_id":sender}},"message": {"mentions":
                 [{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "chronoai-office-nyxbot"}]}}},
         });
+        store_direct_source(&state, &row, &body).await;
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
             &state.jwt_keys,
@@ -5396,6 +5427,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
             headers,
             Bytes::from(bytes),
         )
+        .await
     };
     // The group's shared thread and its settled replies.
     let replies = || {
@@ -6588,11 +6620,12 @@ async fn authenticated_telegram_directed_start_registers_group_without_a_welcome
     state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
         doc! {"_id":&row.channel_bot_id},doc! {"$set":{"platform":"telegram","platform_bot_username":"Helper_bot","platform_bot_id":"99"}}).await.unwrap();
     let body = json!({"message_id":"command-source","correlation_id":"command-correlation","platform":"telegram",
-        "conversation":{"id":"route","platform_id":"-100","type":"group"},
+        "conversation":{"id":row.route_id,"platform_id":"-100","type":"group"},
         "sender":{"platform_id":"7","display_name":"Owner"},
         "content":{"type":"text","text":"/start@Helper_bot arguments"},
         "raw_platform_data":{"message":{"chat":{"id":-100,"type":"supergroup"},"from":{"id":7,"is_bot":false},
             "text":"/start@Helper_bot arguments","entities":[{"type":"bot_command","offset":0,"length":17}]}}});
+    store_direct_source(&state, &row, &body).await;
     let bytes = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
         &state.jwt_keys,

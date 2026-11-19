@@ -706,8 +706,8 @@ test("real native connection card exposes web credential/device/terminal control
     device: undefined as any,
     oauth: undefined as any,
     error: undefined as string | undefined,
-    setError: (text: string) => {
-      flow.error = text;
+    setError: (text: string | (() => string)) => {
+      flow.error = typeof text === "function" ? text() : text;
     },
     approve: async (values: any) => {
       submitted.push(values);

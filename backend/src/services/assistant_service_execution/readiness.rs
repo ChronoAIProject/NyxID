@@ -290,7 +290,7 @@ pub async fn guest_readiness(
     // A recorded BYOK route remains eligible only while its exact live identity
     // is unchanged. Read-only resolution never refreshes/decrypts credentials.
     if let (Some(bound), Some(row)) = (bound, row.as_ref()) {
-        let chat = acks::for_key(db, owner, Some(&row.credential_api_key_id)).await?;
+        let chat = acks::chat_for_conversation(db, row).await?;
         if let Some(chat) = chat {
             let target = match bound_target(db, keys, owner, bound).await {
                 Err(error @ AppError::DatabaseError(_)) => return Err(error),

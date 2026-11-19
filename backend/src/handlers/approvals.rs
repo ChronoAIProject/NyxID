@@ -1008,8 +1008,8 @@ pub async fn decide_request(
 
     // Verify the caller can act on this request -- direct owner, named
     // recipient, or current admin of the owning org.
-    let request = approval_service::get_request(&state.db, &request_id).await?;
-    let group_access = ensure_caller_can_decide(&state.db, &request, &user_id).await?;
+    let decision = approval_service::read_decision_request(&state.db, &request_id).await?;
+    let group_access = ensure_caller_can_decide(&state.db, &decision.request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
         && duration_sec <= 0
@@ -1025,7 +1025,7 @@ pub async fn decide_request(
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        request,
+        decision,
         body.approved,
         body.duration_sec,
         idempotency_key,

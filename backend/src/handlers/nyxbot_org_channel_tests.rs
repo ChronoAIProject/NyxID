@@ -1637,6 +1637,7 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
             "conversation":{"id":row.route_id,"platform_id":"org-private","type":"private"},
             "sender":{"platform_id":"org-member"},"content":{"type":"text","text":text},
             "raw_platform_data":{"event":{"sender":{"sender_type":"user"}}}});
+        store_direct_source(&state, &row, &body).await;
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
             &state.jwt_keys,

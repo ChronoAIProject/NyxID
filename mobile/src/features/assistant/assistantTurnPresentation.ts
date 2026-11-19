@@ -237,6 +237,8 @@ export function storedError(
   }
   if (code === "credential_invalid")
     return translateApp("The assistant credential could not be accepted.");
+  if (code === "credential_revoked")
+    return translateApp("NyxID rejected the assistant credential during this turn. Review completed actions before retrying.");
   if (code === "model_not_configured")
     return translateApp(
       "This agent is unavailable. Ask NyxBot to check its configuration.",

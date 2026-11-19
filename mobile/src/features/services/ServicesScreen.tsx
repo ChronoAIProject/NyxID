@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
@@ -88,8 +89,8 @@ export function ServicesScreen({
   const [adding, setAdding] = useState<CatalogEntry>();
   const [busy, setBusy] = useState(false);
   const [writing, setWriting] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [flowComplete, setFlowComplete] = useState(false);
   const [tokenOnlyRemoval, setTokenOnlyRemoval] = useState(false);
   const [replacement, setReplacement] = useState("");
@@ -213,7 +214,7 @@ export function ServicesScreen({
     try {
       await action();
     } catch (cause) {
-      setError(t(messageOf(cause)));
+      setError(() => (translateApp(messageOf(cause))));
     } finally {
       actionLock.current = false;
       setBusy(false);
@@ -271,20 +272,20 @@ export function ServicesScreen({
       setReplacement("");
       await reload();
       setNotice(
-        result.upstream_revocation_scheduled
+        () => (result.upstream_revocation_scheduled
           ? translateApp(
               "Connection removed. Provider authorization revocation was scheduled.",
             )
-          : translateApp("Connection removed."),
+          : translateApp("Connection removed.")),
       );
       if (onClose) setFlowComplete(true);
     } catch (cause) {
       if (cause instanceof ApiError && cause.errorCode === 11500) {
         setTokenOnlyRemoval(true);
         setError(
-          translateApp(
+          () => (translateApp(
             "Other connections share this provider authorization. You can remove only this service below; the provider authorization and other connections will be kept.",
-          ),
+          )),
         );
       } else {
         throw cause;
@@ -321,9 +322,9 @@ export function ServicesScreen({
               await authorize(connection, adding);
             else
               setNotice(
-                translateApp(
+                () => (translateApp(
                   "Connection added. Its status below comes from NyxID.",
-                ),
+                )),
               );
           })
         }
@@ -666,11 +667,11 @@ export function ServicesScreen({
                         await servicesApi.setActive(connection.id, active);
                         await reload();
                         setNotice(
-                          active
+                          () => (active
                             ? translateApp("Connection enabled.")
                             : translateApp(
                                 "Connection paused. Your credential is kept.",
-                              ),
+                              )),
                         );
                       })
                     }
@@ -855,7 +856,7 @@ export function ServicesScreen({
                   onPress={() =>
                     void run(async () => {
                       await Clipboard.setStringAsync(connection.proxy_url!);
-                      setNotice(translateApp("Proxy address copied."));
+                      setNotice(() => (translateApp("Proxy address copied.")));
                     }, false)
                   }
                 />
@@ -928,7 +929,7 @@ export function ServicesScreen({
                         setReplacement("");
                         setCredentialEditorOpen(false);
                         await reload();
-                        setNotice(translateApp("Credential replaced."));
+                        setNotice(() => (translateApp("Credential replaced.")));
                       })
                     }
                   />
@@ -1207,7 +1208,7 @@ function ConnectForm({
     onDirty(dirty);
     return () => onDirty(false);
   }, [dirty, onDirty]);
-  const [linkError, setLinkError] = useState<string>();
+  const [linkError, setLinkError] = useLocalizedState<string>();
   const [linkBusy, setLinkBusy] = useState(false);
   const linkLock = useRef(false);
   const focused = useIsFocused();
@@ -1254,7 +1255,7 @@ function ConnectForm({
       await WebBrowser.openBrowserAsync(url.href);
       await onRefresh();
     } catch (cause) {
-      setLinkError(messageOf(cause));
+      setLinkError(() => (messageOf(cause)));
     } finally {
       linkLock.current = false;
       setLinkBusy(false);
@@ -1269,7 +1270,7 @@ function ConnectForm({
         setLinkError(undefined);
         void Promise.resolve()
           .then(() => Linking.openURL(validateBrowserUrl(entry.api_key_url!)))
-          .catch((cause) => setLinkError(messageOf(cause)));
+          .catch((cause) => setLinkError(() => (messageOf(cause))));
       }}
     />
   ) : null;
@@ -1434,7 +1435,7 @@ function ConnectForm({
               setLinkBusy(true);
               setLinkError(undefined);
               void onRefresh()
-                .catch((cause) => setLinkError(messageOf(cause)))
+                .catch((cause) => setLinkError(() => (messageOf(cause))))
                 .finally(() => {
                   linkLock.current = false;
                   setLinkBusy(false);

@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -59,7 +61,7 @@ export function AccountSecurityScreen() {
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [feedback, setFeedback] = useLocalizedState<Feedback | null>(null);
 
   // MFA secrets live only in this screen's transient state, never Query's
   // mutation cache, SecureStore, route params, or telemetry.
@@ -205,7 +207,7 @@ export function AccountSecurityScreen() {
       await operation(epoch);
     } catch (error) {
       if (currentEpoch(epoch))
-        setFeedback({ message: accountError(error), tone: "error" });
+        setFeedback(() => ({ message: accountError(error), tone: "error" }));
     } finally {
       privateBusy.current = false;
       setPrivateAction(null);
@@ -226,10 +228,13 @@ export function AccountSecurityScreen() {
   function confirmEnrollment() {
     const result = totpCodeSchema.safeParse(totpCode);
     if (!result.success) {
-      setFeedback({
-        message: result.error.issues[0]?.message ?? translateApp("Enter a valid code"),
+      setFeedback(() => ({
+        message: (() => {
+          const validation = totpCodeSchema.safeParse(totpCode);
+          return (!validation.success && validation.error.issues[0]?.message) || translateApp("Enter a valid code");
+        })(),
         tone: "error",
-      });
+      }));
       return;
     }
     void runPrivate("confirm", async () => {
@@ -250,17 +255,17 @@ export function AccountSecurityScreen() {
           setTotpCode("");
           setRevealCodes(false);
           setFeedback(
-            isVisible.current
+            () => (isVisible.current
               ? {
                   message: translateApp("Two-factor authentication enabled"),
                   tone: "success",
                 }
-              : null,
+              : null),
           );
         }
       } catch (error) {
         if (recoveryLifecycle.finishConfirmation(ticket) && isVisible.current)
-          setFeedback({ message: accountError(error), tone: "error" });
+          setFeedback(() => ({ message: accountError(error), tone: "error" }));
       } finally {
         syncRecovery();
       }
@@ -274,12 +279,12 @@ export function AccountSecurityScreen() {
       ...(passwordAccount ? { password } : {}),
     });
     if (!result.success) {
-      setFeedback({
+      setFeedback(() => ({
         message: translateApp(
           "Enter your authenticator or recovery code and, if required, your current password.",
         ),
         tone: "error",
-      });
+      }));
       return;
     }
     Alert.alert(
@@ -298,7 +303,7 @@ export function AccountSecurityScreen() {
               await accountApi.disableMfa(result.data, {
                 authorityGuard: () => {
                   if (!currentEpoch(epoch))
-                    throw Object.assign(new Error(translateApp("Account action cancelled")), {
+                    throw Object.assign(localizedError("Account action cancelled"), {
                       name: "AbortError",
                     });
                 },
@@ -306,10 +311,10 @@ export function AccountSecurityScreen() {
               if (currentEpoch(epoch)) {
                 void refreshProfile();
                 clearPrivateState();
-                setFeedback({
+                setFeedback(() => ({
                   message: translateApp("Two-factor authentication turned off"),
                   tone: "success",
-                });
+                }));
               }
             });
           },
@@ -318,10 +323,10 @@ export function AccountSecurityScreen() {
     );
   }
 
-  function copyPrivate(value: string, message: string) {
+  function copyPrivate(value: string, message: () => string) {
     void runPrivate("copy", async (epoch) => {
       await Clipboard.setStringAsync(value);
-      if (currentEpoch(epoch)) setFeedback({ message, tone: "success" });
+      if (currentEpoch(epoch)) setFeedback(() => ({ message: message(), tone: "success" }));
     });
   }
 
@@ -334,12 +339,12 @@ export function AccountSecurityScreen() {
         }),
       });
       if (currentEpoch(epoch) && result.action === Share.sharedAction)
-        setFeedback({
+        setFeedback(() => ({
           message: translateApp(
             "Confirm you saved a private copy before closing. You can export again.",
           ),
           tone: "info",
-        });
+        }));
     });
   }
 
@@ -482,9 +487,9 @@ export function AccountSecurityScreen() {
                   onPress={() =>
                     copyPrivate(
                       recoveryCodes.join("\n"),
-                      translateApp(
+                      () => (translateApp(
                         "Codes copied. Paste them into a private password manager.",
-                      ),
+                      )),
                     )
                   }
                 />,
@@ -533,9 +538,9 @@ export function AccountSecurityScreen() {
                     onPress={() =>
                       copyPrivate(
                         enrollment.secret,
-                        translateApp(
+                        () => (translateApp(
                           "Setup key copied. Add it to your authenticator.",
-                        ),
+                        )),
                       )
                     }
                   />
@@ -550,12 +555,12 @@ export function AccountSecurityScreen() {
                       const url = enrollment.qr_code_url;
                       void Linking.openURL(url).catch(() => {
                         if (isFocused.current)
-                          setFeedback({
+                          setFeedback(() => ({
                             message: translateApp(
                               "No authenticator opened. Copy the setup key and add the account manually.",
                             ),
                             tone: "info",
-                          });
+                          }));
                       });
                     }}
                   />

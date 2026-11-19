@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
@@ -25,7 +26,7 @@ export function AssistantApprovalCard({
   const { colors } = useTheme();
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [decided, setDecided] = useState<boolean>();
   const lock = useRef(false);
   const alive = useRef(true);
@@ -50,9 +51,9 @@ export function AssistantApprovalCard({
     } catch (cause) {
       if (alive.current)
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : translateApp("Could not send your decision. Try again."),
+            : translateApp("Could not send your decision. Try again.")),
         );
     } finally {
       lock.current = false;

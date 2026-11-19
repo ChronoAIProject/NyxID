@@ -1,3 +1,5 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Translation } from "../../i18n/Translation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -10,6 +12,7 @@ import { useQuery } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
   ActivityIndicator,
+  AccessibilityInfo,
   AppState,
   Linking,
   Platform,
@@ -47,7 +50,7 @@ import { createFlowStyles } from "../../theme/flowStyles";
 import { BrandNebula, BreathingMark, RiseIn } from "../../components/brand/BrandNebula";
 import { Eye, EyeOff, LockKeyhole, Mail } from "lucide-react-native";
 import { PortalMarkLogo } from "../../components/brand/PortalMark";
-import { KeyboardScrollView } from "../../components/workspace/KeyboardScrollView";
+import { KeyboardScrollView, type KeyboardScrollViewHandle } from "../../components/workspace/KeyboardScrollView";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
@@ -190,16 +193,26 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [mfaCode, setMfaCode] = useState("");
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const socialLoginLock = useRef(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [registrationNotice, setRegistrationNotice] = useState<string | null>(null);
+  const [loginError, setLoginError] = useLocalizedState<string | null>(null);
+  const [registrationNotice, setRegistrationNotice] = useLocalizedState<string | null>(null);
   const [registrationPending, setRegistrationPending] = useState(false);
   const registrationLock = useRef(false);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
   const emailLoginLock = useRef(false);
   const lastHandledSocialUrlRef = useRef<string | null>(null);
-  const showToast = (message: string, kind: ToastKind) => {
-    setToast({ message, kind });
+  const scrollController = useRef<KeyboardScrollViewHandle | null>(null);
+  const errorBannerRef = useRef<View>(null);
+
+  useEffect(() => {
+    if (loginError && Platform.OS === "ios") {
+      AccessibilityInfo.announceForAccessibility(loginError === "WAITLIST"
+        ? translateApp("Registration is invite-only.") : loginError);
+    }
+  }, [loginError]);
+
+  const showToast = (message: () => string, kind: ToastKind) => {
+    setToast(localizedToast(() => ({ message: message(), kind })));
   };
 
   useEffect(() => {
@@ -243,7 +256,7 @@ export function AuthHomeScreen({ navigation }: Props) {
       lastHandledSocialUrlRef.current = url;
 
       if (callback.status === "error") {
-        setLoginError(resolveSocialAuthError(callback.error));
+        setLoginError(() => (resolveSocialAuthError(callback.error)));
         resetSocialState();
         return;
       }
@@ -259,7 +272,7 @@ export function AuthHomeScreen({ navigation }: Props) {
       }
 
       if (!callback.accessToken) {
-        setLoginError(translateApp("Missing social auth access token."));
+        setLoginError(() => (translateApp("Missing social auth access token.")));
         resetSocialState();
         return;
       }
@@ -274,7 +287,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               : undefined,
         });
       } catch (error) {
-        setLoginError(resolveErrorMessage(error));
+        setLoginError(() => (resolveErrorMessage(error)));
       } finally {
         resetSocialState();
       }
@@ -342,20 +355,20 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       if (result.type === "cancel" || result.type === "dismiss") {
         setLoginError(
-          translateApp("Sign-in was closed ({{type}}). Please try again.", {
+          () => (translateApp("Sign-in was closed ({{type}}). Please try again.", {
             type: result.type,
-          }),
+          })),
         );
         return;
       }
 
       setLoginError(
-        translateApp("Social sign-in failed: {{type}}", {
+        () => (translateApp("Social sign-in failed: {{type}}", {
           type: result.type,
-        }),
+        })),
       );
     } catch (error) {
-      setLoginError(resolveErrorMessage(error));
+      setLoginError(() => (resolveErrorMessage(error)));
     } finally {
       socialLoginLock.current = false;
       if (isMountedRef.current) {
@@ -400,11 +413,11 @@ export function AuthHomeScreen({ navigation }: Props) {
             if (error instanceof ApiError && error.reason === "mfa_challenge_expired") {
               setMfaProvider(null); setRecoveryMode(false); setMfaChallenge(null);
               setLoginError(
-                translateApp(
+                () => (translateApp(
                   "Your verification expired. Please sign in again.",
-                ),
+                )),
               );
-            } else { setLoginError(resolveErrorMessage(error)); }
+            } else { setLoginError(() => (resolveErrorMessage(error))); }
           }
         },
         () => isMountedRef.current,
@@ -428,21 +441,21 @@ export function AuthHomeScreen({ navigation }: Props) {
     registrationLock.current = true;
     setRegistrationPending(true);
     setRegistrationNotice(
-      translateApp(
+      () => (translateApp(
         "Registration opens on the NyxID website. Close the browser to return here and sign in after verifying your email.",
-      ),
+      )),
     );
     try {
       await WebBrowser.openBrowserAsync(
         accountWebUrl(getFrontendUrl(), "/register"),
       );
       if (isMountedRef.current) setRegistrationNotice(
-          translateApp(
+          () => (translateApp(
             "Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.",
-          ),
+          )),
         );
     } catch (error) {
-      setLoginError(resolveAuthError(error));
+      setLoginError(() => (resolveAuthError(error)));
     } finally {
       registrationLock.current = false;
       if (isMountedRef.current) setRegistrationPending(false);
@@ -453,6 +466,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     <ScreenContainer>
       <BrandNebula />
       <KeyboardScrollView
+        revealController={scrollController}
         style={flowStyles.content}
         contentContainerStyle={[
           flowStyles.scrollContent,
@@ -617,6 +631,24 @@ export function AuthHomeScreen({ navigation }: Props) {
                 </Pressable>
               </View>
               )}
+        {loginError && (
+          <View ref={errorBannerRef} style={styles.errorBanner}
+            accessibilityRole="alert" accessibilityLiveRegion="assertive"
+            onLayout={() => scrollController.current?.reveal(errorBannerRef.current)}>
+            {loginError === "WAITLIST" ? (
+              <>
+                <Text style={styles.errorText}>
+                  {getFrontendUrl() ? <Translation
+                    message="Registration is invite-only. {{waitlist}} to get access."
+                    values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
+                  /> : translateApp("Registration is invite-only.")}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.errorText}>{loginError}</Text>
+            )}
+          </View>
+        )}
               <AuthSubmitButton
                 onPress={() => void handleEmailLogin()}
                 disabled={signInBlocked}
@@ -673,22 +705,6 @@ export function AuthHomeScreen({ navigation }: Props) {
         {registrationNotice ? (
           <Text accessibilityRole="alert" style={{ color: colors.textSecondary }}>{registrationNotice}</Text>
         ) : null}
-        {loginError && (
-          <View style={styles.errorBanner}>
-            {loginError === "WAITLIST" ? (
-              <>
-                <Text style={styles.errorText}>
-                  {getFrontendUrl() ? <Translation
-                    message="Registration is invite-only. {{waitlist}} to get access."
-                    values={{ waitlist: <Text style={styles.errorLink} onPress={() => void Linking.openURL(getFrontendUrl())}>{translateApp("Join the waitlist")}</Text> }}
-                  /> : translateApp("Registration is invite-only.")}
-                </Text>
-              </>
-            ) : (
-              <Text style={styles.errorText}>{loginError}</Text>
-            )}
-          </View>
-        )}
       </KeyboardScrollView>
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>

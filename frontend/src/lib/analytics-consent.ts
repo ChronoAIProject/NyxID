@@ -9,6 +9,8 @@ export interface AnalyticsConsent {
   diagnostics_status?: "available" | "consent_required" | "not_offered" | "unknown";
   diagnostics_available?: boolean;
   policy_version?: string | null;
+  /** Account-level acknowledgement of the one-time consent prompt. */
+  prompt_seen?: boolean;
   enabled: boolean;
   changed_at: string | null;
   revision: string;
@@ -37,7 +39,7 @@ export async function saveAnalyticsConsent(accountId: string, enabled: boolean, 
   // Failed withdrawal must still stop this device immediately. Opt-in waits for
   // durable acknowledgement and cannot inherit a previous account's preference.
   if (!enabled || !useConsentStore.getState().enabled || useConsentStore.getState().accountId !== accountId || acknowledged !== 2) {
-    useConsentStore.getState().setConsent(false);
+    useConsentStore.getState().setConsent(false, useConsentStore.getState().policy ?? 1, { markAsked: false });
     disableTelemetry();
   }
   const revision = useConsentStore.getState().revision;
@@ -55,5 +57,14 @@ export async function saveAnalyticsConsent(accountId: string, enabled: boolean, 
   intentGuard();
   if (result.account_id !== accountId || result.enabled !== enabled) throw new Error('Account preference response did not match.');
   useConsentStore.getState().setConsent(enabled && result.enabled, policy);
+  const current = useAuthStore.getState().user;
+  if (current?.id === accountId && current.profile_config) {
+    useAuthStore.setState({
+      user: {
+        ...current,
+        profile_config: { ...current.profile_config, analytics: { prompt_seen: true } },
+      },
+    });
+  }
   return result;
 }

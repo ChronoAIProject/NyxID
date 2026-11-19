@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { AgentAvatar } from "../../components/AgentAvatar";
@@ -58,7 +60,7 @@ function GroupEditor({
   const lock = useRef(false);
   const exitConsumed = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [baseline, setBaseline] = useState<Group>();
   const [initialized, setInitialized] = useState(false);
   const [name, setName] = useState("");
@@ -223,7 +225,7 @@ function GroupEditor({
       await action();
     } catch (cause) {
       if (scope.current.mounted && live.available())
-        setError(groupError(cause));
+        setError(() => (groupError(cause)));
     } finally {
       lock.current = false;
       if (scope.current.mounted) setBusy(false);
@@ -246,9 +248,7 @@ function GroupEditor({
       let saved: Group;
       if (!groupId) {
         if (org && (!orgEnabled || !enabledOrgs.some((row) => row.id === org)))
-          throw new Error(
-            translateApp("You cannot create a crew for this organization."),
-          );
+          throw localizedError("You cannot create a crew for this organization.");
         saved = await groupsApi.create(valid.data);
       } else {
         const patch: GroupUpdate = {};
@@ -256,23 +256,15 @@ function GroupEditor({
         if (memberTouched || gone) patch.member_agent_ids = selectedMembers;
         if (org && peopleTouched) patch.participant_user_ids = people;
         if (org && (!lead || !selectedMembers.includes(lead)))
-          throw new Error(
-            translateApp("Choose a lead from the selected agents."),
-          );
+          throw localizedError("Choose a lead from the selected agents.");
         if (org && lead !== baseline!.lead_agent_id) {
           if (!lead || !selectedMembers.includes(lead))
-            throw new Error(
-              translateApp("Choose a lead from the selected agents."),
-            );
+            throw localizedError("Choose a lead from the selected agents.");
           patch.lead_agent_id = lead;
         }
         const latest = await groupsApi.detail(groupId);
         if (!groupCanManage(latest))
-          throw new Error(
-            translateApp(
-              "You can no longer manage this crew. Reopen it to review access.",
-            ),
-          );
+          throw localizedError("You can no longer manage this crew. Reopen it to review access.");
         const ids = (values: readonly string[]) =>
           [...values].sort().join("\n");
         if (
@@ -286,16 +278,10 @@ function GroupEditor({
           (patch.lead_agent_id &&
             latest.lead_agent_id !== baseline!.lead_agent_id)
         ) {
-          throw new Error(
-            translateApp(
-              "This crew changed elsewhere. Your draft is kept. Go back and reopen settings to review the latest changes.",
-            ),
-          );
+          throw localizedError("This crew changed elsewhere. Your draft is kept. Go back and reopen settings to review the latest changes.");
         }
         if (!live.available())
-          throw new Error(
-            translateApp("Reconnect and keep crew settings open to save."),
-          );
+          throw localizedError("Reconnect and keep crew settings open to save.");
         saved = await groupsApi.update(groupId, patch);
       }
       if (scope.current.mounted && scope.current.epoch === getAuthEpoch()) {

@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Pager } from "../../components/settings/Pager";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
@@ -298,8 +300,8 @@ function AgentSkillsManager({
   const [selectedVersion, setSelectedVersion] = useState<SkillVersion>();
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const lock = useRef(false);
   const authEpoch = useRef(getAuthEpoch());
   const currentKey = [...ROOT, agent.id] as const;
@@ -391,14 +393,10 @@ function AgentSkillsManager({
     setNotice(undefined);
     try {
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          translateApp(
-            "Your account session changed. Reopen Plugins to continue.",
-          ),
-        );
+        throw localizedError("Your account session changed. Reopen Plugins to continue.");
       await action();
     } catch (cause) {
-      setError(failure(cause));
+      setError(() => (failure(cause)));
     } finally {
       lock.current = false;
       setBusy(false);
@@ -416,19 +414,11 @@ function AgentSkillsManager({
         latestAgent.agent.can_maintain === false ||
         latestAgent.agent.status === "destroyed"
       )
-        throw new Error(
-          translateApp(
-            "This agent can no longer be changed. Reload to review its current state.",
-          ),
-        );
+        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
       assertSkillRevision(agent.id, baseline, latest);
       const selection = buildSkillSelection(latest, change);
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          translateApp(
-            "Your account session changed. Reopen Plugins to continue.",
-          ),
-        );
+        throw localizedError("Your account session changed. Reopen Plugins to continue.");
       if (!currentCanFetch.current)
         throw new Error(
           currentTranslation.current(
@@ -439,9 +429,9 @@ function AgentSkillsManager({
       await refresh();
       setTesting(false);
       setNotice(
-        change.type === "detach"
+        () => (change.type === "detach"
           ? translateApp("Skill removed from agent.")
-          : translateApp("Exact skill version attached."),
+          : translateApp("Exact skill version attached.")),
       );
       if (change.type === "detach") navigation.goBack();
       else if (change.type === "attach")

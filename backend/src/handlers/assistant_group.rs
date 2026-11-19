@@ -537,6 +537,7 @@ async fn run_member_with_work(
         attempt.await
     };
     let started = match result {
+        Err(AppError::AssistantTurnRequired) if work.is_some() => return Ok(()),
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
             if durable {
                 crate::services::assistant_wake_service::group::retire(

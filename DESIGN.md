@@ -964,11 +964,11 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - At window widths of 900pt and above, a persistent 300pt sidebar sits beside
   the same retained content navigator. Both columns remain touch- and
   accessibility-accessible; the sidebar does not own modal focus or a closing
-  scrim. It starts closed, so content takes the full width; Menu opens or hides
-  it (VoiceOver “Show sidebar”/“Hide sidebar”) and the person's later choice is
-  saved per device, independent of the folded Duo's full screen. The slab's edge
-  follows on the UI thread in one 250ms ease-out on the slab's curve; Reduce
-  Motion swaps at once.
+  scrim. Ordinary iPad and Android windows retain the visible sidebar. Only an
+  iOS corner-sensor window (the unfolded Duo) starts with it closed and lets Menu
+  show or hide it (VoiceOver “Show sidebar”/“Hide sidebar”). That Duo choice is
+  saved per device, independently of full screen. Its slab edge follows on the UI
+  thread in one 250ms ease-out; Reduce Motion swaps at once.
   Narrower windows use the push interaction above, with the sidebar capped
   at 360pt. Resizing changes layout without replacing the chat or its draft.
 - Drawer top is the window's safe-area top plus 10pt. On windows at least 768pt
@@ -1013,9 +1013,9 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - Every slab header bar, narrow or beside the persistent sidebar, floats its
   controls as these floating buttons, 8pt apart with 12pt side margins:
   Menu/Back (or Show/Hide sidebar), the agent identity (avatar, title,
-  chevron) as one 44pt pill whose title is its only truncating part, then Scan QR, New
-  chat and More on narrow bars or the bell, New chat and More beside the
-  persistent sidebar (iPad), and crew options. The Duo's chats (folded or
+  chevron) as one glass pill, then the bell, New chat and More, and crew options.
+  Ordinary devices keep their existing action set and thread/member details;
+  More opens Details directly, or offers Voice preferences and Details during a call. The Duo's chats (folded or
   unfolded, either mode) have no bar: these controls sit in the status
   column (below). The chevron always follows the title.
   Every other workspace bar uses the same floating controls, on ordinary
@@ -1161,17 +1161,26 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   a full-window native page sheet), so the clock and the rail stay in view
   beside it under the scrim (a tap there dismisses the sheet). The unfolded
   Duo uses the same bottom attachment and rail clearance. The choice is saved per device (default shown).
-- Search field placeholders never clip: each field lists complete phrases,
+- On iOS corner-sensor windows, search placeholders choose among complete phrases,
   most descriptive first ("Search chats, agents, settings", then "Search"),
   and shows the first that fits its measured width at the current text size.
   The descriptive phrase must fit a 320pt window and the folded Duo in rail
   mode at default size in every language; the short one at the largest
   Dynamic Type (budget test against the bundled font's advance widths). The
-  descriptive phrase stays the field's accessibility label.
-- Workspace page large titles and the Home greeting grow with text size up to
-  1.25×, wrap between words to at most two lines and then end in an ellipsis;
-  they never break inside a word. The greeting is one translated phrase,
-  including the first name.
+  descriptive phrase stays the field's accessibility label. Ordinary devices
+  retain their existing full placeholder, translated into the chosen language.
+- On iOS corner-sensor windows, workspace page large titles and the Home greeting
+  grow with text size up to 1.25× and wrap to at most two lines before an ellipsis.
+  Ordinary devices retain the base scaling and each page's wrapping policy. The
+  greeting is one translated phrase, including the first name.
+- Ordinary devices retain base sidebar label wrapping/counts, the complete agent
+  picker roster, and notification title/preview/footer scaling. Only corner-sensor
+  windows use the measured sidebar headers, picker Recent section, stacked recent
+  metadata at accessibility sizes, notification caps, transcript remount on text
+  size changes, and optional assistant companion panel. Segment controls keep base
+  equal-width cells and fixed-height count badges whenever every label fits. Only
+  measured label overflow enables natural widths and horizontal scrolling; labels
+  that fit in English retain the base appearance on iPhone, iPad and Android.
 - Home is an explicit primary-chat state, reached from the navigation logo/Chats,
   bare `/assistant`, or app start without a restored chat. New chat with NyxBot
   shows the same normal empty chat as a specialist: identity header, intro and
@@ -1214,12 +1223,14 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). On narrow windows an idle composer is one row:
+  (user decision 2026-11-11). Only on narrow iOS corner-sensor windows an idle
+  composer is one row:
   unfocused with an empty or whitespace-only draft (the draft itself is never
   trimmed), Attach, dictation and Send overlay its text line and the permission
   pill hides. Focus, non-whitespace text, attachments, uploads or dictation
-  restore two rows without remounting the input. A tap anywhere outside the
-  composer blurs it as the touch ends, so the tapped control still acts on the
+  restore two rows without remounting the input. Ordinary devices retain the
+  full-width text row and existing toolbar, permission dropdown and input focus
+  behavior. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
   first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages
@@ -1251,9 +1262,10 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   transient choices, alongside media preview and voice conversation.
 - Native permissions controls contain Full access, Auto and Ask every time only,
   with the effective agent override shown read-only. The composer's control is a
-  plain pill with only the current mode (no chevron) on the floating surface, in
-  a 44pt target with one tail-truncating line; VoiceOver reads "Permissions:
-  {mode}" with the hint "Changes the permission mode". Chat and agent settings use
+  labelled dropdown with its chevron on ordinary devices. On iOS corner-sensor
+  windows it is a plain current-mode pill on the floating surface, in a 44pt
+  target with one tail-truncating line; VoiceOver reads "Permissions: {mode}"
+  with the hint "Changes the permission mode". Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
   Voice, conversation mode and completion notices are chosen in Settings › Voice;
   the call screen has no voice/source pickers. The Voice menu selects the next-call voice without playable samples (user decision 2026-11-12). Voice composers never show pricing or tariffs, including connection, idle, minimized and help-popover states (user decision 2026-11-06, superseding V1). Pricing belongs in Settings › Voice. Hold to talk and Hands-free remain selectable through the compact header radio toggle: phone and radio glyphs, inactive icon only, active icon plus a wrapping label, and 44pt minimum targets. Mode changes animate the header width, switching instantly under Reduce Motion. The status/timer has its own full-width line, with elapsed time protected from status truncation. At accessibility text sizes the agent name moves below the top control row; the selected mode label fits within the remaining width. xAI shows only the forced Hold to talk option and cannot switch modes. Changes still save the existing voice preference (user decision 2026-11-06, U11). Hold to talk keeps a press-and-hold microphone, release-to-send instruction and halo in both expanded and minimized layouts; tapping the minimized row opens the mode switch. Resizing releases an existing hold without changing modes.

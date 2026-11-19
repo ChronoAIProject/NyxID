@@ -978,7 +978,7 @@ impl std::fmt::Debug for TurnRequest {
 pub fn valid_id(id: &str) -> bool {
     prefixed_hex(id, "nyxa-")
 }
-fn prefixed_hex(id: &str, prefix: &str) -> bool {
+pub(super) fn prefixed_hex(id: &str, prefix: &str) -> bool {
     id.strip_prefix(prefix).is_some_and(|tail| {
         tail.len() == 32
             && tail
@@ -1374,6 +1374,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             CONVERSATIONS,
             doc! {"active_turn.heartbeat_at": 1, "_id": 1},
+            false,
+        ),
+        (
+            CONVERSATIONS,
+            doc! {"active_turn.restart_offer.due_at": 1, "_id": 1},
             false,
         ),
         (
@@ -2305,6 +2310,7 @@ async fn group_has_nyxbot_in_session(
 
 pub(crate) enum OwnerTurnAdmission {
     Started(Box<OwnerTurnClaim>),
+    Recovering,
     /// Every drained event was ineligible: queue cleared, no turn, no streak.
     Drained,
 }
@@ -2313,6 +2319,7 @@ impl OwnerTurnAdmission {
     pub(crate) fn into_started(self) -> AppResult<OwnerTurnClaim> {
         match self {
             Self::Started(claim) => Ok(*claim),
+            Self::Recovering => Err(AppError::AssistantTurnActive),
             Self::Drained => Err(AppError::Conflict("No eligible pending events".into())),
         }
     }
@@ -2322,6 +2329,7 @@ impl OwnerTurnAdmission {
 /// Legacy Ask-mode orchestrators upgrade to Full access here, inside the same
 /// transaction that claims the turn, so no startup sweep races a live turn.
 /// Event turns drain the row's pending events atomically.
+#[cfg(test)]
 pub async fn begin_turn(
     db: &Database,
     user_id: &str,
@@ -2429,6 +2437,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             owner_model_route: None,
             invocation_controlled: false,
             credential_invocation_id: None,
+            stopped_window: None,
+            thread_secret_fence: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
             machine_previews: false,
             platform_cleanup_pending: false,
@@ -2601,6 +2611,14 @@ pub(crate) async fn begin_owner_turn_in_session(
 
     if live_turn(&row, now).is_some() {
         return Err(AppError::AssistantTurnActive);
+    }
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.restart_admission.is_some())
+    {
+        super::assistant_turn_restart::offer_expired_in_session(db, &row, session, now).await?;
+        return Ok(OwnerTurnAdmission::Recovering);
     }
     if start.origin == TurnOrigin::Channel
         && let Some(origin) = start.channel.as_ref().filter(|o| o.thread.is_some())
@@ -2950,7 +2968,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
     }
     row.credential_invocation_id = next_invocation;
-    let credential = Box::pin(
+    let mut credential = Box::pin(
         super::assistant_agent_credential_service::load_or_provision_in_session(
             db,
             keys,
@@ -2961,6 +2979,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         ),
     )
     .await?;
+    let replace_stopped = row
+        .stopped_window
+        .as_ref()
+        .is_some_and(|stopped| stopped.credential_id == credential.api_key_id);
+    if replace_stopped {
+        row.thread_secret_fence = Some(
+            Box::pin(
+                super::assistant_agent_credential_service::replace_stopped_secret(
+                    db,
+                    keys,
+                    &row,
+                    &mut credential,
+                    session,
+                ),
+            )
+            .await?,
+        );
+    }
+    row.stopped_window = None;
     let credential_id = credential.api_key_id.as_str();
     if voice_request
         .as_ref()
@@ -2984,7 +3021,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
-    if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
+    if replace_stopped
+        || (start.conversation_id.is_some() && row.credential_api_key_id != credential_id)
+    {
         row.nyxagent_session_id = None;
         row.nyxagent_instruction_binding = None;
         row.nyxagent_last_response_id = None;
@@ -3281,6 +3320,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        restart_offer: None,
+        restart_eligibility: None,
+        restart_admission: None,
+        execution_attempt: None,
         group_reply_in_settlement: false,
         platform_model_context: None,
         automation_work: automation_work.clone(),
@@ -3387,7 +3430,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         .and_then(|t| t.automation_work.clone())
         .filter(|w| w.role == "group")
     {
-        super::trigger_schedule::group::admit(db, &row, &work, turn_id, session).await?;
+        use super::trigger_schedule::group::{self, Admission};
+        let admission = if start.origin == TurnOrigin::Event {
+            Admission::Continuation
+        } else {
+            Admission::Dispatch
+        };
+        group::admit(db, &row, &work, turn_id, admission, session).await?;
     }
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
@@ -3527,7 +3576,8 @@ pub(crate) async fn begin_owner_turn_in_session(
                 )
                 .await?;
                 if work.role == "group" {
-                    super::trigger_schedule::group::admit(db, &row, work, turn_id, session).await?;
+                    use super::trigger_schedule::group::{self, Admission};
+                    group::admit(db, &row, work, turn_id, Admission::Continuation, session).await?;
                 }
             }
         }
@@ -3601,6 +3651,21 @@ pub(crate) async fn begin_owner_turn_in_session(
     .await?;
     if voice_request.is_none() || hidden_voice {
         row.message_count += 1;
+    }
+    if super::security_readiness_service::turn_restart_enrollment_ready()
+        && super::assistant_notification_service::turn_handoff_enabled(db, user_id)
+    {
+        let profile =
+            super::assistant_nyxagent_model_cache::inference_credential(db, user_id, &row.model);
+        let deployment = super::assistant_nyxagent_runtime::cached_reattach(db);
+        negotiate_restart(
+            &mut row,
+            start,
+            &message_id,
+            deployment,
+            profile,
+            super::shutdown::process().is_draining(),
+        );
     }
     if start.conversation_id.is_some() {
         collection
@@ -3868,6 +3933,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     })))
 }
 
+#[cfg(test)]
 pub async fn begin_turn_with_voice(
     db: &Database,
     user_id: &str,
@@ -3875,6 +3941,20 @@ pub async fn begin_turn_with_voice(
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     voice_request_id: Option<&str>,
 ) -> AppResult<AssistantConversation> {
+    Ok(
+        Box::pin(claim_turn(db, user_id, start, keys, voice_request_id))
+            .await?
+            .conversation,
+    )
+}
+
+pub(crate) async fn claim_turn(
+    db: &Database,
+    user_id: &str,
+    start: impl Into<TurnStart>,
+    keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    voice_request_id: Option<&str>,
+) -> AppResult<OwnerTurnClaim> {
     let voice_request_id = voice_request_id.map(str::to_owned);
     let start: TurnStart = start.into();
     let id = start
@@ -4030,7 +4110,7 @@ pub async fn begin_turn_with_voice(
         replaced,
     )
     .await;
-    Ok(claim.conversation)
+    Ok(claim)
 }
 
 /// The input NyxAgent receives for a claimed turn: the message text, or the
@@ -4166,14 +4246,13 @@ pub async fn append_events_in_session(
 
 pub async fn clear_binding(
     db: &Database,
-    user_id: &str,
-    id: &str,
-    turn_id: &str,
+    row: &AssistantConversation,
     reason: &str,
 ) -> AppResult<()> {
-    let mut filter = owner_filter(user_id, id)?;
-    filter.insert("active_turn.turn_id", turn_id);
-    db.collection::<AssistantConversation>(CONVERSATIONS)
+    let mut filter = WorkerFence::capture(row)?.filter();
+    filter.insert("active_turn.stop_requested", false);
+    let changed = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             filter,
             doc! {"$set": {
@@ -4185,7 +4264,11 @@ pub async fn clear_binding(
             }},
         )
         .await?;
-    Ok(())
+    if changed.matched_count == 1 {
+        Ok(())
+    } else {
+        Err(AppError::AssistantTurnRequired)
+    }
 }
 
 /// Select the model for one conversation. Returns the previous model and the
@@ -4268,6 +4351,7 @@ pub enum StopTarget {
 
 /// Reuse the existing read and return only a successfully stopped turn. Losing
 /// the exact-turn fence must not cancel transports of a now-waiting run.
+#[cfg(test)]
 pub async fn request_stop_target(db: &Database, owner: &str, id: &str) -> AppResult<StopTarget> {
     let row = get(db, owner, id).await?;
     let stopped = request_stop_row_target(db, &row).await?;
@@ -4364,6 +4448,10 @@ pub(crate) async fn request_stop_row_target(
             .await?;
         }
     }
+    if turn.restart_admission.is_some() {
+        force_stop(db, user_id, id, &turn.turn_id).await?;
+        return Ok(Some(row));
+    }
     // A legacy row has no worker liveness signal. Keep its historical Stop
     // behavior: the worker may observe the durable flag, while an absent worker
     // is reclaimed only by the existing lease/TTL path.
@@ -4396,7 +4484,6 @@ pub(crate) async fn request_stop_row_target(
 pub async fn mark_queued(
     db: &Database,
     row: &AssistantConversation,
-    turn_id: &str,
     since: DateTime<Utc>,
     until: DateTime<Utc>,
 ) -> AppResult<bool> {
@@ -4404,8 +4491,7 @@ pub async fn mark_queued(
     Ok(db
         .collection::<bson::Document>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": &row.id, "user_id": &row.user_id,
-            "active_turn.turn_id": turn_id, "active_turn.stop_requested": false},
+            WorkerFence::matching(row, doc! {"active_turn.stop_requested": false})?,
             doc! {"$set": {
                 "active_turn.queued_at": bson::DateTime::from_chrono(since),
                 "active_turn.queue_deadline": bson::DateTime::from_chrono(until),
@@ -4419,14 +4505,10 @@ pub async fn mark_queued(
 
 /// Clear the queued display once the turn runs. The engine request start
 /// (`assistant_turn_observability::request_started`) also clears it.
-pub async fn mark_dequeued(
-    db: &Database,
-    row: &AssistantConversation,
-    turn_id: &str,
-) -> AppResult<()> {
+pub async fn mark_dequeued(db: &Database, row: &AssistantConversation) -> AppResult<()> {
     db.collection::<bson::Document>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": turn_id},
+            WorkerFence::capture(row)?.filter(),
             vec![doc! {"$set": {"active_turn.timing.queue_wait_ms":{"$add":[
                 {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
                 {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}}},
@@ -4436,13 +4518,189 @@ pub async fn mark_dequeued(
     Ok(())
 }
 
-/// Renew one worker's liveness marker. The turn-id predicate fences a late
-/// heartbeat after a forced stop, reclamation, or deletion.
-pub async fn heartbeat(db: &Database, user_id: &str, id: &str, turn_id: &str) -> AppResult<bool> {
+#[derive(Clone)]
+pub(crate) struct WorkerFence(bson::Document);
+
+pub(crate) fn negotiate_restart(
+    row: &mut AssistantConversation,
+    start: &TurnStart,
+    message_id: &str,
+    deployment: Option<crate::models::assistant_conversation::ReattachDeployment>,
+    profile: Option<super::assistant_nyxagent_model_cache::InferenceCredential>,
+    draining: bool,
+) {
+    use super::assistant_nyxagent_model_cache::InferenceCredential;
+    let reason = match (profile, deployment) {
+        (_, None) => "capability_unavailable",
+        (None, _) => "profile_unknown",
+        (Some(InferenceCredential::Platform), _) => "platform_credential",
+        (Some(InferenceCredential::Thread), Some(deployment)) => {
+            enroll_restart(row, start, message_id, deployment, draining);
+            if row
+                .active_turn
+                .as_ref()
+                .is_some_and(|turn| turn.restart_admission.is_some())
+            {
+                "watched_thread_credential"
+            } else {
+                "lane_ineligible"
+            }
+        }
+    };
+    if let Some(turn) = &mut row.active_turn {
+        turn.restart_eligibility = Some(reason.into());
+    }
+}
+
+pub(crate) fn enroll_restart(
+    row: &mut AssistantConversation,
+    start: &TurnStart,
+    message_id: &str,
+    deployment: crate::models::assistant_conversation::ReattachDeployment,
+    draining: bool,
+) {
+    use crate::models::assistant_conversation::{
+        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource,
+    };
+    let Some(turn) = row.active_turn.as_mut() else {
+        return;
+    };
+    if row.shared_agent_thread
+        || row.guest_turn
+        || row.guest_model_setup
+        || row.channel.is_some()
+        || row.invocation_controlled
+        || row.platform_thread.is_some()
+        || row.platform_cleanup_pending
+        || row.collaboration.is_some()
+        || row.voice_parent_conversation_id.is_some()
+        || start.guest
+        || start.channel.is_some()
+        || start.reply_channel.is_some()
+        || start
+            .org_access
+            .as_ref()
+            .is_some_and(|access| access.shared().is_some() || access.channel().is_some())
+        || turn.channel_context.is_some()
+        || turn.channel_adapter_origin.is_some()
+        || turn.platform_origin.is_some()
+        || turn.invocation_id.is_some()
+        || turn.voice_request_id.is_some()
+        || turn.channel_event_id.is_some()
+        || turn.events.iter().any(|event| {
+            event.invocation_id.is_some()
+                || !event.channel_contexts.is_empty()
+                || !event.source_event_ids.is_empty()
+        })
+    {
+        return;
+    }
+    let source = match (&turn.automation_work, turn.origin) {
+        (Some(work), _)
+            if matches!(work.role.as_str(), "coordinator" | "direct" | "group")
+                && !work.run_id.is_empty()
+                && !work.work_id.is_empty() =>
+        {
+            RestartSource::Automation { work: work.clone() }
+        }
+        (None, TurnOrigin::Trigger) if row.group_id.is_none() => {
+            let Some(run_id) = &turn.trigger_run_id else {
+                return;
+            };
+            RestartSource::Trigger {
+                run_id: run_id.clone(),
+            }
+        }
+        (None, TurnOrigin::User)
+            if row.group_id.is_none()
+                && row.group_request_id.is_none()
+                && start.owner_instruction_source
+                    == Some(OwnerInstructionSource::FirstPartyOwner) =>
+        {
+            RestartSource::FirstPartyOwner
+        }
+        _ => return,
+    };
+    let (Some(initiating_seq), Some(agent_id), Some(worker)) = (
+        turn.initiating_message_seq,
+        &row.agent_id,
+        &turn.worker_instance,
+    ) else {
+        return;
+    };
+    turn.restart_admission = Some(Box::new(RestartAdmission {
+        version: 1,
+        reattach: Some(deployment),
+        window: None,
+        source,
+        initiating_message_id: message_id.into(),
+        initiating_seq,
+        reply_id: Uuid::new_v4().to_string(),
+        actor_id: row.user_id.clone(),
+        agent_id: agent_id.clone(),
+        agent_owner_id: row.agent_owner_id.as_ref().unwrap_or(&row.user_id).clone(),
+        model: row.model.clone(),
+        credential_id: row.credential_api_key_id.clone(),
+        credential_ended: false,
+        event_ids: turn.events.iter().map(|event| event.id.clone()).collect(),
+    }));
+    turn.execution_attempt = Some(ExecutionAttempt {
+        epoch: 0,
+        claim_id: Uuid::new_v4().to_string(),
+    });
+    if draining {
+        let now = Utc::now();
+        turn.restart_offer = Some(RestartOffer {
+            from_worker: worker.id.clone(),
+            reason: "shutdown".into(),
+            offered_at: now,
+            due_at: now,
+            claimed_by: None,
+        });
+    }
+}
+
+impl WorkerFence {
+    pub(crate) fn capture(row: &AssistantConversation) -> AppResult<Self> {
+        let turn = row
+            .active_turn
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let mut filter = doc! {
+            "_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id,
+        };
+        if let Some(attempt) = &turn.execution_attempt {
+            let worker = turn
+                .worker_instance
+                .as_ref()
+                .ok_or(AppError::AssistantTurnRequired)?;
+            filter.insert("active_turn.worker_instance.id", &worker.id);
+            filter.insert("active_turn.execution_attempt.epoch", attempt.epoch);
+            filter.insert("active_turn.execution_attempt.claim_id", &attempt.claim_id);
+        } else {
+            filter.insert("active_turn.execution_attempt", bson::Bson::Null);
+        }
+        Ok(Self(filter))
+    }
+
+    pub(crate) fn filter(&self) -> bson::Document {
+        self.0.clone()
+    }
+
+    pub(crate) fn matching(
+        row: &AssistantConversation,
+        mut conditions: bson::Document,
+    ) -> AppResult<bson::Document> {
+        conditions.extend(Self::capture(row)?.0);
+        Ok(conditions)
+    }
+}
+
+pub(crate) async fn heartbeat(db: &Database, fence: &WorkerFence) -> AppResult<bool> {
     Ok(db
         .collection::<bson::Document>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id},
+            fence.filter(),
             doc! {"$set": {"active_turn.heartbeat_at": bson::DateTime::now()}},
         )
         .await?
@@ -4484,7 +4742,16 @@ pub async fn finish_turn(
     message_id: &str,
     result: &TurnResult,
 ) -> AppResult<Option<TurnError>> {
-    finish_turn_inner(db, row, credential_id, message_id, result, None, None).await
+    finish_turn_inner(
+        db,
+        row,
+        credential_id,
+        message_id,
+        result,
+        None,
+        SettlementCondition::Worker,
+    )
+    .await
 }
 
 pub async fn finish_turn_with_instructions(
@@ -4502,21 +4769,25 @@ pub async fn finish_turn_with_instructions(
         message_id,
         result,
         instruction_binding,
-        None,
+        SettlementCondition::Worker,
     )
     .await
 }
 
-/// Shared fenced settlement. `heartbeat_before` restricts settlement to a turn
-/// whose worker heartbeat is at or before that instant (orphan reclamation).
-async fn finish_turn_inner(
+pub(crate) enum SettlementCondition {
+    Worker,
+    Orphaned(DateTime<Utc>),
+    CancelUnconfirmed(String),
+}
+
+pub(crate) async fn finish_turn_inner(
     db: &Database,
     row: &AssistantConversation,
     credential_id: &str,
     message_id: &str,
     result: &TurnResult,
     instruction_binding: Option<&crate::models::assistant_conversation::InstructionBinding>,
-    heartbeat_before: Option<DateTime<Utc>>,
+    condition: SettlementCondition,
 ) -> AppResult<Option<TurnError>> {
     let instruction_binding = instruction_binding.cloned();
     let turn_id = row
@@ -4539,14 +4810,16 @@ async fn finish_turn_inner(
             // Bound the transaction future independently of its retry-driver frames.
             let operation: AppResult<_> = Box::pin(async {
                 // A retry after an ambiguous commit observes the durable reply.
+                let attempt = row.active_turn.as_ref().and_then(|turn| turn.execution_attempt.as_ref());
+                let mut saved_filter = doc! {"_id": &message_id, "user_id": &row.user_id,
+                    "conversation_id": &row.id, "turn_id": &turn_id};
+                if let Some(attempt) = attempt {
+                    saved_filter.insert("settled_by_attempt.epoch", attempt.epoch);
+                    saved_filter.insert("settled_by_attempt.claim_id", &attempt.claim_id);
+                }
                 if let Some(saved) = db
                     .collection::<AssistantMessage>(MESSAGES)
-                    .find_one(doc! {
-                        "_id": &message_id,
-                        "user_id": &row.user_id,
-                        "conversation_id": &row.id,
-                        "turn_id": &turn_id,
-                    })
+                    .find_one(saved_filter)
                     .session(&mut *session)
                     .await?
                 {
@@ -4580,11 +4853,7 @@ artifact_recovery_target: None,
                     }), None));
                 }
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                let mut active_filter = doc! {
-                        "_id": &row.id,
-                        "user_id": &row.user_id,
-                        "active_turn.turn_id": &turn_id,
-                    };
+                let mut active_filter = WorkerFence::capture(&row)?.filter();
                 if result.error.as_ref().is_some_and(|error| error.stage == "shutdown") {
                     let worker = row.active_turn.as_ref()
                         .and_then(|turn| turn.worker_instance.as_ref())
@@ -4594,7 +4863,7 @@ artifact_recovery_target: None,
                 if let Some(expected) = row.active_turn.as_ref().and_then(|turn| turn.platform_origin.as_ref()) {
                     active_filter.insert("active_turn.platform_origin", bson::to_bson(expected).map_err(|_|AppError::AssistantTurnRequired)?);
                 }
-                if let Some(before) = heartbeat_before {
+                if let SettlementCondition::Orphaned(before) = condition {
                     active_filter.insert(
                         "active_turn.heartbeat_at",
                         doc! {
@@ -4615,7 +4884,17 @@ artifact_recovery_target: None,
                 {
                     Some(TurnError::internal("cancelled", "stop"))
                 } else {
-                    result.error.clone().or_else(|| current.active_turn.as_ref()
+                    result.error.clone().map(|mut error| {
+                        if error.code == "credential_revoked" && current.active_turn.as_ref()
+                            .and_then(|turn| turn.restart_admission.as_deref())
+                            .is_some_and(|source| source.credential_ended && source.credential_id == credential_id) {
+                            let known = TurnError::internal("credential_invalid", "credential_revocation");
+                            error.code = known.code;
+                            error.message = known.message;
+                            error.stage = known.stage;
+                        }
+                        error
+                    }).or_else(|| current.active_turn.as_ref()
                         .and_then(super::assistant_model_observer::approval_error))
                 };
                 let mut error = error.map(|error| current.active_turn.as_ref().map_or_else(
@@ -4744,6 +5023,17 @@ artifact_recovery_target: None,
                             "role":{"$ne":"assistant"},"media_event_ids.0":{"$exists":true}})
                         .projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
                 let settled_turn = current.active_turn.take();
+                if let Some(turn) = settled_turn.as_ref()
+                    && let Some(source) = turn.restart_admission.as_deref().filter(|source| !source.credential_ended)
+                    && let Some(window) = &source.window
+                    && (turn.stop_requested || matches!(&condition, SettlementCondition::CancelUnconfirmed(key) if key == &window.key))
+                {
+                    current.stopped_window = Some(crate::models::assistant_conversation::StoppedWindow {
+                        turn_id: turn.turn_id.clone(),
+                        credential_id: source.credential_id.clone(),
+                        window_key: window.key.clone(),
+                    });
+                }
                 // A disposable upstream session may retain fetched pixels or
                 // injected document text. Never carry it into another guest's
                 // turn; only the ordinary transcript survives settlement.
@@ -4876,10 +5166,13 @@ artifact_recovery_target: None,
                     ))
                     .await?;
                 }
-                db.collection::<AssistantMessage>(MESSAGES)
-                    .insert_one(message)
-                    .session(&mut *session)
-                    .await?;
+                if let Some(attempt) = attempt {
+                    let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
+                    saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
+                    db.collection::<bson::Document>(MESSAGES).insert_one(saved).session(&mut *session).await?;
+                } else {
+                    db.collection::<AssistantMessage>(MESSAGES).insert_one(message).session(&mut *session).await?;
+                }
                 let upload_owner=row.collaboration.as_ref().map_or(row.user_id.as_str(), |b|b.original_requester_id.as_str());
                 Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,upload_owner,&row.id,&turn_id)).await?;
                 collection
@@ -4910,11 +5203,19 @@ pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -
     else {
         return Ok(false);
     };
+    let message_id = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.restart_admission.as_deref())
+        .map_or_else(
+            || Uuid::new_v4().to_string(),
+            |source| source.reply_id.clone(),
+        );
     finish_turn_inner(
         db,
         &row,
         &row.credential_api_key_id,
-        &Uuid::new_v4().to_string(),
+        &message_id,
         &TurnResult {
             text: String::new(),
             session_id: None,
@@ -4922,7 +5223,7 @@ pub async fn force_stop(db: &Database, user_id: &str, id: &str, turn_id: &str) -
             error: Some(TurnError::internal("cancelled", "stop")),
         },
         None,
-        None,
+        SettlementCondition::Worker,
     )
     .await
     .map(|_| true)
@@ -4943,6 +5244,19 @@ pub async fn settle_shutdown_turn(
     {
         return Ok(None);
     }
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.restart_admission.is_some() && !turn.stop_requested)
+    {
+        super::assistant_turn_restart::offer(
+            db,
+            row,
+            super::assistant_turn_restart::Loss::Shutdown(worker_id),
+        )
+        .await?;
+        return Ok(None);
+    }
     match finish_turn_inner(
         db,
         row,
@@ -4955,7 +5269,7 @@ pub async fn settle_shutdown_turn(
             error: Some(TurnError::internal("turn_lost", "shutdown")),
         },
         None,
-        None,
+        SettlementCondition::Worker,
     )
     .await
     {
@@ -4995,6 +5309,19 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
         if row.active_turn.is_none() {
             continue;
         }
+        if row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.restart_admission.is_some() && !turn.stop_requested)
+        {
+            super::assistant_turn_restart::offer(
+                db,
+                &row,
+                super::assistant_turn_restart::Loss::Stale(stale_before),
+            )
+            .await?;
+            continue;
+        }
         let result = finish_turn_inner(
             db,
             &row,
@@ -5007,7 +5334,7 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
                 error: Some(TurnError::internal("turn_lost", "sweep")),
             },
             None,
-            Some(stale_before),
+            SettlementCondition::Orphaned(stale_before),
         )
         .await;
         match result {
@@ -7539,9 +7866,17 @@ impl TurnError {
                     "Check its result before trying again.",
                 ),
             ),
+            "executor_lost" => (
+                "outcome_unknown",
+                "The executor stopped. Review completed actions and confirm uncertain outcomes before retrying.",
+            ),
             "agent_key_required" | "credential_invalid" => (
                 "credential_invalid",
                 "The assistant credential could not be accepted.",
+            ),
+            "credential_revoked" => (
+                "credential_revoked",
+                "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.",
             ),
             "model_authority_changed" => (
                 "model_authority_changed",
@@ -7754,9 +8089,8 @@ pub async fn waiting_for_capacity(
     started: DateTime<Utc>,
     deadline: DateTime<Utc>,
 ) -> AppResult<()> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
     db.collection::<bson::Document>(CONVERSATIONS).update_one(
-        doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": false},
+        WorkerFence::matching(row, doc! {"active_turn.stop_requested": false})?,
         vec![doc! {"$set": {
             "active_turn.waiting_for_capacity": true,
             "active_turn.capacity_wait_started_at": {"$cond": [{"$eq": ["$active_turn.waiting_for_capacity", true]}, "$active_turn.capacity_wait_started_at", bson::DateTime::from_chrono(started)]},
@@ -7770,9 +8104,11 @@ pub async fn waiting_for_capacity(
 /// malformed frames and non-monotonic sequences fail closed.
 #[derive(Default)]
 pub struct ResponseStream {
+    pub(super) replay: bool,
+    pub(super) reader_error: Option<Value>,
     buffer: Vec<u8>,
     total: usize,
-    sequence: Option<u64>,
+    pub(super) sequence: Option<u64>,
     pub text: String,
     pub terminal: Option<TurnResult>,
     pub created: Option<crate::models::assistant_conversation::RunningResponse>,
@@ -7831,13 +8167,37 @@ impl ResponseStream {
         }
         Ok(())
     }
-    fn event(&mut self, event: Value) -> Result<(), TurnError> {
+    pub(super) fn event(&mut self, event: Value) -> Result<(), TurnError> {
         if self.terminal.is_some() {
             return Err(TurnError::internal("invalid_stream", "stream"));
         }
         let kind = event["type"]
             .as_str()
             .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
+        if self.replay {
+            if kind == "error" {
+                self.reader_error = Some(event);
+                return Ok(());
+            }
+            if self.reader_error.is_some() {
+                return Ok(());
+            }
+            let sequence = event["sequence_number"]
+                .as_u64()
+                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
+            if self.sequence.is_some_and(|previous| sequence <= previous) {
+                return Ok(());
+            }
+            if sequence
+                != self
+                    .sequence
+                    .map_or(0, |previous| previous.saturating_add(1))
+            {
+                self.reader_error = Some(Value::Null);
+                return Ok(());
+            }
+            self.sequence = Some(sequence);
+        }
         self.data_events += 1;
         if !matches!(
             kind,
@@ -7845,13 +8205,14 @@ impl ResponseStream {
                 | "response.output_text.delta"
                 | "response.completed"
                 | "response.failed"
+                | "response.cancelled"
         ) {
             return Ok(());
         }
         let sequence = event["sequence_number"]
             .as_u64()
             .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
-        if self.sequence.is_some_and(|previous| sequence <= previous) {
+        if !self.replay && self.sequence.is_some_and(|previous| sequence <= previous) {
             return Err(TurnError::internal("invalid_stream", "stream"));
         }
         self.sequence = Some(sequence);
@@ -7910,12 +8271,7 @@ impl ResponseStream {
             });
             if session.is_none()
                 || response_id.is_none()
-                || response["status"]
-                    != if kind == "response.completed" {
-                        "completed"
-                    } else {
-                        "failed"
-                    }
+                || response["status"].as_str() != kind.strip_prefix("response.")
             {
                 return Err(TurnError::internal("invalid_stream", "stream"));
             }
@@ -7942,9 +8298,12 @@ impl ResponseStream {
                 text: self.text.clone(),
                 session_id: session.map(str::to_owned),
                 response_id: response_id.map(str::to_owned),
-                error: (kind == "response.failed").then(|| {
-                    let mut error =
-                        TurnError::new(response["error"]["code"].as_str().unwrap_or_default());
+                error: (kind != "response.completed").then(|| {
+                    let mut error = TurnError::new(if kind == "response.cancelled" {
+                        "cancelled"
+                    } else {
+                        response["error"]["code"].as_str().unwrap_or_default()
+                    });
                     error.response_id = response_id.map(Into::into);
                     error
                 }),

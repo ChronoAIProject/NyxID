@@ -491,18 +491,22 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     };
     let now = Utc::now();
-    events
-        .update_one(
-            doc! {"_id": event_id},
-            doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}},
-        )
-        .await?;
-    if d.state == "waiting" && d.stream_deadline <= now {
+    let checked = doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}};
+    if d.state == "waiting" {
+        // Older observers could persist the disconnect and exit before detach.
+        // The stream and replay claims still arbitrate against the release.
+        let previous = state.db.collection::<bson::Document>(EVENTS)
+            .find_one_and_update(doc! {"_id": event_id, "delivery.state": "waiting"}, checked)
+            .projection(doc! {"_id": 0, "gateway_observer_detached": 1})
+            .await?;
+        let Some(previous) = previous else { return Ok(()); };
+        if d.stream_deadline > now && previous.get_bool("gateway_observer_detached") != Ok(true) {
+            return Ok(());
+        }
         delivery::detach(&state.db, event_id).await?;
         d.state = "pending".into();
-    }
-    if d.state == "waiting" {
-        return Ok(());
+    } else {
+        events.update_one(doc! {"_id": event_id}, checked).await?;
     }
     let conversation = engine::get(
         &state.db,

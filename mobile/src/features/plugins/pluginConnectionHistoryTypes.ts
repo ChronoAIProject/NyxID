@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
@@ -50,11 +51,9 @@ export function parseConnectionHistory(
 ) {
   const page = connectionHistorySchema.parse(value);
   if (page.service_id !== serviceId)
-    throw new Error(
-      translateApp("History returned for a different connection."),
-    );
+    throw localizedError("History returned for a different connection.");
   if (page.next_cursor !== null && page.next_cursor === cursor)
-    throw new Error(translateApp("History returned an invalid cursor."));
+    throw localizedError("History returned an invalid cursor.");
   return page;
 }
 
@@ -74,18 +73,14 @@ export function parseHistoryActions(
 ) {
   const page = historyActionsSchema.parse(value);
   if (version !== undefined && page.version !== version)
-    throw new Error(
-      translateApp("History filters changed. Reload the choices."),
-    );
+    throw localizedError("History filters changed. Reload the choices.");
   if (
     page.next_offset !== null &&
     (page.next_offset <= offset ||
       page.next_offset >= page.total ||
       page.next_offset > 1000)
   )
-    throw new Error(
-      translateApp("History filters returned invalid pagination."),
-    );
+    throw localizedError("History filters returned invalid pagination.");
   return page;
 }
 

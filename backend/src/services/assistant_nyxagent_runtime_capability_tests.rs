@@ -59,7 +59,7 @@ fn egress(replies: Vec<AppResult<axum::response::Response>>) -> ScriptedEgress {
     }
 }
 
-async fn fixture() -> (AppState, String) {
+async fn fixture() -> (AppState, CapabilityKey) {
     let db = connect_transaction_test_database("nyxa_capability_cache").await;
     engine::ensure_indexes(&db).await.unwrap();
     let mut service = downstream_service::test_helpers::dummy_service();
@@ -67,7 +67,11 @@ async fn fixture() -> (AppState, String) {
     service.slug = engine::SERVICE_SLUG.into();
     service.is_active = true;
     service.requires_user_credential = false;
-    let cache_key = format!("{}:{}:{}", db.name(), service.id, service.base_url);
+    let cache_key = (
+        db.name().to_owned(),
+        service.id.clone(),
+        service.base_url.clone(),
+    );
     db.collection(downstream_service::COLLECTION_NAME)
         .insert_one(service)
         .await
@@ -120,6 +124,90 @@ async fn owner(state: &AppState) -> Owner {
 
 async fn lookup(state: &AppState, egress: &ScriptedEgress, owner: &Owner) -> Value {
     upstream_capabilities(state, egress, &owner.context, &owner.credential, None).await
+}
+
+#[tokio::test]
+async fn reattach_admission_reuses_authenticated_limits_and_rejects_ambiguous_destinations() {
+    let (state, key) = fixture().await;
+    let actor = owner(&state).await;
+    let supported = json!({"reattach": {"protocol":"nyxagent-reattach-v1", "credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15}, "max_events":453439,"recent_events":4096,"max_event_bytes":33554432,"absence_retention_seconds":604800,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32}});
+    let egress = egress(vec![Ok(axum::Json(&supported).into_response())]);
+    assert!(cached_reattach(&state.db).is_none());
+    assert_eq!(lookup(&state, &egress, &actor).await, supported);
+    let selected = cached_reattach(&state.db).unwrap();
+    assert_eq!(selected.limits.max_subscribers_per_response, 8);
+    let watch = selected.limits.credential_watch.unwrap();
+    assert_eq!(
+        (watch.interval_seconds, watch.model_request_max_age_seconds),
+        (30, 15)
+    );
+    let mut previous_protocol = supported.clone();
+    previous_protocol["reattach"]
+        .as_object_mut()
+        .unwrap()
+        .remove("credential_watch");
+    CAPABILITIES
+        .lock()
+        .await
+        .insert(key.clone(), (Instant::now(), previous_protocol));
+    assert!(cached_reattach(&state.db).is_none());
+    let mut implicit_horizon = supported.clone();
+    implicit_horizon["reattach"]
+        .as_object_mut()
+        .unwrap()
+        .remove("absence_retention_seconds");
+    CAPABILITIES
+        .lock()
+        .await
+        .insert(key.clone(), (Instant::now(), implicit_horizon));
+    assert_eq!(
+        cached_reattach(&state.db)
+            .unwrap()
+            .limits
+            .absence_retention_seconds,
+        604800
+    );
+    let destination = contract::NyxAgentDestination(selected.destination_hash);
+    destination.verify(&key.1, &key.2).unwrap();
+    assert!(destination.verify("replaced-service", &key.2).is_err());
+    assert!(destination.verify(&key.1, "https://moved.invalid").is_err());
+    let changed = (key.0.clone(), key.1.clone(), "https://other.invalid".into());
+    CAPABILITIES
+        .lock()
+        .await
+        .insert(changed.clone(), (Instant::now(), supported.clone()));
+    assert!(cached_reattach(&state.db).is_none());
+    CAPABILITIES.lock().await.remove(&changed);
+    CAPABILITIES.lock().await.insert(
+        key.clone(),
+        (Instant::now() - CAPABILITY_TTL, supported.clone()),
+    );
+    assert!(cached_reattach(&state.db).is_none());
+    for (field, invalid) in [
+        ("protocol", json!("future")),
+        ("credential_watch", json!({})),
+        (
+            "credential_watch",
+            json!({"interval_seconds":31,"model_request_max_age_seconds":15}),
+        ),
+        (
+            "credential_watch",
+            json!({"interval_seconds":30,"model_request_max_age_seconds":16}),
+        ),
+        ("max_subscribers_per_owner", json!(1)),
+        ("retention_seconds", Value::Null),
+    ] {
+        let mut value = supported.clone();
+        value["reattach"][field] = invalid;
+        CAPABILITIES
+            .lock()
+            .await
+            .insert(key.clone(), (Instant::now(), value));
+        assert!(cached_reattach(&state.db).is_none());
+    }
+    assert_eq!(egress.owners.lock().await.len(), 1);
+    CAPABILITIES.lock().await.remove(&key);
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -222,6 +310,7 @@ async fn image_planning_reuses_owner_model_metadata_on_transports_without_discov
             Some(vec![ModelInfo {
                 id: engine::DEFAULT_MODEL.into(),
                 label: "Text model".into(),
+                inference_credential: None,
                 available: true,
                 description: None,
                 input_modalities: Some(vec!["text".into()]),

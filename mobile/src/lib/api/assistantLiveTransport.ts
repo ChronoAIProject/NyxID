@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { ApiError } from "./ApiError";
 
@@ -82,9 +82,7 @@ class LiveFrames {
       }
       this.size += character.length;
       if (this.size > ASSISTANT_LIVE_MAX_FRAME_CHARS)
-        throw new Error(
-          translateApp("Assistant live frame exceeded its limit."),
-        );
+        throw localizedError("Assistant live frame exceeded its limit.");
       if (character === "\r" || character === "\n") {
         if (!this.line) {
           if (this.data.length) payloads.push(this.data.join("\n"));
@@ -114,7 +112,7 @@ function parseEvent(payload: string): AssistantLiveEvent | undefined {
   }
 }
 const aborted = () =>
-  Object.assign(new Error(translateApp("Assistant live request stopped.")), {
+  Object.assign(localizedError("Assistant live request stopped."), {
     name: "AbortError",
   });
 
@@ -142,7 +140,7 @@ function deadline<T>(
       return;
     }
     timer = clock.setTimeout(() => {
-      finish(() => reject(new Error(translateApp("Assistant live request timed out."))));
+      finish(() => reject(localizedError("Assistant live request timed out.")));
       controller.abort();
     }, milliseconds);
     Promise.resolve()
@@ -195,9 +193,7 @@ export async function runAssistantLive({
   const timing = { ...DEFAULT_TIMING, ...overrides };
   for (const value of Object.values(timing)) {
     if (!Number.isFinite(value) || value <= 0)
-      throw new Error(
-        translateApp("Assistant live deadlines must be positive."),
-      );
+      throw localizedError("Assistant live deadlines must be positive.");
   }
   const state: { status: AssistantLiveStatus } = { status: "idle" };
   const setStatus = (next: AssistantLiveStatus) => {
@@ -235,9 +231,7 @@ export async function runAssistantLive({
         delay = ASSISTANT_LIVE_UNSUPPORTED_RETRY_MS;
       } else {
         if (!response.body)
-          throw new Error(
-            translateApp("Assistant live stream returned no body."),
-          );
+          throw localizedError("Assistant live stream returned no body.");
         reader = response.body.getReader();
         const frames = new LiveFrames();
         const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -272,11 +266,7 @@ export async function runAssistantLive({
           }
           if (!result.value.byteLength) {
             if (++emptyReads > 64)
-              throw new Error(
-                translateApp(
-                  "Assistant live stream returned too many empty chunks.",
-                ),
-              );
+              throw localizedError("Assistant live stream returned too many empty chunks.");
             continue;
           }
           emptyReads = 0;
@@ -286,9 +276,7 @@ export async function runAssistantLive({
             result.value.byteLength > ASSISTANT_LIVE_MAX_CHUNK_BYTES ||
             total > MAX_CONNECTION_BYTES
           )
-            throw new Error(
-              translateApp("Assistant live response exceeded its limit."),
-            );
+            throw localizedError("Assistant live response exceeded its limit.");
           for (const payload of frames.push(
             decoder.decode(result.value, { stream: true }),
           )) {
@@ -304,9 +292,7 @@ export async function runAssistantLive({
           }
         }
         if (!ready && !signal.aborted)
-          throw new Error(
-            translateApp("Assistant live stream closed before ready."),
-          );
+          throw localizedError("Assistant live stream closed before ready.");
         // EOF immediately restores fallback polling during the reopen gap.
         setStatus("connecting");
       }

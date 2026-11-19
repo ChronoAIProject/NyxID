@@ -1146,6 +1146,7 @@ async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_atta
             &u.f.state.db,
             &u.f.state.encryption_keys,
             None,
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args(&u.attachment_id)
@@ -1160,6 +1161,7 @@ async fn lark_base_write_config_exact_descriptors_nonchat_and_async_exclude_atta
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             &asynchronous,
             &args(&u.attachment_id)
@@ -1360,6 +1362,7 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
         "omitted_photo",
         "override",
         "wrong_table",
+        "wrong_base",
     ] {
         let mut input = args(&u.attachment_id);
         match variant {
@@ -1373,6 +1376,7 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
                 input.as_object_mut().unwrap().remove("attachments");
             }
             "override" => input["allow_duplicate_photo"] = json!(true),
+            "wrong_base" => input["app_token"] = json!("other"),
             _ => input["table_id"] = json!("other"),
         }
         assert_error(&call(&u, &auth, false, input).await);
@@ -1401,6 +1405,16 @@ async fn lark_base_write_real_scope_evaluator_accepts_decimal_recipe_and_denies_
     assert_eq!(
         payload(&call(&u, &auth, true, args(&u.attachment_id)).await)["record_id"],
         "rec_receipt"
+    );
+    let sent = requests(&u).await;
+    let upload = sent
+        .iter()
+        .find(|r| r.url.path().ends_with("/upload_all"))
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&upload.body)
+            .unwrap()
+            .contains("name=\"parent_node\"\r\n\r\nbase\r\n")
     );
     cleanup(u).await;
 }

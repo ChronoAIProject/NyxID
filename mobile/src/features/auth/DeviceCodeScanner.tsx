@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -56,8 +57,8 @@ export function DeviceCodeScanner({
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const [permission, requestPermission, getPermission] = useCameraPermissions();
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [scanError, setScanError] = useLocalizedState<string | null>(null);
+  const [permissionError, setPermissionError] = useLocalizedState<string | null>(null);
   const [permissionPending, setPermissionPending] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const scanHandled = useRef(false);
@@ -76,7 +77,7 @@ export function DeviceCodeScanner({
       if (nextState !== "active") return;
       void getPermission().catch(() => {
         setPermissionError(
-          translateApp("Camera access could not be checked. Please try again."),
+          () => (translateApp("Camera access could not be checked. Please try again.")),
         );
       });
     });
@@ -101,7 +102,7 @@ export function DeviceCodeScanner({
     const request = extractLoginRequestFromQr(result.data);
     if (!request) {
       setScanError(
-        translateApp("This QR code is not a valid NyxID login request."),
+        () => (translateApp("This QR code is not a valid NyxID login request.")),
       );
       return;
     }
@@ -121,9 +122,9 @@ export function DeviceCodeScanner({
       await requestPermission();
     } catch {
       setPermissionError(
-        translateApp(
+        () => (translateApp(
           "Camera access could not be requested. Try again or enter the code manually.",
-        ),
+        )),
       );
     } finally {
       setPermissionPending(false);
@@ -137,9 +138,9 @@ export function DeviceCodeScanner({
       await Linking.openSettings();
     } catch {
       setPermissionError(
-        translateApp(
+        () => (translateApp(
           "Settings could not be opened. Enable Camera for NyxID in system settings.",
-        ),
+        )),
       );
     } finally {
       setPermissionPending(false);

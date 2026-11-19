@@ -208,9 +208,15 @@ on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
 specifications, including a mounted copy of the hosted overlay, cannot grant
 this capability. User uploads retain their live conversation/key/retention checks;
 tool images retain their producing-live-turn fence. Consent binds the exact
-canonical multipart bytes and boundary content type. Body-constrained operation
-scopes still require JSON and therefore refuse this multipart upload: they cannot
-constrain its Base through `parent_node`. The upload is excluded from
+canonical multipart bytes and boundary content type. When admission to this live-chat
+operation requires a body limit, NyxID checks the caller's JSON arguments before
+attachment lookup. Uploads authorized without a body limit retain the original
+multipart encoding and confirmation identity. To pin
+the destination Base, require an exact `parent_node` and declare
+`attachment_id` and `parent_type` in the same closed object. NyxID uses those
+arguments to resolve the file and write the multipart fields. During a rolling
+upgrade, older replicas still return `body requires application/json` for a
+body-limited upload. The upload is excluded from
 `/mcp/config`, exact-operation views and descriptors, and refuses non-chat,
 feature-off, exact, durable and async execution before provider effects. Existing
 `bitable_record_create` discovery and JSON execution remain unchanged.

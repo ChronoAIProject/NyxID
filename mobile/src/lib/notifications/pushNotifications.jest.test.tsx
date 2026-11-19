@@ -7,6 +7,7 @@ import { setPushDeliverySuppressed } from "./pushDeliveryState";
 import { getAuthAccountId, setAuthAccountId } from "../auth/authAccount";
 import {
   activatePushAfterLogin,
+  capturePushLogout,
   deactivatePushOnLogout,
   isPushDeliverySuppressed,
   initializeNotificationRuntime,
@@ -665,4 +666,36 @@ test("exhausted native unregister is retained and active retries even while sign
   expect(mobileApi.registerPushToken).not.toHaveBeenCalled();
   expect(warning).toHaveBeenCalledTimes(2);
   stop();
+});
+
+
+test('M2622-03 post-tombstone teardown uses captured credentials and persists pending unbind before network', async () => {
+  mockStore.set('nyxid.push.device_token', 'native-token');
+  const captured = await capturePushLogout('old-access');
+  setAuthAccountId(null);
+  let release!: () => void;
+  jest.mocked(mobileApi.unregisterPushToken).mockImplementationOnce(async (_payload, accessToken) => {
+    expect(accessToken).toBe('old-access');
+    expect(mockStore.has('nyxid.push.pending_unbind')).toBe(true);
+    await new Promise<void>(resolve => {release=resolve;});
+  });
+  const operation=deactivatePushOnLogout(captured);
+  for(let i=0;i<50 && !release;i++) await Promise.resolve();
+  expect(release).toBeDefined();
+  expect(isPushDeliverySuppressed()).toBe(true);
+  release(); await operation;
+  expect(mockStore.has('nyxid.push.pending_unbind')).toBe(false);
+});
+
+test('M2622-03 missing capture and unreadable push storage still invalidate native delivery after durable clear', async () => {
+  const read = jest.mocked(SecureStore.getItemAsync).getMockImplementation()!;
+  setAuthAccountId(null);
+  jest.mocked(SecureStore.getItemAsync).mockImplementation(async (key) => {
+    if (key === 'nyxid.push.device_token') throw Error('push storage unavailable');
+    return read(key);
+  });
+  try {
+    await expect(deactivatePushOnLogout({accessToken: 'rotated-access', registration: null})).resolves.toBe(false);
+    expect(Notifications.unregisterForNotificationsAsync).toHaveBeenCalled();
+  } finally {jest.mocked(SecureStore.getItemAsync).mockImplementation(read);}
 });

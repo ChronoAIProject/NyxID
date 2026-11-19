@@ -15,6 +15,8 @@ function translateKnown(message: string, options?: TOptions): string {
 }
 
 function translateBare(message: string, options?: TOptions): string {
+  const authentication = /^Authentication failed:\s*([\s\S]*)$/i.exec(message);
+  if (authentication) return translateBare(authentication[1]!, options);
   if (englishErrorMessages.has(message)) return translateKnown(message, options);
 
   const status = /^Request failed with status (\d{3})$/.exec(message);

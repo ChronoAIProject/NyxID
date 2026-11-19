@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -71,7 +72,7 @@ export function CrewVoiceComposer(props: Props) {
   const rapidSilences = useRef(0);
   const [sending, setSending] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [connectedAt, setConnectedAt] = useState<number>();
   const [now, setNow] = useState(Date.now());
   const mounted = useRef(true);
@@ -116,7 +117,7 @@ export function CrewVoiceComposer(props: Props) {
       rapidSilences.current =
         durationMs < RAPID_SILENCE_MS ? rapidSilences.current + 1 : 0;
       if (rapidSilences.current >= MAX_RAPID_SILENCES) {
-        setError(translateApp(MICROPHONE_RETRY));
+        setError(() => (translateApp(MICROPHONE_RETRY)));
         return;
       }
       setRearming(true);
@@ -140,16 +141,16 @@ export function CrewVoiceComposer(props: Props) {
         const delivered = await sendUtterance(text);
         if (available() && !delivered)
           setError(
-            translateApp(
+            () => (translateApp(
               "Your spoken message was not sent. Review the draft in chat before trying again.",
-            ),
+            )),
           );
       } catch {
         if (available())
           setError(
-            translateApp(
+            () => (translateApp(
               "Your spoken message could not be sent. Review the crew before trying again.",
-            ),
+            )),
           );
       } finally {
         sendLock.current = false;
@@ -359,9 +360,9 @@ export function CrewVoiceComposer(props: Props) {
           onError: () => {
             if (!available() || ticket !== playback.current || finished) return;
             setError(
-              translateApp(
+              () => (translateApp(
                 "The reply could not be read aloud. It is available in the transcript.",
-              ),
+              )),
             );
             finished = true;
             stopPlayback();
@@ -370,9 +371,9 @@ export function CrewVoiceComposer(props: Props) {
         });
       } catch {
         setError(
-          translateApp(
+          () => (translateApp(
             "Speech playback is unavailable. Continue in the transcript.",
-          ),
+          )),
         );
         stopPlayback();
         setSpeaking(false);

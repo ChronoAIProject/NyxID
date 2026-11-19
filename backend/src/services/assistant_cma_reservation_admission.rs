@@ -1,4 +1,4 @@
-//! Admin-only local transitions; ordinary admission and recovery stay unchanged.
+//! Fenced reservation transitions shared by administration and background observation.
 use super::*;
 use crate::services::{
     assistant_cma_gateway::CmaSandbox,
@@ -26,10 +26,9 @@ pub(crate) async fn creation_for_sandbox(
 pub(crate) enum Change {
     Associate(CmaSandbox),
     Release,
+    ConfirmRetirement(CmaSandbox),
 }
 
-/// Provider reads stay outside the transaction. Both the observed parent and
-/// creation revision are compared again here, before any metadata can change.
 pub(crate) async fn commit(
     db: &Database,
     parent: &AssistantCmaSandbox,
@@ -38,12 +37,35 @@ pub(crate) async fn commit(
     actor: &AuditActor,
     audit_data: Value,
 ) -> AppResult<(AssistantCmaSandbox, Option<AssistantCmaCreation>)> {
+    commit_with_actor(db, parent, creation, change, Some(actor), audit_data).await
+}
+
+pub(crate) async fn commit_recovery(
+    db: &Database,
+    parent: &AssistantCmaSandbox,
+    creation: Option<&AssistantCmaCreation>,
+    change: Change,
+    audit_data: Value,
+) -> AppResult<(AssistantCmaSandbox, Option<AssistantCmaCreation>)> {
+    commit_with_actor(db, parent, creation, change, None, audit_data).await
+}
+
+/// Provider reads stay outside the transaction. Both the observed parent and
+/// creation revision are compared again here, before any metadata can change.
+async fn commit_with_actor(
+    db: &Database,
+    parent: &AssistantCmaSandbox,
+    creation: Option<&AssistantCmaCreation>,
+    change: Change,
+    actor: Option<&AuditActor>,
+    audit_data: Value,
+) -> AppResult<(AssistantCmaSandbox, Option<AssistantCmaCreation>)> {
     let context = (
         db.clone(),
         parent.clone(),
         creation.cloned(),
         change,
-        actor.clone(),
+        actor.cloned(),
         audit_data,
     );
     super::super::transaction_service::run_db_only(db, &context, |tx, (db, before, expected, change, actor, audit_data)| {
@@ -76,6 +98,18 @@ pub(crate) async fn commit(
                     } else { CreationChange::Receipt(CreationReceipt::Sandbox(remote.id.clone())) };
                     apply_creation_change(row, &mut next, &change)?;
                 },
+                Change::ConfirmRetirement(remote) => {
+                    if !current.occupies_account_slot
+                        || current.cma_sandbox_id.as_deref() != Some(&remote.id)
+                        || remote.state != SandboxObservationState::Retired
+                    { return Err(drift()); }
+                    if let Some(row) = creation.as_mut() {
+                        apply_creation_change(row, &mut next, &CreationChange::Confirm {
+                            sandbox_id: remote.id.clone(), agent_id: None,
+                        })?;
+                    }
+                    sandboxes::apply_observation(&mut next, remote, current.generation, Utc::now())?;
+                },
                 Change::Release => {
                     let row = creation.as_mut().ok_or_else(drift)?;
                     if row.submission_state != "confirmed_not_created" || current.cma_sandbox_id.is_some() {
@@ -94,8 +128,43 @@ pub(crate) async fn commit(
             {
                 return Err(drift());
             }
-            log_actor_event_in_transaction(db, tx, actor, "admin_cma_sandbox_reservation_resolved", audit_data.clone()).await?;
+            if let Some(actor) = actor {
+                log_actor_event_in_transaction(db, tx, actor, "admin_cma_sandbox_reservation_resolved", audit_data.clone()).await?;
+            } else {
+                let key = super::super::audit_service::audit_chain_hmac_key()
+                    .ok_or_else(|| AppError::Internal("Audit authority unavailable".into()))?;
+                super::super::audit_service::log_system_event_in_session(db, tx, key,
+                    "cma_sandbox_reservation_recovered", audit_data.clone()).await?;
+            }
             Ok((saved, creation))
         })
     }).await
+}
+
+/// Background receipt reconciliation uses the existing exact identity helpers;
+/// it has no path to replay or to create a remote resource.
+pub(crate) async fn recover_receipt(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    creation: &AssistantCmaCreation,
+) -> AppResult<&'static str> {
+    verify_creation(gateway, creation).await?;
+    let creation = change_creation(db, creation, CreationChange::Checked).await?;
+    if let Some(operation) = &creation.operation_id {
+        let value = gateway.get_lifecycle(&creation.user_id, operation).await?;
+        if let Some(agent) = lifecycle_agent(operation, &value)? {
+            finish_agent(db, gateway, &creation, agent).await?;
+        } else {
+            return Ok(
+                super::super::assistant_cma_reservation_service::operation_without_resource(&value),
+            );
+        }
+    } else if let Some(agent) = &creation.cma_agent_id {
+        finish_agent(db, gateway, &creation, agent).await?;
+    } else if let Some(sandbox) = &creation.cma_sandbox_id {
+        finish_sandbox(db, gateway, &creation, sandbox).await?;
+    } else {
+        return Ok("creation_identity_not_observable_without_replay");
+    }
+    Ok("creation_confirmed")
 }

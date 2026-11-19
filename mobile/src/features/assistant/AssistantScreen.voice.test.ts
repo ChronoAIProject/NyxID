@@ -95,8 +95,7 @@ function setup(
   let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
-  const alerts: { text: string; style?: string; onPress?: () => void }[][] =
-    [];
+  const alerts: { text: string; style?: string; onPress?: () => void }[][] = [];
   const drafts: {
     agentId: string;
     signal: AbortSignal;
@@ -158,7 +157,10 @@ function setup(
     model: "nyxagent/chat",
     agents: [agent],
     agentsError: undefined as string | undefined,
-    reloadAgents: async () => { events.push(["reloadAgents"]); assistant.agentsError = undefined; },
+    reloadAgents: async () => {
+      events.push(["reloadAgents"]);
+      assistant.agentsError = undefined;
+    },
     conversations: [],
     inputAttachments: [],
     online: true,
@@ -251,7 +253,12 @@ function setup(
     "./ChatIdentityHeader": headerModule,
     "react-native-safe-area-context": {
       SafeAreaView: "SafeAreaView",
-      useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: rightInset }),
+      useSafeAreaInsets: () => ({
+        top: 0,
+        left: 0,
+        bottom: 0,
+        right: rightInset,
+      }),
     },
     "../../components/workspace/WorkspaceLayoutContext": {
       WorkspaceCornerSensorContext: {
@@ -650,10 +657,7 @@ function setup(
       elements(expand(headerOptions.headerRight()))
         .find((n) => n.props.accessibilityLabel === "Chat options")!
         .props.onPress();
-      alerts
-        .at(-1)!
-        .find((action) => action.text === text)!
-        .onPress!();
+      alerts.at(-1)!.find((action) => action.text === text)!.onPress!();
       harness.flush();
     },
     setWidth: (value: number) => {
@@ -780,7 +784,9 @@ test("a shielded voice link publication renders as completed without pending UI"
   const rendered = elements(
     expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
   );
-  const footer = rendered.find((node) => node.type === "AssistantMessageFooter");
+  const footer = rendered.find(
+    (node) => node.type === "AssistantMessageFooter",
+  );
   assert.equal(footer?.props.text, `<${link}>`);
   assert.equal(footer?.props.report.messageId, message.id);
   assert.equal(
@@ -863,16 +869,17 @@ test("appending voice parts keeps the mobile row key stable and Report follows i
 });
 test("a navigation target for a middle voice segment reveals its stable group row", () => {
   const x = setup(A);
-  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map((row, index) =>
-    messageSchema.parse({
-      ...row,
-      seq: index + 6,
-      role: "assistant",
-      status: "completed",
-      error_code: null,
-      created_at: "2026-11-09T01:00:00Z",
-      via: "voice",
-    }),
+  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map(
+    (row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: "2026-11-09T01:00:00Z",
+        via: "voice",
+      }),
   );
   x.props.route.params.messageId = "7";
   x.harness.render();
@@ -883,7 +890,10 @@ test("a navigation target for a middle voice segment reveals its stable group ro
   };
   x.harness.render();
   assert.equal(list.props.data[0].id, "6");
-  assert.deepEqual(scrolls.map((target) => target.index), [0]);
+  assert.deepEqual(
+    scrolls.map((target) => target.index),
+    [0],
+  );
   x.harness.render();
   assert.equal(scrolls.length, 1);
   x.harness.unmount();
@@ -934,7 +944,9 @@ test("voice footers hide live continuations and keep sealed disconnect partial g
       visible ? 1 : 0,
     );
     if (visible) {
-      const footer = rendered.find((node) => node.type === "AssistantMessageFooter")!;
+      const footer = rendered.find(
+        (node) => node.type === "AssistantMessageFooter",
+      )!;
       assert.equal(footer.props.text, list.props.data[0].text);
       assert.equal(footer.props.timestamp, "2026-11-09T01:00:00Z");
       assert.equal(footer.props.report.messageId, "7");
@@ -1166,44 +1178,21 @@ test("wide windows: More opens Details directly and voice adds its preferences m
   x.harness.unmount();
 });
 
-test("narrow More lists chat details, Notifications and Settings; Settings opens the sidebar's sheet", async () => {
+test("P9 ordinary More opens Details directly without a call and offers only call preferences with voice", async () => {
   const x = setup(A);
   x.options();
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Chat details", "Settings", "Cancel"],
-  );
-  assert.equal(x.alerts.at(-1)!.at(-1)!.style, "cancel");
-  x.alerts.at(-1)![1]!.onPress!();
-  x.harness.flush();
-  // The sidebar's Settings row dispatches workspaceNavigateAction("AccountSettings").
-  assert.deepEqual(x.events.at(-1), [
-    "dispatch",
-    workspaceNavigateAction("AccountSettings"),
-  ]);
-  x.chooseOption("Chat details");
   assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  assert.equal(x.alerts.length, 0);
   x.setBell(true);
   x.options();
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Chat details", "Notifications", "Settings", "Cancel"],
-  );
-  x.alerts.at(-1)![1]!.onPress!();
-  x.harness.flush();
-  assert.deepEqual(x.events.at(-1), ["push", "Notifications", undefined]);
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  assert.equal(x.alerts.length, 0);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.options();
   assert.deepEqual(
     Array.from(x.alerts.at(-1)!, (action) => action.text),
-    [
-      "Voice preferences",
-      "Chat details",
-      "Notifications",
-      "Settings",
-      "Cancel",
-    ],
+    ["Voice preferences", "Chat details", "Cancel"],
   );
   x.alerts.at(-1)![0]!.onPress!();
   x.harness.flush();
@@ -1211,8 +1200,10 @@ test("narrow More lists chat details, Notifications and Settings; Settings opens
   x.harness.unmount();
 });
 
-test("an account change while More is open makes its Settings and Details entries inert", () => {
+test("an account change while More is open makes its Preferences and Details entries inert", async () => {
   const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
   x.options();
   const menu = x.alerts.at(-1)!;
   const before = x.events.length;
@@ -2258,7 +2249,9 @@ test("the folded Duo's agent picker is the workspace bottom sheet ending before 
   x.setCornerSensor(104);
   x.chooseAgent();
   const modal = () =>
-    x.all().find((n) => n.type === "Modal" && n.props.visible && n.props.children)!;
+    x
+      .all()
+      .find((n) => n.type === "Modal" && n.props.visible && n.props.children)!;
   // A transparent Modal hosting the shared surface (its own travel, scrim,
   // handle, and the rail reserve), never a full-window page sheet.
   assert.equal(modal().props.transparent, true);
@@ -2269,9 +2262,19 @@ test("the folded Duo's agent picker is the workspace bottom sheet ending before 
   const phone = setup(A);
   phone.chooseAgent();
   assert.ok(
-    phone.all().some((n) => n.type === "Modal" && n.props.visible && n.props.presentationStyle === "pageSheet"),
+    phone
+      .all()
+      .some(
+        (n) =>
+          n.type === "Modal" &&
+          n.props.visible &&
+          n.props.presentationStyle === "pageSheet",
+      ),
   );
-  assert.equal(phone.all().some((n) => n.type === "WorkspaceSheetSurface"), false);
+  assert.equal(
+    phone.all().some((n) => n.type === "WorkspaceSheetSurface"),
+    false,
+  );
   phone.harness.unmount();
 });
 
@@ -2292,7 +2295,11 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
       .flatMap((n) => n.props.children.flat(Infinity));
     assert.ok(labels.includes("This thread"));
     assert.ok(labels.includes("Saved chat"));
-    assert.ok(labels.some((label) => typeof label === "string" && label.includes("12 messages")));
+    assert.ok(
+      labels.some(
+        (label) => typeof label === "string" && label.includes("12 messages"),
+      ),
+    );
     const button = x
       .all()
       .find((n) => n.type === "ActionButton" && n.props.label === label)!;
@@ -2324,7 +2331,7 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
 test("header Details uses the latest conversation even when header identity stays unchanged", () => {
   const x = setup(A);
   x.adopt(B);
-  x.chooseOption("Chat details");
+  x.options();
   const pushed = x.events.find((e) => e[0] === "push")!;
   assert.equal(pushed[1], "AssistantDetails");
   assert.equal((pushed[2] as any).conversationId, B);
@@ -2538,7 +2545,9 @@ test("private, specialist and contextual header identities open the picker witho
     }
     x.input().props.onChangeText("Unsent draft");
     x.harness.flush();
-    const identity = elements(x.header()).find((n) => n.type === "FloatingButton")!;
+    const identity = elements(x.header()).find(
+      (n) => n.type === "FloatingButton",
+    )!;
     assert.match(
       identity.props.accessibilityLabel,
       /Chatting with .*Saved chat.*Choose agent/,
@@ -2572,16 +2581,13 @@ test("private, specialist and contextual header identities open the picker witho
   draft.harness.unmount();
 });
 
-test("narrow bars read Menu, title, Scan QR, New chat, More as the shared 44pt glass buttons", () => {
+test("P9 ordinary bars retain bell, New chat and More with floating 44pt controls", () => {
   const x = setup(A, false);
-  const actions = x.headerActions();
   assert.deepEqual(
-    actions.map((n) => n.props.accessibilityLabel),
-    ["Scan QR code", "New chat", "Chat options"],
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["New chat", "Chat options"],
   );
-  for (const action of actions) {
-    // The one glass primitive (44pt target, its own interactive glass
-    // capsule, the shared highlight), with no styling of its own.
+  for (const action of x.headerActions()) {
     assert.equal(action.type, "FloatingButton");
     assert.equal(action.props.style, undefined);
     assert.equal(action.props.capsuleStyle, undefined);
@@ -2589,32 +2595,30 @@ test("narrow bars read Menu, title, Scan QR, New chat, More as the shared 44pt g
   const bar = elements(x.headerRight()).find(
     (n) => n.props.testID === "chat-header-actions",
   )!;
-  const barStyle = Object.assign({}, ...[bar.props.style].flat().filter(Boolean));
+  const barStyle = Object.assign(
+    {},
+    ...[bar.props.style].flat().filter(Boolean),
+  );
   assert.equal(barStyle.flexShrink, 0);
-  assert.equal(barStyle.gap, 8, "floating circles sit 8pt apart");
-  actions[0]!.props.onPress();
-  x.harness.flush();
-  // The sidebar quick action dispatches this same scanner sheet action.
-  assert.deepEqual(x.events.at(-1), ["dispatch", openScannerSheetAction()]);
+  assert.equal(barStyle.gap, 8);
   x.setBell(true);
-  assert.deepEqual(
-    x.headerActions().map((n) => n.props.accessibilityLabel),
-    ["Scan QR code", "New chat", "Chat options"],
-    "narrow bars move Notifications into More",
-  );
-  x.setWidth(1024);
-  assert.equal(
-    x.headerActions().some((n) => n.props.accessibilityLabel === "Scan QR code"),
-    false,
-    "the persistent sidebar keeps its own scanner",
-  );
-  // The wide bar floats the same glass buttons: the bell, New chat, More.
-  assert.deepEqual(
+  const controls = () =>
     elements(x.headerRight())
-      .filter((n) => n.type === "FloatingButton" || n.type === "NotificationBell")
-      .map((n) => n.props.accessibilityLabel ?? n.type),
-    ["NotificationBell", "New chat", "Chat options"],
-  );
+      .filter(
+        (n) => n.type === "FloatingButton" || n.type === "NotificationBell",
+      )
+      .map((n) => n.props.accessibilityLabel ?? n.type);
+  assert.deepEqual(controls(), [
+    "NotificationBell",
+    "New chat",
+    "Chat options",
+  ]);
+  x.setWidth(1024);
+  assert.deepEqual(controls(), [
+    "NotificationBell",
+    "New chat",
+    "Chat options",
+  ]);
   x.harness.unmount();
 });
 
@@ -2643,19 +2647,19 @@ test("beside the Duo's rail (folded or unfolded, either mode) the chat's control
   x.setQuickRail(false);
   assert.deepEqual(
     x.headerActions().map((n) => n.props.accessibilityLabel),
-    ["Scan QR code", "New chat", "Chat options"],
+    ["New chat", "Chat options"],
   );
   x.options();
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Chat details", "Notifications", "Settings", "Cancel"],
-  );
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  assert.equal(x.alerts.length, alerts);
   // iPad's wide bar (no corner cluster, no rail) is unchanged: the bell,
   // New chat, More.
   x.setWidth(1024);
   const wideBar = () =>
     elements(x.headerRight())
-      .filter((n) => n.type === "FloatingButton" || n.type === "NotificationBell")
+      .filter(
+        (n) => n.type === "FloatingButton" || n.type === "NotificationBell",
+      )
       .map((n) => n.props.accessibilityLabel ?? n.type);
   assert.deepEqual(wideBar(), ["NotificationBell", "New chat", "Chat options"]);
   x.harness.unmount();
@@ -2679,15 +2683,21 @@ test("on the Duo this chat's controls go to the column in both modes: Menu, the 
   column.identity.onPress();
   x.harness.flush();
   assert.equal(modals(), before + 1);
-  // More runs the bar's More (narrow: the Chat options menu).
+  // More retains the base direct Details action outside a corner window.
   const alerts = x.alerts.length;
   column.more.onPress();
   x.harness.flush();
-  assert.equal(x.alerts.length, alerts + 1);
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text).slice(0, 1),
-    ["Chat details"],
+  assert.equal(x.alerts.length, alerts);
+  assert.equal(
+    x.events.some((e) => e[0] === "push"),
+    false,
+    "Details waits for picker dismissal",
   );
+  x.all()
+    .find((n) => n.type === "Modal")!
+    .props.onDismiss();
+  x.harness.flush();
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
   // A contextual chat (pushed from another page) has Back, like its bar.
   x.props.contextual = true;
   x.harness.render();
@@ -2695,10 +2705,12 @@ test("on the Duo this chat's controls go to the column in both modes: Menu, the 
   x.harness.unmount();
 });
 
-test("phone composers collapse to one row only while idle; uploads, dictation and wide windows keep two rows", () => {
+test("P9 only folded Duo composers collapse while idle; ordinary devices, uploads and dictation retain two rows", () => {
   const x = setup(A, false);
   const idle = () => x.input().props.compactWhenIdle;
-  assert.equal(idle(), true, "an ordinary phone composer may collapse");
+  assert.equal(idle(), false, "ordinary phone keeps the base two rows");
+  x.setQuickRail(true);
+  assert.equal(idle(), true, "folded Duo may collapse");
   x.uploads.files.push({ key: "photo", status: "uploaded" });
   x.harness.render();
   assert.equal(idle(), false, "pending attachments stay visible");
@@ -2716,12 +2728,15 @@ test("phone composers collapse to one row only while idle; uploads, dictation an
   x.harness.unmount();
 });
 
-test("the narrow bar keeps a fixed avatar; its title is the one tail-truncating line before the actions", () => {
+test("the Duo bar keeps a fixed avatar; its title is the one tail-truncating line before the actions", () => {
   const x = setup(A, false);
+  x.setQuickRail(true);
   x.assistant.agent.display_name =
     "A very long specialist name that cannot fit beside three actions";
   x.harness.render();
-  const identity = elements(x.header()).find((n) => n.type === "FloatingButton")!;
+  const identity = elements(x.header()).find(
+    (n) => n.type === "FloatingButton",
+  )!;
   // One shared glass pill around avatar, title and chevron; its glass hugs
   // the pill and yields width.
   const capsule = Object.assign(
@@ -2762,10 +2777,7 @@ test("the narrow bar keeps a fixed avatar; its title is the one tail-truncating 
           ? "chevron"
           : undefined,
   );
-  assert.deepEqual(
-    order.filter(Boolean),
-    ["avatar", "title", "chevron"],
-  );
+  assert.deepEqual(order.filter(Boolean), ["avatar", "title", "chevron"]);
   const avatar = elements(identity).find((n) => n.type === "AgentAvatar")!;
   assert.equal(avatar.props.size, "lg");
   assert.equal(avatar.props.agent.id, "agent-a");
@@ -2777,7 +2789,11 @@ test("on a corner-sensor phone the agent picker's header stays at the top; its f
   const sheet = () => {
     const modal = x.all().find((n) => n.type === "Modal")!;
     const panel = modal.props.children[0];
-    return { panel, header: panel.props.children[0], body: panel.props.children[1] };
+    return {
+      panel,
+      header: panel.props.children[0],
+      body: panel.props.children[1],
+    };
   };
   x.chooseAgent();
   const style = (node: { props: Record<string, any> }) =>
@@ -2833,14 +2849,22 @@ test("scrolling the transcript dismisses the keyboard and never swallows a first
   x.harness.unmount();
 });
 
-test("a live text-size change remounts the transcript so message, date and Markdown text re-measure", () => {
+test("P9 transcript keeps base native identity outside Duo and remeasures in corner windows", () => {
   const x = setup(A, false);
   const list = () => x.all().find((n) => n.type === "FlatList")!;
   const before = list().key;
   x.harness.render();
-  assert.equal(list().key, before, "ordinary renders keep the list and its scroll");
+  assert.equal(
+    list().key,
+    before,
+    "ordinary renders keep the list and its scroll",
+  );
   x.setFontScale(3.12);
-  assert.notEqual(list().key, before);
+  assert.equal(list().key, before, "ordinary font changes preserve the list");
+  x.setQuickRail(true);
+  const duoBefore = list().key;
+  x.setFontScale(2);
+  assert.notEqual(list().key, duoBefore);
   assert.ok(String(list().key).startsWith(`${A}:`), "still scoped to its chat");
   x.harness.unmount();
 });
@@ -3278,12 +3302,22 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
   }
 });
 
-
 test("Home displays a friendly 503 beside Reload agents and clears it after retry", async () => {
   const x = setup();
-  x.assistant.agentsError = buildApiError("<html><center>nginx</center></html>", 503).message;
+  x.assistant.agentsError = buildApiError(
+    "<html><center>nginx</center></html>",
+    503,
+  ).message;
   x.harness.render();
-  assert.ok(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."));
+  assert.ok(
+    x
+      .all()
+      .some(
+        (node) =>
+          node.props.message ===
+          "NyxID is temporarily unavailable. Try again in a moment.",
+      ),
+  );
   assert.doesNotMatch(JSON.stringify(x.harness.value()), /<html>|nginx/);
   const reload = x.all().find((node) => node.props.label === "Reload agents");
   assert.ok(reload);
@@ -3291,26 +3325,47 @@ test("Home displays a friendly 503 beside Reload agents and clears it after retr
   await x.harness.settle();
   x.harness.render();
   assert.ok(x.events.some(([name]) => name === "reloadAgents"));
-  assert.equal(x.all().some((node) => node.props.label === "Reload agents"), false);
-  assert.equal(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."), false);
+  assert.equal(
+    x.all().some((node) => node.props.label === "Reload agents"),
+    false,
+  );
+  assert.equal(
+    x
+      .all()
+      .some(
+        (node) =>
+          node.props.message ===
+          "NyxID is temporarily unavailable. Try again in a moment.",
+      ),
+    false,
+  );
   x.harness.unmount();
 });
 
 test("2345 history failure keeps the composer usable, offers refresh, and respects destroyed state", async () => {
   const x = setup(A);
-  x.assistant.error = "Conversation history could not be loaded. Please try again.";
+  x.assistant.error =
+    "Conversation history could not be loaded. Please try again.";
   x.harness.render();
   assert.notEqual(x.input().props.editable, false);
-  const refresh = x.all().find((node) => node.props.label === "Refresh history" || node.props.accessibilityLabel === "Refresh history");
+  const refresh = x
+    .all()
+    .find(
+      (node) =>
+        node.props.label === "Refresh history" ||
+        node.props.accessibilityLabel === "Refresh history",
+    );
   assert.ok(refresh);
   await refresh.props.onPress();
   assert.ok(x.events.some(([name]) => name === "recover"));
-  x.assistant.history!.conversation.agent = { ...x.assistant.agent, destroyed: true };
+  x.assistant.history!.conversation.agent = {
+    ...x.assistant.agent,
+    destroyed: true,
+  };
   x.harness.render();
   assert.equal(x.input().props.editable, false);
   x.harness.unmount();
 });
-
 
 test("Home loading never registers a critical navigation guard; only its initial send or upload does", () => {
   const env = setup();
@@ -3338,4 +3393,13 @@ test("Home loading never registers a critical navigation guard; only its initial
     "an established chat can leave during a send",
   );
   env.harness.unmount();
+});
+
+test("P9 ordinary floating identity retains the base thread detail", () => {
+  const x = setup(A, false);
+  const lines = elements(x.header()).filter(
+    (n) => n.type === "Text" && n.props.ellipsizeMode === "tail",
+  );
+  assert.equal(lines.length, 2, "name and thread details stay visible");
+  x.harness.unmount();
 });

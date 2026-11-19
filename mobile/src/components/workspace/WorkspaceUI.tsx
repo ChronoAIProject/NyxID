@@ -1,4 +1,4 @@
-import { DynamicTypeText as Text } from "../DynamicTypeText";
+
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useContext, type PropsWithChildren, type ReactNode } from "react";
@@ -12,6 +12,7 @@ import {
   WORKSPACE_TITLE_MAX_LINES,
 } from "./workspaceHeaderMetrics";
 import {
+  Text,
   ActivityIndicator,
   Pressable,
   RefreshControl,
@@ -26,12 +27,13 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../../theme/ThemeContext";
-import { fonts, radius, typeScale, TOUCH_TARGET } from "../../theme/designTokens";
+import { fonts, radius, typeScale, TOUCH_TARGET, } from "../../theme/designTokens";
 import { KeyboardViewport } from "./KeyboardViewport";
 import { PageScrollView } from "./ScrollEdgeFades";
 
 export function WorkspacePage({
   title,
+  titleNumberOfLines,
   subtitle,
   children,
   scroll = true,
@@ -41,6 +43,7 @@ export function WorkspacePage({
   contentStyle,
 }: PropsWithChildren<{
   title: string;
+  titleNumberOfLines?: number;
   subtitle?: string;
   scroll?: boolean;
   showHeading?: boolean;
@@ -77,9 +80,11 @@ export function WorkspacePage({
             }
             // Capped like the header bar so no title word outgrows a line:
             // breaks fall between words, and a longer title ends in "…".
-            numberOfLines={WORKSPACE_TITLE_MAX_LINES}
+            numberOfLines={
+              cornerSensor ?WORKSPACE_TITLE_MAX_LINES : titleNumberOfLines}
             ellipsizeMode="tail"
-            maxFontSizeMultiplier={WORKSPACE_TITLE_MAX_FONT_SCALE}
+            maxFontSizeMultiplier={
+              cornerSensor ?WORKSPACE_TITLE_MAX_FONT_SCALE : undefined}
             style={[styles.title, { color: colors.textPrimary }]}
           >
             {title}
@@ -182,7 +187,7 @@ export function Section({
           accessibilityRole="header"
           style={[styles.sectionTitle, { color: colors.textMuted }]}
         >
-          {title}
+          {title.toUpperCase()}
         </Text>
       ) : null}
       <Card>{children}</Card>
@@ -425,7 +430,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   multiline: { minHeight: 96, textAlignVertical: "top" },
-  button: { minWidth: TOUCH_TARGET, borderRadius: radius.md, overflow: "hidden" },
+  button: { minWidth: TOUCH_TARGET, borderRadius: radius.md, overflow: "hidden", },
   compactButton: {
     alignSelf: "flex-start",
     maxWidth: "100%",
@@ -461,7 +466,9 @@ const styles = StyleSheet.create({
   notice: { padding: 12, borderWidth: 1, borderRadius: radius.md },
   section: { gap: 8 },
   sectionTitle: {
-    ...typeScale.groupLabel,
+    fontFamily: fonts.body,
+    fontSize: 12,
+    letterSpacing: 0.6,
     paddingHorizontal: 16,
   },
   sectionFooter: {

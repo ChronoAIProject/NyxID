@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 export function accountWebUrl(frontend: string, path: string): string {
   const base = new URL(frontend);
@@ -6,14 +7,10 @@ export function accountWebUrl(frontend: string, path: string): string {
     base.username ||
     base.password
   )
-    throw new Error(
-      translateApp(
-        "NyxID website is not configured. Contact your administrator.",
-      ),
-    );
+    throw localizedError("NyxID website is not configured. Contact your administrator.");
   const url = new URL(path, base.origin);
   if (url.origin !== base.origin)
-    throw new Error(translateApp("Invalid NyxID website destination."));
+    throw localizedError("Invalid NyxID website destination.");
   return url.href;
 }
 export const ORGANIZATION_WEB_ACTIONS = [

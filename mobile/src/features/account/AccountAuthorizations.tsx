@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
@@ -32,7 +33,7 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
   });
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [feedback, setFeedback] = useState<{
+  const [feedback, setFeedback] = useLocalizedState<{
     message: string;
     tone: "error" | "success";
   } | null>(null);
@@ -63,17 +64,17 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
           () => false,
         );
       if (ticket.isCurrent())
-        setFeedback({
+        setFeedback(() => ({
           message: listed
             ? translateApp("Access revoked. Lists refreshed from NyxID.")
             : translateApp(
                 "Access revoked. Lists could not reload yet; retry to confirm.",
               ),
           tone: "success",
-        });
+        }));
     } catch (error) {
       if (ticket.isCurrent())
-        setFeedback({ message: resolveErrorMessage(error), tone: "error" });
+        setFeedback(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);

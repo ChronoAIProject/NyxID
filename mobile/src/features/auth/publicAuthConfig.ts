@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import type { SocialProvider } from "./socialCallback";
 
@@ -20,9 +20,7 @@ export function parsePublicAuthConfig(payload: unknown): PublicAuthConfig {
   const result = publicAuthConfigSchema.safeParse(payload);
   if (!result.success) {
     // Error feedback must never include the response body or validation input.
-    throw new Error(
-      translateApp("Unable to load sign-in options. Please try again."),
-    );
+    throw localizedError("Unable to load sign-in options. Please try again.");
   }
 
   return {
@@ -38,19 +36,12 @@ export function requireSocialProvider(
   provider: SocialProvider,
 ): void {
   if (!config) {
-    throw new Error(
-      translateApp("Sign-in options are not ready. Please wait or retry."),
-    );
+    throw localizedError("Sign-in options are not ready. Please wait or retry.");
   }
   if (!config.socialProviders.includes(provider)) {
     const label = { google: "Google", github: "GitHub", apple: "Apple" }[
       provider
     ];
-    throw new Error(
-      translateApp(
-        "{{label}} sign-in is not enabled on this server. Choose another available sign-in method.",
-        { label: label},
-      ),
-    );
+    throw localizedError("{{label}} sign-in is not enabled on this server. Choose another available sign-in method.", { label: label});
   }
 }

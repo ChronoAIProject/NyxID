@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { requestJson } from "./http";
 import {
   QUICK_ACCESS_MAX_ITEMS,
@@ -13,9 +13,7 @@ const PATH = "/users/me/quick-access";
 function parseState(payload: unknown): QuickAccessState {
   const result = quickAccessResponseSchema.safeParse(payload);
   if (!result.success)
-    throw new Error(
-      translateApp("NyxID returned an unexpected response. Please try again."),
-    );
+    throw localizedError("NyxID returned an unexpected response. Please try again.");
   return result.data;
 }
 
@@ -24,7 +22,7 @@ export const quickAccessApi = {
   async get(signal?: AbortSignal) {
     return parseState(await requestJson<unknown>(PATH, { signal }));
   },
-  async save(items: readonly QuickAccessItem[]) {
+  async save(items: readonly QuickAccessItem[], authorityGuard?: () => void) {
     // The same limits the server enforces, checked before sending.
     const body = {
       items: quickAccessItemSchema
@@ -34,12 +32,12 @@ export const quickAccessApi = {
         .map(({ kind, id }) => ({ kind, id })),
     };
     return parseState(
-      await requestJson<unknown>(PATH, { method: "PUT", body }),
+      await requestJson<unknown>(PATH, { method: "PUT", body, authorityGuard }),
     );
   },
-  async reset() {
+  async reset(authorityGuard?: () => void) {
     return parseState(
-      await requestJson<unknown>(PATH, { method: "DELETE" }),
+      await requestJson<unknown>(PATH, { method: "DELETE", authorityGuard }),
     );
   },
 };

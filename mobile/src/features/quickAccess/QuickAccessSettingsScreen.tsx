@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import {isApiError} from "../../lib/api/ApiError";
+import { useRef, useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { ChevronDown, ChevronUp, Minus, Plus } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -41,11 +42,23 @@ export function QuickAccessSettingsScreen(
   const sources = useQuickAccessSources({ agents: true, crews: true });
   // Editing waits for the saved list: a change made over the placeholder
   // default would overwrite it.
-  const editable = quickAccess.loaded;
+  const busy = useRef(false);
+  const [pending, setPending] = useState(false);
+  const partial = quickAccess.state.hasUnsupportedEntries === true;
+  const conflictError = isApiError(quickAccess.saveError) && quickAccess.saveError.statusCode === 409
+    && (quickAccess.saveError.errorCode === 1004 || quickAccess.saveError.errorKey === 'conflict');
+  const editable = quickAccess.loaded && !partial && !quickAccess.recoveryRequired;
+  const saving = pending || quickAccess.saving;
+  const begin = (operation: (complete: () => void) => void, reset = false) => {
+    if (!quickAccess.loaded || (!reset && !editable) || saving || busy.current) return;
+    busy.current = true;
+    setPending(true);
+    quickAccess.clearSaveError();
+    operation(() => { busy.current = false; setPending(false); });
+  };
   const full = quickAccessFull(items);
   const change = (next: QuickAccessItem[]) => {
-    quickAccess.clearSaveError();
-    quickAccess.save(next);
+    begin(complete => quickAccess.save(next, complete));
   };
   const candidates = quickAccessCandidates(items, sources);
   const glyph = (entry: QuickAccessEntry) => (
@@ -80,14 +93,24 @@ export function QuickAccessSettingsScreen(
       <SettingsGroup
         title={t("Your shortcuts")}
         footer={
-          quickAccess.saveError
+          partial
+            ? t("Some shortcuts need a newer version of NyxID. Update the app to edit them, or use Reset to default to replace the entire list.")
+            : quickAccess.recoveryRequired
+            ? quickAccess.recoveryPending
+              ? t("Reloading shortcuts changed on another device. Editing will resume when the latest list loads.")
+              : t("Couldn't reload your shortcuts. Reload the latest list before editing.")
+            : quickAccess.saveError && !conflictError
+            ? t("Couldn't save quick access. Your previous list is back.")
+            : quickAccess.conflictRecovered
+            ? t("Your shortcuts changed on another device. The latest list is shown. Try again.")
+            : quickAccess.saveError
             ? t("Couldn't save quick access. Your previous list is back.")
             : t(
                 "Shown in the column under the clock, in this order. Saved to your account, so your other devices show the same list.",
               )
         }
       >
-        {!editable ? (
+        {!quickAccess.loaded ? (
           <SettingsRow label={t("Loading…")} disabled />
         ) : rows.length === 0 ? (
           <SettingsRow
@@ -119,20 +142,21 @@ export function QuickAccessSettingsScreen(
                   <View style={styles.controls}>
                     <OrderButton
                       label={t("Move {{name}} up", { name })}
-                      disabled={index === 0}
+                      disabled={!editable || saving || index === 0}
                       onPress={() => change(moveQuickAccess(items, index, -1))}
                     >
                       <ChevronUp size={18} color={colors.textPrimary} />
                     </OrderButton>
                     <OrderButton
                       label={t("Move {{name}} down", { name })}
-                      disabled={index === items.length - 1}
+                      disabled={!editable || saving || index === items.length - 1}
                       onPress={() => change(moveQuickAccess(items, index, 1))}
                     >
                       <ChevronDown size={18} color={colors.textPrimary} />
                     </OrderButton>
                     <OrderButton
                       label={t("Remove {{name}}", { name })}
+                      disabled={!editable || saving}
                       onPress={() => change(removeQuickAccess(items, index))}
                     >
                       <Minus size={18} color={colors.danger} />
@@ -144,6 +168,11 @@ export function QuickAccessSettingsScreen(
           })
         )}
       </SettingsGroup>
+      {quickAccess.recoveryRequired && !quickAccess.recoveryPending ? (
+        <SettingsGroup>
+          <SettingsRow label={t("Reload shortcuts")} tone="action" onPress={quickAccess.retry} />
+        </SettingsGroup>
+      ) : null}
       <SettingsGroup
         title={t("Add from the menu")}
         footer={
@@ -166,7 +195,7 @@ export function QuickAccessSettingsScreen(
                 name,
                 label: name,
               })}
-              disabled={!editable || full}
+              disabled={!editable || saving || full}
               onAdd={() => change(addQuickAccess(items, { kind: "destination", id }))}
             />
           );
@@ -189,7 +218,7 @@ export function QuickAccessSettingsScreen(
                   label: name,
                   agent,
                 })}
-                disabled={!editable || full}
+                disabled={!editable || saving || full}
                 onAdd={() =>
                   change(addQuickAccess(items, { kind: "agent", id: agent.id }))
                 }
@@ -213,7 +242,7 @@ export function QuickAccessSettingsScreen(
                 label: crew.name,
                 members: crew.members,
               })}
-              disabled={!editable || full}
+              disabled={!editable || saving || full}
               onAdd={() =>
                 change(addQuickAccess(items, { kind: "crew", id: crew.id }))
               }
@@ -229,10 +258,9 @@ export function QuickAccessSettingsScreen(
         <SettingsRow
           label={t("Reset to default")}
           tone="action"
-          disabled={!editable || !customized}
+          disabled={!quickAccess.loaded || saving || !customized}
           onPress={() => {
-            quickAccess.clearSaveError();
-            quickAccess.reset();
+            begin(complete => quickAccess.reset(complete), true);
           }}
         />
       </SettingsGroup>

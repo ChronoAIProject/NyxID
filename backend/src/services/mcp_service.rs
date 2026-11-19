@@ -939,6 +939,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
@@ -2995,6 +3003,25 @@ pub fn generate_tool_definitions(
     });
 
     tools.push(McpToolDefinition {
+        name: "nyx__diagnose_invocation".to_string(),
+        description: "Redeem one short-lived NyxID invocation-diagnostic handle using this exact current identity. The original tool error remains authoritative. Call at most once, except one retry when the result explicitly reports diagnostic_not_ready; never retry the failed business operation automatically."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Opaque nyx_diag_ handle returned by the immediately preceding failed NyxID invocation"
+                }
+            },
+            "required": ["handle"],
+            "additionalProperties": false
+        }),
+    });
+
+    tools.push(McpToolDefinition {
         name: "nyx__ssh_exec".to_string(),
         description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
             and exit code. The command runs on the remote machine authenticated via NyxID \
@@ -3086,6 +3113,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
+        | "nyx__diagnose_invocation"
         | "nyx__wait_for_connection"
         | "nyx__ssh_list_services"
         | "nyx__oracle_pools"
@@ -3142,6 +3170,7 @@ pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
         "nyx__wait_for_connection" => "Wait for a connection",
         "nyx__discover_services" => "Discover services",
         "nyx__list_connected_services" => "List connected services",
+        "nyx__diagnose_invocation" => "Diagnose a failed invocation",
         "nyx__ssh_list_services" => "List SSH services",
         "nyx__ssh_exec" => "Run an SSH command",
         "nyx__oracle_pools" => "List oracle pools",
@@ -4309,6 +4338,38 @@ impl PreparedProxyCall {
         service: &McpToolService,
         endpoint: &McpToolEndpoint,
     ) -> AppResult<()> {
+        let (body, mime) = self.scope_input();
+        self.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            super::agent_operation_scope_service::InputBody::Request(body, mime),
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn scope_input(&self) -> (&[u8], Option<&str>) {
+        if let Some(json) = self
+            .attachment_binding
+            .as_ref()
+            .and_then(|b| b.scope_json())
+        {
+            (json, Some("application/json"))
+        } else {
+            (
+                self.body.as_deref().unwrap_or_default(),
+                self.body_content_type.as_deref(),
+            )
+        }
+    }
+
+    fn authorize_operation_inputs(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+        input: super::agent_operation_scope_service::InputBody<'_>,
+    ) -> AppResult<bool> {
         use super::agent_operation_scope_service as operations;
         if operations::applicable(
             scopes,
@@ -4318,7 +4379,7 @@ impl PreparedProxyCall {
         .next()
         .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let path = if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
@@ -4338,7 +4399,7 @@ impl PreparedProxyCall {
             self.carries_override(true),
             false,
         )?;
-        operations::check_inputs(
+        operations::evaluate_inputs(
             scopes,
             &service.service_id,
             operations::mcp_catalog_id(service),
@@ -4346,8 +4407,7 @@ impl PreparedProxyCall {
             self.method.as_str(),
             &path,
             self.query.as_deref(),
-            self.body.as_deref().unwrap_or_default(),
-            self.body_content_type.as_deref(),
+            input,
         )
     }
 
@@ -4656,6 +4716,7 @@ pub fn prepare_chat_proxy_tool_call<'a>(
     db: &'a mongodb::Database,
     keys: &'a EncryptionKeys,
     chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    scopes: &'a crate::models::agent_operation_scope::OperationScopes,
     service: &'a McpToolService,
     endpoint: &'a McpToolEndpoint,
     args: &'a serde_json::Value,
@@ -4732,10 +4793,8 @@ pub fn prepare_chat_proxy_tool_call<'a>(
             );
             return Ok(prepared);
         }
-        let materialized = Box::pin(super::lark_attachment_tool::materialize(
-            db, keys, chat, service, endpoint, args,
-        ))
-        .await?;
+        let chat =
+            super::lark_attachment_tool::require_upload_chat(db, chat, service, endpoint).await?;
         // Reuse route/policy preparation with no caller body. This private copy
         // changes only body construction; consent and identity keep the real endpoint.
         let mut route = endpoint.clone();
@@ -4743,6 +4802,31 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         route.request_body_schema = None;
         route.request_body_required = false;
         let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        use super::agent_operation_scope_service::InputBody;
+        let body_limited = prepared.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            InputBody::BeforeUpload,
+        )?;
+        let upload = super::lark_attachment_tool::UploadArguments::new(args, body_limited)?;
+        if let Some(body) = upload.scope_json() {
+            prepared.authorize_operation_inputs(
+                scopes,
+                service,
+                endpoint,
+                InputBody::Request(body, Some("application/json")),
+            )?;
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, upload,
+        ))
+        .await?;
+        if body_limited {
+            prepared
+                .server_owned_headers
+                .push(("content-type".into(), materialized.content_type.clone()));
+        }
         prepared.body = Some(materialized.body);
         prepared.body_content_type = Some(materialized.content_type);
         prepared.attachment_binding = Some(materialized.binding);
@@ -6350,6 +6434,14 @@ async fn execute_tool_resolved_inner(
         {
             return Err(super::lark_attachment_tool::refused());
         }
+        if binding.scope_json().is_some()
+            && proxy_service::credential_header_name(&target)
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "The credential conflicts with the scoped upload content type".into(),
+            ));
+        }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
     if let Some(base) = &prepared.managed_base {
@@ -6425,7 +6517,14 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
@@ -6502,6 +6601,14 @@ async fn execute_tool_resolved_inner(
                 service.service_slug
             )
         });
+        let semantic_input = if prepared.attachment_binding.is_some() {
+            prepared.scope_input()
+        } else {
+            (
+                prepared.body.as_deref().unwrap_or_default(),
+                Some("application/json"),
+            )
+        };
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6523,14 +6630,7 @@ async fn execute_tool_resolved_inner(
                 prepared.acknowledgement_id.as_deref(),
                 &summary,
                 &target,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         } else {
@@ -6552,14 +6652,7 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some(&target),
                 false,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         };
@@ -10739,6 +10832,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -12937,8 +13031,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 8 meta-tools (6 core + 2 SSH)
-        assert_eq!(tools.len(), 8);
+        // Should only have the 9 meta-tools (7 core + 2 SSH)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -12963,8 +13057,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 8 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 9);
+        // 9 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12988,8 +13082,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 8 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 10);
+        // 9 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -13010,6 +13104,12 @@ mod tests {
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
         let tools = generate_tool_definitions(&[], None);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "nyx__diagnose_invocation"),
+            "diagnostic redemption must be available to MCP callers"
+        );
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")

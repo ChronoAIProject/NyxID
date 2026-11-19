@@ -7,7 +7,7 @@ pub(super) async fn outcome(
     row: &NyxbotChannel,
     source: &str,
     result: Result<&Inbound, ()>,
-) -> AppResult<()> {
+) -> AppResult<Option<&'static str>> {
     if row.platform == "x" {
         let observed = match &result {
             Ok(Inbound::Turn(_)) => Some(XOutcome::TurnStarted),
@@ -22,22 +22,64 @@ pub(super) async fn outcome(
         }
     }
     let code = match result {
-        Ok(Inbound::Silent("handled")) => return Ok(()),
+        Ok(Inbound::Silent("handled")) => return Ok(None),
         Ok(Inbound::Silent(reason)) => reason,
         Ok(Inbound::Busy) => "refused_busy",
         Ok(Inbound::Queued) => "queued",
         Ok(Inbound::Reply(_)) => "reply_without_turn",
-        Ok(Inbound::Turn(_)) => return Ok(()), // Bound in the turn transaction.
+        Ok(Inbound::Turn(_)) => return Ok(None), // Bound in the turn transaction.
         Err(()) => "refused_processing_error",
     };
-    if diagnostics::finish(&state.db, row, source, code)
-        .await
-        .is_err()
-    {
-        // An accepted queue or reply must survive a diagnostics-only failure.
-        tracing::warn!(channel_id=%row.id, message_id=source, code="admission_diagnostic_unavailable", "NyxBot admission diagnostic could not be updated");
+    match diagnostics::finish(&state.db, row, source, code).await {
+        Ok(true) => Ok(Some(code)),
+        Ok(false) => Ok(None),
+        Err(_) => {
+            tracing::warn!(channel_id=%row.id, message_id=source, code="admission_diagnostic_unavailable", "NyxBot admission diagnostic could not be updated");
+            Ok(None)
+        }
     }
-    Ok(())
+}
+
+pub(super) async fn telegram_group_outcome(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &str,
+    activity: &Value,
+    disposition: &str,
+) {
+    let code = match disposition {
+        "refused_members" => "telegram_group_members_refused",
+        "refused_owner_absent" => "telegram_group_owner_absent",
+        "refused_sender" | "refused_self_bot" => "telegram_group_sender_refused",
+        "refused_bot_budget" => "telegram_group_bot_budget",
+        "refused_processing_error" => "telegram_group_processing_failed",
+        "refused_busy" | "refused_empty_content" => return,
+        reason if reason.starts_with("refused_") => "telegram_group_policy_refused",
+        _ => return,
+    };
+    // The legacy gateway can imply addressing for admission. A bot-wide policy
+    // diagnostic needs an actual mention or a reply to this bot in this chat.
+    if disposition != "refused_processing_error" && activity["kind"]["mentions_bot"] != true {
+        let Some(chat_id) = activity["conversation"]["id"].as_str() else {
+            return;
+        };
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            chats::gateway_replies_to_bot(state, row, chat_id, source),
+        )
+        .await;
+        if !matches!(reply, Ok(Ok(true))) {
+            return;
+        }
+    }
+    crate::services::channel_inbound_diagnostics::telegram_outcome(
+        &state.db,
+        &row.channel_bot_id,
+        bot_owner(row),
+        code,
+        None,
+    )
+    .await;
 }
 
 /// Native events have a persisted recovery identity. Reuse it for metadata;

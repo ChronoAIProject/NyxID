@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
@@ -104,27 +105,17 @@ export function buildSkillSelection(current: AgentSkills, change: SkillChange) {
   );
   if (change.type === "attach") {
     if (existing?.disabled)
-      throw new Error(
-        translateApp(
-          "Enable this skill before updating its exact version. Updating a disabled pin is not supported.",
-        ),
-      );
+      throw localizedError("Enable this skill before updating its exact version. Updating a disabled pin is not supported.");
     const reference = change.preview.reference;
     if (
       reference.skill_id !== change.skillId ||
       reference.version !== change.selected.version ||
       reference.sha256 !== change.selected.sha256
     ) {
-      throw new Error(
-        translateApp(
-          "The package does not match the selected skill and exact version. Reload its versions and try again.",
-        ),
-      );
+      throw localizedError("The package does not match the selected skill and exact version. Reload its versions and try again.");
     }
     if (!existing && current.skills.length >= 16)
-      throw new Error(
-        translateApp("This agent already has 16 skills. Detach one first."),
-      );
+      throw localizedError("This agent already has 16 skills. Detach one first.");
     const replacement = {
       ...existing,
       ...reference,
@@ -139,11 +130,7 @@ export function buildSkillSelection(current: AgentSkills, change: SkillChange) {
     };
   }
   if (!existing)
-    throw new Error(
-      translateApp(
-        "This skill is no longer attached. Reload the agent's skills.",
-      ),
-    );
+    throw localizedError("This skill is no longer attached. Reload the agent's skills.");
   return {
     expected_revision: current.revision,
     skills: current.skills.filter((pin) => pin.skill_id !== change.skillId),
@@ -159,11 +146,7 @@ export function assertSkillRevision(
     (latest.agent_id && latest.agent_id !== agentId) ||
     baseline.revision !== latest.revision
   )
-    throw new Error(
-      translateApp(
-        "These skills changed elsewhere. Reload and review the current selection before saving.",
-      ),
-    );
+    throw localizedError("These skills changed elsewhere. Reload and review the current selection before saving.");
 }
 
 export const SKILL_HISTORY_LABELS: Record<string, string> = {

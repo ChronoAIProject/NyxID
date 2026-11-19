@@ -39,6 +39,8 @@
 		EACE96617E4372D4AE2FA736 /* AgentsPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D6CBA8A12FBB2EB2683922 /* AgentsPage.swift */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
 		F69D7E64A212BD62D8987A7B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E4EB3A82F6D3E951D04142E5 /* PrivacyInfo.xcprivacy */; };
+		80B50DDEEB13451DAE3ABDF5 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */; };
+		601F2615F9D84B78BC32160C /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 8431C337599549608023513A /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +106,8 @@
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = NyxIDMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* NyxIDMobile-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "NyxIDMobile-Bridging-Header.h"; path = "NyxIDMobile/NyxIDMobile-Bridging-Header.h"; sourceTree = "<group>"; };
+		19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */ = {isa = PBXFileReference; name = "InfoPlist.strings"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = text.plist.strings; explicitFileType = undefined; includeInIndex = 0; };
+		8431C337599549608023513A /* InfoPlist.strings */ = {isa = PBXFileReference; name = "InfoPlist.strings"; path = "zh-Hant.lproj/InfoPlist.strings"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = text.plist.strings; explicitFileType = undefined; includeInIndex = 0; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -250,6 +254,8 @@
 			isa = PBXGroup;
 			children = (
 				BB2F792C24A3F905000567C9 /* Expo.plist */,
+				55708E10090C4FFB9FB1790D /* zh-Hans.lproj */,
+				7F09710C92914B4DB1CCBFE1 /* zh-Hant.lproj */,
 			);
 			name = Supporting;
 			path = NyxIDMobile/Supporting;
@@ -264,6 +270,24 @@
 			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
+		};
+		55708E10090C4FFB9FB1790D /* zh-Hans.lproj */ = {
+			isa = "PBXGroup";
+			children = (
+				19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */,
+			);
+			name = zh-Hans.lproj;
+			sourceTree = "<group>";
+			path = "";
+		};
+		7F09710C92914B4DB1CCBFE1 /* zh-Hant.lproj */ = {
+			isa = "PBXGroup";
+			children = (
+				8431C337599549608023513A /* InfoPlist.strings */,
+			);
+			name = zh-Hant.lproj;
+			sourceTree = "<group>";
+			path = "";
 		};
 /* End PBXGroup section */
 
@@ -358,6 +382,8 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				AF4C328CC3407B0CFD1299A4 /* PrivacyInfo.xcprivacy in Resources */,
+				80B50DDEEB13451DAE3ABDF5 /* InfoPlist.strings in Resources */,
+				601F2615F9D84B78BC32160C /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

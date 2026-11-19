@@ -14,13 +14,13 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     .all()
     .filter((node) => node.props.accessibilityRole === "header");
   for (const heading of headings) {
-    assert.equal(style(heading).textTransform, "uppercase");
-    assert.equal(style(heading).fontSize, 12);
+    assert.equal(style(heading).textTransform, undefined);
+    assert.equal(style(heading).fontSize, 11);
     assert.equal(style(heading).fontWeight, "500");
-    assert.equal(style(heading).letterSpacing, 1.5);
+    assert.equal(style(heading).letterSpacing, 0.6);
   }
   assert.deepEqual(headings.map((node) => String(node.props.children).toUpperCase()), ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
-  assert.equal(headings[0]!.props.children, "Account", "visual case does not mutate translated copy");
+  assert.equal(headings[0]!.props.children, "ACCOUNT", "base uppercase presentation is retained");
   const routes = [
     ["Account & security", "AccountSecurity"],
     ["Usage & credits", "UsageCredits"],
@@ -275,4 +275,26 @@ test("Quick access (the Duo rail's list) is offered only where the window shows 
   row.props.onPress();
   assert.equal(JSON.stringify(duo.pushes.at(-1)), '["QuickAccessSettings"]');
   duo.harness.unmount();
+});
+
+
+test('M2622-03 sign-out waits for durability, blocks double taps and offers retry after failure', async () => {
+  let resolve!: () => void, reject!: (reason: unknown) => void, calls = 0;
+  const env = setupSettingsScreen('./AccountSettingsScreen.tsx', 'AccountSettingsScreen', {
+    signOut: () => { calls++; return new Promise<void>((yes, no) => { resolve = yes; reject = no; }); },
+  });
+  try {
+    const confirm = () => { env.row('Sign Out').props.onPress(); return env.alerts.at(-1)!.buttons![1]!.onPress!; };
+    const press = confirm(); press(); press();
+    await env.harness.settle();
+    assert.equal(calls, 1);
+    assert.equal(env.row('Signing out...').props.disabled, true);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast, null);
+    reject(new Error('disk unavailable')); await env.harness.settle();
+    assert.equal(env.row('Sign Out').props.disabled, false);
+    assert.match(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, /Couldn't sign out.*try again/);
+    confirm()(); resolve(); await env.harness.settle();
+    assert.equal(calls, 2);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, 'You are signed out.');
+  } finally { env.harness.unmount(); }
 });

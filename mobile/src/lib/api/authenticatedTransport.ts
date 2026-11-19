@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { decodeJwtSub } from "../auth/jwt";
 
 export type RequestOptions = {
@@ -30,7 +30,7 @@ function identity(session: Session): string {
 
 function ensureNotAborted(signal?: AbortSignal) {
   if (signal?.aborted)
-    throw Object.assign(new Error(translateApp("Request cancelled")), { name: "AbortError" });
+    throw Object.assign(localizedError("Request cancelled"), { name: "AbortError" });
 }
 
 /** Share native JSON and streaming admission. Only an explicit HTTP 401 is
@@ -58,7 +58,7 @@ export async function executeAuthenticatedRequest<
 }): Promise<{ response: R; assertOwner: () => Promise<void> }> {
   const { options } = input;
   if (options.body !== undefined && options.rawBody !== undefined)
-    throw new Error(translateApp("Choose either JSON or raw request bytes."));
+    throw localizedError("Choose either JSON or raw request bytes.");
   const requiresAuth = options.requiresAuth ?? true;
   const originalEpoch = input.getAuthEpoch?.();
   ensureNotAborted(options.signal);
@@ -117,6 +117,7 @@ export async function executeAuthenticatedRequest<
   await checkOwner();
   let response = await send();
   await checkOwner();
+  let refreshRefused = false;
   if (
     response.status === 401 &&
     requiresAuth &&
@@ -124,6 +125,7 @@ export async function executeAuthenticatedRequest<
   ) {
     const refreshed = await input.refresh();
     await checkOwner();
+    refreshRefused = !refreshed;
     if (refreshed) {
       headers.Authorization = `Bearer ${refreshed.access_token}`;
       response = await send();
@@ -140,7 +142,7 @@ export async function executeAuthenticatedRequest<
       /* The error boundary rejects non-JSON proxy bodies. */
     }
     if (
-      response.status === 401 &&
+      refreshRefused && response.status === 401 &&
       requiresAuth &&
       (options.invalidateSessionOnAuthFailure ?? true)
     ) {

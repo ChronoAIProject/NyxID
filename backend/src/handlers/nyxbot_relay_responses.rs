@@ -364,18 +364,11 @@ impl Drop for Observer {
         let id = self.response.clone();
         crate::services::shutdown::process().spawn_cleanup(async move {
             if let Ok(Some(stored)) = recovery::load(&state.db, &row, &id).await {
-                // Also fence admission which has not created delivery metadata yet.
-                let _ = state
-                    .db
-                    .collection::<NyxbotEvent>(EVENTS)
-                    .update_one(
-                        doc! {"_id":&stored.event_key},
-                        doc! {"$set":{"gateway_observer_detached":true}},
-                    )
-                    .await;
-                let _ =
-                    crate::services::channel_turn_delivery::detach(&state.db, &stored.event_key)
-                        .await;
+                let _ = crate::services::channel_turn_delivery::detach_observer(
+                    &state.db,
+                    &stored.event_key,
+                )
+                .await;
                 if !state.shutdown.is_stopped() {
                     late_delivery::process(&state, &stored.event_key).await;
                 }

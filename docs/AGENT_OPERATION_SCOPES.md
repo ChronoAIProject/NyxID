@@ -49,7 +49,15 @@ permission engine uses:
 
 Absent parts stay unconstrained. Limits are validated at save time against the
 operation's method and template, and checked by `check_inputs` against the final
-request on every transport after `authorize`. A request satisfies a scope when
+request on every transport after `authorize`. For a trusted, live-chat Lark/Feishu
+`bitable_media_upload` that requires a body limit, the evaluator uses the supplied
+JSON tool arguments. NyxID
+checks them before reading the attachment and builds the multipart request from
+them. An omitted argument stays absent for the closed schema, including
+`file_name`, `size` and `extra` when NyxID supplies their wire values.
+Uploads authorized without a body limit keep their existing multipart encoding
+and consent inputs. Ordinary multipart requests still fail a JSON body limit.
+A request satisfies a scope when
 any operation it matches accepts its inputs. Streamed uploads have no buffered
 body, so a body limit refuses them. Authoring is through the API or CLI
 (`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for

@@ -1,5 +1,7 @@
 #[path = "assistant_shutdown_tests.rs"]
 mod shutdown_tests;
+#[path = "assistant_nyxagent_survivor_tests.rs"]
+mod survivor_tests;
 use super::*;
 #[path = "assistant_first_byte_outcome_tests.rs"]
 mod first_byte_outcome_tests;
@@ -192,6 +194,7 @@ async fn new_user_nyxagent_chat_transport_completes_without_approval_preferences
             "v1/responses",
             Some(json!({"input":"hello", "stream":true})),
             Some("new-user-turn"),
+            None,
             Some(SERVER_TURN_POLICY),
         )
         .await
@@ -215,6 +218,43 @@ async fn new_user_nyxagent_chat_transport_completes_without_approval_preferences
         );
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn pinned_nyxagent_request_refuses_a_changed_destination_before_forwarding() {
+    use crate::services::platform_manager_contract::NyxAgentDestination;
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let auth = test_auth_user(OWNER);
+    let service = assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
+        .await
+        .unwrap();
+    for (url, succeeds) in [
+        ("https://previous.invalid", false),
+        (service.base_url.as_str(), true),
+    ] {
+        let result = proxy_raw(
+            &state,
+            &auth,
+            "fixture-conversation-key",
+            "POST",
+            "v1/responses",
+            Some(json!({"input":"hello", "stream":true})),
+            Some("pinned-window"),
+            Some(NyxAgentDestination::for_service(&service.id, url)),
+            Some(SERVER_TURN_POLICY),
+        )
+        .await;
+        if succeeds {
+            let response = result.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(drain(response).await.contains("response.completed"));
+        } else {
+            assert!(matches!(result, Err(AppError::Conflict(_))));
+        }
+        assert_eq!(calls.lock().await.len(), usize::from(succeeds));
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
 }
 
 async fn setup_script(
@@ -6002,13 +6042,12 @@ async fn stop_wins_over_an_outstanding_claim() {
 async fn the_engine_request_start_clears_a_queue_marker_left_behind() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let _running = hold_running_slots(&state).await;
-    let (row, turn_id, _permit) = queued_turn(&state).await;
+    let (row, _, _permit) = queued_turn(&state).await;
     let since = Utc::now();
     assert!(
         engine::mark_queued(
             &state.db,
             &row,
-            &turn_id,
             since,
             since + chrono::Duration::minutes(10)
         )

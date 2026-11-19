@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
@@ -128,17 +129,9 @@ export function authoredSkillActionRequest(
       body: Record<string, unknown>;
     } {
   if (!authoredReviewMatches(reference, data))
-    throw new Error(
-      translateApp(
-        "This confirmation does not match the reviewed draft. Reload it before continuing.",
-      ),
-    );
+    throw localizedError("This confirmation does not match the reviewed draft. Reload it before continuing.");
   if (!supportedAuthoredSkillActions(data).includes(action))
-    throw new Error(
-      translateApp(
-        "This action is no longer available. Reload the current publication state.",
-      ),
-    );
+    throw localizedError("This action is no longer available. Reload the current publication state.");
   if (action === "deny" || action === "dismiss_card")
     return { kind: "decision", choice: "deny" };
   if (action === "publish" || action === "retry" || action === "check")

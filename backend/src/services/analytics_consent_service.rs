@@ -43,6 +43,16 @@ impl PolicyVersion {
     }
 }
 
+/// Existing explicit choices already answered the prompt before the marker
+/// existed. This is display state only and never grants analytics permission.
+pub fn prompt_seen(consent: &AnalyticsConsent) -> bool {
+    consent.prompt_seen
+        || consent.enabled
+        || !consent.revision.is_empty()
+        || consent.policy_version.is_some()
+        || consent.changed_at.is_some()
+}
+
 fn options() -> CollectionOptions {
     CollectionOptions::builder()
         .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
@@ -94,6 +104,7 @@ pub async fn set_acknowledging(
         .find_one_and_update(
             active_person(user_id),
             vec![doc! {"$set": {"profile_config.analytics": {
+                "prompt_seen": true,
                 "enabled": enabled, "changed_at": "$$NOW", "revision": &revision,
                 "policy_version": acknowledged.as_str()
             }}}],
@@ -210,6 +221,38 @@ mod tests {
     use crate::test_utils::{connect_test_database, test_user};
     use mongodb::bson;
 
+    #[test]
+    fn prompt_acknowledgement_preserves_legacy_choices_without_enabling_collection() {
+        let unseen = AnalyticsConsent::default();
+        assert!(!prompt_seen(&unseen));
+        for consent in [
+            AnalyticsConsent {
+                prompt_seen: true,
+                ..unseen.clone()
+            },
+            AnalyticsConsent {
+                revision: "legacy-choice".into(),
+                ..unseen.clone()
+            },
+            AnalyticsConsent {
+                policy_version: Some("1".into()),
+                ..unseen.clone()
+            },
+            AnalyticsConsent {
+                changed_at: Some(chrono::Utc::now()),
+                ..unseen.clone()
+            },
+        ] {
+            assert!(prompt_seen(&consent));
+            assert!(!consent.enabled);
+        }
+        // A legacy opt-in is also an answer, even without newer metadata.
+        assert!(prompt_seen(&AnalyticsConsent {
+            enabled: true,
+            ..unseen
+        }));
+    }
+
     async fn account() -> (Database, String) {
         let db = connect_test_database("analytics_consent")
             .await
@@ -234,6 +277,7 @@ mod tests {
             .await
             .unwrap();
         let absent = read(&db, &id).await.unwrap();
+        assert!(!prompt_seen(&absent));
         assert!(!absent.enabled);
         assert!(absent.changed_at.is_none());
         assert!(absent.policy_version.is_none());
@@ -241,6 +285,7 @@ mod tests {
         for enabled in [true, false] {
             let before = db.run_command(doc! {"hello": 1}).await.unwrap();
             let saved = set(&db, &id, enabled).await.unwrap();
+            assert!(prompt_seen(&saved));
             let after = db.run_command(doc! {"hello": 1}).await.unwrap();
             assert_eq!(saved.enabled, enabled);
             assert_eq!(saved.policy_version.as_deref(), Some(POLICY_VERSION));
@@ -259,6 +304,7 @@ mod tests {
                 .unwrap()
                 .get_document("analytics")
                 .unwrap();
+            assert!(analytics.get_bool("prompt_seen").unwrap());
             assert_eq!(analytics.get_str("policy_version").unwrap(), POLICY_VERSION);
             assert_eq!(
                 analytics

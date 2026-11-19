@@ -562,7 +562,28 @@ pub struct NyxAgentRequest {
     pub relative_path: String,
     pub body: Option<serde_json::Value>,
     pub idempotency_key: String,
+    pub destination: Option<NyxAgentDestination>,
     pub billing_policy: Option<super::billing::route_inventory::BillingRoutePolicy>,
+}
+
+#[derive(Clone)]
+pub struct NyxAgentDestination(pub(crate) String);
+
+impl NyxAgentDestination {
+    pub(crate) fn for_service(service_id: &str, base_url: &str) -> Self {
+        Self(crate::crypto::token::hash_token(&format!(
+            "{service_id}\0{base_url}"
+        )))
+    }
+
+    pub(crate) fn verify(&self, service_id: &str, base_url: &str) -> crate::errors::AppResult<()> {
+        if self.0 != Self::for_service(service_id, base_url).0 {
+            return Err(crate::errors::AppError::Conflict(
+                "NyxAgent destination changed".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct PreparedPublicTurn {

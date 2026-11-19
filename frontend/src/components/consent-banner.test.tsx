@@ -1,184 +1,278 @@
+import "@/i18n";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ConsentBanner } from "./consent-banner";
-import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useConsentStore } from "@/stores/consent-store";
 import type { User } from "@/types/api";
-const mocks = vi.hoisted(() => ({read:vi.fn(),save:vi.fn(),telemetry:true,crashOffered:false}));
-vi.mock("@/lib/analytics-consent",()=>({readAnalyticsConsent:mocks.read,saveAnalyticsConsent:mocks.save}));
-vi.mock("@/hooks/use-public-config",()=>({usePublicConfig:()=>({data:{telemetry_share_analytics:mocks.telemetry,crash_diagnostics_offered:mocks.crashOffered || undefined}})}));
-const original = "Optional usage analytics are linked to your account. Allow enables account permission and this browser. Declining withdraws account permission across devices. Each other device still needs its own opt-in, and Do Not Track or Global Privacy Control always disables collection. Change this in Settings → Privacy.";
-const initialAuth=useAuthStore.getState(),initialConsent=useConsentStore.getState();
-let client:QueryClient;
-beforeEach(()=>{
+import type { AnalyticsConsent } from "@/lib/analytics-consent";
+
+const mocks = vi.hoisted(() => ({ api: vi.fn(), error: vi.fn(), telemetry: true, crashOffered: false, permission: {} as Partial<AnalyticsConsent> }));
+vi.mock("@/lib/api-client", async (original) => ({
+  ...await original<typeof import("@/lib/api-client")>(),
+  apiClient: mocks.api,
+}));
+vi.mock("@/lib/telemetry", () => ({ disableTelemetry: vi.fn(), identify: vi.fn(), reset: vi.fn() }));
+vi.mock("sonner", () => ({ toast: { error: mocks.error } }));
+vi.mock("@/hooks/use-public-config", () => ({
+  usePublicConfig: () => ({ data: { telemetry_share_analytics: mocks.telemetry, crash_diagnostics_offered: mocks.crashOffered || undefined } }),
+}));
+
+const initialAuth = useAuthStore.getState();
+const initialConsent = useConsentStore.getState();
+let client: QueryClient;
+function show() {
+  return render(<ConsentBanner />, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
+function reads() {
+  return mocks.api.mock.calls.filter(([, options]) => options.method !== "PUT");
+}
+const owner = {
+  id: "owner",
+  profile_config: { analytics: { prompt_seen: false }, onboarding: { ai_services_completed_at: null } },
+} as User;
+
+beforeEach(() => {
   localStorage.clear();
-  mocks.telemetry=true;
-  mocks.crashOffered=false;
-  useAuthStore.setState({user:{id:"owner"} as User});
-  useConsentStore.setState({accountId:"owner",asked:false,enabled:false,policy:1});
-  mocks.read.mockReset().mockResolvedValue({account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"1",diagnostics_offered:false});
-  mocks.save.mockReset().mockResolvedValue({});
-  client=new QueryClient({defaultOptions:{queries:{retry:false}}});
-});
-
-afterEach(()=>{cleanup();client.clear();useAuthStore.setState(initialAuth);useConsentStore.setState(initialConsent);});
-function show(){return render(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);}
-it("flag-off first-time banner retains the exact existing disclosure and account/browser choice",async()=>{
-  show();
-  expect(await screen.findByText(original)).toBeInTheDocument();
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  expect(mocks.read).not.toHaveBeenCalled();
-  expect(screen.queryByText(/Analytics updated/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/crash diagnostics/i)).not.toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button",{name:"Decline telemetry"}));
-  expect(mocks.save).toHaveBeenCalledWith("owner",false,1);
-});
-it("declined users cause no consent GET from the banner",async()=>{
-  useConsentStore.setState({asked:true,enabled:false});
-  const view=show();
-  await act(async()=>{window.dispatchEvent(new Event("focus"));await Promise.resolve();});
-  view.rerender(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);
-  expect(mocks.read).not.toHaveBeenCalled();
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-});
-it("first-time offered policy-2 disclosure is complete and does not claim an update",async()=>{
-  mocks.crashOffered = true;
-  mocks.read.mockResolvedValue({account_id:"owner",enabled:false,current_policy_version:"2",diagnostics_offered:true});
-  show();
-  await screen.findByText(/Optional crash diagnostics include app version/);
-  const text=screen.getByRole("dialog").textContent!;
-  for(const part of ["linked to your account","account permission and this browser","Declining withdraws account permission across devices","Each other device still needs its own opt-in","Do Not Track or Global Privacy Control","sanitized code locations","up to 30 days"])
-    expect(text).toContain(part);
-  expect(text).not.toContain("Analytics updated");
-  expect(screen.getByRole("button",{name:"Accept telemetry"})).toHaveTextContent("Allow");
-  await userEvent.click(screen.getByRole("button",{name:"Accept telemetry"}));
-  expect(mocks.save).toHaveBeenCalledWith("owner",true,2);
-});
-it("flag off hides re-acknowledgement while an offered existing choice gets the updated variant",async()=>{
-  useConsentStore.setState({asked:true,enabled:true});
-  const view = show();
-  await act(async () => { await Promise.resolve(); });
-  expect(mocks.read).not.toHaveBeenCalled();
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  mocks.read.mockResolvedValue({account_id:"owner",enabled:true,policy_version:"1",current_policy_version:"2",diagnostics_offered:true});
-  mocks.crashOffered = true;
-  view.rerender(<QueryClientProvider client={client}><ConsentBanner/></QueryClientProvider>);
-  expect(await screen.findByText(/^Analytics updated:/)).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button",{name:"Decline telemetry"}));
-  expect(mocks.save).not.toHaveBeenCalled();
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-});
-it("a fresh banner cache is reused and window focus does not refetch",async()=>{
-  mocks.crashOffered = true;
-  const first=show();
-  await waitFor(()=>expect(mocks.read).toHaveBeenCalledOnce());
-  first.unmount();show();
-  await act(async()=>{window.dispatchEvent(new Event("focus"));await Promise.resolve();});
-  expect(mocks.read).toHaveBeenCalledOnce();
-});
-
-it("unconfigured telemetry makes no preference request and shows no banner", async () => {
-  mocks.telemetry = false;
-  show();
-  await act(async () => { await Promise.resolve(); });
-  expect(mocks.read).not.toHaveBeenCalled();
-  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-});
-it("banner preference cache lasts the session across stale time focus and remount", async () => {
-  mocks.crashOffered = true;
-  const clock = vi.spyOn(Date, "now");
-  const now = Date.now();
-  const first = show();
-  await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
-  first.unmount();
-  clock.mockReturnValue(now + 24 * 60 * 60 * 1000);
-  const second = show();
-  await act(async () => { window.dispatchEvent(new Event("focus")); await Promise.resolve(); });
-  second.unmount();
-  show();
-  expect(mocks.read).toHaveBeenCalledOnce();
-  clock.mockRestore();
-});
-
-it("a failed banner preference read does not retry on remount focus or reconnect", async () => {
-  mocks.crashOffered = true;
-  mocks.read.mockRejectedValue(new Error("offline"));
-  const first = show();
-  await waitFor(() => expect(client.getQueryState(["analytics-consent", "owner"])?.status).toBe("error"));
-  first.unmount();
-  show();
-  await act(async () => {
-    onlineManager.setOnline(false);
-    onlineManager.setOnline(true);
-    window.dispatchEvent(new Event("focus"));
-    await Promise.resolve();
+  mocks.telemetry = true;
+  mocks.crashOffered = false;
+  mocks.permission = { account_id: owner.id, enabled: false, prompt_seen: false, revision: "", current_policy_version: "1", diagnostics_offered: false };
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  mocks.api.mockReset().mockImplementation(async (_path, options) => {
+    options.authorityGuard();
+    if (options.method !== "PUT") return { ...mocks.permission };
+    return { ...options.body, prompt_seen: true, revision: "saved", changed_at: "2026-11-18T00:00:00Z" };
   });
-  expect(mocks.read).toHaveBeenCalledOnce();
+  mocks.error.mockReset();
+  useAuthStore.setState({ user: owner, isAuthenticated: true });
+  useConsentStore.getState().bindAccount(owner.id);
+});
+
+afterEach(() => {
+  cleanup();
+  client.clear();
+  useAuthStore.setState(initialAuth);
+  useConsentStore.setState(initialConsent);
+});
+
+it.each([false, true])("remembers the account decision after browser storage is cleared (allow=%s)", async (enabled) => {
+  const user = userEvent.setup();
+  const view = show();
+  expect(screen.getByRole("dialog", { name: "Usage analytics" })).toHaveAttribute("aria-modal", "true");
+  await user.click(screen.getByRole("button", { name: enabled ? "Accept telemetry" : "Decline telemetry" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(mocks.api).toHaveBeenCalledWith("/users/me/preferences/analytics", expect.objectContaining({
+    method: "PUT", body: { account_id: owner.id, enabled },
+  }));
+  expect(useAuthStore.getState().user?.profile_config?.analytics?.prompt_seen).toBe(true);
+  expect(useConsentStore.getState().enabled).toBe(enabled);
+
+  // A fresh browser knows only the restored account profile, not this device's choice.
+  view.unmount();
+  localStorage.clear();
+  useConsentStore.getState().bindAccount(owner.id);
+  show();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(useConsentStore.getState().enabled).toBe(false);
+});
+
+it.each([false, true])("honors an existing browser choice even if the profile acknowledgement is false (allow=%s)", (enabled) => {
+  useConsentStore.getState().setConsent(enabled);
+  show();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mocks.api).not.toHaveBeenCalled();
+  expect(useConsentStore.getState().enabled).toBe(enabled);
+});
+
+it("requires an explicit selection and ignores Escape and clicks outside the footer", async () => {
+  const user = userEvent.setup();
+  show();
+  const dialog = screen.getByRole("dialog");
+  await user.keyboard("{Escape}");
+  // Radix renders the full-page backdrop immediately before the footer.
+  await user.click(dialog.previousElementSibling!);
+  expect(dialog).toBeInTheDocument();
+  expect(mocks.api).not.toHaveBeenCalled();
+  expect(useConsentStore.getState().asked).toBe(false);
+});
+
+it("keeps the footer open and prevents duplicate choices until the save is acknowledged", async () => {
+  let release!: (value: object) => void;
+  mocks.api.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+  show();
+  await userEvent.click(screen.getByRole("button", { name: "Accept telemetry" }));
+  expect(screen.getByRole("dialog")).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("button", { name: "Accept telemetry" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Decline telemetry" })).toBeDisabled();
+  expect(useConsentStore.getState()).toMatchObject({ enabled: false, asked: false });
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveFocus();
+  await userEvent.tab();
+  expect(dialog).toHaveFocus();
+  await userEvent.tab({ shift: true });
+  expect(dialog).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", { name: "Decline telemetry" }));
+  expect(mocks.api).toHaveBeenCalledOnce();
+  await act(async () => { release({ account_id: owner.id, enabled: true }); });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(useConsentStore.getState()).toMatchObject({ enabled: true, asked: true });
 });
 
 it.each([
-  { telemetry: false, crash: false, requests: 0 },
-  { telemetry: true, crash: false, requests: 0 },
-  { telemetry: false, crash: true, requests: 1 },
-  { telemetry: true, crash: true, requests: 1 },
-])("banner discovery with telemetry=$telemetry and crash=$crash makes $requests preference requests", async ({ telemetry, crash, requests }) => {
-  mocks.telemetry = telemetry;
-  mocks.crashOffered = crash;
-  useConsentStore.setState({ asked: true, enabled: true, policy: 1 });
-  mocks.read.mockResolvedValue({
-    account_id: "owner", enabled: true, policy_version: "1",
-    current_policy_version: crash ? "2" : "1", diagnostics_offered: crash,
-  });
-  const first = show();
-  if (requests) {
-    await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
-  }
-  first.unmount();
+  { enabled: false, acknowledged: false },
+  { enabled: true, acknowledged: false },
+  { enabled: false, acknowledged: true },
+  { enabled: true, acknowledged: true },
+])("keeps a pending choice through profile refresh (allow=$enabled, server answered=$acknowledged)", async ({ enabled, acknowledged }) => {
+  let release!: (value: object) => void;
+  mocks.api.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+  useAuthStore.getState().setUser(owner);
   show();
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    await Promise.resolve();
-  });
-  expect(mocks.read).toHaveBeenCalledTimes(requests);
-  if (crash) {
-    expect(screen.getByText(/^Analytics updated:/)).toBeInTheDocument();
-  } else {
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  }
+  await userEvent.click(screen.getByRole("button", { name: enabled ? "Accept telemetry" : "Decline telemetry" }));
+  const revision = useConsentStore.getState().revision;
+  act(() => { useAuthStore.getState().setUser({
+    ...owner,
+    display_name: "Refreshed profile",
+    profile_config: { ...owner.profile_config!, analytics: { prompt_seen: acknowledged } },
+  }); });
+  expect(useConsentStore.getState().revision).toBe(revision);
+  expect(screen.getByRole("dialog")).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("dialog")).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Accept telemetry" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Decline telemetry" })).toBeDisabled();
+  await act(async () => { release({ account_id: owner.id, enabled }); });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mocks.error).not.toHaveBeenCalled();
+  expect(useConsentStore.getState()).toMatchObject({ enabled, asked: true });
+  expect(useAuthStore.getState().user?.profile_config?.analytics?.prompt_seen).toBe(true);
 });
 
-it("a cohort non-member makes one cached preference GET per session and sees no banner", async () => {
-  mocks.telemetry = false;
-  mocks.crashOffered = true;
-  const first = show();
-  await waitFor(() => expect(mocks.read).toHaveBeenCalledOnce());
-  first.unmount();
+it.each([true, false])("allows retry after a failed save and keeps this browser off (profile present=%s)", async (profilePresent) => {
+  if (!profilePresent) useAuthStore.setState({ user: { ...owner, profile_config: undefined } });
+  mocks.api.mockRejectedValueOnce(new Error("offline"));
   show();
-  await act(async () => {
-    window.dispatchEvent(new Event("focus"));
-    onlineManager.setOnline(false);
-    onlineManager.setOnline(true);
-    await Promise.resolve();
+  await userEvent.click(screen.getByRole("button", { name: "Accept telemetry" }));
+  await waitFor(() => expect(mocks.error).toHaveBeenCalledOnce());
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(useAuthStore.getState().user?.profile_config?.analytics?.prompt_seen).toBe(profilePresent ? false : undefined);
+  expect(useConsentStore.getState()).toMatchObject({ enabled: false, asked: false });
+  await userEvent.click(screen.getByRole("button", { name: "Decline telemetry" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+});
+
+it("does not apply the previous account's acknowledgement to a new person", () => {
+  useAuthStore.setState({ user: { ...owner, profile_config: { ...owner.profile_config!, analytics: { prompt_seen: true } } } });
+  show();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  act(() => {
+    useAuthStore.setState({ user: { ...owner, id: "other" } });
+    useConsentStore.getState().bindAccount("other");
   });
-  expect(mocks.read).toHaveBeenCalledOnce();
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});
+
+it("does not use another account's browser choice while identity binding changes", () => {
+  useConsentStore.getState().bindAccount("other");
+  useConsentStore.getState().setConsent(true);
+  show();
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(mocks.api).not.toHaveBeenCalled();
+});
+
+it("does not prompt signed-out people or deployments without analytics", () => {
+  mocks.telemetry = false;
+  const view = show();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  mocks.telemetry = true;
+  act(() => { useAuthStore.setState({ user: null }); });
+  view.rerender(<ConsentBanner />);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-it("flag-off telemetry-enabled first-time and opted-in users match main across remounts without preference GETs", async () => {
-  mocks.telemetry = true;
-  mocks.crashOffered = false;
-  for (const optedIn of [false, true]) {
-    useConsentStore.setState({ asked: optedIn, enabled: optedIn, policy: optedIn ? 2 : 1 });
-    for (let mount = 0; mount < 2; mount++) {
-      const view = show();
-      if (!optedIn) expect(await screen.findByText(original)).toBeInTheDocument();
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-      expect(mocks.read).not.toHaveBeenCalled();
-      if (optedIn) expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-      else expect(screen.getByText(original)).toBeInTheDocument();
-      view.unmount();
-    }
-  }
+it("retains the existing disclosure and makes no preference GET when crash diagnostics are not offered", async () => {
+  show();
+  expect(screen.getByRole("dialog")).toHaveTextContent("Do Not Track or Global Privacy Control always disables collection");
+  expect(screen.queryByText(/crash diagnostics/i)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Decline telemetry" }));
+  expect(reads()).toHaveLength(0);
+});
+
+it.each([false, true])("first-time offered diagnostics includes its disclosure and saves policy 2 (allow=%s)", async (enabled) => {
+  mocks.crashOffered = true;
+  mocks.permission = { ...mocks.permission, current_policy_version: "2", diagnostics_offered: true };
+  show();
+  const dialog = await screen.findByRole("dialog");
+  for (const part of ["linked to your account", "Declining withdraws account permission across devices", "Each other device still needs its own opt-in", "Do Not Track or Global Privacy Control", "sanitized code locations", "up to 30 days"])
+    expect(dialog).toHaveTextContent(part);
+  expect(dialog).not.toHaveTextContent("Analytics updated");
+  await userEvent.click(screen.getByRole("button", { name: enabled ? "Accept telemetry" : "Decline telemetry" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(mocks.api).toHaveBeenCalledWith("/users/me/preferences/analytics", expect.objectContaining({ method: "PUT", body: { account_id: owner.id, enabled, policy_version: "2" } }));
+  expect(useConsentStore.getState()).toMatchObject({ enabled, asked: true, policy: 2 });
+});
+
+it.each([false, true])("does not redisplay the footer for existing choices when diagnostics are newly offered (allow=%s)", async (enabled) => {
+  mocks.crashOffered = true;
+  useConsentStore.getState().setConsent(enabled);
+  show();
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  expect(mocks.api).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("an existing account acknowledgement suppresses diagnostics discovery on a fresh browser", async () => {
+  mocks.crashOffered = true;
+  useAuthStore.setState({ user: { ...owner, profile_config: { ...owner.profile_config!, analytics: { prompt_seen: true } } } });
+  show();
+  await act(async () => { await Promise.resolve(); });
+  expect(mocks.api).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(useConsentStore.getState().enabled).toBe(false);
+});
+
+it("waits for the person's diagnostics offer before showing a crash-only first prompt", async () => {
+  mocks.telemetry = false;
+  mocks.crashOffered = true;
+  let release!: (value: object) => void;
+  mocks.api.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  show();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await act(async () => { release({ ...mocks.permission, current_policy_version: "2", diagnostics_offered: true }); });
+  expect(await screen.findByRole("dialog")).toHaveTextContent("Optional crash diagnostics");
+});
+
+it("reuses discovery across remounts and time, focus and reconnect events", async () => {
+  mocks.telemetry = false;
+  mocks.crashOffered = true;
+  const clock = vi.spyOn(Date, "now");
+  try {
+    const now = Date.now();
+    const first = show();
+    await waitFor(() => expect(reads()).toHaveLength(1));
+    first.unmount();
+    clock.mockReturnValue(now + 24 * 60 * 60 * 1000);
+    show();
+    await act(async () => {
+      onlineManager.setOnline(false); onlineManager.setOnline(true);
+      window.dispatchEvent(new Event("focus")); await Promise.resolve();
+    });
+    expect(reads()).toHaveLength(1);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  } finally { clock.mockRestore(); }
+});
+
+it("failed discovery does not retry on remount, focus or reconnect", async () => {
+  mocks.crashOffered = true;
+  mocks.api.mockRejectedValue(new Error("offline"));
+  const first = show();
+  await waitFor(() => expect(client.getQueryState(["analytics-consent", owner.id])?.status).toBe("error"));
+  first.unmount(); show();
+  await act(async () => {
+    onlineManager.setOnline(false); onlineManager.setOnline(true);
+    window.dispatchEvent(new Event("focus")); await Promise.resolve();
+  });
+  expect(reads()).toHaveLength(1);
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
 });

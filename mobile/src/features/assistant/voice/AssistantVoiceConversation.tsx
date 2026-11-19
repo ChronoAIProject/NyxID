@@ -1,3 +1,5 @@
+import { localizedError } from "../../../i18n/localizedError";
+import { useLocalizedState } from "../../../i18n/useLocalizedState";
 import { translateApp } from "../../../i18n/appTranslation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
@@ -110,7 +112,7 @@ async function loadVoiceSelection<T>(
       "name" in cause &&
       cause.name === "VoiceRequestTimeoutError"
     )
-      throw new Error(translateApp("Voice options could not load."));
+      throw localizedError("Voice options could not load.");
     throw cause;
   } finally {
     signal.removeEventListener("abort", cancel);
@@ -202,7 +204,7 @@ function VoiceConversation({
   const restartIntent = useRef<Restart | undefined>(undefined);
   const restartConsidered = useRef(false);
   const [restartExpired, setRestartExpired] = useState(false);
-  const [restartNotice, setRestartNotice] = useState<string>();
+  const [restartNotice, setRestartNotice] = useLocalizedState<string>();
   const entry = useRef({ thread, epoch: environment.epoch, attempted: false });
   const closed = useRef(false);
   const mounted = useRef(true);
@@ -508,7 +510,7 @@ function VoiceConversation({
     ) {
       if (endedForAnotherReason)
         setRestartNotice(
-          translateApp("The previous call ended. Start a new call when ready."),
+          () => (translateApp("The previous call ended. Start a new call when ready.")),
         );
       cancelRestart();
       return;
@@ -525,7 +527,7 @@ function VoiceConversation({
         if (accepted === false && restartIntent.current === starting) {
           cancelRestart();
           setRestartNotice(
-            translateApp("The new call did not start. Try again when ready."),
+            () => (translateApp("The new call did not start. Try again when ready.")),
           );
         }
       });

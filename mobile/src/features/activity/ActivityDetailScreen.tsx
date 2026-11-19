@@ -1,3 +1,4 @@
+import { localizedToast } from "../../i18n/localizedToast";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
@@ -269,11 +270,11 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       void queryClient.invalidateQueries({
         queryKey: ["challenge", challengeId],
       });
-      setToast({
+      setToast(localizedToast(() => ({
         message: decision === "APPROVE" ? translateApp("Approved")
             : translateApp("Denied"),
         kind: "success",
-      });
+      })));
       returnTimer.current = setTimeout(() => {
         if (!navigation.isFocused()) return;
         if (navigation.canGoBack()) {
@@ -284,7 +285,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       }, 600);
     },
     onError: (err) => {
-      setToast({ message: getDecisionErrorMessage(err), kind: "error" });
+      setToast(localizedToast(() => ({ message: getDecisionErrorMessage(err), kind: "error" })));
     },
   });
 

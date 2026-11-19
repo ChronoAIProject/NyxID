@@ -368,6 +368,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &raw_args(&u.attachment_id),
@@ -386,6 +387,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &raw_args(&u.attachment_id)
@@ -452,6 +454,7 @@ async fn raw_attachment_schema_is_always_on_preserves_config_contract_and_denies
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &generic,
             endpoint,
             &raw_args(&u.attachment_id)
@@ -491,6 +494,7 @@ async fn raw_attachment_chat_accepts_model_authored_body_and_handle_without_flag
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &body_args,
@@ -506,6 +510,7 @@ async fn raw_attachment_chat_accepts_model_authored_body_and_handle_without_flag
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &both,
@@ -929,6 +934,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 auth.chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &args
@@ -953,6 +959,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             &unsupported,
             &args
@@ -969,6 +976,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 auth.chat.as_ref(),
+                &auth.assistant_operation_scopes,
                 &service,
                 &unsupported,
                 &args
@@ -999,6 +1007,7 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
             &u.f.state.db,
             &u.f.state.encryption_keys,
             auth.chat.as_ref(),
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args
@@ -1023,7 +1032,9 @@ async fn raw_attachment_final_egress_and_unsupported_paths_refuse_before_provide
 #[tokio::test]
 async fn raw_attachment_binary_response_limits_preserve_the_original_reader() {
     let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
-    let u = setup_raw("raw_response_limits").await;
+    let mut u = setup_raw("raw_response_limits").await;
+    // Both readers compare the same loopback response, including its complete body.
+    u.f.state.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
     let auth = authenticate(&u.f).await;
     let mut ordinary = auth.clone();
     ordinary.chat = None;
@@ -1067,6 +1078,12 @@ async fn raw_attachment_binary_response_limits_preserve_the_original_reader() {
             None
         };
         let expected = raw_call(&u, &ordinary, false, "download_file", json!({})).await;
+        assert_eq!(
+            expected["result"]["isError"],
+            false,
+            "ordinary body read failed: {}",
+            text(&expected)
+        );
         for meta in [false, true] {
             let result = raw_call(&u, &auth, meta, "download_file", json!({})).await;
             assert_legacy_chat_projection(&u, &auth, meta, &result, text(&expected)).await;
@@ -1107,6 +1124,7 @@ async fn raw_attachment_legacy_arguments_and_exact_descriptors_keep_original_par
             &u.f.state.db,
             &u.f.state.encryption_keys,
             chat,
+            &auth.assistant_operation_scopes,
             &service,
             &json_endpoint,
             &args,
@@ -1130,6 +1148,7 @@ async fn raw_attachment_legacy_arguments_and_exact_descriptors_keep_original_par
             &u.f.state.db,
             &u.f.state.encryption_keys,
             chat,
+            &auth.assistant_operation_scopes,
             &service,
             endpoint,
             &args,
@@ -1669,9 +1688,37 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
         .find(|e| e.name == "upload_file")
         .unwrap();
     let args = raw_args(&u.attachment_id);
-    u.f.state.db.run_command(doc! {"profile":2}).await.unwrap();
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let finds = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = finds.clone();
+    let mut options =
+        mongodb::options::ClientOptions::parse(crate::test_utils::selected_test_database_uri())
+            .await
+            .unwrap();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && let Ok(collection) = event.command.get_str("find")
+        {
+            let projection = event.command.get_document("projection").ok().cloned();
+            observed
+                .lock()
+                .unwrap()
+                .push((collection.to_owned(), projection));
+        }
+    }));
+    let db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(u.f.state.db.name());
+    let count = |name: &str| {
+        finds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(collection, _)| collection == name)
+            .count()
+    };
     let validated = crate::services::raw_attachment_tool::uses_handle(
-        &u.f.state.db,
+        &db,
         auth.chat.as_ref(),
         &service,
         endpoint,
@@ -1681,59 +1728,38 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
     .unwrap()
     .unwrap();
     let prepared = crate::services::raw_attachment_tool::materialize(
-        &u.f.state.db,
+        &db,
         &u.f.state.encryption_keys,
         validated,
     )
     .await
     .unwrap();
-    u.f.state.db.run_command(doc! {"profile":0}).await.unwrap();
-    let profile = u.f.state.db.collection::<bson::Document>("system.profile");
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":service_endpoint::COLLECTION_NAME})
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":"feature_flag_overrides"})
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count(service_endpoint::COLLECTION_NAME), 1);
+    assert_eq!(count("feature_flag_overrides"), 0);
     // All three identity snapshots (before/after materialization and final egress)
     // project only metadata; no payload or key-rotation metadata is fetched.
     let guard = crate::services::assistant_service_execution::HttpEgressGuard::with_attachment(
         None,
-        &u.f.state.db,
+        &db,
         &service,
         endpoint,
         Some(&prepared.binding),
     )
     .unwrap();
-    u.f.state.db.run_command(doc! {"profile":2}).await.unwrap();
     guard.revalidate().await.unwrap();
-    u.f.state.db.run_command(doc! {"profile":0}).await.unwrap();
-    let snapshots: Vec<bson::Document> = futures::TryStreamExt::try_collect(
-        profile
-            .find(doc! {
-                "command.find":crate::models::assistant_attachment::COLLECTION_NAME,
-                "command.projection.chunk_index":1,
-            })
-            .await
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let snapshots: Vec<_> = finds
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(collection, projection)| {
+            let projection = projection.as_ref()?;
+            (collection == crate::models::assistant_attachment::COLLECTION_NAME
+                && projection.get_i32("chunk_index") == Ok(1))
+            .then(|| projection.clone())
+        })
+        .collect();
     assert_eq!(snapshots.len(), 3);
-    for row in snapshots {
-        let projection = row
-            .get_document("command")
-            .unwrap()
-            .get_document("projection")
-            .unwrap();
+    for projection in snapshots {
         for field in [
             "data_encrypted",
             "text_encrypted",
@@ -1742,20 +1768,8 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
             assert!(!projection.contains_key(field));
         }
     }
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":service_endpoint::COLLECTION_NAME})
-            .await
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        profile
-            .count_documents(doc! {"command.find":"feature_flag_overrides"})
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count(service_endpoint::COLLECTION_NAME), 2);
+    assert_eq!(count("feature_flag_overrides"), 0);
     drop(guard);
     drop(prepared);
     let endpoints =
@@ -1773,6 +1787,7 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &args,
@@ -1804,6 +1819,7 @@ async fn raw_attachment_invalid_contract_is_clear_and_preparation_validates_once
                 &u.f.state.db,
                 &u.f.state.encryption_keys,
                 chat,
+                &auth.assistant_operation_scopes,
                 &service,
                 endpoint,
                 &args,

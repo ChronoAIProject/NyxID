@@ -245,10 +245,11 @@ async fn lookup_current(state: &AppState, claims: &Claims) -> AppResult<Membersh
             &state.db, &key, None, None, None,
         ))
         .await?;
-        let live = acks::for_key_with_access(
+        let live = acks::chat_for_key_version(
             &state.db,
             &actor.id,
             Some(&key.id),
+            auth.thread_key_version(),
             auth.org_agent_access.as_ref(),
         )
         .await?

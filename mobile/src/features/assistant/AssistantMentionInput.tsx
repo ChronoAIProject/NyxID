@@ -1,5 +1,4 @@
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { translateApp } from "../../i18n/appTranslation";
 import { composerInputMinHeight } from "./composerGeometry";
 import { AgentAvatar } from "../../components/AgentAvatar";
@@ -11,6 +10,7 @@ import {
 } from "../../components/workspace/ScrollEdgeFades";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Text,
   Platform,
   Pressable,
   ScrollView,
@@ -433,7 +433,10 @@ export function AssistantMentionInput({
               { color: colors.textMuted },
               renderActions &&
                 (textInsets
-                  ? { left: textInsets.paddingLeft, right: textInsets.paddingRight }
+                  ? {
+                      left: textInsets.paddingLeft,
+                      right: textInsets.paddingRight,
+                    }
                   : { left: 12, right: 12 }),
             ]}
           >
@@ -442,7 +445,9 @@ export function AssistantMentionInput({
         ) : null}
         <ScrollEdgeFades edges={overflow.edges} color={colors.composerBg} />
       </View>
-      {renderActions ? renderActions(mentionAction, actionsLayout) : mentionAction}
+      {renderActions
+        ? renderActions(mentionAction, actionsLayout)
+        : mentionAction}
     </View>
   );
 }

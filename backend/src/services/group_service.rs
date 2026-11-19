@@ -220,7 +220,16 @@ pub async fn add_member_as(
         return Err(AppError::GroupMembershipExists);
     }
 
-    audit::user_group(db, user_id, group_id, audit::Membership::Add, actor).await
+    let joined_at = Utc::now();
+    audit::user_group(db, user_id, group_id, audit::Membership::Add, actor).await?;
+
+    // Membership succeeded; scheduled credits are best effort and never turn
+    // a successful join into an error. Discovery or admin seeding recovers.
+    crate::services::billing::schedules::eligibility::after_group_joined(
+        db, group_id, user_id, joined_at,
+    )
+    .await;
+    Ok(())
 }
 
 /// Remove a user from a group.

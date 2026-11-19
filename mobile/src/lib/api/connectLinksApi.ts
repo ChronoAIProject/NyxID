@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import {
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
@@ -62,11 +62,7 @@ export const connectLinksApi = {
       await requestJson(`/connect-links/${encodeURIComponent(id)}`, { signal }),
     );
     if (result.id !== id)
-      throw new Error(
-        translateApp(
-          "The server returned a different connection request. Please reload.",
-        ),
-      );
+      throw localizedError("The server returned a different connection request. Please reload.");
     return result;
   },
 };

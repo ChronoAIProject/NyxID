@@ -186,8 +186,8 @@ export const mobileApi = {
   ): Promise<PushTokenRegisterResponse> {
     return rotatePushTokenRequest(payload);
   },
-  async unregisterPushToken(payload: PushTokenRegisterRequest): Promise<void> {
-    await unregisterPushTokenRequest(payload);
+  async unregisterPushToken(payload: PushTokenRegisterRequest, capturedAccessToken?: string): Promise<void> {
+    await unregisterPushTokenRequest(payload, capturedAccessToken);
   },
   async getAccountProfile(): Promise<AccountProfile> {
     return getCurrentUserProfileRequest();

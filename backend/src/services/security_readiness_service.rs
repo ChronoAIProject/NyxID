@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
+    turn_restart_ready_until: Arc<Mutex<Option<Instant>>>,
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
     pub platform_policy_required: bool,
@@ -35,6 +36,7 @@ impl Runtime {
         platform_policy_required: bool,
     ) -> Self {
         Self {
+            turn_restart_ready_until: Default::default(),
             identity,
             config,
             platform_policy_required,
@@ -99,6 +101,15 @@ pub(crate) fn local_generation() -> Option<&'static str> {
         .get()
         .map(|runtime| runtime.identity.generation_id.as_str())
 }
+
+pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v1";
+
+pub(crate) fn turn_restart_enrollment_ready() -> bool {
+    RUNTIME
+        .get()
+        .and_then(|local| *local.turn_restart_ready_until.lock().ok()?)
+        .is_some_and(|until| Instant::now() < until)
+}
 fn runtime() -> AppResult<&'static Runtime> {
     RUNTIME.get().ok_or(AppError::SecurityReadinessUnavailable)
 }
@@ -117,7 +128,9 @@ pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     super::approval_service::RULES_READINESS,
     super::unified_key_service::CATALOG_OPT_IN_READINESS,
+    super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
+    TURN_HANDOFF,
     super::assistant_platform_model::READINESS,
     super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     super::platform_model_service::REGISTRY_READINESS,
@@ -254,7 +267,19 @@ pub async fn observe_with_automation(
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
-    observe_for(db, local, &capabilities).await
+    let observed = observe_for(db, local, &capabilities).await;
+    let started = Instant::now();
+    let ready = observed.is_ok()
+        && capabilities.contains(&TURN_HANDOFF)
+        && serving_report_for(db, local, TURN_HANDOFF)
+            .await
+            .is_ok_and(|report| report.activated && report.serving_ready);
+    *local
+        .turn_restart_ready_until
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) =
+        ready.then(|| started + std::time::Duration::from_secs(15));
+    observed
 }
 
 #[cfg(test)]
@@ -866,6 +891,8 @@ pub async fn require_flag_enable(db: &Database, key: &str) -> AppResult<()> {
             return Err(AppError::SecurityReadinessUnavailable);
         }
         &model_capabilities[..]
+    } else if key == super::feature_flag_service::TURN_HANDOFF_FLAG_KEY {
+        &[TURN_HANDOFF][..]
     } else if known_capability(key) {
         &individual[..]
     } else {
@@ -969,6 +996,7 @@ async fn ready_test_replica_inner(
 ) -> tokio::task::JoinHandle<()> {
     stop_test_replica(db).await;
     let local = Runtime {
+        turn_restart_ready_until: Default::default(),
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
             generation_id: "test-process".into(),

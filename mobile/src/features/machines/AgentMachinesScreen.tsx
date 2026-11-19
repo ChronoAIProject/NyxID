@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import type { ContentScreenProps } from "../../app/navigationTypes";
@@ -56,7 +58,7 @@ export function AgentMachinesScreen({
   const openChat = useOpenWorkspaceChat();
   const selected =
     route.name === "AgentMachineEditor" ? route.params.machineId : undefined;
-  const [notice, setNotice] = useState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const refreshedAt = useRef(0);
   const queryKey = [
     ...machineKeys(runtime.epoch),
@@ -74,7 +76,7 @@ export function AgentMachinesScreen({
   const machine = query.data?.machines.find((row) => row.node_id === selected);
   async function refresh() {
     if (Date.now() - refreshedAt.current < 1000)
-      throw new Error(translateApp("Wait a moment before refreshing again."));
+      throw localizedError("Wait a moment before refreshing again.");
     refreshedAt.current = Date.now();
     const result = await query.refetch();
     if (result.error) throw result.error;
@@ -83,7 +85,7 @@ export function AgentMachinesScreen({
   const pull = usePullRefresh(async () => {
     if (!runtime.active) return;
     await refresh().catch((cause) => {
-      if (runtime.current()) setNotice(machineError(cause));
+      if (runtime.current()) setNotice(() => (machineError(cause)));
     });
   });
   if (machine && query.data) {
@@ -103,9 +105,9 @@ export function AgentMachinesScreen({
         onSaved={(machines) => {
           client.setQueryData(queryKey, { ...query.data, machines });
           setNotice(
-            translateApp(
+            () => (translateApp(
               "Capabilities saved. Review cleanup and acknowledgement status before starting new work.",
-            ),
+            )),
           );
           void client.invalidateQueries({
             queryKey: ["workspace", "agents"],
@@ -267,7 +269,7 @@ export function AgentMachineEditor({
     conversation_id: string;
     acknowledgement_id: string;
   }>();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   // Guards a reload in flight; the pull spinner itself comes from `pull`.
   const [reloading, setReloading] = useState(false);
   const dirty = JSON.stringify(caps) !== JSON.stringify(machine.capabilities);
@@ -299,16 +301,14 @@ export function AgentMachineEditor({
       const latest = await onRefresh();
       if (!write.current()) return;
       if (!latest)
-        throw new Error(
-          translateApp("This machine is no longer available to this agent."),
-        );
+        throw localizedError("This machine is no longer available to this agent.");
       setCaps(latest.capabilities);
       setConfirmMode(undefined);
       setLegacyAccepted(false);
       write.reviewed();
       setRefreshError(undefined);
     } catch (cause) {
-      if (write.current()) setRefreshError(machineError(cause));
+      if (write.current()) setRefreshError(() => (machineError(cause)));
     } finally {
       setReloading(false);
     }

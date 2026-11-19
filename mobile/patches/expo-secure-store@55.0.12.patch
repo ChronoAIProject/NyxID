@@ -1,0 +1,15 @@
+diff --git a/android/src/main/java/expo/modules/securestore/SecureStoreModule.kt b/android/src/main/java/expo/modules/securestore/SecureStoreModule.kt
+index 0fef884af8f4c8a201d4a9c9e7e6ecd6bfe45bfb..28af882288633c71f9c8ea90c3411657aaa93a1c 100644
+--- a/android/src/main/java/expo/modules/securestore/SecureStoreModule.kt
++++ b/android/src/main/java/expo/modules/securestore/SecureStoreModule.kt
+@@ -203,7 +203,9 @@ open class SecureStoreModule : Module() {
+       val secretKeyEntry: SecretKeyEntry = getOrCreateKeyEntry(SecretKeyEntry::class.java, mAESEncryptor, options, options.requireAuthentication)
+       val encryptedItem = mAESEncryptor.createEncryptedItem(value, secretKeyEntry, options.requireAuthentication, options.authenticationPrompt, authenticationHelper)
+       encryptedItem.put(SCHEME_PROPERTY, AESEncryptor.NAME)
+-      saveEncryptedItem(encryptedItem, prefs, keychainAwareKey, options.requireAuthentication, options.keychainService)
++      if (!saveEncryptedItem(encryptedItem, prefs, keychainAwareKey, options.requireAuthentication, options.keychainService)) {
++        throw WriteException("Could not write encrypted value to SecureStore", key, options.keychainService)
++      }
+ 
+       // If a legacy value exists under this key we remove it to avoid unexpected errors in the future
+       if (prefs.contains(key)) {

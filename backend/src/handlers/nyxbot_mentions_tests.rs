@@ -873,7 +873,7 @@ async fn external_direct_lark_bot_mentions_are_guests_and_cannot_link_the_owner(
                 "direction":"inbound","platform":"lark","conversation_id":"route",
                 "agent_api_key_id":&row.route_api_key_id,"sender_platform_id":sender,
                 "platform_conversation_id":"oc_chat","content_type":"text","created_at":bson::DateTime::now(),
-                "platform_message_id":if id=="foreign-redelivery" {"foreign"} else {id}})
+                "thread_id": "omt_topic", "platform_message_id":if id=="foreign-redelivery" {"foreign"} else {id}})
             .await.unwrap();
         let body = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
             "agent":{"api_key_id":row.route_api_key_id,"name":"route"},

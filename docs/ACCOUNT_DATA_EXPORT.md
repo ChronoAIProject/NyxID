@@ -221,6 +221,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `assistant` | `oracle_sessions` | `owner_user_id`, `origin`, `tag`, `turn_count`, `last_task_id`, `chatgpt_url`, `owner_worker_label`, `closed_at`, `created_at`, `updated_at` |
 | `assistant` | `oracle_tasks` | `submitter_user_id`, `kind`, `target_url`, `prompt`, `model_label`, `project_url`, `tag`, `pdf_name`, `attachment_name`, `status`, `conversation_id`, `required_worker_label`, `phase`, `phase_detail`, `response`, `response_chars`, `chatgpt_url`, `failure_reason`, `observed_model_switcher`, `observed_model_effort`, `created_at`, `updated_at`, `completed_at`, `expires_at` |
 | `billing` | `credit_grants` | `recipient_user_id`, `target_kind`, `amount`, `remaining`, `reserved`, `scope`, `expires_at`, `reason`, `status`, `created_at`, `updated_at`, `consumed_at`, `expired_at`, `revoked_at` |
+| `billing` | `credit_schedule_recipients` | `schedule_id`, `recipient_user_id`, `anchor_at`, `next_due_at`, `is_eligible`, `created_at`, `updated_at` |
 | `billing` | `usage_meter` | `billing_owner_id`, `service_id`, `service_slug`, `metric`, `quantity`, `status`, `created_at` |
 | `billing` | `usage_workspaces` | `config`, `revision`, `updated_at` |
 | `billing` | `wallet` | `owner_id`, `plan_kind`, `balance_credits`, `reserved_credits`, `pending_lago_debits`, `pending_topup_expiry_credits`, `has_payment_instrument`, `overdraft_cap_credits`, `suspended`, `collection_state`, `balance_synced_at`, `created_at`, `updated_at` |

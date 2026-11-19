@@ -55,6 +55,7 @@ import {
   content,
   pushContent,
 } from "./workspaceNavigationTestHarness";
+import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { dismissWorkspaceSheetAction } from "./navigationHierarchy";
 import {
   workspaceContentAnimation,
@@ -130,6 +131,7 @@ function setup(
   deferFade = false,
   initialWidth = 390,
   initiallyAuthenticated = true,
+  cornerWindow = false,
 ) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
@@ -266,7 +268,9 @@ function setup(
     },
     clearTimeout: (id: number) => timers.delete(id),
     useTheme: () => ({ mode: "dark" }),
-    useSafeAreaInsets: () => ({ top: 40 }),
+    useSafeAreaInsets: () => ({ top: 40, right: cornerWindow ? 83 : 0 }),
+    Platform: {OS:"ios"},
+    workspaceCornerSensor,
     useDiagnosticsNotice: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
     getAuthAccountId: () => accountId,
@@ -1379,14 +1383,14 @@ test("persistent sidebar opens account sheets without hiding or resetting the se
 
 test("deferred persistent menu focus cannot land on a compact or sheet-covered sidebar", () => {
   // The wide sidebar starts closed; Menu opens it and moves focus there.
-  const resized = setup(false, 1194);
+  const resized = setup(false, 1194, true, true);
   resized.navigator().props.onOpenMenu();
   resized.flush();
   resized.resize(507);
   resized.flushFocus();
   assert.deepEqual(resized.focused, []);
 
-  const covered = setup(false, 1194);
+  const covered = setup(false, 1194, true, true);
   covered.navigator().props.onOpenMenu();
   covered.flush();
   covered.drawer().props.onNavigate("AccountSettings");
@@ -1394,7 +1398,7 @@ test("deferred persistent menu focus cannot land on a compact or sheet-covered s
   covered.flushFocus();
   assert.deepEqual(covered.focused, []);
 
-  const active = setup(false, 1194);
+  const active = setup(false, 1194, true, true);
   active.navigator().props.onOpenMenu();
   active.flush();
   active.flushFocus();
@@ -1405,8 +1409,8 @@ test("deferred persistent menu focus cannot land on a compact or sheet-covered s
   assert.deepEqual(active.focused, [300], "hiding never moves focus");
 });
 
-test("on wide windows the sidebar starts closed; Menu opens and hides it, labelled for VoiceOver; narrow windows keep the drawer", () => {
-  const wide = setup(false, 1194);
+test("on Duo wide windows the sidebar starts closed; Menu opens and hides it, labelled for VoiceOver; narrow windows keep the drawer", () => {
+  const wide = setup(false, 1194, true, true);
   const shell = () => wide.find("WorkspacePushShell");
   const toggle = () => wide.find("WorkspaceSidebarToggleProvider");
   assert.equal(shell().props.sidebarCollapsed, true, "closed by default");
@@ -2179,4 +2183,11 @@ test("session boundaries clear selected chat metadata and stale drawer focus res
   env.flush();
   env.flushFocus();
   assert.deepEqual(env.focused, [72]);
+});
+
+
+test("P9 ordinary wide App retains a visible sidebar despite a stored Duo choice", () => {
+  const wide = setup(false,1194);
+  assert.equal(wide.find("WorkspacePushShell").props.sidebarCollapsed, false);
+  assert.deepEqual({...wide.find("WorkspaceSidebarToggleProvider").props.value}, {persistent:false, collapsed:false});
 });

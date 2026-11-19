@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { conversationIdSchema } from "../../features/assistant/assistantTypes";
 import {
@@ -24,7 +24,7 @@ type JsonRequest = (path: string, options?: RequestOptions) => Promise<unknown>;
 
 /** Only trusted app configuration supplies this origin, never a scanned URL. */
 export function trustedVoiceOrigin(value: string): string {
-  const invalid = () => new Error(translateApp("Voice requires a trusted frontend origin."));
+  const invalid = () => localizedError("Voice requires a trusted frontend origin.");
   if (
     typeof value !== "string" ||
     !/^https?:\/\/[^/?#\\@]+\/?$/iu.test(value) ||
@@ -70,11 +70,7 @@ export function createAssistantVoiceApi(
   const origin = trustedVoiceOrigin(trustedOrigin);
   const sameId = <T extends { id: string }>(expected: string, result: T): T => {
     if (result.id !== expected)
-      throw new Error(
-        translateApp(
-          "The server returned a different voice resource. Please reload.",
-        ),
-      );
+      throw localizedError("The server returned a different voice resource. Please reload.");
     return result;
   };
   const requestPath = (conversationId: string, requestId: string) =>
@@ -141,7 +137,7 @@ export function createAssistantVoiceApi(
       const current = conversationIdSchema.parse(conversationId);
       const assertActive = () => {
         if (signal?.aborted)
-          throw Object.assign(new Error(translateApp("Voice request was cancelled.")), {
+          throw Object.assign(localizedError("Voice request was cancelled."), {
             name: "AbortError",
           });
       };

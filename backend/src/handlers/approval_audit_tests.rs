@@ -56,6 +56,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_command_observer(|_| {}).await
+    }
+
+    async fn with_command_observer(
+        observe: impl Fn(&CommandEvent) + Send + Sync + 'static,
+    ) -> Self {
         let monitor = Arc::new(Mutex::new(Monitor::default()));
         let seen = monitor.clone();
         let db = connect_transaction_test_database_with_command_handler(
@@ -64,6 +70,7 @@ impl Fixture {
                 if REQUEST.try_with(|_| ()).is_err() {
                     return;
                 }
+                observe(&event);
                 let mut m = seen.lock().unwrap();
                 match event {
                     CommandEvent::Started(e) => {

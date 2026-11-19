@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
@@ -42,7 +43,7 @@ export function AccountOrganizations({
   const [nonce, setNonce] = useState("");
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [message, setMessage] = useState<{
+  const [message, setMessage] = useLocalizedState<{
     message: string;
     tone: "info" | "success" | "error";
   } | null>(null);
@@ -95,14 +96,14 @@ export function AccountOrganizations({
       setSelectedId(id);
       const listed = await refresh();
       if (ticket.isCurrent())
-        setMessage({
+        setMessage(() => ({
           message: (kind === "create" ? (listed
               ? translateApp("Organization created. Membership reloaded from NyxID.") : translateApp("Organization created. Membership could not reload yet; pull to refresh.")) : (listed ? translateApp("Invitation accepted. Membership reloaded from NyxID.") : translateApp("Invitation accepted. Membership could not reload yet; pull to refresh."))),
           tone: "success",
-        });
+        }));
     } catch (error) {
       if (ticket.isCurrent())
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -124,7 +125,7 @@ export function AccountOrganizations({
       if (current()) {
         const listed = await refresh();
         if (current())
-          setMessage({
+          setMessage(() => ({
             message: listed
               ? translateApp(
                   "Returned from the website. Membership refreshed; no browser action is assumed completed.",
@@ -133,11 +134,11 @@ export function AccountOrganizations({
                   "Returned from the website. Membership could not reload; pull to refresh.",
                 ),
             tone: listed ? "info" : "error",
-          });
+          }));
       }
     } catch (error) {
       if (current())
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -209,10 +210,10 @@ export function AccountOrganizations({
               const ticket = current.capture();
               void refresh().catch((error) => {
                 if (ticket.isCurrent())
-                  setMessage({
+                  setMessage(() => ({
                     message: resolveErrorMessage(error),
                     tone: "error",
-                  });
+                  }));
               });
             }}
           />

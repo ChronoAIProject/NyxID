@@ -16,7 +16,7 @@ export function defaultNewAgentKey(now = Date.now()): NewAgentKey {
   return {
     kind: "new",
     name: translateApp("CLI Agent"),
-    scopes: translateApp("read proxy"),
+    scopes: "read proxy",
     allowed_service_ids: [],
     allowed_node_ids: [],
     allow_all_services: false,

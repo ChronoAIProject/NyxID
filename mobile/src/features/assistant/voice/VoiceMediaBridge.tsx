@@ -1,3 +1,4 @@
+import { localizedError } from "../../../i18n/localizedError";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import { translateApp } from "../../../i18n/appTranslation";
 import { useEffect, useMemo, useRef } from "react";
@@ -30,7 +31,7 @@ type MediaDiagnostic = {
   counts?: Record<string, number>;
 };
 
-const closedError = () => new Error(translateApp("Voice audio was closed."));
+const closedError = () => localizedError("Voice audio was closed.");
 
 /** No authentication material is ever passed to the local media document. */
 export class NativeVoiceMedia implements VoiceMediaAdapter {
@@ -386,11 +387,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(
-          new Error(
-            translateApp(
-              "Voice audio took too long to start. Please try again.",
-            ),
-          ),
+          localizedError("Voice audio took too long to start. Please try again."),
         );
         this.unavailable(
           translateApp("Voice audio took too long to start. Please try again."),
@@ -407,7 +404,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   ): Promise<string> {
     this.close();
     if (microphoneOwner && microphoneOwner !== this)
-      throw new Error(translateApp("The microphone is already in use."));
+      throw localizedError("The microphone is already in use.");
     microphoneOwner = this;
     this.closed = false;
     this.diagnostics = [];
@@ -451,9 +448,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
           const timer = setTimeout(
             () =>
               waiter.reject(
-                new Error(
-                  translateApp("Voice audio is not ready. Please try again."),
-                ),
+                localizedError("Voice audio is not ready. Please try again."),
               ),
             15000,
           );
@@ -473,7 +468,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         result.length > 131072 ||
         (protocol === "openai_live" && !result)
       )
-        throw new Error(translateApp("Voice audio returned an invalid offer."));
+        throw localizedError("Voice audio returned an invalid offer.");
       return result;
     } catch (error) {
       if (generation === this.generation) this.close();
@@ -485,7 +480,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
 
   async answer(sdp: string): Promise<void> {
     if (this.closed) return;
-    if (!sdp || sdp.length > 131072) throw new Error(translateApp("Invalid voice answer."));
+    if (!sdp || sdp.length > 131072) throw localizedError("Invalid voice answer.");
     if (this.native) return this.native.answer(sdp);
     await this.request({ type: "answer", sdp });
   }

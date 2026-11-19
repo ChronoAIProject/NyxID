@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
@@ -161,20 +162,16 @@ export function notificationReadBody(
   if ("ids" in scope) {
     const ids = [...new Set(scope.ids.filter((id) => id.length > 0))];
     if (ids.length === 0)
-      throw new Error(
-        translateApp("Choose at least one notification to mark as read."),
-      );
+      throw localizedError("Choose at least one notification to mark as read.");
     if (ids.length > MAX_NOTIFICATION_READ_IDS)
-      throw new Error(
-        translateApp("Mark at most {{count}} notifications at once.", {
+      throw localizedError("Mark at most {{count}} notifications at once.", {
           count: MAX_NOTIFICATION_READ_IDS,
-        }),
-      );
+        });
     return { ids };
   }
   if ("source" in scope) {
     notificationSourceTypeSchema.parse(scope.source.type);
-    if (!scope.source.id) throw new Error(translateApp("A source needs an identifier."));
+    if (!scope.source.id) throw localizedError("A source needs an identifier.");
     return { source: { type: scope.source.type, id: scope.source.id } };
   }
   instantSchema.parse(scope.before);

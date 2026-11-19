@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { AuthSubmitButton } from "./AuthSubmitButton";
@@ -23,7 +25,7 @@ export function useMfaStepUp(scope: string) {
   const generation = authSessionGeneration();
   const [pending, setPending] = useState<{
     retry: () => Promise<void>;
-    message: string;
+    message: () => string;
     generation: number;
     scope: string;
   } | null>(null);
@@ -78,7 +80,7 @@ export function useMfaStepUp(scope: string) {
     if (decision !== "prompt") return false;
     setPending({
       retry,
-      message: error instanceof Error ? error.message : translateApp("Verification required"),
+      message: () => error instanceof Error ? error.message : translateApp("Verification required"),
       generation,
       scope,
     });
@@ -88,7 +90,7 @@ export function useMfaStepUp(scope: string) {
   const prompt =
     pending && stepUpScopeIsCurrent(pending, scope, authSessionGeneration()) ? (
       <MfaStepUpPrompt
-        message={pending.message}
+        message={pending.message()}
         cancel={() => setPending(null)}
         verify={async (code) => {
           setBusy(true);
@@ -110,7 +112,7 @@ export function useMfaStepUp(scope: string) {
                         authSessionGeneration(),
                       )
                     )
-                      throw Object.assign(new Error(translateApp("Verification cancelled")), {
+                      throw Object.assign(localizedError("Verification cancelled"), {
                         name: "AbortError",
                       });
                   },
@@ -160,7 +162,7 @@ function MfaStepUpPrompt({
   const [code, setCode] = useState("");
   const [recovery, setRecovery] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   async function submit() {
     if (submitting.current || !code.trim()) return;
     submitting.current = true;
@@ -171,9 +173,9 @@ function MfaStepUpPrompt({
     } catch (failure) {
       if (mounted.current)
         setError(
-          failure instanceof Error
+          () => (failure instanceof Error
             ? failure.message
-            : translateApp("Verification failed. Try again."),
+            : translateApp("Verification failed. Try again.")),
         );
     } finally {
       submitting.current = false;
