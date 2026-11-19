@@ -38,6 +38,8 @@ pub mod codes {
     pub const PROVIDER_CREDITS: &str = "provider_credits";
     /// The platform rate limited NyxID (HTTP 429).
     pub const RATE_LIMITED: &str = "rate_limited";
+    /// NyxID refused a native gateway command during intake validation (HTTP 400).
+    pub const GATEWAY_INTAKE_REFUSED: &str = "intake_validation_refused";
     /// The platform is unavailable (HTTP 5xx).
     pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
     /// Any other platform error.
@@ -307,6 +309,8 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
             subscription_action,
             format!("The {name} webhook subscription is missing or incomplete. Register it again."),
         ),
+        codes::GATEWAY_INTAKE_REFUSED => advice("contact_admin",
+            "NyxID refused a dispatch from the Agent Event Gateway. Ask a platform administrator to check the nyxbot_provider_refused audit and the conversation queue in gateway Activity.".into()),
         codes::NATIVE_RELAY_CONFLICT => advice(
             "verify",
             "Meta delivered a relay callback while native WhatsApp gateway intake was active. NyxID kept native intake authoritative; verify the dedicated app callback and gateway status.".into(),
@@ -410,6 +414,7 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
                 | codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
                 | codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
                 | codes::NYXBOT_ORG_ACCESS_LOST
+                | codes::GATEWAY_INTAKE_REFUSED
         )
     {
         return found;

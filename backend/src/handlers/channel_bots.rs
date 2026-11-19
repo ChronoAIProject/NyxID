@@ -569,6 +569,8 @@ struct NyxbotHealthRow {
     org_restore_claim_id: Option<String>,
     #[serde(default)]
     org_restore_attempts: i32,
+    #[serde(default)]
+    native_intake_refused: bool,
 }
 
 async fn latest_nyxbot_rows(
@@ -591,6 +593,12 @@ async fn latest_nyxbot_rows(
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
                 "org_restore_attempts": 1,
+                "native_intake_refused": {"$and":[{"$eq":["$transport","gateway"]},
+                    {"$eq":["$status","active"]},{"$eq":["$gateway_native_phase","ready"]},
+                    {"$in":["$gateway_source.type",["discord","whatsapp"]]},
+                    {"$eq":[{"$ifNull":["$gateway_setup_release_id",null]},null]},
+                    {"$eq":[{"$ifNull":["$pending_agent_api_key_id",null]},null]},
+                    {"$eq":["$gateway_native_delivery",crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED]}]},
             }},
             doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
             doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"}}},
@@ -600,7 +608,7 @@ async fn latest_nyxbot_rows(
                 "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
-                "org_restore_attempts": 1,
+                "org_restore_attempts": 1, "native_intake_refused": 1,
             }},
             doc! {"$limit": bot_ids.len() as i64},
         ])
@@ -697,6 +705,10 @@ fn health_with_nyxbot(
     }
     let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
     if let Some(row) = nyxbot {
+        if row.native_intake_refused && facts.failure_reason.is_none() {
+            facts.failure_reason =
+                Some(crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED);
+        }
         if row.status == "failed" && row.last_error.as_deref() == Some("org_access_lost") {
             facts.failure_reason = nyxbot_state.or(Some(
                 crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
