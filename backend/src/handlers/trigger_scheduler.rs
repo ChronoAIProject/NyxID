@@ -968,87 +968,15 @@ pub(super) async fn settle_result(
         }
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
-    if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
-        return settle_chat_result(state, row, run, text, error).await;
-    }
-    if matches!(run.deliver_to, DeliverTo::Notification) {
-        return settle_notification_result(state, row, run, text, error).await;
-    }
-    // One settlement owns the outbound attempt. Recovery never duplicates an
-    // ambiguous network send; the thread remains the durable final result.
-    if run.result_claimed {
-        return schedules::finish(
-            &state.db,
-            &run.id,
-            RunOutcome::Failed,
-            Some("result_delivery_interrupted"),
-            &state.config.frontend_url,
-        )
-        .await;
-    }
-    let Some(run) = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .find_one_and_update(
-            doc! {
-                "_id": &run.id,
-                "outcome": RunOutcome::Started.as_str(),
-                "turn_id": &run.turn_id,
-                "result_claimed": { "$ne": true },
-            },
-            doc! { "$set": {"result_claimed":true} },
-        )
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-    else {
-        return Ok(());
-    };
-    let failure_text = error.map(|code| {
-        if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
-        } else {
-            engine::TurnError::new(code).message
+    match run.deliver_to {
+        DeliverTo::Chat { .. } => settle_chat_result(state, row, run, text, error).await,
+        DeliverTo::Notification => settle_notification_result(state, row, run, text, error).await,
+        // The saved reply is the delivery for Thread, including legacy rows
+        // whose former finalizer claimed the result before stopping.
+        DeliverTo::Thread => {
+            schedules::finish_thread_result(&state.db, run, error, &state.config.frontend_url).await
         }
-    });
-    let final_text = failure_text.as_deref().unwrap_or(text);
-    let outcome = match &run.deliver_to {
-        DeliverTo::Thread => Ok(()),
-        DeliverTo::Notification => unreachable!("notification uses leased settlement"),
-        DeliverTo::Chat { chat_id } => {
-            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
-            if error.is_none() {
-                Box::pin(super::nyxbot::chats::post_automation_images(
-                    state, &run, chat_id, agent_id, &row.id, final_text,
-                ))
-                .await
-                .map(|_| ())
-            } else {
-                Box::pin(super::nyxbot::chats::post_automation(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    final_text,
-                    agent_id,
-                    &row.id,
-                    &run.id,
-                ))
-                .await
-                .map(|_| ())
-            }
-        }
-    };
-    schedules::finish(
-        &state.db,
-        &run.id,
-        if error.is_some() || outcome.is_err() {
-            RunOutcome::Failed
-        } else {
-            RunOutcome::Completed
-        },
-        error.or(outcome.err().map(|_| "result_delivery_failed")),
-        &state.config.frontend_url,
-    )
-    .await
+    }
 }
 
 async fn settle_notification_result(

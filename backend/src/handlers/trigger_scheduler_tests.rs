@@ -43,12 +43,6 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
 
 async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let reply = reply.to_owned();
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
@@ -86,6 +80,20 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
             }
         }),
     );
+    let (state, _, server) = setup_with_response_router(name, upstream).await;
+    (state, calls, server)
+}
+
+async fn setup_with_response_router(
+    name: &str,
+    upstream: Router,
+) -> (AppState, String, tokio::task::JoinHandle<()>) {
+    let db = connect_transaction_test_database(name).await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -94,7 +102,8 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
     let mut row = crate::models::downstream_service::test_helpers::dummy_service();
     row.id = Uuid::new_v4().to_string();
     row.slug = engine::SERVICE_SLUG.into();
-    row.base_url = format!("http://{address}");
+    let base_url = format!("http://{address}");
+    row.base_url = base_url.clone();
     row.service_category = "internal".into();
     row.auth_method = "none".into();
     row.requires_user_credential = false;
@@ -106,10 +115,19 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
         .await
         .unwrap();
     schedules::indexes(&db).await.unwrap();
-    (test_app_state(db), calls, server)
+    (test_app_state(db), base_url, server)
 }
 
 async fn automation(state: &AppState, agent_id: &str, policy: Option<ThreadPolicy>) -> Trigger {
+    automation_with_instruction(state, agent_id, policy, "Summarise my GitHub notifications").await
+}
+
+async fn automation_with_instruction(
+    state: &AppState,
+    agent_id: &str,
+    policy: Option<ThreadPolicy>,
+    instruction: &str,
+) -> Trigger {
     crate::services::trigger_service::create(
         &state.db,
         &state.encryption_keys,
@@ -136,7 +154,7 @@ async fn automation(state: &AppState, agent_id: &str, policy: Option<ThreadPolic
                 confirmation_policy: Default::default(),
                 agent_id: agent_id.into(),
                 thread_policy: policy,
-                instruction: "Summarise my GitHub notifications".into(),
+                instruction: instruction.into(),
                 deliver_to: DeliverTo::Thread,
             },
         },

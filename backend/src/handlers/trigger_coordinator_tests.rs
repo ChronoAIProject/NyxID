@@ -7,6 +7,11 @@ use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
 use crate::services::trigger_schedule::{continuation as v2, direct, group as work_groups};
 use futures::TryStreamExt;
 
+#[path = "trigger_scheduled_group_workflow_tests.rs"]
+mod scheduled_group_workflow_tests;
+#[path = "trigger_workflow_completion_tests.rs"]
+mod workflow_completion_tests;
+
 fn start(thread: &str, text: &str) -> engine::TurnStart {
     engine::TurnStart::from(
         &serde_json::from_value::<engine::TurnRequest>(
@@ -19,6 +24,20 @@ fn start(thread: &str, text: &str) -> engine::TurnStart {
 async fn root(
     name: &str,
     specialist_coordinator: bool,
+) -> (
+    AppState,
+    Trigger,
+    TriggerRun,
+    AssistantConversation,
+    tokio::task::JoinHandle<()>,
+) {
+    root_with_enrollment(name, specialist_coordinator, true).await
+}
+
+async fn root_with_enrollment(
+    name: &str,
+    specialist_coordinator: bool,
+    enroll_v2: bool,
 ) -> (
     AppState,
     Trigger,
@@ -84,7 +103,7 @@ async fn root(
     request.execution_enrollment = true;
     request.origin = TurnOrigin::Trigger;
     request.trigger = Some(schedules::TurnClaim {
-        enroll_v2: true,
+        enroll_v2,
         run_id: run.id.clone(),
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: trigger.updated_at,
@@ -100,7 +119,10 @@ async fn root(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.coordinator.as_ref().unwrap().protocol, 2);
+    assert_eq!(
+        run.coordinator.as_ref().map(|c| c.protocol),
+        enroll_v2.then_some(2)
+    );
     assert!(row.active_turn.as_ref().unwrap().execution_task.is_none());
     assert_eq!(row.automation_thread, specialist_coordinator);
     let chat = crate::services::assistant_acknowledgement_service::for_key(
@@ -637,6 +659,20 @@ async fn group_turn(
     group: &crate::models::assistant_group::AssistantGroup,
     agent: &str,
 ) -> AssistantConversation {
+    engine::begin_turn(
+        &state.db,
+        OWNER,
+        &group_request(group, agent),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap()
+}
+
+fn group_request(
+    group: &crate::models::assistant_group::AssistantGroup,
+    agent: &str,
+) -> engine::TurnStart {
     let work = work_groups::queued(group)
         .into_iter()
         .find(|(_, id)| id == agent)
@@ -648,9 +684,7 @@ async fn group_turn(
     request.origin = TurnOrigin::Group;
     request.group_id = Some(group.id.clone());
     request.automation_work = Some(work);
-    engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
-        .await
-        .unwrap()
+    request
 }
 
 #[tokio::test]

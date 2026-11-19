@@ -764,6 +764,21 @@ cancel enrolled runs, and require no nonterminal runs, bound queued events,
 active children, pending receipts, group followers, cards or async watches in the
 diagnostic. Observation cannot discover writers predating the observation protocol. A disabled option alone does not make a downgrade safe.
 
-Completion records the coordinator's settled result; verifying external business
-outcomes such as published post IDs remains the coordinator agent's job and is
-outside this change (the remaining part of issue #2040).
+### Verify a scheduled group run
+
+1. Use an admin or operator session to read
+   `GET /api/v1/admin/automation-continuations/readiness`. Check `configured`,
+   `readiness.serving_ready`, and any `readiness.serving_blockers`. This
+   describes current readiness for new admissions.
+2. Use the automation owner's session to read
+   `GET /api/v1/triggers/{id}/runs`. Identify the run by `id` and
+   `scheduled_at`. A populated `coordinator_deadline` identifies an enrolled
+   run even after readiness or configuration changes. While the run awaits
+   tracked group results, expect `outcome: waiting`, `wait_kind: coordinator`,
+   `reason: coordinator_pending`, and an empty `finished_at`.
+3. Follow the same run to its terminal `outcome`, `reason`, and
+   `finished_at`. For Thread delivery, open its `thread_id` to read the
+   coordinator's retained result. Correlate the run ID with
+   `trigger_run_waiting` and `trigger_run_outcome` audit metadata. Check
+   any business evidence required by the workflow in the retained reply
+   and its source, such as publication IDs and reply-chain readback.
