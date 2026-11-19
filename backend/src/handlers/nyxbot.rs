@@ -6022,6 +6022,7 @@ async fn responses_with_producers_impl(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
+    provider_refusal::telegram_group(&row, &request["event_context"]["activity"]);
     provider_refusal::event(
         request["event_context"]["activity"]["event_id"]
             .as_str()
@@ -6758,7 +6759,17 @@ async fn gateway_inbound(
     ))
     .await;
     if let Some(source) = &source {
-        admission_diagnostics::outcome(state, row, source, result.as_ref().map_err(|_| ())).await?;
+        let completed =
+            admission_diagnostics::outcome(state, row, source, result.as_ref().map_err(|_| ()))
+                .await?;
+        if let Some(code) = completed
+            && activity["conversation"]["kind"] == "group"
+            && row.platform == "telegram"
+            && row.gateway_source.is_none()
+            && row.transport == "gateway"
+        {
+            admission_diagnostics::telegram_group_outcome(state, row, source, activity, code).await;
+        }
     }
     result
 }
@@ -6940,9 +6951,7 @@ async fn gateway_inbound_inner(
         Some(evidence.addressed)
     } else if let Some(addressed) = verified_address {
         let reply = if !addressed && let Some(message) = activity["event_id"].as_str() {
-            let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-            let reply_to = chats::inbound_reply_to(state, row, message).await?;
-            chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+            chats::gateway_replies_to_bot(state, row, chat_id, message).await?
         } else {
             false
         };
@@ -6965,10 +6974,7 @@ async fn gateway_inbound_inner(
                         .any(|id| id == chat_id))
                 || match activity["event_id"].as_str() {
                     Some(message_id) => {
-                        let bot =
-                            channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-                        let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
-                        chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+                        chats::gateway_replies_to_bot(state, row, chat_id, message_id).await?
                     }
                     None => false,
                 },
