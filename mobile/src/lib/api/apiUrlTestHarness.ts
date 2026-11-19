@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
@@ -27,6 +28,7 @@ export function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fet
   let session = { accessToken: "access-before-refresh", refreshToken: "refresh-test", sessionGeneration: 1 };
   const dependencies: Record<string, unknown> = {
     "../../i18n/appTranslation": { translateApp },
+    "../../i18n/localizedError": { localizedError },
     "./connectionState": { assistantConnection: { observe: (send: () => Promise<unknown>) => send() } },
     "../auth/sessionRefresh": { createSessionRefresh, isRefreshRefusal },
     "expo/fetch": { fetch },

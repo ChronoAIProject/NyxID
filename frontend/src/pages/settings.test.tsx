@@ -22,7 +22,7 @@ import type { User } from "@/types/api";
 import { SettingsPage } from "./settings";
 
 const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() => ({
-  securityUser: { display_name: "Reader", email: "reader@example.com", email_verified: true, mfa_enabled: false, social_provider: null as string | null, has_password: true },
+  securityUser: { id: "owner", display_name: "Reader", avatar_url: null, email: "reader@example.com", email_verified: true, mfa_enabled: false, social_provider: null as string | null, has_password: true },
   mockDisable: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
@@ -160,10 +160,12 @@ describe.each(["/settings", "/assistant"] as const)(
     });
 
     it("keeps profile drafts across tabs, reviews only the name, and preserves the update API", async () => {
+      const config = { ...useAuthStore.getState().user!.profile_config!, analytics: { prompt_seen: true } };
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, profile_config: config } });
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
         ? new Response(JSON.stringify({ ...securityUser, id: "owner", display_name: "Updated Reader" })) : original(url, options));
-      await open(route);
+      const { client } = await open(route);
       const name = screen.getByRole("textbox", { name: "Name" });
       expect(name).toHaveValue("Reader");
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
@@ -183,6 +185,8 @@ describe.each(["/settings", "/assistant"] as const)(
       await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
       expect(transport).toHaveBeenCalledWith("/api/v1/users/me", expect.objectContaining({ method: "PUT", body: JSON.stringify({ display_name: "Updated Reader" }) }));
       expect(useAuthStore.getState().user?.display_name).toBe("Updated Reader");
+      expect(useAuthStore.getState().user?.profile_config).toEqual(config);
+      expect(client.getQueryData<User>(["user", "me"])?.profile_config).toEqual(config);
     });
 
     it("retains profile edits made while a save is pending against the saved baseline", async () => {
@@ -235,6 +239,25 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
       expect(useAuthStore.getState().user).toBe(confirmed);
       expect(client.getQueryData(["user", "me"])).toEqual(confirmed);
+    });
+
+    it("does not apply a pending profile update to a successor account", async () => {
+      let finish!: (response: Response) => void;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
+        ? new Promise<Response>(resolve => { finish = resolve; }) : original(url, options));
+      const { client } = await open(route);
+      await userEvent.type(screen.getByRole("textbox", { name: "Name" }), " draft");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const review = screen.getByRole("dialog", { name: "Review changes" });
+      await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(finish).toBeTypeOf("function"));
+      const successor = { ...useAuthStore.getState().user!, id: "other", display_name: "Other person" };
+      act(() => { useAuthStore.getState().setUser(successor); });
+      await act(async () => { finish(new Response(JSON.stringify({ ...securityUser, display_name: "Saved old name" }))); });
+      await waitFor(() => expect(review).not.toBeInTheDocument());
+      expect(useAuthStore.getState().user).toEqual(successor);
+      expect(client.getQueryData(["user", "me"])).toBeUndefined();
     });
 
     it("retains failed profile edits and discards without calling the API again", async () => {
@@ -794,14 +817,14 @@ describe.each(["/settings", "/assistant"] as const)(
 describe("MFA security settings", () => {
   it("offers social-only enrollment while email authentication is disabled", async () => {
     securityUser.social_provider = "google"; securityUser.has_password = false;
-    useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
+    useAuthStore.setState({ user: { ...securityUser } as User });
     const user = userEvent.setup(); await open("/settings", "security");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     expect(screen.getByTestId("mfa-setup")).toBeInTheDocument();
   });
   it.each([{ provider: "google", hasPassword: false }, { provider: null, hasPassword: true }, { provider: "github", hasPassword: true }])("requires code and the actual password availability: $provider / $hasPassword", async ({ provider, hasPassword }) => {
     Object.assign(securityUser, { mfa_enabled: true, social_provider: provider, has_password: hasPassword });
-    useAuthStore.setState({ user: { id: "owner", ...securityUser } as User });
+    useAuthStore.setState({ user: { ...securityUser } as User });
     const user = userEvent.setup(); await open("/settings", "security");
     await user.click(await screen.findByRole("switch", { name: "Toggle two-factor authentication" }));
     const dialog = await screen.findByRole("dialog");

@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { channelDetail } from "./channelPresentation";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
@@ -139,8 +141,8 @@ export function AgentsScreen({
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [closeRequested, setCloseRequested] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [editorVersion, setEditorVersion] = useState(0);
   const [grantsVersion, setGrantsVersion] = useState(0);
   const lock = useRef(false);
@@ -319,7 +321,7 @@ export function AgentsScreen({
 
   async function run(
     action: () => Promise<void>,
-    success?: string,
+    success?: () => string,
     refreshForm?: "grants",
   ): Promise<boolean> {
     if (lock.current) return false;
@@ -334,7 +336,7 @@ export function AgentsScreen({
       if (success) setNotice(success);
       return true;
     } catch (cause) {
-      setError(errorMessage(cause));
+      setError(() => (errorMessage(cause)));
       return false;
     } finally {
       lock.current = false;
@@ -362,19 +364,11 @@ export function AgentsScreen({
       if (!Object.keys(patch).length) return;
       const latest = (await agentsApi.detail(agent.id)).agent;
       if (latest.can_maintain !== true || latest.status === "destroyed")
-        throw new Error(
-          translateApp(
-            "This agent can no longer be changed. Reload to review its current state.",
-          ),
-        );
+        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
       if (profileHasConflict(agent, latest, patch))
-        throw new Error(
-          translateApp(
-            "This profile changed elsewhere. Reload the agent and review those changes before saving.",
-          ),
-        );
+        throw localizedError("This profile changed elsewhere. Reload the agent and review those changes before saving.");
       await agentsApi.update(agent.id, patch);
-    }, translateApp("Confirmation mode saved."));
+    }, () => (translateApp("Confirmation mode saved.")));
   }
   function confirmLifecycle(agent: AssistantAgent, destroy: boolean) {
     Alert.alert(
@@ -405,8 +399,8 @@ export function AgentsScreen({
                   back();
                 }
               },
-              destroy ? translateApp("Agent destroyed.")
-                : translateApp("Agent deleted."),
+              () => (destroy ? translateApp("Agent destroyed.")
+                : translateApp("Agent deleted.")),
             ),
         },
       ],
@@ -480,7 +474,7 @@ export function AgentsScreen({
               setSelectedId(created.id);
               setCreatedId(created.id);
               setEditorVersion((value) => value + 1);
-            }, translateApp("Agent created."));
+            }, () => (translateApp("Agent created.")));
           }}
         />
       </WorkspacePage>
@@ -703,23 +697,15 @@ export function AgentsScreen({
                         latest.can_maintain !== true ||
                         latest.status === "destroyed"
                       )
-                        throw new Error(
-                          translateApp(
-                            "This agent can no longer be changed. Reload to review its current state.",
-                          ),
-                        );
+                        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
                       if (grantSignature(latest) !== grantSignature(baseline))
-                        throw new Error(
-                          translateApp(
-                            "The agent's permissions changed elsewhere. Reload and review them before saving.",
-                          ),
-                        );
+                        throw localizedError("The agent's permissions changed elsewhere. Reload and review them before saving.");
                       await agentsApi.grants(
                         agent.id,
                         changedGrants(baseline, services, accountRead, guests),
                       );
                     },
-                    translateApp("Permissions saved."),
+                    () => (translateApp("Permissions saved.")),
                     "grants",
                   )
                 }
@@ -779,7 +765,7 @@ export function AgentsScreen({
                                   onPress: () =>
                                     void run(async () => {
                                       await agentsApi.forget(agent.id, note.id);
-                                    }, translateApp("Memory forgotten.")),
+                                    }, () => (translateApp("Memory forgotten."))),
                                 },
                               ],
                             )
@@ -804,7 +790,7 @@ export function AgentsScreen({
                 onRemember={(text) =>
                   run(async () => {
                     await agentsApi.remember(agent.id, text);
-                  }, translateApp("Memory saved."))
+                  }, () => (translateApp("Memory saved.")))
                 }
               />
             )}

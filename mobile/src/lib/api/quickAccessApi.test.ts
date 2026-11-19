@@ -74,6 +74,7 @@ test("responses keep known entries in order and skip what a newer server may add
   });
   assert.deepEqual(parsed, {
     customized: true,
+    hasUnsupportedEntries: true,
     items: [
       { kind: "destination", id: "plugins" },
       { kind: "agent", id: AGENT },
@@ -111,4 +112,11 @@ test("get, save and reset use the account's quick-access route; saves are checke
   // An unusable answer is a translated error, not the payload.
   const broken = api({ unexpected: true });
   await assert.rejects(broken.quickAccessApi.get(), /unexpected response/);
+});
+
+
+test('M2622-08 server partial flag survives even when the old backend already filtered unknown items',()=>{
+  const state=quickAccessResponseSchema.parse({items:[{kind:'destination',id:'plugins'}],customized:true,has_unsupported_entries:true});
+  assert.equal(state.hasUnsupportedEntries,true);
+  assert.equal(quickAccessResponseSchema.parse({items:[],customized:true}).hasUnsupportedEntries,undefined);
 });

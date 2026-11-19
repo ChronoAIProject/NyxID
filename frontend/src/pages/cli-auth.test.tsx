@@ -9,22 +9,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the unauthenticated → /login redirect (preserving return_to), and the
 // happy-path token POST + 127.0.0.1 callback redirect.
 
-const { mockNavigate, mockPost, searchState, storeState } = vi.hoisted(() => ({
+const { mockNavigate, mockPost, storeState } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   mockPost: vi.fn(),
-  searchState: {
-    value: {} as {
-      port?: string;
-      state?: string;
-      client_ua?: string;
-    },
-  },
   storeState: { isAuthenticated: false, isLoading: false },
 }));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => mockNavigate,
-  useSearch: () => searchState.value,
+  useSearch: () => Object.fromEntries(new URLSearchParams(window.location.search)),
 }));
 
 vi.mock("@/stores/auth-store", () => ({
@@ -42,9 +35,12 @@ import { CliAuthPage } from "./cli-auth";
 
 let assignSpy: ReturnType<typeof vi.spyOn>;
 
+function setSearch(params: Record<string, string>) {
+  window.history.replaceState({}, "", `/cli-auth?${new URLSearchParams(params)}`);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  searchState.value = {};
   storeState.isAuthenticated = false;
   storeState.isLoading = false;
   window.history.pushState({}, "", "/cli-auth");
@@ -60,7 +56,7 @@ afterEach(() => {
 describe("CliAuthPage", () => {
   it("shows a terminal cancellation state without retrying the CLI callback", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = { port: "5555", state: "cancel-step-up" };
+    setSearch({ port: "5555", state: "cancel-step-up" });
     mockPost.mockRejectedValueOnce(
       new ApiError(403, {
         error: "mfa_step_up_required",
@@ -70,6 +66,7 @@ describe("CliAuthPage", () => {
     );
     render(<CliAuthPage />);
     const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Authorize CLI sign-in" }));
     expect(
       await screen.findByRole("region", { name: "Verify this session" }),
     ).toBeVisible();
@@ -93,11 +90,12 @@ describe("CliAuthPage", () => {
 
   it("steps up inline and retries the CLI callback without signing out", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = { port: "5555", state: "step-up" };
+    setSearch({ port: "5555", state: "step-up" });
     mockPost.mockRejectedValueOnce(new ApiError(403, {error: "mfa_step_up_required", error_code: 2003,
       message: "Approving sign-ins on other devices requires MFA. Verify this session with your authenticator, or approve from a device where you signed in with MFA."}));
     render(<CliAuthPage />);
     const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Authorize CLI sign-in" }));
     expect(await screen.findByRole("region", {name: "Verify this session"})).toBeVisible();
     expect(assignSpy).not.toHaveBeenCalled();
     mockPost.mockResolvedValueOnce({message: "Session verified"}).mockResolvedValueOnce({access_token: "access", refresh_token: "refresh"});
@@ -108,7 +106,7 @@ describe("CliAuthPage", () => {
   });
   it("shows a skeleton (no redirect, no token POST) while auth is still loading", () => {
     storeState.isLoading = true;
-    searchState.value = { port: "5555" };
+    setSearch({ port: "5555" });
 
     const { container } = render(<CliAuthPage />);
 
@@ -126,7 +124,7 @@ describe("CliAuthPage", () => {
 
   it("redirects unauthenticated users to /login with a return_to that preserves port/state/client_ua", async () => {
     storeState.isAuthenticated = false;
-    searchState.value = { port: "5555", state: "xyz", client_ua: "nyxid/1.2" };
+    setSearch({ port: "5555", state: "xyz", client_ua: "nyxid/1.2" });
 
     render(<CliAuthPage />);
 
@@ -145,7 +143,7 @@ describe("CliAuthPage", () => {
 
   it("renders the invalid-request panel and routes to /dashboard when there is no port", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = {}; // authenticated but missing the CLI callback port
+    setSearch({}); // authenticated but missing the CLI callback port
 
     const user = userEvent.setup();
     render(<CliAuthPage />);
@@ -161,9 +159,21 @@ describe("CliAuthPage", () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });
 
+  it.each(["@host", "host:1", "0", "65536", "+80", " 80", "80 ", "1e2", "1.5"])(
+    "requires a decimal loopback port for %j",
+    (port) => {
+      storeState.isAuthenticated = true;
+      setSearch({ port });
+      render(<CliAuthPage />);
+      expect(screen.getByRole("heading", { name: "Invalid CLI Auth Request" })).toBeVisible();
+      expect(mockPost).not.toHaveBeenCalled();
+      expect(assignSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it("mints a CLI token and redirects to the 127.0.0.1 callback with state on the happy path", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = { port: "5555", state: "st-1", client_ua: "nyxid/9" };
+    setSearch({ port: "5555", state: "st-1", client_ua: "nyxid/9" });
     mockPost.mockResolvedValueOnce({
       access_token: "acc-123",
       refresh_token: "ref-456",
@@ -171,7 +181,10 @@ describe("CliAuthPage", () => {
 
     render(<CliAuthPage />);
 
-    // The progress copy renders for an authenticated + port request.
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(screen.getByText("http://127.0.0.1:5555/callback")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Authorize CLI sign-in" }));
     expect(
       screen.getByRole("heading", { name: /CLI Authentication/i }),
     ).toBeInTheDocument();
@@ -194,13 +207,14 @@ describe("CliAuthPage", () => {
 
   it("omits state from the callback URL when the CLI did not supply one", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = { port: "6000" };
+    setSearch({ port: "6000" });
     mockPost.mockResolvedValueOnce({
       access_token: "a",
       refresh_token: "r",
     });
 
     render(<CliAuthPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Authorize CLI sign-in" }));
 
     await waitFor(() => {
       expect(assignSpy).toHaveBeenCalledTimes(1);
@@ -215,10 +229,11 @@ describe("CliAuthPage", () => {
 
   it("renders an in-page failure message (no callback redirect) when token minting fails", async () => {
     storeState.isAuthenticated = true;
-    searchState.value = { port: "7000" };
+    setSearch({ port: "7000" });
     mockPost.mockRejectedValueOnce(new Error("session expired"));
 
     render(<CliAuthPage />);
+    await userEvent.click(screen.getByRole("button", { name: "Authorize CLI sign-in" }));
 
     await waitFor(() => {
       expect(mockPost).toHaveBeenCalledTimes(1);

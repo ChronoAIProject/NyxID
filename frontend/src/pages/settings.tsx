@@ -266,10 +266,19 @@ function ProfileForm({ user }: { readonly user: User }) {
     form.clearErrors("root");
     try {
       const profile = captureAccountProfileRead();
-      const updated = await api.put<User>("/users/me", values);
+      const updated = await api.put<Pick<User, "id" | "email" | "display_name" | "avatar_url">>("/users/me", values, {
+        authorityGuard: () => {
+          if (useAuthStore.getState().user?.id !== user.id) throw new Error("Account changed; try again from the current account.");
+        },
+      });
+      const current = useAuthStore.getState().user;
+      if (!current || current.id !== user.id || updated.id !== user.id) throw new Error("Profile response did not match the current account.");
       if (profile.isCurrent()) {
-        setUser(updated);
-        queryClient.setQueryData(["user", "me"], updated);
+        // PUT returns only editable profile fields. Retain account preferences
+        // and capabilities from the current full profile, including consent.
+        const merged = { ...current, email: updated.email, display_name: updated.display_name, avatar_url: updated.avatar_url };
+        setUser(merged);
+        queryClient.setQueryData(["user", "me"], merged);
       }
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });

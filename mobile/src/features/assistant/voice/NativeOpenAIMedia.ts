@@ -1,3 +1,4 @@
+import { localizedError } from "../../../i18n/localizedError";
 import { translateApp } from "../../../i18n/appTranslation";
 import { claimSystemStatusActivity } from "../../../lib/systemStatusActivity";
 import type {
@@ -67,7 +68,7 @@ type Diagnostic = {
   counts?: Record<string, number>;
 };
 
-const closedError = () => new Error(translateApp("Voice audio was closed."));
+const closedError = () => localizedError("Voice audio was closed.");
 const startupError = "Voice audio could not be started. Please try again.";
 const connectionError = "WebRTC negotiation failed.";
 let microphoneOwner: NativeOpenAIMedia | undefined;
@@ -165,16 +166,14 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       };
       const cancel = (error: Error) => finish(error);
       const timer = this.clock.setTimeout(() => {
-        const error = new Error(
-          translateApp("Voice audio took too long to start. Please try again."),
-        );
+        const error = localizedError("Voice audio took too long to start. Please try again.");
         finish(error);
         if (this.alive(generation)) this.fail(error.message);
       }, ms);
       this.waiters.add(cancel);
       operation.then(
         (value) => finish(undefined, value),
-        () => finish(new Error(translateApp(startupError))),
+        () => finish(localizedError(startupError)),
       );
       if (!this.alive(generation)) finish(closedError());
     });
@@ -183,12 +182,10 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   async prepare(protocol: VoiceProtocol, signal: AbortSignal): Promise<string> {
     this.close();
     if (protocol !== "openai_live")
-      throw new Error(
-        translateApp("Voice audio is not supported by this app runtime."),
-      );
+      throw localizedError("Voice audio is not supported by this app runtime.");
     if (signal.aborted) throw closedError();
     if (microphoneOwner && microphoneOwner !== this)
-      throw new Error(translateApp("The microphone is already in use."));
+      throw localizedError("The microphone is already in use.");
     microphoneOwner = this;
     this.closed = false;
     const generation = ++this.generation;
@@ -218,7 +215,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       const tracks = stream.getAudioTracks();
       const track = tracks[0];
       if (tracks.length !== 1 || !track || track.readyState !== "live")
-        throw new Error(translateApp(startupError));
+        throw localizedError(startupError);
       this.listen(track, "ended", () => {
         if (this.alive(generation))
           this.fail(
@@ -300,10 +297,10 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       this.assertAlive(generation);
       await this.waitForICE(peer, generation);
       this.assertAlive(generation);
-      if (track.readyState !== "live") throw new Error(translateApp(startupError));
+      if (track.readyState !== "live") throw localizedError(startupError);
       const sdp = peer.localDescription?.sdp;
       if (typeof sdp !== "string" || !sdp.trim() || sdp.length > 131072)
-        throw new Error(translateApp(startupError));
+        throw localizedError(startupError);
       this.timer = this.clock.setInterval(
         () => void this.sample(generation),
         200,
@@ -335,7 +332,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   async answer(sdp: string): Promise<void> {
     if (this.closed || !this.peer) throw closedError();
     if (!sdp.trim() || sdp.length > 131072)
-      throw new Error(translateApp("Invalid voice answer."));
+      throw localizedError("Invalid voice answer.");
     const generation = this.generation;
     try {
       await this.wait(

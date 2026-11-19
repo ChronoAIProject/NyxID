@@ -73,8 +73,9 @@ A missing hint suppresses the mobile review notice. A Cohort non-member on a
 crash-only deployment sees no banner because their preference response does not
 offer diagnostics.
 
-Web offers the updated consent
-banner and a Privacy review dialog. Mobile offers an account-bound one-time
+Web includes diagnostics in the first consent footer when offered. Accounts
+that already answered are not prompted again; Settings › Privacy provides
+the updated permission review dialog. Mobile offers an account-bound one-time
 Review / Not now alert and a Privacy review row. Not now retains the old choice.
 Local withdrawal remains usable during network failures.
 

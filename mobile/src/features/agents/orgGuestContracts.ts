@@ -14,6 +14,7 @@ export const orgGuestSettingsSchema = z.object({
   guest_revision: z.string().default(""),
   guest_enabled: z.boolean(),
   grants_ready: z.boolean().default(false),
+  binding_limits_guest_services: z.boolean().default(false),
   guest_policy_mode: z.enum(["legacy", "grants"]).default("legacy"),
   channel_status: z.string().optional(),
   readiness_reason: z.string().nullish(),

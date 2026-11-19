@@ -484,3 +484,45 @@ and authorization errors retain their usual responses. Such older uncertain requ
 authoritative CMA investigation, not a new identity or a local force-unlock.
 A rolling old replica may still leave a refusal unknown; an upgraded replica can
 recover it within that window. No schema or writer-cutover change is required.
+
+
+## Automatic reservation reconciliation
+
+A dedicated NyxID worker observes held NyxID-created reservations without owner
+activity or the optional management feature. It walks at most 16 rows per page
+using the `source, occupies_account_slot, _id` index, a renewable cluster lease
+and durable cursor. Pages run on a 30-second tick; a completed pass rests five
+minutes. Each row has a 15-second budget, and failures do not stop later rows.
+No ordinary proxy, MCP or turn request gains a read. The worker makes exact
+owner-authorized GETs only, without proxy metering, billing or request-rate use.
+
+Saved lifecycle/Agent/sandbox receipts use the existing deployment and identity
+checks to complete association and creation journaling. Confirmed journals and
+ordinary associated sandboxes cause no remote read. A retiring bound sandbox
+settles only when CMA returns `retired` for that exact identity. Generation,
+parent version, creation revision and erasure fences guard the local transaction;
+retirement releases the slot and clears recovery material without deleting any
+remote object. Admins may perform the same exact observation with
+`confirm_retirement`; inspect itself stays audit-only. A 404, list omission,
+failed operation, timeout or elapsed time never frees a slot.
+
+System-attributed `cma_sandbox_reservation_recovered` records settlement (atomic
+with retirement; best effort after the existing multistep receipt recovery).
+`cma_sandbox_reservation_recovery_deferred` reports fixed reason codes at most
+once per reservation/generation/reason per hour via an existing coordination
+claim. Neither event retains provider bodies, request material or credentials.
+Old replicas can continue reading and writing all rows: no new persisted enum
+value or sandbox/creation field is introduced. Repeated observation and races
+with owner recovery are safe under the existing fences.
+
+`operation_without_resource` is not a terminal non-creation result. CMA may
+have a sandbox internally while exposing no Agent in the public operation.
+Queued/running operations keep being observed; `waiting_for_connection` needs
+the owner to complete CMA's connection and retry the original request; a failed
+operation with no public resource stays held pending authoritative evidence.
+The inspector reports these distinctions and guidance. Checked against CMA
+`71dfed36f8806dcc68ba4ca1d73d6688e5935c9e`,
+`api/crates/cma/src/store/agent_lifecycle_writes.rs` (`record_sandbox`, `fail`,
+`resume_connection`) and `agent_lifecycle_operations.rs` (`view`). The missing
+creation identity/absence contract is tracked in ChronoAIProject/cma#2354;
+NyxID cannot safely force-release these rows.

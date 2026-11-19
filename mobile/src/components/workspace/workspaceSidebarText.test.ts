@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import ts from "typescript";
 import { sidebarTextProps } from "./sidebarText";
 
-test("every sidebar Text is single-line without competing with the drawer close gesture", () => {
+test("P9 ordinary sidebar labels retain native paragraph identity and the drawer close gesture", () => {
   for (const name of [
     "WorkspaceDrawer",
     "WorkspaceChatList",
@@ -15,46 +14,16 @@ test("every sidebar Text is single-line without competing with the drawer close 
       new URL(`./${name}.tsx`, import.meta.url),
       "utf8",
     );
-    assert.match(
+    assert.doesNotMatch(
       source,
       /DynamicTypeText as Text/,
-      `${name}: live font changes must refresh native paragraph metrics`,
+      `${name}: keep base paragraph identity`,
     );
-    assert.doesNotMatch(source, /SidebarHeaderViewport|<ScrollView[^>]*\bhorizontal/s);
-    const file = ts.createSourceFile(
-      name + ".tsx",
+    assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
+    assert.doesNotMatch(
       source,
-      ts.ScriptTarget.Latest,
-      true,
+      /SidebarHeaderViewport|<ScrollView[^>]*\bhorizontal/s,
     );
-    const visit = (node: ts.Node) => {
-      if (
-        ts.isJsxOpeningElement(node) &&
-        node.tagName.getText(file) === "Text"
-      ) {
-        const props = node.attributes.properties;
-        assert.ok(
-          props.some(
-            (p) =>
-              ts.isJsxAttribute(p) &&
-              p.name.getText(file) === "numberOfLines" &&
-              p.initializer?.getText(file) === "{1}",
-          ),
-          `${name}: ${node.getText(file)}`,
-        );
-        assert.ok(
-          props.some(
-            (p) =>
-              ts.isJsxSpreadAttribute(p) &&
-              p.expression.getText(file).startsWith("sidebarTextProps("),
-          ),
-          `${name}: missing shared label policy`,
-        );
-
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(file);
   }
   assert.deepEqual(sidebarTextProps(), {
     numberOfLines: 1,

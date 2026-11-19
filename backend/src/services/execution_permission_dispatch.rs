@@ -1632,6 +1632,31 @@ impl Permit {
         })
     }
 
+    pub(crate) fn single_dispatch(&self) -> bool {
+        self.resume.is_some() || self.one_use()
+    }
+
+    fn one_use(&self) -> bool {
+        matches!(
+            self.grant
+                .execution
+                .as_ref()
+                .and_then(|e| e.v1.as_ref())
+                .map(|c| &c.validity),
+            Some(Validity::Operation { .. })
+        )
+    }
+
+    /// The owner transport proved this attempt did not reach the node.
+    /// The consumed claim remains terminal, including on ordinary caller retry.
+    pub(crate) async fn node_not_sent(&self) -> AppResult<()> {
+        self.finish(ExecutionUseState::NotSent).await?;
+        if let Some(resume) = &self.resume {
+            resume.node_not_sent(&self.db).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn complete(&self, received: bool) -> AppResult<()> {
         self.finish(if received {
             ExecutionUseState::Completed
@@ -1648,14 +1673,7 @@ impl Permit {
     }
 
     async fn finish(&self, state: ExecutionUseState) -> AppResult<()> {
-        if !matches!(
-            self.grant
-                .execution
-                .as_ref()
-                .and_then(|e| e.v1.as_ref())
-                .map(|c| &c.validity),
-            Some(Validity::Operation { .. })
-        ) {
+        if !self.one_use() {
             return Ok(());
         }
         let now = Utc::now();

@@ -849,6 +849,8 @@ async fn create_thread_with_kind(
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
+        stopped_window: None,
+        thread_secret_fence: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,

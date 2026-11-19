@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
@@ -30,7 +31,7 @@ export function AccountSecurityControls({
   const { isConnected } = useNetworkStatus();
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [message, setMessage] = useState<{
+  const [message, setMessage] = useLocalizedState<{
     message: string;
     tone: "success" | "error";
   } | null>(null);
@@ -60,7 +61,7 @@ export function AccountSecurityControls({
       if (ticket.isCurrent()) {
         await refresh();
         if (ticket.isCurrent())
-          setMessage({ message: translateApp("Sign-in policy saved"), tone: "success" });
+          setMessage(() => ({ message: translateApp("Sign-in policy saved"), tone: "success" }));
       }
     } catch (error) {
       if (
@@ -68,7 +69,7 @@ export function AccountSecurityControls({
         !(await stepUp.handle(error, () => savePolicy(enabled, ticket))) &&
         ticket.isCurrent()
       )
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);

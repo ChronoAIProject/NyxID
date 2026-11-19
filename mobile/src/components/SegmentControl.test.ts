@@ -168,7 +168,9 @@ test("appearance reflows between horizontal and stacked choices while icons, sca
     assert.equal(labels.length, 2);
     for (const label of labels) {
       assert.equal(label.key, fontScale);
-      assert.equal(label.props.numberOfLines, 1, "never wraps, even stacked");
+      assert.equal(label.props.numberOfLines,
+        undefined,
+        "fitting and stacked labels retain base wrapping",);
       assert.notEqual(label.props.allowFontScaling, false);
     }
     assert.equal(
@@ -212,16 +214,18 @@ test("segment labels stay on one line at the Dynamic Type size; a row that canno
   const highlight = () =>
     nodes(screen.tree()).find((node) => node.type === "Animated.View")!;
   const widths = () => tabs(screen.tree()).map((tab) => style(tab).width);
+  screen.measure([70, 140, 190, 90]);
   for (const tab of tabs(screen.tree())) {
     const label = nodes(tab).find((node) => node.type === "Text")!;
     assert.equal(label.props.numberOfLines, 1);
-    assert.equal(label.props.adjustsFontSizeToFit, undefined, "never scaled down");
+    assert.equal(label.props.adjustsFontSizeToFit, undefined, "never scaled down",);
     assert.equal(label.props.minimumFontScale, undefined);
   }
   // Every label fits an equal share: today's equal segments, no scrolling.
   screen.measure([50, 75, 60, 60]);
-  assert.deepEqual(widths(), [77.5, 77.5, 77.5, 77.5]);
-  assert.equal(scrollView().props.scrollEnabled, false);
+  assert.deepEqual(
+    tabs(screen.tree()).map((tab) => style(tab).flex), [1, 1, 1, 1],);
+  assert.equal(scrollView(), undefined);
   // "Automations" needs more than a share but the row still fits: natural
   // widths plus an equal share of the spare space, still no scrolling.
   screen.measure([50, 80, 110, 60]);
@@ -239,7 +243,8 @@ test("segment labels stay on one line at the Dynamic Type size; a row that canno
   // The highlight follows the selected segment's own width and offset, and
   // the row brings it into view.
   assert.equal(style(highlight()).width, 190);
-  assert.equal(highlight().props.style[2].transform[0].translateX.value, 70 + 2 + 140 + 2);
+  assert.equal(
+    style(highlight()).transform[0].translateX.value, 70 + 2 + 140 + 2,);
   assert.ok(scrolls.length > 0);
   assert.ok(scrolls.at(-1)!.x > 0);
   screen.update({ ...filters, activeIndex: 0 });
@@ -261,4 +266,32 @@ test("segment labels stay on one line at the Dynamic Type size; a row that canno
     nodes(clip).some((node) => node.props.accessibilityRole === "tab"),
     false,
   );
+});
+
+test("P9 fitting labels use the base equal cells and fixed badge without a scroll container", (t) => {
+  const x = setupSegmentControl(filters);
+  t.after(x.harness.unmount);
+  x.layout(320);
+  x.measure([50, 70, 70, 65]);
+  assert.equal(
+    nodes(x.tree()).some((n) => n.type === "ScrollView"),
+    false,
+  );
+  for (const tab of tabs(x.tree())) {
+    assert.equal(
+      style({
+        ...tab,
+        props: { ...tab.props, style: tab.props.style({ pressed: false }) },
+      }).flex,
+      1,
+    );
+  }
+  const badge = nodes(tabs(x.tree())[0]!).find(
+    (n) => style(n).minWidth === 18,
+  )!;
+  assert.equal(style(badge).height, 18);
+  assert.equal(style(badge).minHeight, undefined);
+  const highlight = nodes(x.tree()).find((n) => n.type === "Animated.View")!;
+  assert.equal(style(highlight).top, style(x.tree()).padding);
+  assert.equal(style(highlight).left, style(x.tree()).padding);
 });

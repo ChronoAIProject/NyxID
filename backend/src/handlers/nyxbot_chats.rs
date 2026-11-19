@@ -603,6 +603,17 @@ pub(super) async fn replies_to_bot(
         .is_some())
 }
 
+pub(super) async fn gateway_replies_to_bot(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat_id: &str,
+    message_id: &str,
+) -> AppResult<bool> {
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    let reply_to = inbound_reply_to(state, row, message_id).await?;
+    replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await
+}
+
 /// The platform message a gateway event replies to, read from NyxID's own
 /// record of the inbound message (the gateway's activity does not say).
 pub(super) async fn inbound_reply_to(
@@ -1847,10 +1858,12 @@ pub(crate) async fn post_turn_is_live(
         return Ok(false);
     }
     // None deliberately forces fresh owner/org/group ACL resolution.
-    let current = crate::services::assistant_acknowledgement_service::for_key(
+    let current = crate::services::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &chat.user_id,
         Some(&chat.api_key_id),
+        chat.key_version,
+        None,
     )
     .await?;
     Ok(current.is_some_and(|current| {
@@ -1955,6 +1968,7 @@ pub(crate) async fn post_current_turn(
                 state,
                 super::images::ImageSendContext {
                     source: crate::models::image_preparation::Source::Post {
+                        key_version: chat.key_version,
                         api_key_id: chat.api_key_id.clone(),
                     },
                     owner: &chat.user_id,

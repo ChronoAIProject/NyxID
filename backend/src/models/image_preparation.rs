@@ -15,10 +15,20 @@ pub enum ImageAnchor {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Source {
-    Event { event_id: String },
-    Supplemental { origin: ChannelOrigin },
-    Post { api_key_id: String },
-    Automation { run_id: String },
+    Event {
+        event_id: String,
+    },
+    Supplemental {
+        origin: ChannelOrigin,
+    },
+    Post {
+        api_key_id: String,
+        #[serde(default)]
+        key_version: i64,
+    },
+    Automation {
+        run_id: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -80,7 +80,9 @@ test("Recents uses plain text rows, caps the sidebar at eight, and opens exact t
   assert.ok(row.props.style({ pressed: false })[0].minHeight >= 44);
   assert.ok(
     // Plain text rows: labels plus the one View grouping count, status, time.
-    elements(row).every((n) => ["Text", "Pressable", "View"].includes(String(n.type))),
+    elements(row).every((n) =>
+      ["Text", "Pressable", "View"].includes(String(n.type)),
+    ),
   );
   row.props.onPress();
   assert.deepEqual(selected, [rows[0]!.target]);
@@ -91,8 +93,10 @@ test("Recents uses plain text rows, caps the sidebar at eight, and opens exact t
   h.unmount();
 });
 
-test("at accessibility text sizes a recent row keeps the title's full width and puts count, status and time beneath it", () => {
+test("on the Duo at accessibility text sizes a recent row keeps the title's full width and puts count, status and time beneath it", () => {
+  const corner = { value: true };
   const h = hookHarness<E>({
+    "./WorkspaceLayoutContext": { WorkspaceCornerSensorContext: corner },
     "react/jsx-runtime": jsx,
     "react-native": native,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
@@ -105,7 +109,11 @@ test("at accessibility text sizes a recent row keeps the title's full width and 
   const { WorkspaceRecentRow, RECENT_ROW_STACK_FONT_SCALE } = h.load(
     fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url)),
   ) as any;
-  const item = { ...recent(1), title: "Reviewing the Duo layout", status: "Needs you" };
+  const item = {
+    ...recent(1),
+    title: "Reviewing the Duo layout",
+    status: "Needs you",
+  };
   const flat = (style: unknown) =>
     Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
   const render = (scale: number) => {
@@ -116,14 +124,26 @@ test("at accessibility text sizes a recent row keeps the title's full width and 
     const texts = elements(row).filter((n) => n.type === "Text");
     const [title, count, status, time] = texts.map((n) => flat(n.props.style));
     const meta = flat(
-      elements(row).find((n) => n.props.testID === "recent-row-meta")!.props.style,
+      elements(row).find((n) => n.props.testID === "recent-row-meta")!.props
+        .style,
     );
     h.unmount();
-    return { row: flat(row.props.style({ pressed: false })), texts, title, count, status, time, meta };
+    return {
+      row: flat(row.props.style({ pressed: false })),
+      texts,
+      title,
+      count,
+      status,
+      time,
+      meta,
+    };
   };
   try {
     // XXXL, the largest non-accessibility size, keeps today's single line.
-    assert.ok(RECENT_ROW_STACK_FONT_SCALE > 1.353 && RECENT_ROW_STACK_FONT_SCALE <= 1.786);
+    assert.ok(
+      RECENT_ROW_STACK_FONT_SCALE > 1.353 &&
+        RECENT_ROW_STACK_FONT_SCALE <= 1.786,
+    );
     for (const scale of [1, 1.353]) {
       const one = render(scale);
       assert.equal(one.row.flexDirection, "row", String(scale));
@@ -147,12 +167,26 @@ test("at accessibility text sizes a recent row keeps the title's full width and 
       assert.ok(stacked.row.minHeight >= 44);
       assert.equal(stacked.time.flexShrink, 1);
       // Strict no-wrap: every label is still one line with a tail ellipsis.
-      for (const text of stacked.texts) assert.equal(text.props.numberOfLines, 1);
+      for (const text of [stacked.texts[0]!, stacked.texts.at(-1)!])
+        assert.equal(text.props.numberOfLines, 1);
       assert.deepEqual(
         stacked.texts.map((n) => [n.props.children].flat().join("")),
-        ["Reviewing the Duo layout", "2", "Needs you", formatRelativeTimeFromMs(Date.parse(item.activityAt))],
+        [
+          "Reviewing the Duo layout",
+          "2",
+          "Needs you",
+          formatRelativeTimeFromMs(Date.parse(item.activityAt)),
+        ],
       );
     }
+    corner.value = false;
+    const ordinary = render(3.571);
+    assert.equal(
+      ordinary.row.flexDirection,
+      "row",
+      "ordinary devices retain base layout at large text",
+    );
+    assert.equal(ordinary.status.maxWidth, 78);
   } finally {
     fontScale = 1;
   }
@@ -330,14 +364,25 @@ test("Recents shares real history/live APIs with visibility, foreground, network
 });
 
 test("Recents rows show the unread counts the summary attributes to their thread or crew", () => {
-  const rows = [recent(0), recent(1), { ...recent(2), key: "crew:g", title: "Launch crew", target: { kind: "group" as const, groupId: `nyxg-${"e".repeat(32)}` } }];
+  const rows = [
+    recent(0),
+    recent(1),
+    {
+      ...recent(2),
+      key: "crew:g",
+      title: "Launch crew",
+      target: { kind: "group" as const, groupId: `nyxg-${"e".repeat(32)}` },
+    },
+  ];
   const h = hookHarness<E>({
     "react/jsx-runtime": jsx,
     "react-native": native,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../lib/time": { formatRelativeTimeFromMs },
     "../Skeleton": { SkeletonRows: "SkeletonRows" },
-    "./useWorkspaceRecents": { useWorkspaceRecents: () => ({ rows, online: true }) },
+    "./useWorkspaceRecents": {
+      useWorkspaceRecents: () => ({ rows, online: true }),
+    },
   });
   const { WorkspaceRecents, WorkspaceRecentRow } = h.load(
     fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url)),
@@ -346,20 +391,32 @@ test("Recents rows show the unread counts the summary attributes to their thread
     conversations: { [`nyxa-${"1".padStart(32, "0")}`]: 4 },
     groups: { [`nyxg-${"e".repeat(32)}`]: 120 },
   };
-  h.mount(() => WorkspaceRecents({ visible: true, unread, onSelect() {}, onSeeAll() {} }));
+  h.mount(() =>
+    WorkspaceRecents({ visible: true, unread, onSelect() {}, onSeeAll() {} }),
+  );
   const rendered = elements(h.value())
     .filter((n) => n.type === WorkspaceRecentRow)
     .map((n) => WorkspaceRecentRow(n.props));
   assert.deepEqual(
     rendered.map((row) => row.props.accessibilityLabel),
-    ["Open recent Thread 0", "Open recent Thread 1, 4 unread", "Open recent Launch crew, 120 unread"],
+    [
+      "Open recent Thread 0",
+      "Open recent Thread 1, 4 unread",
+      "Open recent Launch crew, 120 unread",
+    ],
   );
-  const pills = rendered.map((row) => elements(row).find((n) => n.props.testID === "sidebar-unread-count"));
+  const pills = rendered.map((row) =>
+    elements(row).find((n) => n.props.testID === "sidebar-unread-count"),
+  );
   assert.equal(pills[0], undefined);
   assert.equal(pills[1]!.props.children, "4");
   assert.equal(pills[2]!.props.children, "99+");
   assert.equal(recentUnread({ target: { kind: "home" } }, unread), 0);
-  assert.equal(recentUnread({ target: { kind: "agent", agentId: "helper" } }, unread), 0, "an agent target without a thread has no marker");
+  assert.equal(
+    recentUnread({ target: { kind: "agent", agentId: "helper" } }, unread),
+    0,
+    "an agent target without a thread has no marker",
+  );
   h.unmount();
   const bare = hookHarness<E>({
     "react/jsx-runtime": jsx,
@@ -367,15 +424,28 @@ test("Recents rows show the unread counts the summary attributes to their thread
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../lib/time": { formatRelativeTimeFromMs },
     "../Skeleton": { SkeletonRows: "SkeletonRows" },
-    "./useWorkspaceRecents": { useWorkspaceRecents: () => ({ rows, online: true }) },
+    "./useWorkspaceRecents": {
+      useWorkspaceRecents: () => ({ rows, online: true }),
+    },
   });
-  const plain = bare.load(fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url))) as any;
-  bare.mount(() => plain.WorkspaceRecents({ visible: true, onSelect() {}, onSeeAll() {} }));
-  const plainRows = elements(bare.value()).filter((n) => n.type === plain.WorkspaceRecentRow).map((n) => plain.WorkspaceRecentRow(n.props));
-  assert.ok(plainRows.every((row) => !elements(row).some((n) => n.props.testID === "sidebar-unread-count")), "no markers without a summary");
+  const plain = bare.load(
+    fileURLToPath(new URL("./WorkspaceRecents.tsx", import.meta.url)),
+  ) as any;
+  bare.mount(() =>
+    plain.WorkspaceRecents({ visible: true, onSelect() {}, onSeeAll() {} }),
+  );
+  const plainRows = elements(bare.value())
+    .filter((n) => n.type === plain.WorkspaceRecentRow)
+    .map((n) => plain.WorkspaceRecentRow(n.props));
+  assert.ok(
+    plainRows.every(
+      (row) =>
+        !elements(row).some((n) => n.props.testID === "sidebar-unread-count"),
+    ),
+    "no markers without a summary",
+  );
   bare.unmount();
 });
-
 
 test("recent rows and See all disable with muted text during a critical write and recover without remounting", () => {
   type RecentProps = Parameters<

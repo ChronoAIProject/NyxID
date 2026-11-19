@@ -1,7 +1,8 @@
+import { localizedToast } from "../../i18n/localizedToast";
 import { translateApp } from "../../i18n/appTranslation";
 import { LANGUAGES } from "../../i18n/language";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Image,
@@ -201,6 +202,9 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     () => createStyles(colors, stacked, fontScale),
     [colors, stacked, fontScale],
   );
+  const signingOutRef = useRef(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutFailed, setSignOutFailed] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   // Only iOS builds that include the watch app can set it up.
   const watchSupported = useMemo(() => nativeWatchLink() !== null, []);
@@ -222,8 +226,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
   });
   const voiceEnabled = !!voiceFeatures.data?.includes("assistant:voice");
 
-  const showToast = (message: string, kind: ToastKind) =>
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) =>
+    setToast(localizedToast(() => ({ message: message(), kind })));
 
   useEffect(() => {
     if (!toast) return;
@@ -235,11 +239,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async (result) => {
       showToast(
-        result.status === "complete"
+        () => (result.status === "complete"
           ? translateApp("Account erasure complete. You have been signed out.")
           : translateApp(
               "Account deletion accepted. Cleanup continues until verified. You have been signed out.",
-            ),
+            )),
         "success",
       );
       try {
@@ -249,7 +253,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     },
     onError: (error) => {
       const resolved = resolveDeleteAccountError(error);
-      showToast(resolved.message, "error");
+      showToast(() => (resolveDeleteAccountError(error).message), "error");
       if (resolved.shouldForceSignOut) {
         void signOut()
           .then(() => queryClient.clear())
@@ -258,21 +262,31 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     },
   });
 
+  const runSignOut = async () => {
+    if (signingOutRef.current) return;
+    signingOutRef.current = true;
+    setSigningOut(true);
+    setSignOutFailed(false);
+    setToast(null);
+    try {
+      await signOut();
+      queryClient.clear();
+      showToast(() => translateApp("You are signed out."), "info");
+    } catch {
+      setSignOutFailed(true);
+      showToast(() => translateApp("Couldn't sign out on this device. Please try again."), "error");
+    } finally {
+      signingOutRef.current = false;
+      setSigningOut(false);
+    }
+  };
   const handleSignOut = () => {
+    if (signingOutRef.current) return;
     Alert.alert(
       translateApp("Sign Out"),
       translateApp("Do you want to sign out from this account?"), [
       { text: translateApp("Cancel"), style: "cancel" },
-      {
-        text: translateApp("Sign Out"),
-        style: "destructive",
-        onPress: () => {
-          showToast(translateApp("You are signed out."), "info");
-          void signOut()
-            .then(() => queryClient.clear())
-            .catch(() => {});
-        },
-      },
+      { text: translateApp("Sign Out"), style: "destructive", onPress: () => { void runSignOut(); } },
     ]);
   };
 
@@ -319,7 +333,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
               if (online) void refetchProfile();
               else
                 showToast(
-                  translateApp("Still offline — will retry when connected"), "error");
+                  () => (translateApp("Still offline — will retry when connected")), "error");
             }}
           />
         )}
@@ -484,11 +498,11 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
         </SettingsGroup>
 
-        <SettingsGroup>
+        <SettingsGroup footer={signOutFailed ? t("Couldn't sign out on this device. Please try again.") : undefined}>
           <SettingsRow
             centered
-            label={t("Sign Out")}
-            disabled={deleting || isOffline}
+            label={signingOut ? t("Signing out...") : t("Sign Out")}
+            disabled={deleting || signingOut}
             onPress={handleSignOut}
           />
         </SettingsGroup>
@@ -502,7 +516,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             centered
             destructive
             label={deleting ? t("Deleting...") : t("Delete Account")}
-            disabled={deleting || isOffline}
+            disabled={deleting || signingOut || isOffline}
             onPress={handleDeleteAccount}
           />
         </SettingsGroup>

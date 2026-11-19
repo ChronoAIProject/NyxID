@@ -86,7 +86,9 @@ export function setupSettingsScreen(
     devicePolicy,
     deviceEnabled = false,
     railWindow = false,
+    signOut = async () => {},
   }: {
+    signOut?: () => Promise<void>;
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
@@ -227,7 +229,7 @@ export function setupSettingsScreen(
       Path: "Path",
     },
     "@tanstack/react-query": {
-      useQueryClient: () => ({}),
+      useQueryClient: () => ({ clear() {} }),
       useQuery: ({ queryKey }: { queryKey: string[] }) => ({
         isFetching: false,
         isError: false,
@@ -287,7 +289,7 @@ export function setupSettingsScreen(
       TelegramLinkModal: "TelegramLinkModal",
     },
     "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
-    "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut() {} }) },
+    "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut }) },
     "../../lib/consent": {
       useMobileConsent: () => ({
         accountId: "account",
@@ -416,6 +418,7 @@ export function setupSettingsScreen(
   };
   return {
     module,
+    alerts,
     all,
     text,
     parent,
@@ -425,7 +428,6 @@ export function setupSettingsScreen(
     pushPreferenceMutations,
     deviceChoices,
     sheets,
-    alerts,
     pushes,
     preferences,
     harness,

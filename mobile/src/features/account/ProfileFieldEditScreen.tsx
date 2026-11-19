@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useState } from "react";
@@ -72,20 +73,23 @@ export function ProfileFieldEditScreen({
   const saved = profile.data?.[field] ?? "";
   const [value, setValue] = useState<string>();
   const draft = value ?? saved;
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const save = useMutation({
     mutationFn: accountApi.updateProfile,
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["account", "profile"] });
       navigation.goBack();
     },
-    onError: (cause) => setError(resolveErrorMessage(cause)),
+    onError: (cause) => setError(() => (resolveErrorMessage(cause))),
   });
   const changed = !!profile.data && draft.trim() !== saved;
   const submit = useCallback(() => {
     const parsed = updateProfileSchema.safeParse({ [field]: draft });
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? translateApp("Check this value."),
+      setError(() => {
+        const validation = updateProfileSchema.safeParse({ [field]: draft });
+        return (!validation.success && validation.error.issues[0]?.message) || translateApp("Check this value.");
+      },
       );
       return;
     }

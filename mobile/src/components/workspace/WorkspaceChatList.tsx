@@ -1,3 +1,5 @@
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
 import { workspaceAgentPickerSections } from "./workspaceAgentPickerModel";
 import { recentUnread, type WorkspaceRecent } from "./workspaceSidebarModel";
 import {
@@ -6,8 +8,6 @@ import {
   workspaceRecentLabel,
   workspaceThreadLabel,
 } from "./workspaceAccessibilityLabels";
-import { DynamicTypeText as Text } from "../DynamicTypeText";
-import { sidebarTextProps } from "./sidebarText";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -17,6 +17,7 @@ import {
 import { AgentAvatar, AgentAvatarStack } from "../AgentAvatar";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Text,
   ActivityIndicator,
   AppState,
   Pressable,
@@ -31,7 +32,7 @@ import {
   ChevronDown,
   ChevronRight,
   Plus,
-  Users,
+  Users
 } from "lucide-react-native";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import type { AssistantAgent } from "../../features/agents/agentContracts";
@@ -89,6 +90,7 @@ type BrowseRow =
   | { id: string; group: Group }
   | { id: string; chat: AssistantConversation };
 type Browser =
+  |
   { kind: "agents" | "groups" }
   | { kind: "chats"; fromAgents: boolean };
 
@@ -209,9 +211,10 @@ export function WorkspaceChatList({
       a.last_message_at || a.created_at,
     ),
   );
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const picker = workspaceAgentPickerSections(
     allAgents,
-    mode === "picker" ? recentRows : [],
+    mode === "picker" && cornerWindow ? recentRows : [],
   );
   const roster = mode === "picker" ? picker.roster : allAgents;
   const currentAgentId =
@@ -448,7 +451,7 @@ export function WorkspaceChatList({
   ) : null;
   const previewAgents = boundedDrawerPreview(
     roster,
-    openId || currentAgentId,
+    openId || currentAgentId
   );
   const ownerCounts = new Map<string, { total: number; shown: number }>();
   for (const row of allAgents) {
@@ -464,10 +467,7 @@ export function WorkspaceChatList({
     rows.push(
       <Text
         key="recent-heading"
-        {...sidebarTextProps()}
         accessibilityRole="header"
-        numberOfLines={1}
-        ellipsizeMode="tail"
         style={[styles.ownerHeading, { color: colors.textMuted }]}
       >
         {translateApp("Recent")}
@@ -501,10 +501,7 @@ export function WorkspaceChatList({
       rows.push(
         <Text
           key="roster-heading"
-          {...sidebarTextProps()}
           accessibilityRole="header"
-          numberOfLines={1}
-          ellipsizeMode="tail"
           style={[styles.ownerHeading, { color: colors.textMuted }]}
         >
           {translateApp("Agents")}
@@ -518,7 +515,7 @@ export function WorkspaceChatList({
         key="agents"
         section="agents"
         label={translateApp("Agents")}
-        count={translateApp("{{count}} total", { count: allAgents.length})}
+        count={translateApp("{{count}} total", { count: allAgents.length })}
         expanded={sections.agents}
         createLabel={translateApp("New agent")}
         onCreate={onCreateAgent}
@@ -552,13 +549,16 @@ export function WorkspaceChatList({
           <DrawerMessage text={translateApp("Offline · showing saved chats")} />
         ) : null}
         {agents.isPending ? (
-          <SkeletonRows rows={3} accessibilityLabel={translateApp("Loading agents")}
+          <SkeletonRows
+            rows={3}
+            accessibilityLabel={translateApp("Loading agents")}
           />
         ) : null}
         {agents.isError ? (
           <DrawerMessage
             text={
-              agents.data ? translateApp("Couldn’t refresh agents.")
+              agents.data
+                ? translateApp("Couldn’t refresh agents.")
                 : translateApp("Couldn’t load agents.")
             }
             retry={() => void refreshAgents()}
@@ -579,22 +579,27 @@ export function WorkspaceChatList({
           rows.push(
             <Text
               key={`owner:${owner.key}`}
-                {...sidebarTextProps()}
-                accessibilityRole="header"
+              accessibilityRole="header"
               accessibilityLabel={translateApp(
-                  "{{owner}}, {{shown}} of {{total}} agents shown",
-                  {
-                    owner: owner.label,
-                    shown: counts.shown,
-                    total: counts.total,
-                  },
-                )}
-                numberOfLines={1}
-                ellipsizeMode="tail"
-                style={[styles.ownerHeading, { color: colors.textMuted }]}
+                "{{owner}}, {{shown}} of {{total}} agents shown",
+                {
+                  owner: owner.label,
+                  shown: counts.shown,
+                  total: counts.total,
+                },
+              )}
+              style={[styles.ownerHeading, { color: colors.textMuted }]}
             >
-              {(counts.shown === counts.total
-                ? translateApp("{{label}} · {{count}}", { label: owner.label, count: counts.total }) : translateApp("{{label}} · {{shown}} of {{count}}", { label: owner.label, shown: counts.shown, count: counts.total }))}
+              {counts.shown === counts.total
+                ? translateApp("{{label}} · {{count}}", {
+                    label: owner.label,
+                    count: counts.total,
+                  })
+                : translateApp("{{label}} · {{shown}} of {{count}}", {
+                    label: owner.label,
+                    shown: counts.shown,
+                    count: counts.total,
+                  })}
             </Text>,
           );
         previousOwner = owner.key;
@@ -702,7 +707,35 @@ export function WorkspaceChatList({
                 <DisclosureRow
                   disabled={disabled}
                   label={bot.label}
-                  detail={(bot.threads.length === 1 ? (status ? translateApp("{{platform}} · {{count}} chat · {{status}}", { platform: platform, count: bot.threads.length, status: status }) : translateApp("{{platform}} · {{count}} chat", { platform: platform, count: bot.threads.length })) : (status ? translateApp("{{platform}} · {{count}} chats · {{status}}", { platform: platform, count: bot.threads.length, status: status }) : translateApp("{{platform}} · {{count}} chats", { platform: platform, count: bot.threads.length })))}
+                  detail={
+                    bot.threads.length === 1
+                      ? status
+                        ? translateApp(
+                            "{{platform}} · {{count}} chat · {{status}}",
+                            {
+                              platform: platform,
+                              count: bot.threads.length,
+                              status: status,
+                            },
+                          )
+                        : translateApp("{{platform}} · {{count}} chat", {
+                            platform: platform,
+                            count: bot.threads.length,
+                          })
+                      : status
+                        ? translateApp(
+                            "{{platform}} · {{count}} chats · {{status}}",
+                            {
+                              platform: platform,
+                              count: bot.threads.length,
+                              status: status,
+                            },
+                          )
+                        : translateApp("{{platform}} · {{count}} chats", {
+                            platform: platform,
+                            count: bot.threads.length,
+                          })
+                  }
                   expanded={Boolean(open)}
                   selected={holdsActive}
                   unread={botUnread}
@@ -739,10 +772,6 @@ export function WorkspaceChatList({
                         <View key={parentId}>
                           {followed ? (
                             <Text
-                              {...sidebarTextProps(
-                              )}
-                              numberOfLines={1}
-                              ellipsizeMode="tail"
                               style={[
                                 styles.detail,
                                 { color: colors.textMuted },
@@ -840,7 +869,9 @@ export function WorkspaceChatList({
     rows.push(
       <View key="crew-rows">
         {groups.isPending ? (
-          <SkeletonRows rows={2} accessibilityLabel={translateApp("Loading crews")}
+          <SkeletonRows
+            rows={2}
+            accessibilityLabel={translateApp("Loading crews")}
           />
         ) : null}
         {groups.isError ? (
@@ -1103,9 +1134,6 @@ function MoreButton({
       style={styles.more}
     >
       <Text
-        {...sidebarTextProps()}
-        numberOfLines={1}
-        ellipsizeMode="tail"
         style={[
           styles.moreText,
           { color: disabled ? colors.textMuted : colors.primaryOnTint },
@@ -1129,10 +1157,7 @@ function UnreadCount({
   if (!count || count <= 0) return null;
   return (
     <Text
-      {...sidebarTextProps()}
       testID="sidebar-unread-count"
-      numberOfLines={1}
-      ellipsizeMode="tail"
       style={[
         styles.count,
         {
@@ -1161,27 +1186,96 @@ function GroupChatRow({
 }) {
   useAppLanguage();
   const { colors } = useTheme();
-  const detail = (group.working_agent_ids.length ? (group.owner?.type === "org" ? (selected ? translateApp("Agents working… · {{count}} agents · {{name}} · {{time}} · Current", { count: group.members.length, name: group.owner.name, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }) : translateApp("Agents working… · {{count}} agents · {{name}} · {{time}}", { count: group.members.length, name: group.owner.name, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) })) : (selected ? translateApp("Agents working… · {{count}} agents · {{time}} · Current", { count: group.members.length, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }) : translateApp("Agents working… · {{count}} agents · {{time}}", { count: group.members.length, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }))) : (group.owner?.type === "org" ? (selected ? translateApp("{{count}} messages · {{agents}} agents · {{name}} · {{time}} · Current", { count: group.message_count, agents: group.members.length, name: group.owner.name, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }) : translateApp("{{count}} messages · {{agents}} agents · {{name}} · {{time}}", { count: group.message_count, agents: group.members.length, name: group.owner.name, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) })) : (selected ? translateApp("{{count}} messages · {{agents}} agents · {{time}} · Current", { count: group.message_count, agents: group.members.length, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }) : translateApp("{{count}} messages · {{agents}} agents · {{time}}", { count: group.message_count, agents: group.members.length, time: formatRelativeTimeFromMs(
-        Date.parse(group.last_message_at || group.created_at),
-      ) }))));
+  const detail = group.working_agent_ids.length
+    ? group.owner?.type === "org"
+      ? selected
+        ? translateApp(
+            "Agents working… · {{count}} agents · {{name}} · {{time}} · Current",
+            {
+              count: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp(
+            "Agents working… · {{count}} agents · {{name}} · {{time}}",
+            {
+              count: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+      : selected
+        ? translateApp(
+            "Agents working… · {{count}} agents · {{time}} · Current",
+            {
+              count: group.members.length,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp("Agents working… · {{count}} agents · {{time}}", {
+            count: group.members.length,
+            time: formatRelativeTimeFromMs(
+              Date.parse(group.last_message_at || group.created_at),
+            ),
+          })
+    : group.owner?.type === "org"
+      ? selected
+        ? translateApp(
+            "{{count}} messages · {{agents}} agents · {{name}} · {{time}} · Current",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp(
+            "{{count}} messages · {{agents}} agents · {{name}} · {{time}}",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+      : selected
+        ? translateApp(
+            "{{count}} messages · {{agents}} agents · {{time}} · Current",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp("{{count}} messages · {{agents}} agents · {{time}}", {
+            count: group.message_count,
+            agents: group.members.length,
+            time: formatRelativeTimeFromMs(
+              Date.parse(group.last_message_at || group.created_at),
+            ),
+          });
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={workspaceCrewLabel(group.name, group.working_agent_ids.length, selected, unread)}
+      accessibilityLabel={workspaceCrewLabel(
+        group.name,
+        group.working_agent_ids.length,
+        selected,
+        unread,
+      )}
       accessibilityState={{ selected, disabled }}
       disabled={disabled}
       onPress={onPress}
@@ -1199,7 +1293,6 @@ function GroupChatRow({
       />
       <View style={styles.label}>
         <Text
-          {...sidebarTextProps()}
           numberOfLines={1}
           style={[
             styles.name,
@@ -1209,9 +1302,7 @@ function GroupChatRow({
           {group.name}
         </Text>
         <Text
-          {...sidebarTextProps()}
           numberOfLines={1}
-          ellipsizeMode="tail"
           style={[styles.detail, { color: colors.textMuted }]}
         >
           {detail}
@@ -1253,7 +1344,12 @@ function DisclosureRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={workspaceDisclosureLabel(label, expanded, accessibilityDetail ?? detail, unread)}
+      accessibilityLabel={workspaceDisclosureLabel(
+        label,
+        expanded,
+        accessibilityDetail ?? detail,
+        unread,
+      )}
       accessibilityState={{ expanded, selected, disabled }}
       disabled={disabled}
       onPress={onPress}
@@ -1275,7 +1371,6 @@ function DisclosureRow({
       )}
       <View style={styles.label}>
         <Text
-          {...sidebarTextProps()}
           numberOfLines={1}
           style={[
             styles.name,
@@ -1295,9 +1390,6 @@ function DisclosureRow({
             ].map((platform) => (
               <Text
                 key={platform}
-                {...sidebarTextProps()}
-                numberOfLines={1}
-                ellipsizeMode="tail"
                 style={[
                   styles.channelBadge,
                   {
@@ -1313,7 +1405,6 @@ function DisclosureRow({
         ) : null}
         {detail ? (
           <Text
-            {...sidebarTextProps()}
             numberOfLines={1}
             style={[styles.detail, { color: colors.textMuted }]}
           >
@@ -1355,8 +1446,14 @@ function ChatRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel ||
-        translateApp(label === translateApp("Current chat") ? "Open current chat" : "Open {{label}}", { label })
+      accessibilityLabel={
+        accessibilityLabel ||
+        translateApp(
+          label === translateApp("Current chat")
+            ? "Open current chat"
+            : "Open {{label}}",
+          { label },
+        )
       }
       accessibilityState={{ selected, disabled }}
       disabled={disabled}
@@ -1374,9 +1471,7 @@ function ChatRow({
       <View style={styles.label}>
         <View style={styles.chatLine}>
           <Text
-            {...sidebarTextProps()}
-            numberOfLines={1}
-            ellipsizeMode="tail"
+            numberOfLines={2}
             style={[
               styles.chatTitle,
               {
@@ -1393,7 +1488,6 @@ function ChatRow({
           </Text>
           {detail ? (
             <Text
-              {...sidebarTextProps()}
               numberOfLines={1}
               style={[styles.chatTime, { color: colors.textMuted }]}
             >
@@ -1403,9 +1497,6 @@ function ChatRow({
         </View>
         {status ? (
           <Text
-            {...sidebarTextProps()}
-            numberOfLines={1}
-            ellipsizeMode="tail"
             style={[
               styles.detail,
               {
@@ -1439,11 +1530,7 @@ function DrawerMessage({
   const { colors } = useTheme();
   return (
     <View style={styles.message}>
-      <Text
-        {...sidebarTextProps()}
-        numberOfLines={1}
-        ellipsizeMode="tail"
-        style={[styles.messageText, { color: colors.textMuted }]}>
+      <Text style={[styles.messageText, { color: colors.textMuted }]}>
         {text}
       </Text>
       {retry ? (
@@ -1454,11 +1541,7 @@ function DrawerMessage({
           onPress={retry}
           style={styles.retry}
         >
-          <Text
-            {...sidebarTextProps()}
-            numberOfLines={1}
-            ellipsizeMode="tail"
-            style={[styles.moreText, { color: colors.primaryOnTint }]}>
+          <Text style={[styles.moreText, { color: colors.primaryOnTint }]}>
             {translateApp("Retry")}
           </Text>
         </Pressable>

@@ -1701,6 +1701,11 @@ mod tests {
             include!("assistant_cma_legacy_tests.rs");
         }
 
+        mod reservation_recovery {
+            use super::*;
+            include!("assistant_cma_reservation_recovery_tests.rs");
+        }
+
         mod admin_reservations {
             use super::*;
             include!("assistant_cma_reservation_tests.rs");

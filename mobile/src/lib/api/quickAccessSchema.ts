@@ -57,6 +57,8 @@ export type QuickAccessState = {
   items: QuickAccessItem[];
   /** False while the person still has the default list. */
   customized: boolean;
+  /** Some saved entries need a newer client/server; only Reset may replace them. */
+  hasUnsupportedEntries?: boolean;
 };
 
 export const QUICK_ACCESS_DEFAULT_STATE: QuickAccessState = {
@@ -69,14 +71,15 @@ export const QUICK_ACCESS_DEFAULT_STATE: QuickAccessState = {
  * added by a newer server) are skipped instead of failing the whole list.
  */
 export const quickAccessResponseSchema = z
-  .object({ items: z.array(z.unknown()), customized: z.boolean() })
-  .transform(({ items, customized }) => ({
-    customized,
-    items: items.flatMap((item) => {
+  .object({ items: z.array(z.unknown()), customized: z.boolean(), has_unsupported_entries: z.boolean().optional() })
+  .transform(({ items, customized, has_unsupported_entries }) => {
+    const known = items.flatMap((item) => {
       const parsed = quickAccessItemSchema.safeParse(item);
       return parsed.success ? [parsed.data] : [];
-    }),
-  }));
+    });
+    return { customized, items: known,
+      ...(has_unsupported_entries || known.length !== items.length ? { hasUnsupportedEntries: true } : {}) };
+  });
 
 /** Two entries name the same thing (the server rejects duplicates). */
 export function sameQuickAccessItem(a: QuickAccessItem, b: QuickAccessItem) {

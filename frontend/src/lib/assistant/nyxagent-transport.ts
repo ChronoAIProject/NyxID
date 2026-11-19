@@ -145,6 +145,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
+  if (code === "credential_revoked") return translateUi("NyxID rejected the assistant credential during this turn. Review completed actions before retrying.");
   if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
   if (code === "model_policy_denied") return translateUi("An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.");

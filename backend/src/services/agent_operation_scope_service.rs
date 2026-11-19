@@ -196,8 +196,40 @@ pub fn check_inputs(
     body: &[u8],
     content_type: Option<&str>,
 ) -> AppResult<()> {
+    evaluate_inputs(
+        scopes,
+        service_id,
+        catalog_id,
+        endpoint_id,
+        method,
+        path,
+        query,
+        InputBody::Request(body, content_type),
+    )
+    .map(|_| ())
+}
+
+pub(super) enum InputBody<'a> {
+    Request(&'a [u8], Option<&'a str>),
+    /// Find whether admission requires a body schema. Defer only those rules.
+    BeforeUpload,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_inputs(
+    scopes: &OperationScopes,
+    service_id: &str,
+    catalog_id: Option<&str>,
+    endpoint_id: Option<&str>,
+    method: &str,
+    path: &CanonicalPath,
+    query: Option<&str>,
+    input: InputBody<'_>,
+) -> AppResult<bool> {
+    let mut needs_body = false;
     for scope in applicable(scopes, service_id, catalog_id) {
         let mut refusal = None;
+        let mut deferred = false;
         let accepted = scope
             .operations
             .iter()
@@ -213,6 +245,14 @@ pub fn check_inputs(
                 let Some(inputs) = &operation.inputs else {
                     return true;
                 };
+                let (body, content_type) = match input {
+                    InputBody::Request(bytes, mime) => (bytes, mime),
+                    InputBody::BeforeUpload if inputs.body.is_some() => {
+                        deferred = true;
+                        return false;
+                    }
+                    InputBody::BeforeUpload => (&[][..], None),
+                };
                 let arguments = proxy_authorization::match_path_arguments(&operation.rule, path)
                     .unwrap_or_default();
                 match inputs.check(&arguments, query, body, content_type) {
@@ -223,14 +263,16 @@ pub fn check_inputs(
                     }
                 }
             });
-        if !accepted {
+        if !accepted && deferred {
+            needs_body = true;
+        } else if !accepted {
             return Err(AppError::ApiKeyScopeForbidden(match refusal {
                 Some(error) => format!("Operation scope input limit: {error}"),
                 None => "Operation scope denied this call".into(),
             }));
         }
     }
-    Ok(())
+    Ok(needs_body)
 }
 
 pub fn mcp_catalog_id(service: &mcp_service::McpToolService) -> Option<&str> {
@@ -937,6 +979,7 @@ pub async fn check_non_mcp_context(
         db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        auth.thread_key_version(),
         auth.org_agent_access.as_ref(),
         &auth.assistant_operation_scopes,
         service,
@@ -952,6 +995,7 @@ pub async fn check_non_mcp_key_context(
     db: &Database,
     actor: &str,
     key: Option<&str>,
+    key_version: i64,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     scopes: &OperationScopes,
     service: &str,
@@ -959,9 +1003,14 @@ pub async fn check_non_mcp_key_context(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<bool> {
-    let Some(chat) =
-        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
-            .await?
+    let Some(chat) = super::assistant_acknowledgement_service::chat_for_key_version(
+        db,
+        actor,
+        key,
+        key_version,
+        access,
+    )
+    .await?
     else {
         return Err(AppError::ApiKeyScopeForbidden(
             "Specialist operation authority requires a live conversation".into(),
@@ -986,12 +1035,19 @@ pub async fn key_is_guest(
     db: &Database,
     actor: &str,
     key: Option<&str>,
+    key_version: i64,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<bool> {
     Ok(
-        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
-            .await?
-            .is_some_and(|chat| chat.guest),
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            actor,
+            key,
+            key_version,
+            access,
+        )
+        .await?
+        .is_some_and(|chat| chat.guest),
     )
 }
 

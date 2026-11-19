@@ -205,16 +205,80 @@ pub fn parse_quick_access(entries: &[QuickAccessEntry<'_>]) -> AppResult<Vec<Qui
     Ok(items)
 }
 
+struct QuickAccessSnapshot {
+    preferences: Option<QuickAccessPreferences>,
+    has_unsupported_entries: bool,
+    raw: Option<bson::Bson>,
+}
+
+async fn quick_access_snapshot(db: &Database, user_id: &str) -> AppResult<QuickAccessSnapshot> {
+    // Typed User deserialization deliberately drops unknown entries. Read the
+    // narrow raw preference so GET can report that loss and PUT can fence it.
+    let user = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! { "_id": user_id })
+        .projection(doc! { "user_type": 1, "profile_config.quick_access": 1 })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    if user
+        .get("user_type")
+        .is_some_and(|kind| kind.as_str() != Some("person"))
+    {
+        return Err(AppError::Forbidden(
+            "Quick access requires a person account".into(),
+        ));
+    }
+    let raw = user
+        .get_document("profile_config")
+        .ok()
+        .and_then(|config| config.get("quick_access"))
+        .cloned();
+    let has_unsupported_entries = raw
+        .as_ref()
+        .and_then(bson::Bson::as_document)
+        .and_then(|value| value.get_array("items").ok())
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| bson::from_bson::<QuickAccessItem>(item.clone()).is_err())
+        });
+    let preferences = match raw.clone() {
+        None | Some(bson::Bson::Null) => None,
+        Some(value) => Some(
+            bson::from_bson(value)
+                .map_err(|_| AppError::Internal("Could not decode quick access".into()))?,
+        ),
+    };
+    Ok(QuickAccessSnapshot {
+        preferences,
+        has_unsupported_entries,
+        raw,
+    })
+}
+
 /// The saved list, or `None` when the person never customised it.
 pub async fn read_quick_access(
     db: &Database,
     user_id: &str,
 ) -> AppResult<Option<QuickAccessPreferences>> {
-    db.collection::<User>(COLLECTION_NAME)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .map(|user| user.profile_config.quick_access)
-        .ok_or_else(|| AppError::NotFound("User not found".into()))
+    Ok(quick_access_snapshot(db, user_id).await?.preferences)
+}
+
+/// Additive compatibility metadata is computed before tolerant model decoding.
+pub async fn read_quick_access_with_compatibility(
+    db: &Database,
+    user_id: &str,
+) -> AppResult<(Option<QuickAccessPreferences>, bool)> {
+    let snapshot = quick_access_snapshot(db, user_id).await?;
+    Ok((snapshot.preferences, snapshot.has_unsupported_entries))
+}
+
+fn quick_access_person_filter(user_id: &str) -> bson::Document {
+    // Older person records predate user_type. Keep them compatible while
+    // fencing writes against organization subjects, including type changes.
+    doc! { "_id": user_id, "$or": [
+        { "user_type": "person" }, { "user_type": { "$exists": false } }
+    ] }
 }
 
 pub async fn save_quick_access(
@@ -222,11 +286,22 @@ pub async fn save_quick_access(
     user_id: &str,
     items: Vec<QuickAccessItem>,
 ) -> AppResult<QuickAccessPreferences> {
+    let snapshot = quick_access_snapshot(db, user_id).await?;
+    if snapshot.has_unsupported_entries {
+        return Err(AppError::Conflict("Quick access contains unsupported entries. Update the app or explicitly reset the list.".into()));
+    }
+    let mut filter = quick_access_person_filter(user_id);
+    // Match the entire raw preference to close the read/write race with a
+    // newer binary adding unknown entries. Null also matches an absent field.
+    filter.insert(
+        "profile_config.quick_access",
+        snapshot.raw.unwrap_or(bson::Bson::Null),
+    );
     let preferences = QuickAccessPreferences { items };
     let result = db
         .collection::<User>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": user_id },
+            filter,
             doc! { "$set": {
                 "profile_config.quick_access": bson::to_bson(&preferences)
                     .map_err(|_| AppError::Internal("Could not encode quick access".into()))?,
@@ -235,7 +310,10 @@ pub async fn save_quick_access(
         )
         .await?;
     if result.matched_count == 0 {
-        return Err(AppError::NotFound("User not found".into()));
+        read_quick_access(db, user_id).await?;
+        return Err(AppError::Conflict(
+            "Quick access changed. Reload the list before editing.".into(),
+        ));
     }
     Ok(preferences)
 }
@@ -245,7 +323,7 @@ pub async fn reset_quick_access(db: &Database, user_id: &str) -> AppResult<()> {
     let result = db
         .collection::<User>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": user_id },
+            quick_access_person_filter(user_id),
             doc! {
                 "$unset": { "profile_config.quick_access": "" },
                 "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
@@ -253,6 +331,7 @@ pub async fn reset_quick_access(db: &Database, user_id: &str) -> AppResult<()> {
         )
         .await?;
     if result.matched_count == 0 {
+        read_quick_access(db, user_id).await?;
         return Err(AppError::NotFound("User not found".into()));
     }
     Ok(())

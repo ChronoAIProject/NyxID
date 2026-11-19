@@ -46,6 +46,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "automatic",
+    locales: {
+      "zh-Hans": "./locales/zh-Hans.json",
+      "zh-Hant": "./locales/zh-Hant.json",
+    },
     assetBundlePatterns: ["**/*"],
     ios: {
       supportsTablet: true,

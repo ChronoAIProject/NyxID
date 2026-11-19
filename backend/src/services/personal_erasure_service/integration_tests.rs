@@ -56,6 +56,49 @@ async fn until_source_removed(state: &crate::AppState, owner: &str) {
 }
 
 #[tokio::test]
+async fn p2_2_quick_access_is_erased_with_the_person_without_changing_a_bystander() {
+    let (db, owner) = tests::fixture().await;
+    let other = uuid::Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(test_user(&other, UserType::Person))
+        .await
+        .unwrap();
+    let items = vec![crate::models::user::QuickAccessItem::Agent {
+        id: uuid::Uuid::new_v4().to_string(),
+    }];
+    for person in [&owner, &other] {
+        crate::services::user_preferences_service::save_quick_access(&db, person, items.clone())
+            .await
+            .unwrap();
+    }
+    let before = db
+        .collection::<Document>(USERS)
+        .find_one(doc! { "_id": &other })
+        .await
+        .unwrap()
+        .unwrap();
+    let state = test_app_state(db.clone());
+    accept(&db, &owner, &owner, None).await.unwrap();
+    until_source_removed(&state, &owner).await;
+    assert!(
+        db.collection::<Document>(USERS)
+            .find_one(doc! { "_id": &owner })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.collection::<Document>(USERS)
+            .find_one(doc! { "_id": &other })
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn personal_erasure_preserves_revocation_outbox_until_audit_delivery() {
     use crate::models::{oauth_broker_binding, refresh_token, security_effect_intent};
     use crate::services::{audit_service, oauth_broker_service, security_effect_service};

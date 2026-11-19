@@ -4174,6 +4174,8 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::assistant_nyxagent::survivor::spawn(state.clone());
+    crate::services::assistant_cma_reservation_recovery::spawn_worker(state.clone());
     crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());

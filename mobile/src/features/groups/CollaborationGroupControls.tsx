@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
@@ -90,19 +91,15 @@ export function CollaborationGroupControls({
   const apply = (change: CollaborationChange) =>
     void session.run(
       async () => {
-        if (!policy) throw new Error(translateApp("Reload group settings first."));
+        if (!policy) throw localizedError("Reload group settings first.");
         const fresh = await groupsApi.detail(group.id);
         if (!session.valid())
-          throw new Error(translateApp("Keep group settings open to save."));
+          throw localizedError("Keep group settings open to save.");
         if (
           fresh.collaboration?.membership_revision !==
           policy.membership_revision
         )
-          throw new Error(
-            translateApp(
-              "This group changed elsewhere. Refresh and review its current participants before saving.",
-            ),
-          );
+          throw localizedError("This group changed elsewhere. Refresh and review its current participants before saving.");
         return collaborationApi.change(
           group.id,
           policy.membership_revision,

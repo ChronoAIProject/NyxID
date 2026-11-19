@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useMemo, useState } from "react";
@@ -44,7 +45,7 @@ export function MachinesScreen({
   const selected =
     route.name === "MachineDetail" ? route.params.machineId : undefined;
   const tab = route.name === "Machines" ? route.params?.tab : undefined;
-  const [handoffError, setHandoffError] = useState<string>();
+  const [handoffError, setHandoffError] = useLocalizedState<string>();
   // Preserve the web query URL while detail gets real horizontal Back history.
   useEffect(() => {
     if (route.name === "Machines" && route.params?.machine) {
@@ -96,7 +97,7 @@ export function MachinesScreen({
     try {
       await openMachineWeb(path);
     } catch (cause) {
-      if (runtime.current()) setHandoffError(machineError(cause));
+      if (runtime.current()) setHandoffError(() => (machineError(cause)));
     }
   }
   const pull = usePullRefresh(async () => {

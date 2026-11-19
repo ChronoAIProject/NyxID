@@ -276,6 +276,9 @@ impl NyxAgentEgress for Egress {
                 "NyxAgent catalog configuration is invalid".into(),
             ));
         }
+        if let Some(destination) = &request.destination {
+            destination.verify(&target.service.id, &target.base_url)?;
+        }
         let payload = request
             .body
             .as_ref()
@@ -756,6 +759,7 @@ mod tests {
             relative_path: path.into(),
             body,
             idempotency_key: "turn:1".into(),
+            destination: None,
             billing_policy: None,
         }
     }

@@ -3,6 +3,8 @@ import { fireEvent, render, screen } from "@testing-library/react-native";
 import { StyleSheet, Text } from "react-native";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { Section } from "./WorkspaceUI";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { typeScale } from "../../theme/designTokens";
 import { SettingsGroup } from "../settings/SettingsList";
 import { HistorySectionHeader } from "../HistoryCard";
 
@@ -20,26 +22,28 @@ jest.mock("../../theme/ThemeContext", () => ({
   }),
 }));
 
-it("renders group headings with visual uppercase while preserving their localized strings", async () => {
+it("P9 keeps base ordinary group headings and localized Chinese text", async () => {
   await render(<>
     <SettingsGroup title="Account"><Text>Settings rows</Text></SettingsGroup>
     <Section title="Usage analytics"><Text>Section rows</Text></Section>
     <HistorySectionHeader title="今天" />
   </>);
-  for (const title of ["Account", "Usage analytics", "今天"]) {
+  for (const [title, expected] of [
+    ["ACCOUNT", { ...typeScale.small, letterSpacing: 0.6 }],
+    ["USAGE ANALYTICS", { fontSize: 12, letterSpacing: 0.6 }],
+    ["今天", { ...typeScale.small, letterSpacing: 0.6 }],
+  ] as const) {
     const heading = screen.getByRole("header", { name: title });
     expect(heading.props.children).toBe(title);
     expect(StyleSheet.flatten(heading.props.style)).toMatchObject({
-      fontSize: 12,
-      fontWeight: "500",
-      textTransform: "uppercase",
-      letterSpacing: 1.5,
+      ...expected,
     });
   }
 });
 
-it("keeps the intrinsic one-line label and 44pt controls when scaled metadata cannot fit", async () => {
+it("on the Duo keeps the intrinsic one-line label and 44pt controls when scaled metadata cannot fit", async () => {
   await render(
+    <WorkspaceCornerSensorContext.Provider value={true}>
     <SidebarSectionHeader
       label="Agents"
       section="agents"
@@ -50,7 +54,8 @@ it("keeps the intrinsic one-line label and 44pt controls when scaled metadata ca
       onCreate={() => {}}
       createDisabled={false}
       onRefresh={() => {}}
-    />,
+    />
+    </WorkspaceCornerSensorContext.Provider>,
   );
   await fireEvent(screen.getByTestId("sidebar-section-viewport"), "layout", {
     nativeEvent: { layout: { width: 276 } },

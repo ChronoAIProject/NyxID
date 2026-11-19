@@ -1120,6 +1120,79 @@ Possible error keys in the redirect:
 
 ### Users
 
+#### GET /api/v1/users/me/quick-access
+
+Returns the ordered account preference used by the Duo quick-access rail.
+All three quick-access methods require a first-party **person** session cookie
+or access JWT. API keys, delegated tokens (including `account:read`), service
+accounts, relay tokens, OAuth-client tokens and organization subjects are refused
+with 401 or 403. GET deliberately follows the human-only device-preference
+policy of `/users/me/analytics-consent`; it is not a delegated profile read.
+
+**Response (200):**
+
+```json
+{
+  "items": [
+    { "kind": "destination", "id": "new_chat" },
+    { "kind": "destination", "id": "notifications" },
+    { "kind": "destination", "id": "scan_qr" },
+    { "kind": "destination", "id": "recent_chats" },
+    { "kind": "destination", "id": "settings" }
+  ],
+  "customized": false,
+  "has_unsupported_entries": false
+}
+```
+
+The additive `has_unsupported_entries` boolean reports whether this server
+omitted stored kinds/destinations it cannot parse. Clients must also detect any
+entries they omit locally. A partial list remains visible but read-only; only
+explicit Reset may replace it. Older clients may ignore this response field;
+server-side PUT protection still prevents them erasing unsupported entries.
+
+#### PUT /api/v1/users/me/quick-access
+
+Saves the ordered list. The JSON body is `{ "items": [...] }`, with zero to
+12 unique entries. Each entry has a `kind` and `id`:
+
+| Kind | Accepted ID |
+|------|-------------|
+| `destination` | `new_chat`, `notifications`, `scan_qr`, `terminal_login_code`, `recent_chats`, `settings`, `automations`, `machines`, `plugins`, `activity`, `create_agent`, `agents`, `crews` |
+| `agent` | UUID, stored in canonical lowercase form |
+| `crew` | Valid `nyxg-` crew ID; `group` is accepted as an alias |
+
+Unknown kinds/destinations, malformed IDs, duplicates and oversized lists return
+400. Shape-valid agent/crew IDs are accepted without checking roster access:
+these inert preferences confer no access, and clients resolve them only against
+the authenticated person's authorized roster. Unavailable entries are not shown.
+The response has the GET shape with `customized: true`; an empty saved list is
+different from the default list. If the raw stored list contains entries this
+server cannot parse, PUT returns 409 `conflict` (existing code 1004) without
+changing storage. Replacement also compares the complete raw preference so a
+concurrent newer-version edit returns 409 rather than being overwritten. Reload
+before retrying a concurrent edit; unsupported lists require a newer compatible
+client/server or intentional Reset.
+
+#### DELETE /api/v1/users/me/quick-access
+
+Removes the saved preference and returns the current default list with
+`customized: false`. All methods operate only on the authenticated person; there
+is no owner override. Storage is the existing users row at
+`profile_config.quick_access`, included in account export and removed with the
+person during erasure; no collection is added. These users preference routes,
+like their adjacent preference endpoints, are documented here rather than
+registered as utoipa paths.
+
+Rolling deployments are compatible: older binaries ignore this optional field.
+All current profile preference writers (service-view filters/named views,
+analytics consent, security policy and onboarding completion) update their own
+`profile_config.*` path; they do not replace the profile object. Quick-access
+save/reset likewise changes only `profile_config.quick_access`. This preserves
+sibling and unknown future settings. Older binaries cannot read the new route;
+clients must retain the default rail if that route returns 404. No migration or
+new personal-data collection is required.
+
 #### GET /api/v1/users/me
 
 Returns the profile of the currently authenticated user.
@@ -9782,6 +9855,9 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 - `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
   `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
   `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
+  Lifecycle operations without a resource also distinguish `operation_in_progress_without_resource`,
+  `operation_waiting_for_connection` and `operation_failed_without_resource`. None proves absence;
+  `next_step` explains automatic observation, owner connection completion, or the missing CMA evidence.
   `owner_retry_will_recover` means the dispatched generic Sandbox creation is
   inside the 23-hour replay window: the owner's next allocating create or retry
   of the original request automatically attempts the existing recovery. If CMA
@@ -9790,12 +9866,14 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 ### POST `/api/v1/admin/cma-sandbox-reservations/{id}/resolve`
 
 Use the latest inspection's three fences (`creation_revision` is null for a legacy
-row with no matching creation; such a row cannot authorize settlement). Example
+row with no matching creation; it can authorize only exact bound-resource retirement). Example
 association body:
 
 ```json
 {"generation":1,"revision":2,"creation_revision":3,"action":"associate","remote_sandbox_id":"sandbox-id"}
 ```
+
+For an already bound sandbox, `"action":"confirm_retirement"` freshly reads its exact identity and requires CMA state `retired`. It completes local retirement and clears recovery material with the same transaction and fences, including for legacy bound rows without a journal. A 404, timeout, live state or retirement acknowledgment cannot authorize it. This action never sends a retirement command.
 
 For release use `"action":"release"` and omit `remote_sandbox_id`. Caller-supplied
 proof is not accepted. `associate` requires a saved creation receipt or exact

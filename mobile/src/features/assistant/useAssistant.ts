@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
 import {
   retryAgentRead,
@@ -75,7 +77,7 @@ export function useAssistant(
   const [loadingIndex, setLoadingIndex] = useState(false);
   const [deciding, setDeciding] = useState<string>();
   const [mutating, setMutating] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [interruption, setInterruption] = useState<{
     conversationId?: string;
     turnId?: string;
@@ -253,7 +255,7 @@ export function useAssistant(
           // remaining read. Its subscriber intentionally ignores refresh errors,
           // so keep the empty conversation's recovery action reachable here.
           if (latestHistory.current?.conversation.id !== id)
-            setError(errorMessage(cause));
+            setError(() => (errorMessage(cause)));
           throw cause;
         })
         .finally(() => {
@@ -290,7 +292,7 @@ export function useAssistant(
             epoch.current === localEpoch &&
             reopenSequence.current === operation
           )
-            setError(errorMessage(cause));
+            setError(() => (errorMessage(cause)));
         });
         return;
       }
@@ -352,7 +354,7 @@ export function useAssistant(
       }
       if (current()) await refreshIndex();
     } catch (cause) {
-      if (current()) setError(errorMessage(cause));
+      if (current()) setError(() => (errorMessage(cause)));
     }
   }, [refreshHistory, refreshIndex]);
 
@@ -409,7 +411,7 @@ export function useAssistant(
         epoch.current === localEpoch &&
         reopenSequence.current === operation
       )
-        setError(errorMessage(cause));
+        setError(() => (errorMessage(cause)));
     });
     return () => {
       current = false;
@@ -471,49 +473,29 @@ export function useAssistant(
       uploads?: AssistantUploadedMessage,
       acknowledgementId?: string,
     ) => {
-      if (sendLock.current) throw new Error(translateApp("A message is already being sent."));
-      if (!activeRef.current) throw new Error(translateApp("Reconnect to send a message."));
+      if (sendLock.current) throw localizedError("A message is already being sent.");
+      if (!activeRef.current) throw localizedError("Reconnect to send a message.");
       if (recoveryRequired)
-        throw new Error(
-          translateApp("Refresh or open the saved chat before sending again."),
-        );
+        throw localizedError("Refresh or open the saved chat before sending again.");
       if (
         uploads &&
         selected.current &&
         uploads.conversationId !== selected.current
       )
-        throw new Error(
-          translateApp(
-            "These files belong to a different chat. Choose them again here.",
-          ),
-        );
+        throw localizedError("These files belong to a different chat. Choose them again here.");
       if (uploads && retryOf)
-        throw new Error(
-          translateApp("Retry uses the original message's attachments."),
-        );
+        throw localizedError("Retry uses the original message's attachments.");
       if (selected.current && !latestHistory.current)
-        throw new Error(
-          translateApp("Wait for this chat's saved history to load."),
-        );
+        throw localizedError("Wait for this chat's saved history to load.");
       if (latestHistory.current?.conversation.active_turn)
-        throw new Error(
-          translateApp(
-            "The assistant is still working. Stop it or wait for completion.",
-          ),
-        );
+        throw localizedError("The assistant is still working. Stop it or wait for completion.");
       if (latestHistory.current?.conversation.agent?.destroyed)
-        throw new Error(
-          translateApp(
-            "This agent was destroyed. Its conversation is read-only.",
-          ),
-        );
+        throw localizedError("This agent was destroyed. Its conversation is read-only.");
       if (
         !selected.current &&
         (!agent || agent.can_use !== true || agent.status === "destroyed")
       )
-        throw new Error(
-          translateApp("Select an available agent before starting a chat."),
-        );
+        throw localizedError("Select an available agent before starting a chat.");
       // Local validation must refuse before detaching any optimistic message.
       assistantTurnBody({
         conversationId: selected.current ?? uploads?.conversationId,
@@ -565,9 +547,7 @@ export function useAssistant(
               setConversationId(id);
               adopt.current?.(id);
             } else if (!reply.conversationId) {
-              throw new Error(
-                translateApp("Assistant did not identify the conversation."),
-              );
+              throw localizedError("Assistant did not identify the conversation.");
             }
             setLive(reply);
           },
@@ -588,7 +568,7 @@ export function useAssistant(
           if (!refused) adoptKnownDraft();
           setRecoveryRequired(!refused);
           if (refused) {
-            setError(errorMessage(cause));
+            setError(() => (errorMessage(cause)));
           } else {
             // Keep this separate from request errors: final refresh, live
             // invalidation and foreground recovery can prove settlement later.
@@ -649,16 +629,14 @@ export function useAssistant(
       undefined,
       undefined,
       queued[0]!.id,
-    ).catch((cause) => setError(errorMessage(cause)));
+    ).catch((cause) => setError(() => (errorMessage(cause))));
   }, [active, conversationId, history, sending, loadingOlder, send]);
 
   async function decide(acknowledgementId: string, choice: "allow" | "deny") {
     const id = selected.current;
     if (!id || decisionLock.current) return;
     if (Date.now() - lastDecision.current < 750)
-      throw new Error(
-        translateApp("Please wait a moment before deciding again."),
-      );
+      throw localizedError("Please wait a moment before deciding again.");
     lastDecision.current = Date.now();
     decisionLock.current = true;
     setDeciding(acknowledgementId);
@@ -676,7 +654,7 @@ export function useAssistant(
       await refreshIndex();
     } catch (cause) {
       if (mounted.current && selected.current === id)
-        setError(errorMessage(cause));
+        setError(() => (errorMessage(cause)));
       // Modal confirmations also need the failure inside their own visible UI.
       throw cause;
     } finally {
@@ -698,22 +676,16 @@ export function useAssistant(
       !activeRef.current ||
       accountEpoch.current !== getAuthEpoch()
     )
-      throw new Error(translateApp("Reconnect to decide this request."));
+      throw localizedError("Reconnect to decide this request.");
     if (
       !row ||
       !Number.isFinite(Date.parse(row.expires_at)) ||
       Date.parse(row.expires_at) <= Date.now() ||
       latestHistory.current?.conversation.agent?.destroyed
     )
-      throw new Error(
-        translateApp(
-          "This request is no longer available. Refresh its latest state.",
-        ),
-      );
+      throw localizedError("This request is no longer available. Refresh its latest state.");
     if (Date.now() - lastDecision.current < 750)
-      throw new Error(
-        translateApp("Please wait a moment before deciding again."),
-      );
+      throw localizedError("Please wait a moment before deciding again.");
     lastDecision.current = Date.now();
     decisionLock.current = true;
     setDeciding(approvalId);
@@ -739,7 +711,7 @@ export function useAssistant(
       await refreshHistory(id, undefined, true);
       if (current()) await refreshIndex();
     } catch (cause) {
-      if (current()) setError(errorMessage(cause));
+      if (current()) setError(() => (errorMessage(cause)));
       throw cause;
     } finally {
       decisionLock.current = false;
@@ -751,7 +723,7 @@ export function useAssistant(
     const id = selected.current;
     const generation = epoch.current;
     if (!id || !activeRef.current)
-      throw new Error(translateApp("Reconnect to check retry availability."));
+      throw localizedError("Reconnect to check retry availability.");
     let recovery: NonNullable<AssistantMessage["recovery"]>;
     try {
       recovery = await assistantApi.recovery(id, messageId);
@@ -821,7 +793,7 @@ export function useAssistant(
         await refreshHistory(id, undefined, true);
     } catch (cause) {
       if (mounted.current && selected.current === id)
-        setError(errorMessage(cause));
+        setError(() => (errorMessage(cause)));
     } finally {
       if (mounted.current) setMutating(false);
     }
@@ -843,7 +815,7 @@ export function useAssistant(
         epoch.current === localEpoch &&
         reopenSequence.current === operation
       )
-        setError(errorMessage(cause));
+        setError(() => (errorMessage(cause)));
     } finally {
       if (
         mounted.current &&
@@ -898,7 +870,7 @@ export function useAssistant(
     loadMoreConversations: () =>
       nextCursor
         ? refreshIndex(nextCursor).catch((cause) =>
-            setError(errorMessage(cause)),
+            setError(() => (errorMessage(cause))),
           )
         : Promise.resolve(),
     hasMoreConversations: !!nextCursor,

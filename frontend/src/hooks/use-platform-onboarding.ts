@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { apiClient } from "@/lib/api-client";
+import { isDefinitiveDraftError } from "@/lib/platform-draft-errors";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 import {
@@ -483,6 +484,12 @@ export function useAdminGuideMutation() {
   });
 }
 
+// A denial is successful query data so TanStack replaces private cached facts.
+// Later transient failures retain this marker, never the discarded draft list.
+export type AnonymousDraftsResult =
+  | { status: "ready"; drafts: PlatformSetup[]; provisional?: true }
+  | { status: "denied" };
+
 export function useAnonymousDrafts(binding?: {
   id: string;
   generation: number;
@@ -499,15 +506,20 @@ export function useAnonymousDrafts(binding?: {
     enabled: !!actor && !!binding,
     gcTime: 0,
     retry: false,
-    queryFn: async () =>
-      z.array(setupSchema).parse(
-        await apiClient(
-          `/onboarding/anonymous-drafts?binding_id=${binding!.id}&binding_generation=${binding!.generation}`,
-          {
-            authorityGuard: actorGuard(actor),
-          },
-        ),
-      ),
+    queryFn: async (): Promise<AnonymousDraftsResult> => {
+      try {
+        const drafts = z.array(setupSchema).parse(
+          await apiClient(
+            `/onboarding/anonymous-drafts?binding_id=${binding!.id}&binding_generation=${binding!.generation}`,
+            { authorityGuard: actorGuard(actor) },
+          ),
+        );
+        return { status: "ready", drafts };
+      } catch (error) {
+        if (isDefinitiveDraftError(error, "read")) return { status: "denied" };
+        throw error;
+      }
+    },
   });
 }
 
@@ -530,6 +542,37 @@ export function useAdoptAnonymousDraft(binding: {
           authorityGuard: actorGuard(actor),
         }),
       ),
+    // Hook callbacks run even after the review observer unmounts. Keep recovery
+    // scoped to the exact chat/generation and preserve the original refusal if
+    // refreshing fails; the owner can retry that read explicitly.
+    onError: (error, submitted) => {
+      if (isDefinitiveDraftError(error, "adopt")) {
+        const queryKey = [
+          "onboarding",
+          actor,
+          "anonymous",
+          binding.id,
+          binding.generation,
+        ];
+        // A failed recovery read must not make the rejected snapshot actionable
+        // again. Preserve other drafts, newer revisions and a prior read denial.
+        client.setQueryData<AnonymousDraftsResult>(queryKey, (current) => {
+          if (current?.status !== "ready") return current;
+          const drafts = current.drafts.filter(
+            (draft) => draft.id !== submitted.id || draft.revision !== submitted.revision,
+          );
+          if (drafts.length === current.drafts.length) return current;
+          return {
+            ...current,
+            drafts,
+            // Eviction proves this snapshot was refused, not that the chat is empty.
+            // Only a successful query read can replace this provisional list.
+            provisional: true,
+          };
+        });
+        return client.invalidateQueries({ queryKey, exact: true }).catch(() => undefined);
+      }
+    },
     onSuccess: () =>
       client.invalidateQueries({ queryKey: ["onboarding", actor] }),
   });

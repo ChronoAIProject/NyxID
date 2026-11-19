@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -163,8 +165,8 @@ export function AuthoredSkillReviewContent({
   const reference = acknowledgement.authored_skill;
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
   );
@@ -225,11 +227,7 @@ export function AuthoredSkillReviewContent({
     setNotice(undefined);
     try {
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          translateApp(
-            "Your account session changed. Reopen this confirmation.",
-          ),
-        );
+        throw localizedError("Your account session changed. Reopen this confirmation.");
       const request = authoredSkillActionRequest(
         reference,
         data,
@@ -247,35 +245,35 @@ export function AuthoredSkillReviewContent({
         );
         if (request.action === "approve")
           setNotice(
-            translateApp("A new confirmation was posted in this conversation."),
+            () => (translateApp("A new confirmation was posted in this conversation.")),
           );
         if (request.action === "reprepare")
           setNotice(
-            result?.card_pending
+            () => (result?.card_pending
               ? translateApp(
                   "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it.",
                 )
               : translateApp(
                   "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.",
-                ),
+                )),
           );
       }
     } catch (cause) {
       setError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
           : translateApp(
               "Publication did not finish. Reload the current state before trying again.",
-            ),
+            )),
       );
     } finally {
       try {
         await refresh();
       } catch {
         setError(
-          translateApp(
+          () => (translateApp(
             "The current publication state could not be refreshed. Reload before trying again.",
-          ),
+          )),
         );
       }
       lock.current = false;
@@ -287,7 +285,7 @@ export function AuthoredSkillReviewContent({
   const reload = usePullRefresh(() =>
     refresh().catch(() =>
       setError(
-        translateApp("The confirmation could not be refreshed. Try again."),
+        () => (translateApp("The confirmation could not be refreshed. Try again.")),
       ),
     ),
   );

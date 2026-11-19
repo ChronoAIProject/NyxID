@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { translate } from "../../i18n/translate";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
@@ -1591,3 +1592,21 @@ for (const supported of [[], undefined]) {
     x.h.unmount();
   });
 }
+
+
+test("N11 retained no-speech notice follows real zh-CN and zh-TW catalogs", async () => {
+  const x = setup();
+  await x.begin();
+  x.native.emit("nomatch");
+  x.emit("end");
+  const phrase = "No speech was detected. Try again.";
+  assert.equal(x.h.value().error, phrase);
+  const events = [...x.events];
+  for (const language of ["zh-CN", "zh-TW", "en"] as const) {
+    x.translate((source) => translate(language, source));
+    assert.equal(x.h.value().error, translate(language, phrase));
+    if (language !== "en") assert.notEqual(x.h.value().error, phrase);
+    assert.deepEqual(x.events, events, "language change does not restart recognition");
+  }
+  x.h.unmount();
+});

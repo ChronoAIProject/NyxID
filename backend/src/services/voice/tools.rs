@@ -311,10 +311,8 @@ impl Execution {
             return Ok(());
         }
         let current = engine::get(&state.db, &self.row.user_id, &self.row.id).await?;
-        let chat = crate::services::assistant_acknowledgement_service::for_key(
-            &state.db,
-            &self.row.user_id,
-            Some(&self.row.credential_api_key_id),
+        let chat = crate::services::assistant_acknowledgement_service::chat_for_conversation(
+            &state.db, &self.row,
         )
         .await?
         .filter(|chat| chat.turn_live && !chat.turn_stopped)
@@ -607,7 +605,7 @@ impl Executions {
                     _ = renew.tick() => {
                         validate_call(state, call).await?;
                         if engine::stop_requested(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await?
-                            || !engine::heartbeat(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await? {
+                            || !engine::heartbeat(&state.db, &engine::WorkerFence::capture(&execution.row)?).await? {
                             break unavailable();
                         }
                     }
@@ -681,13 +679,8 @@ impl Executions {
                     &turn.turn_id,
                 )
                 .await?
-                || !engine::heartbeat(
-                    &state.db,
-                    &execution.row.user_id,
-                    &execution.row.id,
-                    &turn.turn_id,
-                )
-                .await?
+                || !engine::heartbeat(&state.db, &engine::WorkerFence::capture(&execution.row)?)
+                    .await?
             {
                 expired.push(delegation.clone());
             }

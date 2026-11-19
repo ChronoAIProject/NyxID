@@ -1,4 +1,4 @@
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { assistantConnection } from "./connectionState";
 import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
@@ -315,7 +315,7 @@ async function requestRefreshAccessToken(
 
       if (payload && typeof payload === "object") {
         const data = payload as Partial<RefreshResponse>;
-        if (typeof data.access_token === "string" && data.access_token.length > 0) {
+        if (typeof data.access_token === "string" && data.access_token.trim().length > 0) {
           return {
             access_token: data.access_token,
             expires_in:
@@ -330,10 +330,10 @@ async function requestRefreshAccessToken(
         }
       }
 
-      return null;
+      throw buildApiError(null, response.status, response.headers);
     }
 
-    return null;
+    throw buildApiError(null, 409);
   };
 
   try {
@@ -367,6 +367,7 @@ export async function refreshAccessTokenIfNeeded(force = false): Promise<boolean
   }
 
   const refreshed = await refreshAccessTokenWithSingleFlight();
+  if (!refreshed && session.sessionGeneration === authSessionGeneration()) await invalidateSession();
   return Boolean(refreshed);
 }
 
@@ -406,7 +407,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const expectedSessionGeneration = authSessionGeneration();
   const guard = () => {
     options.authorityGuard?.();
-    if (options.signal?.aborted) throw Object.assign(new Error(translateApp("Request cancelled")), { name: "AbortError" });
+    if (options.signal?.aborted) throw Object.assign(localizedError("Request cancelled"), { name: "AbortError" });
     if (requiresAuth && getAuthEpoch() !== expectedEpoch) throw new Error("auth_session_changed");
     if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
     if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
@@ -516,21 +517,17 @@ export async function requestBinaryJson<T>(
           xhr.onerror = () => {
             cleanup();
             reject(
-              new Error(
-              translateApp(
-                "Upload failed. Check your connection and try again.",
-              ),
-            ),
+              localizedError("Upload failed. Check your connection and try again."),
             );
           };
           xhr.ontimeout = () => {
             cleanup();
-            reject(new Error(translateApp("Upload timed out. Try a smaller file.")));
+            reject(localizedError("Upload timed out. Try a smaller file."));
           };
           xhr.onabort = () => {
             cleanup();
             reject(
-              Object.assign(new Error(translateApp("Upload cancelled.")), {
+              Object.assign(localizedError("Upload cancelled."), {
                 name: "AbortError",
               }),
             );
@@ -547,7 +544,7 @@ export async function requestBinaryJson<T>(
           if (init.signal?.aborted) {
             cleanup();
             reject(
-              Object.assign(new Error(translateApp("Upload cancelled.")), {
+              Object.assign(localizedError("Upload cancelled."), {
                 name: "AbortError",
               }),
             );
@@ -816,9 +813,11 @@ export async function rotatePushTokenRequest(
 }
 
 export async function unregisterPushTokenRequest(
-  payload: PushTokenRegisterRequest
+  payload: PushTokenRegisterRequest,
+  capturedAccessToken?: string,
 ): Promise<void> {
   await requestJson<MessageResponse>("/notifications/devices/current", {
+    ...(capturedAccessToken ? { requiresAuth: false, headers: { Authorization: `Bearer ${capturedAccessToken}` } } : {}),
     method: "DELETE",
     body: buildPushDevicePayload(payload),
   });

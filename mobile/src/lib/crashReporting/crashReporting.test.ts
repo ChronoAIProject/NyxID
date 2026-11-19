@@ -1,3 +1,4 @@
+import {localizedError} from "../../i18n/localizedError";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -603,4 +604,19 @@ for (const [status, body, drop] of [
   assert.equal(await send(record, binding), drop);
   assert.equal(disarmed, 0);
   assert.equal(paused, drop ? 0 : 1);
+});
+
+
+test('R2 crash sanitization never evaluates retained local message getters', async () => {
+  for (const error of [localizedError("Unable to verify account access. Please try again."), buildApiError(null, 503)]) {
+    const h = harness(); await h.lifecycle.setRestoring(false);
+    const getter = Object.getOwnPropertyDescriptor(error, 'message')!.get!;
+    assert.ok(getter, 'production error retains a locale getter');
+    let reads = 0;
+    Object.defineProperty(error, 'message', {configurable:true,get:()=>{reads++;return getter.call(error);}});
+    await h.lifecycle.capture(error);
+    assert.equal(reads, 0, 'closed crash record must not evaluate localized display text');
+    assert.equal(h.sent.length, 1, 'eligible fault still reports metadata');
+    assert.ok(!JSON.stringify(h.sent).includes('Unable to verify'));
+  }
 });

@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -71,7 +72,7 @@ export function useMachineWrite() {
   const lock = useRef(false);
   const needsReview = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [uncertain, setUncertain] = useState(false);
   async function run(action: (current: () => boolean) => Promise<void>) {
     if (lock.current || needsReview.current || !runtime.interactive()) return;
@@ -88,7 +89,7 @@ export function useMachineWrite() {
         needsReview.current = unknown;
         setUncertain(unknown);
         setError(
-          (unknown ? translateApp("{{machineError}} The action may have reached the server. Refresh and review status before taking another action.", { machineError: machineError(cause) }) : machineError(cause)),
+          () => ((unknown ? translateApp("{{machineError}} The action may have reached the server. Refresh and review status before taking another action.", { machineError: machineError(cause) }) : machineError(cause))),
         );
       }
     } finally {

@@ -1,124 +1,176 @@
 import { decodeJwtSub } from './jwt';
 export type StoredAuthSession = { accessToken: string; refreshToken?: string; accessTokenExpiresAt?: number; userId?: string; sessionGeneration?: number };
 export type SessionStorage = { getItemAsync(key: string): Promise<string | null>; setItemAsync(key: string, value: string): Promise<void>; deleteItemAsync(key: string): Promise<void> };
-const ACCESS = 'nyxid.auth.access_token', REFRESH = 'nyxid.auth.refresh_token', EXPIRES = 'nyxid.auth.access_token_expires_at', USER = 'nyxid.auth.user_id';
-/** Non-secret marker. Version 2: items use the after-first-unlock keychain class. */
-const FORMAT = 'nyxid.auth.storage_format',
-  STORAGE_FORMAT = '2';
-/** All SecureStore operations share this queue. Explicit login/logout advances
- * generation synchronously, fencing old network responses before they commit.
- * Refresh commits compare both generation and original access/refresh tokens.
- */
+/** Fresh key => SecureStore SecItemAdd applies AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY.
+ * One atomic value publishes the entire session: access is never observable
+ * beside another login's refresh token. Android uses the same upgrade protocol
+ * to retain existing encrypted preferences; accessibility is iOS-only. */
+export const SESSION_RECORD_KEY = 'nyxid.auth.v2.session';
+const LEGACY_KEYS = ['access_token', 'refresh_token', 'access_token_expires_at', 'user_id', 'storage_format'].map(key => `nyxid.auth.${key}`);
+type RecordValue = { version: 2; session: Omit<StoredAuthSession, 'sessionGeneration'> | null };
 export function createSessionCoordinator(storage: SessionStorage, bind: (actor: string | null) => void) {
   let generation = 0;
+  // Only failed clears may extend this generation interval. An intent fences
+  // immediately; failure restores the prior floor, success keeps the fence.
+  let refreshLineageStart = 0;
+  function ownsRefreshLineage(expected: StoredAuthSession) {
+    return expected.sessionGeneration !== undefined && expected.sessionGeneration >= refreshLineageStart
+      && expected.sessionGeneration <= generation;
+  }
+  let legacyCleanupComplete = false;
+  let known: { generation: number; session: StoredAuthSession | null } | undefined;
+  function remember(session: StoredAuthSession | null, expected: number) {
+    if (generation === expected) known = { generation: expected, session };
+    return session;
+  }
+  let pendingSuccessor: { generation: number; session: StoredAuthSession } | null = null;
+  async function persistSuccessor(candidate: NonNullable<typeof pendingSuccessor>, attempts: number) {
+    // The server has already retired the predecessor. Publish memory first and
+    // bound native retries; later loads keep trying the durable write.
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (generation !== candidate.generation || pendingSuccessor !== candidate) return;
+      try {
+        await write(candidate.session);
+        if (pendingSuccessor === candidate) pendingSuccessor = null;
+        return;
+      } catch { /* Keep the successor, never reuse the retired token. */ }
+    }
+  }
   let queue: Promise<unknown> = Promise.resolve();
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = queue.catch(() => {}).then(operation);
     queue = result.catch(() => {});
     return result;
   }
+  function normalize(session: StoredAuthSession): Omit<StoredAuthSession, 'sessionGeneration'> {
+    return {
+      refreshToken: session.refreshToken,
+      accessTokenExpiresAt: Number.isFinite(session.accessTokenExpiresAt) ? session.accessTokenExpiresAt : undefined,
+      userId: decodeJwtSub(session.accessToken) ?? session.userId,
+      accessToken: session.accessToken,
+    };
+  }
+  async function write(session: StoredAuthSession | null) {
+    const value: RecordValue = { version: 2, session: session ? normalize(session) : null };
+    await storage.setItemAsync(SESSION_RECORD_KEY, JSON.stringify(value));
+  }
+  async function removeLegacy() {
+    if (legacyCleanupComplete) return;
+    // Try every deletion; retain the atomic record if any deletion fails.
+    const results = await Promise.allSettled(LEGACY_KEYS.map(key => storage.deleteItemAsync(key)));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    legacyCleanupComplete = true;
+  }
   async function read(expectedGeneration = generation): Promise<StoredAuthSession | null> {
-    const [accessToken, refreshToken, expires, userId] = await Promise.all([ACCESS, REFRESH, EXPIRES, USER].map((key) => storage.getItemAsync(key)));
+    const candidate = pendingSuccessor;
+    if (candidate?.generation === expectedGeneration && generation === expectedGeneration) {
+      await persistSuccessor(candidate, 1);
+      return { ...candidate.session, sessionGeneration: expectedGeneration };
+    }
+    const record = await storage.getItemAsync(SESSION_RECORD_KEY);
+    if (record !== null) {
+      const value = JSON.parse(record) as RecordValue;
+      if (value.version !== 2 || (value.session !== null && (!value.session || typeof value.session.accessToken !== 'string' || !value.session.accessToken)))
+        throw new Error('auth_session_storage_invalid');
+      if (generation === expectedGeneration) await removeLegacy().catch(() => {});
+      return remember(value.session ? { ...normalize(value.session), sessionGeneration: expectedGeneration } : null, expectedGeneration);
+    }
+    const [accessToken, refreshToken, expires, userId] = await Promise.all(LEGACY_KEYS.slice(0,4).map(key => storage.getItemAsync(key)));
     if (!accessToken) {
-      // Clean interrupted legacy writes inside this serialized operation.
-      // Never recursively call clear(), which queues behind this read.
-      if (generation === expectedGeneration && (refreshToken || expires || userId))
-        await Promise.all([REFRESH, EXPIRES, USER].map((key) => storage.deleteItemAsync(key)));
-      return null;
+      if (generation === expectedGeneration && (refreshToken || expires || userId)) await removeLegacy();
+      return remember(null, expectedGeneration);
     }
     const accessTokenExpiresAt = expires ? Number(expires) : NaN;
-    return { accessToken, refreshToken: refreshToken ?? undefined,
+    const session: StoredAuthSession = { accessToken, refreshToken: refreshToken ?? undefined,
       accessTokenExpiresAt: Number.isFinite(accessTokenExpiresAt) ? accessTokenExpiresAt : undefined,
-      userId: decodeJwtSub(accessToken) ?? userId ?? undefined, sessionGeneration: generation };
-  }
-  async function replace(key: string, value: string | undefined) {
-    // SecureStore's update path rewrites only the data of an existing item and
-    // keeps its original keychain accessibility. Re-adding applies the current
-    // class, which migrates items written under the old WHEN_UNLOCKED default.
-    await storage.deleteItemAsync(key);
-    if (value) await storage.setItemAsync(key, value);
-  }
-  async function put(key: string, value: string | undefined) {
-    if (value) await storage.setItemAsync(key, value);
-    else await storage.deleteItemAsync(key);
-  }
-  function fields(session: StoredAuthSession) {
-    return [[REFRESH, session.refreshToken], [EXPIRES, Number.isFinite(session.accessTokenExpiresAt) ? String(session.accessTokenExpiresAt) : undefined], [USER, decodeJwtSub(session.accessToken)]] as const;
-  }
-  async function writeLogin(session: StoredAuthSession) {
-    // Remove the access token first: interrupted multi-key writes cannot leave
-    // an apparently authenticated mixed-token record on the next app launch.
-    // Every item is re-added, so a login always uses the current storage class.
-    await storage.deleteItemAsync(ACCESS);
-    for (const [key, value] of fields(session)) await replace(key, value);
-    await storage.setItemAsync(ACCESS, session.accessToken);
-    await storage.setItemAsync(FORMAT, STORAGE_FORMAT);
-  }
-  async function writeRotation(session: StoredAuthSession) {
-    // Same subject (verified by the caller). Update in place and store the
-    // rotated refresh token before touching the access token: the server has
-    // already retired the old refresh token, so a deleted or lost successor
-    // would end the session. A failed in-place update keeps the old token,
-    // which the server still honours as a retry within its grace window, and
-    // an interruption leaves old access + new refresh, which refreshes cleanly.
-    for (const [key, value] of fields(session)) await put(key, value);
-    await storage.setItemAsync(ACCESS, session.accessToken);
-  }
-  /** One-time re-add of a session written by an older build, run only after a
-   * successful read proves the keychain is currently readable. */
-  async function migrate(expectedGeneration: number) {
-    if (
-      generation !== expectedGeneration ||
-      (await storage.getItemAsync(FORMAT)) === STORAGE_FORMAT
-    )
-      return;
-    const values = await Promise.all(
-      [REFRESH, EXPIRES, USER, ACCESS].map((key) => storage.getItemAsync(key)),
-    );
-    if (generation !== expectedGeneration || !values[3]) return;
-    // Same account's values are re-added in place, access last. Each re-add is
-    // a delete + add of one key, so only a crash inside that pair can lose a
-    // key, once per install, versus every locked background launch before.
-    const keys = [REFRESH, EXPIRES, USER, ACCESS];
-    for (let i = 0; i < keys.length; i += 1)
-      if (values[i]) await replace(keys[i]!, values[i]!);
-    await storage.setItemAsync(FORMAT, STORAGE_FORMAT);
+      userId: decodeJwtSub(accessToken) ?? userId ?? undefined, sessionGeneration: expectedGeneration };
+    if (generation === expectedGeneration) {
+      // Keep legacy credentials through every failed write. Once the complete
+      // record is durable, interruptions during cleanup cannot lose a session.
+      try { await write(session); await removeLegacy(); } catch { /* Retry next load. */ }
+    }
+    return remember(session, expectedGeneration);
   }
   return {
     generation: () => generation,
+    // Best-effort teardown needs the latest admitted pair without native I/O.
+    peek(): StoredAuthSession | null {
+      const session = pendingSuccessor?.generation === generation ? pendingSuccessor.session
+        : known?.generation === generation ? known.session : null;
+      return session ? { ...session, sessionGeneration: generation } : null;
+    },
     load() {
       const expected = generation;
-      return serial(async () => { const value = await read(expected);
-        if (generation !== expected) return null;
-        // Migration is best effort: the session already loaded, and a later
-        // load retries. Never turn a migration failure into a logout.
-        if (value) await migrate(expected).catch(() => {});
-        return value; });
+      return serial(async () => {
+        const value = await read(expected);
+        return generation === expected ? value : null;
+      });
     },
     persist(session: StoredAuthSession) {
-      const expected = ++generation; bind(null);
+      refreshLineageStart = generation + 1;
+      const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) throw new Error('auth_session_changed');
-        await writeLogin(session);
+        await write(session);
+        remember({ ...normalize(session), sessionGeneration: expected }, expected);
+        // A cleanup failure cannot turn a durable login into a failed login.
+        await removeLegacy().catch(() => {});
         if (generation !== expected) throw new Error('auth_session_changed');
         bind(decodeJwtSub(session.accessToken) ?? null);
       });
     },
     clear() {
-      const expected = ++generation; bind(null);
+      const previousGeneration = generation;
+      const previousLineageStart = refreshLineageStart;
+      refreshLineageStart = generation + 1;
+      const previousKnown = known?.generation === previousGeneration ? known : undefined;
+      const previousSuccessor = pendingSuccessor?.generation === previousGeneration ? pendingSuccessor : null;
+      const expected = ++generation; pendingSuccessor = null; known = undefined; bind(null);
       return serial(async () => {
         if (generation !== expected) return;
-        await Promise.all([ACCESS, REFRESH, EXPIRES, USER].map((key) => storage.deleteItemAsync(key)));
+        // Tombstone first prevents interrupted cleanup resurrecting legacy auth.
+        try {
+          await write(null);
+        } catch (error) {
+          // Failure leaves the admitted session usable, including a successor
+          // that exists only in memory. Rebase it into this intent's generation
+          // while retaining same-pair refresh lineage only after this clear fails.
+          if (generation === expected) {
+            const retained = previousSuccessor?.session ?? previousKnown?.session;
+            if (retained) {
+              refreshLineageStart = previousLineageStart;
+              // Android commit() updates native memory before reporting disk
+              // failure. The recovery slot must outrank that cached tombstone,
+              // even when this pair was already durable before sign-out.
+              pendingSuccessor = { generation: expected, session: retained };
+              remember({ ...retained, sessionGeneration: expected }, expected);
+            } else if (previousKnown) remember(null, expected);
+            bind(retained ? decodeJwtSub(retained.accessToken) ?? null : null);
+          }
+          throw error;
+        }
+        remember(null, expected);
+        legacyCleanupComplete = false;
+        // Keep the authoritative nonsecret tombstone even if native deletion
+        // silently fails (iOS ignores SecItemDelete status). Legacy deletion is
+        // independent housekeeping; a later explicit login overwrites v2.
+        void removeLegacy().catch(() => { legacyCleanupComplete = false; });
       });
     },
     commitRefresh(expected: StoredAuthSession, next: StoredAuthSession) {
       return serial(async () => {
-        if (generation !== expected.sessionGeneration) return false;
-        const current = await read(expected.sessionGeneration);
-        if (generation !== expected.sessionGeneration || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
+        if (!ownsRefreshLineage(expected)) return false;
+        // The captured predecessor was loaded by this coordinator. Retain the
+        // server's successor before any further fallible native operation.
+        const current = known?.generation === generation ? known.session : await read(generation);
+        if (!ownsRefreshLineage(expected) || current?.accessToken !== expected.accessToken || current?.refreshToken !== expected.refreshToken
           || decodeJwtSub(next.accessToken) !== decodeJwtSub(expected.accessToken)) return false;
-        await writeRotation(next);
-        if (generation !== expected.sessionGeneration) return false;
+        const candidate = { generation, session: normalize(next) };
+        pendingSuccessor = candidate;
+        remember({ ...candidate.session, sessionGeneration: generation }, generation);
+        await persistSuccessor(candidate, 3);
+        if (!ownsRefreshLineage(expected)) return false;
         bind(decodeJwtSub(next.accessToken) ?? null);
         return true;
       });

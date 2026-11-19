@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import {
@@ -111,13 +113,13 @@ export function AssistantAttachmentView({
   const savingRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string>();
+  const [saveStatus, setSaveStatus] = useLocalizedState<string>();
   const [enlarged, setEnlarged] = useState(false);
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
   );
   const [preview, setPreview] = useState<string>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [expired, setExpired] = useState(false);
   const image = isPreviewableAttachment(attachment);
   const unavailable = attachment.expired || expired;
@@ -181,7 +183,7 @@ export function AssistantAttachmentView({
       setEnlarged(false);
       setBusy(false);
       setSaving(false);
-      if (wasSaving) setSaveStatus(t(IMAGE_NOT_SAVED));
+      if (wasSaving) setSaveStatus(() => (translateApp(IMAGE_NOT_SAVED)));
     });
     return () => subscription.remove();
   }, [cancel, t]);
@@ -216,7 +218,7 @@ export function AssistantAttachmentView({
     setBusy(true);
     savingRef.current = save;
     setSaving(save);
-    if (save) setSaveStatus(t("Saving image…"));
+    if (save) setSaveStatus(() => (translateApp("Saving image…")));
     setError(undefined);
     let openedCache: CachedAttachment | undefined;
     const removeOpenedCache = () => {
@@ -245,7 +247,7 @@ export function AssistantAttachmentView({
             anchor: null,
             alive: sameOperation,
           });
-          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+          if (sameOperation()) setSaveStatus(() => (translateApp(result.phrase, result.values)));
         } finally {
           if (sharingFile.current === nativeSave)
             sharingFile.current = undefined;
@@ -286,7 +288,7 @@ export function AssistantAttachmentView({
             anchor: findNodeHandle(saveButton.current),
             alive: sameOperation,
           });
-          if (sameOperation()) setSaveStatus(t(result.phrase, result.values));
+          if (sameOperation()) setSaveStatus(() => (translateApp(result.phrase, result.values)));
         } finally {
           removeOpenedCache();
         }
@@ -297,7 +299,7 @@ export function AssistantAttachmentView({
           removeOpenedCache();
           return;
         }
-        if (!available) throw new Error(translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE));
+        if (!available) throw localizedError(ATTACHMENT_UNAVAILABLE_MESSAGE);
         sharingFile.current = { file, scope, epoch };
         try {
           // Native cancellation resolves normally and is not shown as an error.
@@ -314,8 +316,8 @@ export function AssistantAttachmentView({
       removeOpenedCache();
       if (save ? sameOperation() : alive()) {
         const message = attachmentAccessError(cause);
-        if (save) setSaveStatus(t(IMAGE_SAVE_FAILED));
-        else setError(message);
+        if (save) setSaveStatus(() => (translateApp(IMAGE_SAVE_FAILED)));
+        else setError(() => (message));
         setExpired(message === translateApp(ATTACHMENT_EXPIRED_MESSAGE));
       }
     } finally {
@@ -368,7 +370,7 @@ export function AssistantAttachmentView({
             onError={() => {
               cancel();
               setPreview(undefined);
-              setError(translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE));
+              setError(() => (translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE)));
             }}
           />
         </Pressable>
@@ -528,7 +530,7 @@ export function AssistantAttachmentView({
           cancel();
           setPreview(undefined);
           closePreview();
-          setError(translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE));
+          setError(() => (translateApp(ATTACHMENT_UNAVAILABLE_MESSAGE)));
         }}
       />
     </View>

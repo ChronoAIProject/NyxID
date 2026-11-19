@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -142,7 +144,7 @@ export function AgentProfileEditScreen({
   const [value, setValue] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -178,23 +180,15 @@ export function AgentProfileEditScreen({
       if (Object.keys(patch).length) {
         const latest = (await agentsApi.detail(agentId)).agent;
         if (latest.can_maintain !== true || latest.status === "destroyed")
-          throw new Error(
-            translateApp(
-              "This agent can no longer be changed. Reload to review its current state.",
-            ),
-          );
+          throw localizedError("This agent can no longer be changed. Reload to review its current state.");
         if (profileHasConflict(baseline, latest, patch))
-          throw new Error(
-            translateApp(
-              "This profile changed elsewhere. Go back and review those changes before saving.",
-            ),
-          );
+          throw localizedError("This profile changed elsewhere. Go back and review those changes before saving.");
         await agentsApi.update(agentId, patch);
       }
       await queryClient.invalidateQueries({ queryKey: ROOT });
       if (mounted.current) setDone(true);
     } catch (cause) {
-      if (mounted.current) setError(errorMessage(cause));
+      if (mounted.current) setError(() => (errorMessage(cause)));
     } finally {
       lock.current = false;
       if (mounted.current) setBusy(false);

@@ -216,6 +216,61 @@ async fn completed(state: &AppState, trigger: &Trigger) -> TriggerRun {
 }
 
 #[tokio::test]
+async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
+    use crate::services::{assistant_agent_credential_service as credentials, key_service};
+
+    let (state, calls, server) = setup("schedule_stopped_home").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let home = team::home_thread(&state.db, &state.encryption_keys, &agent)
+        .await
+        .unwrap();
+    let old =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &home.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let stopped = crate::models::assistant_conversation::StoppedWindow {
+        turn_id: Uuid::new_v4().to_string(),
+        window_key: Uuid::new_v4().to_string(),
+        credential_id: old.api_key_id.clone(),
+    };
+    let updated = state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home.id, "active_turn": mongodb::bson::Bson::Null},
+            doc! {"$set": {"stopped_window": mongodb::bson::to_document(&stopped).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.modified_count, 1);
+    let trigger = automation(&state, &agent.id, Some(ThreadPolicy::Home)).await;
+    make_due(&state, &trigger).await;
+    tick(&state).await.unwrap();
+    let run = completed(&state, &trigger).await;
+    assert_eq!(run.outcome, RunOutcome::Completed);
+    assert_eq!(run.thread_id.as_ref(), Some(&home.id));
+    let next =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &home.id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(next.api_key_id, old.api_key_id);
+    assert!(next.raw_key != old.raw_key);
+    assert!(matches!(
+        key_service::validate_api_key(&state.db, &old.raw_key).await,
+        Err(AppError::Unauthorized(_))
+    ));
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].authorization.strip_prefix("Bearer ") == Some(next.raw_key.as_str()));
+    drop(calls);
+    server.abort();
+    let _ = server.await;
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn schedule_fake_agent_latency_authority_and_event_streak() {
     let (state, calls, server) = setup("schedule_latency").await;
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
@@ -656,6 +711,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
@@ -697,6 +753,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,

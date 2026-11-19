@@ -26,7 +26,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -868,13 +867,18 @@ function SheetEntryRoute({
   "DeviceLogin" | "AgentKeyLogin" | "TermsOfService" | "PrivacyPolicy"
 >) {
   useAppLanguage();
-  useLayoutEffect(() => {
-    const action = workspaceSharedEntryNavigationAction(
-      navigation.getState(),
-      route.name,
-      route.params,
-    );
-    if (action) navigation.dispatch(action);
+  useEffect(() => {
+    // The root stack publishes its initialized state after child effects.
+    // Redirect on the next task, once the cold-link route can be replaced.
+    const timer = setTimeout(() => {
+      const action = workspaceSharedEntryNavigationAction(
+        navigation.getState(),
+        route.name,
+        route.params,
+      );
+      if (action) navigation.dispatch(action);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [navigation, route.name, route.params]);
   return null;
 }

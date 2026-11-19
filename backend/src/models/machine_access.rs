@@ -64,6 +64,8 @@ pub struct Context {
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Lease {
+    #[serde(default)]
+    pub key_version: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub node_id: String,

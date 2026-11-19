@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parsePublicAuthConfig } from "../../features/auth/publicAuthConfig";
-import { translateApp } from "../../i18n/appTranslation";
+import { localizedError } from "../../i18n/localizedError";
 import { loadTestModule } from "./apiUrlTestHarness";
 
 test("sign-in config caches its optional crash hint using the existing request", async () => {
@@ -16,7 +16,7 @@ test("sign-in config caches its optional crash hint using the existing request",
     const api = loadTestModule<typeof import("./publicAuthApi")>("./publicAuthApi.ts", {
       require: (name: string) => {
         if (name === "../../features/auth/publicAuthConfig") return { parsePublicAuthConfig };
-        if (name === "../../i18n/appTranslation") return { translateApp };
+        if (name === "../../i18n/localizedError") return { localizedError };
         if (name === "../publicConfigHints") return {
           cachePublicConfigHints: (value: unknown) => hints.push(value),
         };

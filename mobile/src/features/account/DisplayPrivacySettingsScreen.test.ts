@@ -1,3 +1,4 @@
+import {translate} from "../../i18n/translate";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError } from "../../lib/api/ApiError";
@@ -118,9 +119,9 @@ test("Privacy analytics keeps shared group insets and wrapping controls at narro
     [402, 3.12],
   ]) {
     env.resize(width!, fontScale!);
-    const title = env.text("Usage analytics");
-    assert.equal(style(title).textTransform, "uppercase");
-    assert.equal(style(title).letterSpacing, 1.5);
+    const title = env.text("USAGE ANALYTICS");
+    assert.equal(style(title).textTransform, undefined);
+    assert.equal(style(title).letterSpacing, 0.6);
     const footer = env.text(
       "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.",
     );
@@ -308,7 +309,7 @@ for (const [language, reviewMessage] of [
   ["zh-CN", "无法保存更新后的分析授权。"],
   ["zh-TW", "無法儲存更新後的分析授權。"],
 ] as const) {
-  test(`Privacy policy-1 failure feedback matches main (${language})`, () => {
+  test(`Privacy policy-1 failure feedback follows app language (${language})`, () => {
     const env = setupSettingsScreen("./PrivacySettingsScreen.tsx", "PrivacySettingsScreen", {
       diagnosticsOffered: false, accountPolicy: "1", devicePolicy: 1, language,
     });
@@ -316,7 +317,7 @@ for (const [language, reviewMessage] of [
     env.harness.flush();
     const toast = env.all().find((node) => node.type === "ToastOverlay");
     assert.equal(toast?.props.toast?.message,
-      "Could not save account analytics permission. This device remains off; retry to withdraw across devices.");
+      translate(language, "Could not save account analytics permission. This device remains off; retry to withdraw across devices."));
     env.harness.unmount();
   });
   test(`Privacy policy-2 review failure feedback is localized (${language})`, () => {

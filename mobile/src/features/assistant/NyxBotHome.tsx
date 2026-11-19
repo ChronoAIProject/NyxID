@@ -1,14 +1,16 @@
-import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "../../components/workspace/WorkspaceLayoutContext";
 import {
   WORKSPACE_TITLE_MAX_FONT_SCALE,
   WORKSPACE_TITLE_MAX_LINES,
 } from "../../components/workspace/workspaceHeaderMetrics";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
-import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
+import { retryAgentRead, agentReadRetryDelay, } from "../../lib/api/agentReadRetry";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import { useRef, useState, type PropsWithChildren } from "react";
 import {
+  Text,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -70,6 +72,7 @@ export function NyxBotHome({
   onNewCrew,
   onStartNextStep,
 }: Props) {
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const railIndicator = useRailScrollIndicator();
   useAppLanguage();
   const { colors } = useTheme();
@@ -181,8 +184,9 @@ export function NyxBotHome({
               ellipsis. */}
           <Label
             accessibilityRole="header"
-            maxFontSizeMultiplier={WORKSPACE_TITLE_MAX_FONT_SCALE}
-            numberOfLines={WORKSPACE_TITLE_MAX_LINES}
+            maxFontSizeMultiplier={
+              cornerWindow ?WORKSPACE_TITLE_MAX_FONT_SCALE : undefined}
+            numberOfLines={cornerWindow ?WORKSPACE_TITLE_MAX_LINES : undefined}
             ellipsizeMode="tail"
             style={styles.title}
           >
@@ -437,7 +441,7 @@ export function NyxBotHome({
                       name: agent.name,
                       description: agent.description ||
                 (agent.kind === "nyxbot"
-                  ? translateApp("Full access to your services and account. Delegates to your specialists.")
+                  ? translateApp("Full access to your services and account. Delegates to your specialists.",)
                         : translateApp("No role described yet.")),
                     },
                   )}
@@ -557,6 +561,7 @@ export function NyxBotHomePanel({
   ) => void;
   onNewAgent: () => void;
 }) {
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const railIndicator = useRailScrollIndicator();
   useAppLanguage();
   const { active, available, online } = useGroupAvailability();
@@ -696,8 +701,7 @@ export function NyxBotHomePanel({
             />
           ))}
         {settled && !roster.some((agent) => agent.status !== "destroyed") ? (
-          <Quiet>{translateApp("No agents yet.")}
-          </Quiet>
+          <Quiet>{translateApp("No agents yet.")}</Quiet>
         ) : null}
       </HomeGroup>
     </ScrollView>

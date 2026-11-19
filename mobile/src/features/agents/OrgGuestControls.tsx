@@ -92,30 +92,29 @@ export function OrgGuestChannel({
           {settings ? (
             <>
               {!settings.can_manage && <Notice message={t("An organization admin can change these settings.")} />}
+              {(settings.guest_policy_mode === "grants" || settings.binding_limits_guest_services) && (
+                <SettingsRow
+                  label={translateApp("Guests can use")}
+                  detail={
+                    settings.effective_guest_services.map((s) => s.label).join(", ") ||
+                    translateApp("Model-only chat")
+                  }
+                />
+              )}
               {settings.guest_policy_mode === "legacy" ? (
                 <SettingsRow
-                  label={translateApp(
-                    "Existing guest limits are kept. Review them in Grants.",
-                  )}
+                  label={settings.binding_limits_guest_services
+                    ? translateApp("This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.")
+                    : translateApp("Existing guest limits are kept. Review them in Grants.")}
                   onPress={() => openGrants(agent.id)}
                 />
               ) : (
-                <>
-                  <SettingsRow
-                    label={translateApp("Guests can use")}
-                    detail={
-                      settings.effective_guest_services
-                        .map((s) => s.label)
-                        .join(", ") || translateApp("Model-only chat")
-                    }
-                  />
-                  <SettingsRow
-                    label={translateApp(
-                      "Enabling guests applies this specialist's Grants, including the default Use access.",
-                    )}
-                    onPress={() => openGrants(agent.id)}
-                  />
-                </>
+                <SettingsRow
+                  label={translateApp(
+                    "Enabling guests applies this specialist's Grants, including the default Use access.",
+                  )}
+                  onPress={() => openGrants(agent.id)}
+                />
               )}
               <SettingsRow
                 label={translateApp("Guest service access · Grants")}

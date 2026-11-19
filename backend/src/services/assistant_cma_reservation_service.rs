@@ -72,6 +72,17 @@ pub struct Inspection {
 pub enum ResolveAction {
     Associate,
     Release,
+    ConfirmRetirement,
+}
+
+impl ResolveAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Associate => "associate",
+            Self::Release => "release",
+            Self::ConfirmRetirement => "confirm_retirement",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -216,7 +227,7 @@ fn unknown_reason(error: CmaGatewayError) -> InspectionOutcome {
         _ => "observation_unknown",
     })
 }
-async fn verify(
+pub(super) async fn verify(
     gateway: &dyn CmaGateway,
     parent: &AssistantCmaSandbox,
     creation: Option<&AssistantCmaCreation>,
@@ -235,7 +246,7 @@ async fn verify(
         Err(CmaGatewayError::ConfigurationRequired)
     }
 }
-async fn exact_sandbox(
+pub(super) async fn exact_sandbox(
     gateway: &dyn CmaGateway,
     owner: &str,
     id: &str,
@@ -277,6 +288,7 @@ async fn observe(
             None,
         );
     }
+    let mut operation_reason = None;
     let result = async {
         if let Some(id) = parent
             .cma_sandbox_id
@@ -295,6 +307,7 @@ async fn observe(
             if value.get("id").and_then(serde_json::Value::as_str) != Some(operation) {
                 return Err(CmaGatewayError::InvalidResponse);
             }
+            operation_reason = Some(operation_without_resource(&value));
             if let Some(observed) = value.get("agent_id").filter(|v| !v.is_null()) {
                 let observed = observed.as_str().ok_or(CmaGatewayError::InvalidResponse)?;
                 validate_remote_id(observed)?;
@@ -336,7 +349,9 @@ async fn observe(
         Err(error) => (unknown_reason(error), None),
         Ok(None) => (
             unknown(match creation {
-                Some(c) if c.operation_id.is_some() => "operation_without_resource",
+                Some(c) if c.operation_id.is_some() => {
+                    operation_reason.unwrap_or("operation_without_resource")
+                }
                 Some(c) if c.submission_state == "pending" && c.first_dispatched_at.is_none() => {
                     "creation_not_dispatched"
                 }
@@ -365,6 +380,17 @@ async fn observe(
         ),
     }
 }
+/// Status alone never proves that a lifecycle created no resource. CMA may
+/// retain an internal sandbox identity which its public operation omits.
+pub(super) fn operation_without_resource(value: &serde_json::Value) -> &'static str {
+    match value.get("status").and_then(serde_json::Value::as_str) {
+        Some("queued" | "running" | "ready") => "operation_in_progress_without_resource",
+        Some("waiting_for_connection") => "operation_waiting_for_connection",
+        Some("failed") => "operation_failed_without_resource",
+        _ => "operation_without_resource",
+    }
+}
+
 fn audit_data(
     parent: &AssistantCmaSandbox,
     creation: Option<&AssistantCmaCreation>,
@@ -396,9 +422,29 @@ pub async fn inspect(
         Some(audit_data(&parent, creation.as_ref(), &outcome)),
     )
     .await?;
-    let next_step = matches!(outcome, InspectionOutcome::Unknown { reason: "owner_retry_will_recover" }).then_some(
-        "The owner's next allocating create or retry of the original request automatically attempts recovery inside the 23-hour window. If CMA remains unavailable or uncertain, the slot stays held."
-    );
+    let next_step = match &outcome {
+        InspectionOutcome::Unknown {
+            reason: "owner_retry_will_recover",
+        } => Some(
+            "The owner's next allocating create or retry of the original request automatically attempts recovery inside the 23-hour window. If CMA remains unavailable or uncertain, the slot stays held.",
+        ),
+        InspectionOutcome::Unknown {
+            reason: "operation_in_progress_without_resource",
+        } => Some(
+            "CMA is still creating the resource. NyxID automatically checks the saved operation; the account slot stays held until CMA provides an exact resource identity.",
+        ),
+        InspectionOutcome::Unknown {
+            reason: "operation_waiting_for_connection",
+        } => Some(
+            "The owner must complete the connection required by CMA and retry the original request. NyxID continues observing; it cannot resume this operation by reading it.",
+        ),
+        InspectionOutcome::Unknown {
+            reason: "operation_failed_without_resource" | "operation_without_resource",
+        } => Some(
+            "CMA has not provided a resource identity or proof of non-creation. NyxID keeps checking, but cannot release this slot from operation status alone; CMA must provide authoritative creation identity or absence evidence.",
+        ),
+        _ => None,
+    };
     Ok(Inspection {
         reservation: project(&parent, creation.as_ref()),
         outcome,
@@ -427,6 +473,38 @@ pub async fn resolve(
     if parent.source != sandboxes::NYXID_CREATED_SOURCE {
         return Err(drift());
     }
+    if request.action == ResolveAction::ConfirmRetirement {
+        let creation = admission::creation_for_sandbox(&db, &parent).await?;
+        if creation.as_ref().map(|c| c.revision) != request.creation_revision {
+            return Err(drift());
+        }
+        let id = parent.cma_sandbox_id.as_deref().ok_or_else(drift)?;
+        if request
+            .remote_sandbox_id
+            .as_deref()
+            .is_some_and(|named| named != id)
+        {
+            return Err(drift());
+        }
+        verify(gateway, &parent, creation.as_ref()).await?;
+        let remote = exact_sandbox(gateway, &parent.user_id, id).await?;
+        if remote.state != SandboxObservationState::Retired {
+            return Err(AppError::Conflict("cma_sandbox_retirement_proof_required: CMA has not confirmed retirement of this exact sandbox".into()));
+        }
+        let data = json!({"reservation_id":parent.id,"owner_id":parent.user_id,"cma_service_id":parent.cma_service_id,
+            "generation":parent.generation,"revision":parent.agent_reference_version,"creation_revision":request.creation_revision,
+            "action":"confirm_retirement","result":"resolved"});
+        let (parent, creation) = admission::commit(
+            &db,
+            &parent,
+            creation.as_ref(),
+            admission::Change::ConfirmRetirement(remote),
+            actor,
+            data,
+        )
+        .await?;
+        return Ok(project(&parent, creation.as_ref()));
+    }
     let creation = admission::creation_for_sandbox(&db, &parent)
         .await?
         .ok_or_else(|| AppError::Conflict("cma_creation_record_missing: no exact creation evidence is available; the reservation cannot be resolved".into()))?;
@@ -435,6 +513,7 @@ pub async fn resolve(
     }
     verify(gateway, &parent, Some(&creation)).await?;
     let change = match request.action {
+        ResolveAction::ConfirmRetirement => unreachable!("handled above"),
         ResolveAction::Release => {
             if !has_non_creation_proof(&creation) {
                 return Err(AppError::Conflict("cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made".into()));
@@ -483,7 +562,7 @@ pub async fn resolve(
     };
     let data = json!({"reservation_id":parent.id,"owner_id":parent.user_id,"cma_service_id":parent.cma_service_id,
         "generation":parent.generation,"revision":parent.agent_reference_version,"creation_revision":creation.revision,
-        "action":if request.action==ResolveAction::Associate {"associate"} else {"release"},"result":"resolved"});
+        "action":request.action.as_str(),"result":"resolved"});
     let (parent, creation) =
         admission::commit(&db, &parent, Some(&creation), change, actor, data).await?;
     Ok(project(&parent, creation.as_ref()))

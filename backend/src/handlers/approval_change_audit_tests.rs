@@ -671,3 +671,43 @@ async fn concurrent_channel_creation_uses_the_winners_grant_expiry() {
 
 #[path = "approval_nyxbot_audit_tests.rs"]
 mod nyxbot;
+
+#[path = "approval_causal_tests.rs"]
+mod causal;
+
+#[tokio::test]
+async fn web_decision_refuses_already_decided_and_expired_requests() {
+    use crate::errors::AppError;
+
+    for expired in [false, true] {
+        let f = Fixture::new().await;
+        Web.prepare(&f, false).await;
+        if expired {
+            f.state
+                .db
+                .collection::<Document>(REQUESTS)
+                .update_one(
+                    doc! {"_id": &f.request_id},
+                    doc! {"$set": {"status": "expired"}},
+                )
+                .await
+                .unwrap();
+        } else {
+            Telegram.call(&f, f.auth()).await.unwrap();
+            assert_eq!(
+                f.rows(REQUESTS).await[0].get_str("decision_channel"),
+                Ok("telegram")
+            );
+        }
+        let before = f.rows(REQUESTS).await;
+        let error = Web.call(&f, f.auth()).await.unwrap_err();
+        if expired {
+            assert!(matches!(error, AppError::Forbidden(s) if s == "Approval request expired"));
+        } else {
+            assert!(matches!(error, AppError::Conflict(s) if s == "already_decided"));
+        }
+        assert_eq!(f.rows(REQUESTS).await, before);
+        assert_eq!(f.rows(INTENTS).await.len(), usize::from(!expired));
+        crate::test_utils::drop_test_database(&f.state.db).await;
+    }
+}

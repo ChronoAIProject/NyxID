@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
@@ -173,23 +175,27 @@ function SharingEditor({
   const [subject, setSubject] = useState("");
   const [kind, setKind] = useState<"person" | "org">("person");
   const [role, setRole] = useState<"user" | "manager">("user");
-  const [inputError, setInputError] = useState<string>();
+  const [inputError, setInputError] = useLocalizedState<string>();
   const stale = baseline.version !== policy.version;
   const disabled = session.busy || !session.active;
   function add() {
     const normalized = subject.trim().toLowerCase();
-    const parsed = shareAudienceSchema.safeParse(
+    const parseAudience = () => shareAudienceSchema.safeParse(
       kind === "person"
         ? { subject_kind: kind, email: normalized, role }
         : { subject_kind: kind, subject_id: normalized, role: "user" },
     );
+    const parsed = parseAudience();
     if (!parsed.success) {
-      setInputError(parsed.error.issues[0]?.message ?? translateApp("Check the audience."),
+      setInputError(() => {
+        const validation = parseAudience();
+        return (!validation.success && validation.error.issues[0]?.message) || translateApp("Check the audience.");
+      },
       );
       return;
     }
     if (value.audience.some((a) => (a.email ?? a.subject_id) === normalized)) {
-      setInputError(translateApp("This audience is already selected."));
+      setInputError(() => (translateApp("This audience is already selected.")));
       return;
     }
     setValue((old) => ({ ...old, audience: [...old.audience, parsed.data] }));
@@ -211,15 +217,9 @@ function SharingEditor({
               async () => {
                 const fresh = await collaborationApi.sharing(agent.id);
                 if (!session.valid() || fresh.role !== "owner")
-                  throw new Error(
-                    translateApp("Only the live owner can change sharing."),
-                  );
+                  throw localizedError("Only the live owner can change sharing.");
                 if (fresh.version !== baseline.version)
-                  throw new Error(
-                    translateApp(
-                      "Sharing changed elsewhere. Reload and review before publishing.",
-                    ),
-                  );
+                  throw localizedError("Sharing changed elsewhere. Reload and review before publishing.");
                 await collaborationApi.saveSharing(
                   agent.id,
                   baseline.version,
@@ -578,14 +578,10 @@ function NotesDraft({
                       !session.valid() ||
                       !["owner", "manager"].includes(policy.role)
                     )
-                      throw new Error(
-                        translateApp(
-                          "Only the owner or a current manager can publish team memory.",
-                        ),
-                      );
+                      throw localizedError("Only the owner or a current manager can publish team memory.");
                   }
                   if (!session.valid())
-                    throw new Error(translateApp("Keep notes open to save."));
+                    throw localizedError("Keep notes open to save.");
                   await collaborationApi.saveNotes(
                     id,
                     kind,
@@ -762,19 +758,13 @@ export function SharedProfile({
                 fresh.share_role !== "manager" ||
                 fresh.status === "destroyed"
               )
-                throw new Error(
-                  translateApp("Manager access changed. Reload the agent."),
-                );
+                throw localizedError("Manager access changed. Reload the agent.");
               if (
                 fresh.description !== baseline.description ||
                 fresh.persona !== baseline.persona ||
                 fresh.display_name !== baseline.display_name
               )
-                throw new Error(
-                  translateApp(
-                    "The profile changed elsewhere. Reopen this agent and review the current profile.",
-                  ),
-                );
+                throw localizedError("The profile changed elsewhere. Reopen this agent and review the current profile.");
               await agentsApi.update(
                 agent.id,
                 {
@@ -1204,11 +1194,7 @@ export function OperationDraft({
                 fresh.share_role ||
                 fresh.status === "destroyed"
               )
-                throw new Error(
-                  translateApp(
-                    "Only a current owner/organization maintainer can edit operation permissions.",
-                  ),
-                );
+                throw localizedError("Only a current owner/organization maintainer can edit operation permissions.");
               await collaborationApi.saveOperations(
                 agent.id,
                 guests,

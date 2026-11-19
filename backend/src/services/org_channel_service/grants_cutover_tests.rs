@@ -134,6 +134,21 @@ async fn cutover_keeps_partial_and_empty_lists_until_explicit_adoption_and_fence
     let access = validate(&db, &old, &f.org.org, &f.agent.id).await.unwrap();
     assert!(access.allows_service(&one));
     assert!(!access.allows_service(&two));
+    let partial = management::view(&db, &f.org.admin, &f.channel)
+        .await
+        .unwrap();
+    assert_eq!(partial["binding_limits_guest_services"], true);
+    let mut covers_grants = f.channel.clone();
+    let policy = &mut covers_grants.org_specialist.as_mut().unwrap().guests;
+    policy.service_ids.push(two.id.clone());
+    policy.service_authority.insert(
+        two.id.clone(),
+        management::service_digest(access.channel().unwrap().agent(), &two.id),
+    );
+    let covered = management::view(&db, &f.org.admin, &covers_grants)
+        .await
+        .unwrap();
+    assert_eq!(covered["binding_limits_guest_services"], false);
     let view = management::view(&db, &f.org.admin, &empty).await.unwrap();
     assert_eq!(view["guest_policy_mode"], "legacy");
     assert!(
@@ -142,6 +157,7 @@ async fn cutover_keeps_partial_and_empty_lists_until_explicit_adoption_and_fence
             .unwrap()
             .is_empty()
     );
+    assert_eq!(view["binding_limits_guest_services"], true);
     let input = adopt(&f).await;
     adoption::adopt(&db, &f.org.admin, &f.agent.id, input)
         .await
@@ -162,6 +178,10 @@ async fn cutover_keeps_partial_and_empty_lists_until_explicit_adoption_and_fence
     assert!(access.allows_service(&one));
     assert!(access.allows_service(&two));
     let saved = &f.channel.org_specialist.as_ref().unwrap().guests;
+    let adopted = management::view(&db, &f.org.admin, &f.channel)
+        .await
+        .unwrap();
+    assert_eq!(adopted["binding_limits_guest_services"], false);
     assert_eq!(saved.service_ids, vec![one.id.clone()]); // retained, not erased
     assert!(saved.follows_agent_grants);
     team::set_grants(
@@ -632,4 +652,218 @@ async fn cutover_rebuild_preserves_legacy_or_adopted_mode_and_accounting_continu
         );
         db.drop().await.unwrap();
     }
+}
+
+async fn sheets_tools(
+    f: &Fixture,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+) -> Vec<String> {
+    use crate::services::{
+        assistant_agent_credential_service,
+        billing::{BillingIngress, route_inventory::BillingRoutePolicy},
+    };
+    use axum::{Extension, body::Body, extract::State, http::Request};
+    let state = &f.org.state;
+    let key = assistant_agent_credential_service::load_for_conversation(
+        &state.db,
+        &state.encryption_keys,
+        &row.user_id,
+        &row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let request = Request::post("/mcp")
+        .header("x-api-key", key.raw_key.as_str())
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ))
+        .unwrap();
+    let response = Box::pin(crate::handlers::mcp_transport::mcp_post(
+        State(state.clone()),
+        Extension(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
+        request,
+    ))
+    .await;
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mut names: Vec<_> = reply["result"]["tools"]
+        .as_array()
+        .expect("MCP tool list")
+        .iter()
+        .filter_map(|tool| {
+            tool["name"]
+                .as_str()?
+                .strip_prefix("event-sheets__")
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn org_guest_sheets_discovery_and_operations_follow_the_reviewed_binding() {
+    use crate::services::{
+        agent_operation_scope_service as ops, feature_flag_service as flags,
+        proxy_authorization::CanonicalPath,
+    };
+    let mut f = Fixture::new("org_guest_sheets_tools").await;
+    f.wallet().await;
+    let service = grant(&f, "event-sheets").await;
+    let db = f.org.state.db.clone();
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "api-google-sheets".into();
+    db.collection::<crate::models::downstream_service::DownstreamService>(
+        crate::models::downstream_service::COLLECTION_NAME,
+    )
+    .insert_one(&catalog)
+    .await
+    .unwrap();
+    db.collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id":&service.id},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    let spec = crate::services::catalog_spec_registry::spec_for_slug(&catalog.slug).unwrap();
+    let mut selected = Vec::new();
+    for (method, path) in [
+        ("GET", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
+        (
+            "POST",
+            "/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+        ),
+        ("GET", "/v4/spreadsheets/{spreadsheetId}"),
+    ] {
+        let op = &spec["paths"][path][method.to_ascii_lowercase()];
+        let mut endpoint = crate::test_utils::test_service_endpoint(
+            &catalog.id,
+            op["operationId"].as_str().unwrap(),
+            method,
+            path,
+        );
+        endpoint.parameters = op.get("parameters").cloned();
+        if path.contains("/values/") {
+            selected.push(endpoint.id.clone());
+        }
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(&endpoint)
+        .await
+        .unwrap();
+    }
+    f.guests(vec![]).await;
+    ready(&mut f).await;
+    flags::set_platform_override(
+        &db,
+        flags::GUEST_OPERATION_SCOPES_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.org.admin,
+    )
+    .await
+    .unwrap();
+    team::set_grants(
+        &db,
+        &f.org.admin,
+        &f.agent.id,
+        GrantChange::GuestOperations {
+            base: Box::new(GrantChange::Guests(Default::default())),
+            selections: [(
+                service.id.clone(),
+                serde_json::from_value(json!({"expected_revision":0,"endpoint_ids":selected}))
+                    .unwrap(),
+            )]
+            .into(),
+        },
+    )
+    .await
+    .unwrap();
+    let frozen = channel_turn(&f, &f.guest("visitor").await, "Event time?").await;
+    let key = f.org.key(&frozen).await;
+    let auth = Box::pin(crate::mw::auth::api_key_auth_user(
+        &db, &key, None, None, None,
+    ))
+    .await
+    .unwrap();
+    assert!(auth.allowed_service_ids.is_empty());
+    let scope = crate::services::mcp_service::caller_service_scope(
+        &f.org.org,
+        auth.assistant_agent_owner_id.as_deref(),
+        auth.org_agent_access.as_deref(),
+        auth.assistant_chat.as_deref(),
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+    );
+    assert!(
+        matches!(
+            scope,
+            crate::services::mcp_service::ServiceScope::Allowed([])
+        ),
+        "model-only discovery must use the empty service allowlist"
+    );
+    assert!(sheets_tools(&f, &frozen).await.is_empty());
+    adopt(&f).await;
+    reload(&mut f).await;
+    let row = channel_turn(&f, &f.guest("second visitor").await, "Event time?").await;
+    assert_eq!(
+        sheets_tools(&f, &row).await,
+        ["sheets_append_values", "sheets_get_values"]
+    );
+    let key = f.org.key(&row).await;
+    let auth = Box::pin(crate::mw::auth::api_key_auth_user(
+        &db, &key, None, None, None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        auth.allowed_service_ids.as_slice(),
+        std::slice::from_ref(&service.id)
+    );
+    for (method, path, query, allowed) in [
+        (
+            "GET",
+            "/v4/spreadsheets/event/values/Event_Config",
+            None,
+            true,
+        ),
+        (
+            "POST",
+            "/v4/spreadsheets/event/values/Questions:append",
+            Some("insertDataOption=INSERT_ROWS"),
+            true,
+        ),
+        (
+            "POST",
+            "/v4/spreadsheets/event/values/Questions:append",
+            Some("insertDataOption=OVERWRITE"),
+            false,
+        ),
+        ("GET", "/v4/spreadsheets/event", None, false),
+    ] {
+        let path = CanonicalPath::from_mcp_literal(path).unwrap();
+        let res = ops::check_non_mcp_context(
+            &db,
+            &auth,
+            true,
+            &service.id,
+            Some(&catalog.id),
+            method,
+            Some(&path),
+            ops::GuestHttpContext {
+                query,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(res.is_ok(), allowed, "{method} {query:?}: {res:?}");
+    }
+    db.drop().await.unwrap();
 }

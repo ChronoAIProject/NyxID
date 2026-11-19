@@ -673,17 +673,50 @@ async fn pool_proxy_exhaustion_preserves_the_last_upstream_response() {
         true,
     )
     .await;
+    fixture.state.config.invocation_diagnostics_enabled = true;
+    fixture.state.config.chrono_probe_url = Some("http://127.0.0.1:9".into());
+    fixture.auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    fixture.auth.scope = "proxy".into();
+    let api_key_id = Uuid::new_v4().to_string();
+    fixture.auth.api_key_id = Some(api_key_id.clone());
+    crate::test_utils::set_test_approval_preference(
+        &fixture.state.db,
+        &fixture.auth.user_id.to_string(),
+        false,
+    )
+    .await;
     replace_second_status(&mut fixture, StatusCode::SERVICE_UNAVAILABLE).await;
     let response = call(&fixture, "{}").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()["x-nyxid-pool-attempts"], "2");
     assert_eq!(response.headers()["x-nyxid-pool-member"], "review-second");
+    assert!(
+        response
+            .headers()
+            .contains_key(super::invocation_diagnostics::HANDLE_HEADER)
+    );
     assert_eq!(
         to_bytes(response.into_body(), 1024).await.unwrap(),
         "{\"member\":\"second\"}"
     );
     assert_eq!(fixture.first.requests.lock().await.len(), 1);
     assert_eq!(fixture.second.requests.lock().await.len(), 1);
+    let diagnostic = fixture
+        .state
+        .db
+        .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
+            crate::models::invocation_diagnostic::COLLECTION_NAME,
+        )
+        .find_one(doc! {"actor_user_id":fixture.auth.user_id.to_string()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(diagnostic.exact_user_service_id, fixture.second_member_id);
+    assert_ne!(diagnostic.exact_user_service_id, fixture.pool_id);
+    assert_eq!(
+        diagnostic.original_api_key_id.as_deref(),
+        Some(api_key_id.as_str())
+    );
     fixture.state.db.drop().await.unwrap();
 }
 

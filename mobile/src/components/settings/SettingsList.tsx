@@ -107,7 +107,7 @@ export function SettingsGroup({
           accessibilityRole="header"
           style={[styles.groupTitle, { color: colors.textMuted }]}
         >
-          {title}
+          {title.toUpperCase()}
         </Text>
       ) : null}
       <View style={[styles.card, { backgroundColor: colors.groupedFill }]}>
@@ -770,7 +770,8 @@ const styles = StyleSheet.create({
   },
   group: { gap: spacing.sm },
   groupTitle: {
-    ...typeScale.groupLabel,
+    ...typeScale.small,
+    letterSpacing: 0.6,
     paddingHorizontal: spacing.xxl,
   },
   card: { borderRadius: radius.lg, overflow: "hidden" },

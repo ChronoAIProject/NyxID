@@ -89,7 +89,9 @@ function chatsFor(agentId: string) {
 function elements(root: Element): Element[] {
   if (typeof root.type === "function") {
     // A stateless row part may render nothing (an empty unread pill).
-    const rendered = (root.type as (props: unknown) => Element | null)(root.props);
+    const rendered = (root.type as (props: unknown) => Element | null)(
+      root.props,
+    );
     return rendered ? elements(rendered) : [];
   }
   return [
@@ -117,6 +119,7 @@ function content(root: Element): string {
 }
 
 type SetupOptions = {
+  cornerWindow?: boolean;
   mode?: "drawer" | "picker";
   recentRows?: WorkspaceRecent[];
   scrollHeader?: Element;
@@ -182,6 +185,9 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     },
   };
   const harness = hookHarness<Element>({
+    "./WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: options.cornerWindow ?? false },
+    },
     "../AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -1303,7 +1309,7 @@ test("agent picker reuses the thread hierarchy without crew or creation sections
   env.harness.unmount();
 });
 
-test("agent picker leads with up to three Recent agents above the deduplicated roster", () => {
+test("Duo agent picker leads with up to three Recent agents above the deduplicated roster", () => {
   const recent = (
     agentId: string | undefined,
     id: number,
@@ -1319,6 +1325,7 @@ test("agent picker leads with up to three Recent agents above the deduplicated r
     { kind: "agent", agentId: "agent-3", conversationId: conversationId(303) },
     {
       mode: "picker",
+      cornerWindow: true,
       // AssistantScreen's "This thread" card.
       scrollHeader: {
         type: "Text",
@@ -1345,9 +1352,7 @@ test("agent picker leads with up to three Recent agents above the deduplicated r
   assert.deepEqual(headings, ["This thread", "Recent", "Agents"]);
   const recentRows = env
     .all()
-    .filter((row) =>
-      /^Open recent /.test(row.props.accessibilityLabel ?? ""),
-    );
+    .filter((row) => /^Open recent /.test(row.props.accessibilityLabel ?? ""));
   // View-only agent-8 is skipped; the legacy thread resolves to NyxBot.
   assert.deepEqual(
     recentRows.map((row) => row.props.accessibilityLabel),
@@ -1358,13 +1363,19 @@ test("agent picker leads with up to three Recent agents above the deduplicated r
     ],
   );
   assert.equal(recentRows[0]!.props.accessibilityState.selected, true);
-  const order = env.all().map((row) =>
-    row.props.accessibilityRole === "header"
-      ? content(row)
-      : (row.props.accessibilityLabel ?? ""),
+  const order = env
+    .all()
+    .map((row) =>
+      row.props.accessibilityRole === "header"
+        ? content(row)
+        : (row.props.accessibilityLabel ?? ""),
+    );
+  const at = (pattern: RegExp) =>
+    order.findIndex((label) => pattern.test(label));
+  assert.ok(
+    at(/^This thread$/) < at(/^Recent$/),
+    "the thread card stays on top",
   );
-  const at = (pattern: RegExp) => order.findIndex((label) => pattern.test(label));
-  assert.ok(at(/^This thread$/) < at(/^Recent$/), "the thread card stays on top");
   assert.ok(at(/^Recent$/) < at(/^Open recent Agent 3/));
   assert.ok(at(/^Open recent Agent 5/) < at(/^Agents$/));
   assert.ok(at(/^Agents$/) < at(/^(Expand|Collapse) chats for /));
@@ -1372,12 +1383,17 @@ test("agent picker leads with up to three Recent agents above the deduplicated r
   const roster = env.agentRows().map((row) => row.props.accessibilityLabel);
   for (const name of ["Agent 3", "NyxBot", "Agent 5"])
     assert.equal(
-      roster.some((label) => label.startsWith(`Expand chats for ${name},`) ||
-        label === `Expand chats for ${name}`),
+      roster.some(
+        (label) =>
+          label.startsWith(`Expand chats for ${name},`) ||
+          label === `Expand chats for ${name}`,
+      ),
       false,
       `${name} appears once`,
     );
-  assert.ok(roster.some((label) => label.startsWith("Expand chats for Agent 1")));
+  assert.ok(
+    roster.some((label) => label.startsWith("Expand chats for Agent 1")),
+  );
   assert.equal(env.chatRows().length, 0);
   recentRows[1]!.props.onPress();
   env.harness.flush();
@@ -1594,7 +1610,8 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
       active_turn: null,
       created_at: "2026-10-01T00:00:00Z",
       last_message_at: `2026-10-${String(20 - index).padStart(2, "0")}T00:00:00Z`,
-      agent: { id: "agent-1",
+      agent: {
+        id: "agent-1",
         name: "helper-1",
         display_name: "Agent 1",
         kind: "specialist",
@@ -1610,14 +1627,16 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
     }),
   );
   const own = chatsFor("agent-1").slice(0, 2);
-  const current = { kind: "agent" as const,
+  const current = {
+    kind: "agent" as const,
     agentId: "agent-1",
     conversationId: own[0]!.id,
   };
   const env = setup(current, {
     chats: [...own, ...channels],
     unread: {
-      conversations: { [own[1]!.id]: 2,
+      conversations: {
+        [own[1]!.id]: 2,
         [channels[0]!.id]: 1,
         [channels[2]!.id]: 105,
       },
@@ -1702,7 +1721,6 @@ test("thread, crew and channel-bot rows show the unread counts the notification 
   plain.harness.unmount();
 });
 
-
 test("critical writes disable chat, crew, agent and create rows with muted text and restore them in place", () => {
   const env = setup({
     kind: "agent",
@@ -1777,5 +1795,35 @@ test("an already open chat browser disables its selectable rows and New chat whi
   assert.equal(browser.primaryAction.disabled, true);
   browser.onClose();
   env.harness.flush();
+  env.harness.unmount();
+});
+
+test("P9 ordinary picker keeps the full base roster even with recent rows", () => {
+  const env = setup(undefined, {
+    mode: "picker",
+    recentRows: [
+      {
+        key: "recent",
+        title: "A recent",
+        activityAt: "2026-11-18T00:00:00Z",
+        target: { kind: "agent", agentId: "agent-3" },
+      },
+    ],
+  });
+  assert.equal(
+    env
+      .all()
+      .some((row) => /^Open recent /.test(row.props.accessibilityLabel ?? "")),
+    false,
+  );
+  assert.equal(
+    env
+      .all()
+      .some(
+        (row) =>
+          row.props.accessibilityRole === "header" && content(row) === "Recent",
+      ),
+    false,
+  );
   env.harness.unmount();
 });

@@ -212,6 +212,25 @@ async fn bind_response(
     Ok(())
 }
 
+/// An observer can close on either side of delivery preparation. Record the
+/// close and release any waiting stream in the same event write.
+pub async fn detach_observer(db: &Database, event: &str) -> AppResult<()> {
+    db.collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id": event},
+            vec![doc! {"$set": {
+                "gateway_observer_detached": true,
+                "delivery": {"$cond": [
+                    {"$and": [{"$eq": ["$delivery.version", 1]}, {"$eq": ["$delivery.state", "waiting"]}]},
+                    {"$mergeObjects": ["$delivery", {"state": "pending"}]},
+                    "$delivery",
+                ]},
+            }}],
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn detach(db: &Database, event: &str) -> AppResult<()> {
     db.collection::<bson::Document>(EVENTS)
         .update_one(
