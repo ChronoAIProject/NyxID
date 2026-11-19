@@ -80,18 +80,53 @@ async fn single_field_updates(catalog_backed: bool) {
             assert!(updated.get("credential").is_none());
         }
     }
-    // Validation must reject a single-field change without changing persisted state.
-    for body in [
-        json!({"endpoint_url":"ftp://example.com/bad"}),
-        json!({"label":""}),
+    // Parsing and validation failures must leave the endpoint unchanged, including
+    // a valid new URL accompanied by invalid metadata.
+    let endpoints = db.collection::<mongodb::bson::Document>(USER_ENDPOINTS);
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+    for (expected_status, body) in [
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"endpoint_url":"ftp://example.com/bad"}),
+        ),
+        (StatusCode::BAD_REQUEST, json!({"label":""})),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"endpoint_url":"https://example.com/rejected", "label":""}),
+        ),
+        (StatusCode::UNPROCESSABLE_ENTITY, json!({"endpoint_url":42})),
     ] {
-        let (_, before) = request(&state, "GET", &path, &token, None).await;
+        let (before_status, before) = request(&state, "GET", &path, &token, None).await;
+        assert_eq!(before_status, StatusCode::OK, "{before}");
+        let before_endpoint = endpoints
+            .find_one(doc! {"_id": endpoint_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            before_endpoint.get_str("url").unwrap(),
+            "https://example.com/updated"
+        );
         let (status, error) = request(&state, "PUT", &path, &token, Some(body)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-        let (_, after) = request(&state, "GET", &path, &token, None).await;
+        assert_eq!(status, expected_status, "{error}");
+        let (after_status, after) = request(&state, "GET", &path, &token, None).await;
+        assert_eq!(after_status, StatusCode::OK, "{after}");
+        for response in [&before, &after] {
+            assert_eq!(response["id"], created["id"]);
+            assert_eq!(
+                response["endpoint_url"].as_str(),
+                Some("https://example.com/updated")
+            );
+        }
         for field in ["endpoint_url", "label", "is_active", "updated_at"] {
             assert_eq!(after[field], before[field]);
         }
+        let after_endpoint = endpoints
+            .find_one(doc! {"_id": endpoint_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_endpoint, before_endpoint);
     }
     if !catalog_backed {
         assert_eq!(
