@@ -365,7 +365,13 @@ pub(super) async fn revoke_membership(
     let result =
         revoke_membership_in_session(db, org_user_id, member_user_id, actor, &mut transaction)
             .await;
-    org_membership_authority::finish(transaction, result).await
+    org_membership_authority::finish(transaction, result).await?;
+    crate::services::billing::schedules::eligibility::after_org_exited(
+        db,
+        org_user_id,
+        member_user_id,
+    );
+    Ok(())
 }
 async fn revoke_membership_in_session(
     db: &Database,

@@ -299,7 +299,7 @@ it("defaults capable recurring allocations to recipient cycles and preserves cal
     screen.getByRole("combobox", { name: "Renewal cycle" }),
   ).toHaveTextContent("From when each recipient joins");
   expect(
-    screen.getByText(/New members receive a full first allocation/),
+    screen.getByText(/New members can receive their full first allocation when they join/),
   ).toBeInTheDocument();
   await recipient();
   fireEvent.change(screen.getByLabelText("Credits per recipient"), {

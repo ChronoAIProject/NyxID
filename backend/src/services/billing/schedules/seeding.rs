@@ -155,13 +155,7 @@ pub async fn seed_missing(
             result.pending_activation_count += 1;
         }
     }
-    let count = progress::count_period_grants(db, schedule_id, window.start).await?;
-    db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
-        .update_one(
-            doc! { "_id": &period.id },
-            doc! { "$max": { "disbursed_count": count } },
-        )
-        .await?;
+    progress::refresh_count(db, &period).await?;
     if result.created_count > 0 {
         db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
             .update_one(

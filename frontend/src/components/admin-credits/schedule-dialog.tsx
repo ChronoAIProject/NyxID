@@ -355,7 +355,7 @@ export function ScheduleDialog({
                   description={
                     values.timing === "recipient"
                       ? translateUi(
-                          "New members receive a full first allocation on the next billing update, then renew from their own start date. Monthly renewals use the same date each month.",
+                          "New members can receive their full first allocation when they join. Monthly renewals follow each recipient’s start date.",
                         )
                       : translateUi(
                           "Each calendar period freezes its recipient policy. New signups and organization or group joins can receive its grant. Use Grant missing credits to recover missed grants.",

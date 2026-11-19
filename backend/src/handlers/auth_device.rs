@@ -1357,6 +1357,9 @@ mod tests {
 
     #[tokio::test]
     async fn auth_device_web_poll_skips_extra_mfa_and_revokes_approval_session() {
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
         let Some(state) = setup_state("auth_device_web_poll_happy").await else {
             return;
         };
@@ -1371,6 +1374,7 @@ mod tests {
             .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
             .await
             .expect("enable MFA");
+        let schedule = login_test_schedule(&state.db).await;
         let server = spawn_test_server(state.clone()).await;
         let (status, denied) = post_json(
             &server,
@@ -1394,6 +1398,7 @@ mod tests {
             .expect("auth-device row");
         let approved_session_id = device_row.approved_session_id.expect("approved session id");
 
+        assert_login_credits(&state.db, &schedule, &user_id, false).await;
         let response = server
             .client
             .post(format!("{}/api/v1/auth/device/poll-web", server.base_url))
@@ -1430,6 +1435,7 @@ mod tests {
         let body = response.json::<Value>().await.expect("web poll response");
         assert_eq!(body["ok"], true);
         assert_eq!(body["auth_kind"], "account_session");
+        assert_login_credits(&state.db, &schedule, &user_id, true).await;
         assert!(body.get("login_code").is_none_or(Value::is_null));
         assert!(body.get("access_token").is_none());
         assert!(body.get("refresh_token").is_none());
@@ -2323,6 +2329,9 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_full_happy_path_request_approve_poll_refresh() {
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
         let Some(state) = setup_state("auth_device_e2e_happy").await else {
             return;
         };
@@ -2366,6 +2375,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(approve_json, serde_json::json!({ "ok": true }));
 
+        let schedule = login_test_schedule(&state.db).await;
+        assert_login_credits(&state.db, &schedule, &user_id, false).await;
         let (status, poll_json) = post_json(
             &server,
             "/api/v1/auth/device/poll",
@@ -2386,6 +2397,7 @@ mod tests {
         );
         assert_eq!(poll_json["token_type"], "Bearer");
         assert_eq!(poll_json["expires_in"], 900);
+        assert_login_credits(&state.db, &schedule, &user_id, true).await;
 
         let access_token = poll_json["access_token"].as_str().unwrap();
         let (status, me_json) = get_json(&server, "/api/v1/users/me", Some(access_token)).await;
@@ -2394,6 +2406,7 @@ mod tests {
         assert_eq!(me_json["email"], format!("{user_id}@example.com"));
         assert_eq!(me_json["display_name"], "Test User");
 
+        let refresh_only_schedule = login_test_schedule(&state.db).await;
         let refresh_token = poll_json["refresh_token"].as_str().unwrap();
         let (status, refresh_json) = post_json(
             &server,
@@ -2414,6 +2427,7 @@ mod tests {
                 .is_some_and(|value| !value.is_empty() && value != refresh_token)
         );
         assert_eq!(refresh_json["expires_in"], 900);
+        assert_login_credits(&state.db, &refresh_only_schedule, &user_id, false).await;
 
         let (status, refreshed_me_json) = get_json(
             &server,

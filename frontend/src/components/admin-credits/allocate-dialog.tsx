@@ -291,7 +291,7 @@ export function AllocateDialog({
                         )
                       : value.timing === "recipient"
                         ? translateUi(
-                            "New members receive a full first allocation on the next billing update. Each recipient renews from their own start date; monthly renewals use the same date each month. Existing members start when first covered by this schedule.",
+                            "New members can receive their full first allocation when they join. Existing members can start on sign-in or during a billing update. Each recipient renews from their own start date.",
                           )
                         : translateUi(
                             "Calendar periods use UTC. New signups and organization or group joins can receive the current period's grant. Use Grant missing credits to recover missed grants. Each issuance gets a fresh total and service limits.",

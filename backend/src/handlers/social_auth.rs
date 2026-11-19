@@ -974,7 +974,7 @@ async fn finish_social_sign_in(
         )
         .await;
     }
-    match redirect_target {
+    let response = match redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
                 token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
@@ -1074,7 +1074,9 @@ async fn finish_social_sign_in(
             }
             build_mobile_auth_redirect(&tokens, redirect_target, provider, &user.id, secure, domain)
         }
-    }
+    }?;
+    crate::services::billing::schedules::eligibility::after_human_login(&state.db, &user.id).await;
+    Ok(response)
 }
 
 fn append_social_cleanup_cookies(
@@ -1621,6 +1623,48 @@ impl std::fmt::Debug for AppleCallbackForm {
 mod tests {
     use super::*;
     use bson::doc;
+
+    #[tokio::test]
+    async fn returning_social_browser_and_mobile_logins_load_scheduled_credits() {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("social_credit_loading").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let schedule = login_test_schedule(&db).await;
+        let tele = TelemetryContext::pre_auth(&HeaderMap::new());
+        for target in [
+            SocialRedirectTarget::Web {
+                frontend_url: "https://app.example.com".into(),
+                return_to: None,
+            },
+            SocialRedirectTarget::Mobile {
+                redirect_uri: "nyxid://auth/social/callback".into(),
+            },
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let user = crate::test_utils::test_user(&id, UserType::Person);
+            db.collection::<User>(USERS)
+                .insert_one(&user)
+                .await
+                .unwrap();
+            assert_login_credits(&db, &schedule, &id, false).await;
+            finish_social_sign_in(SocialSignIn {
+                state: &state,
+                user: &user,
+                provider: "github",
+                redirect_target: &target,
+                ip: None,
+                ua: None,
+                tele_social: &tele,
+            })
+            .await
+            .unwrap();
+            assert_login_credits(&db, &schedule, &id, true).await;
+        }
+    }
 
     #[tokio::test]
     async fn session_failure_never_refunds_a_committed_invitation() {

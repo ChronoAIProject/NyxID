@@ -500,19 +500,17 @@ pub async fn disburse_due(
                         // is deduplicated. Do not publish progress after losing ownership.
                         return Ok(());
                     }
-                    advance_cursor(
-                        db,
-                        &schedule.id,
-                        &period.id,
-                        &last_recipient,
-                        outcome.inserted_count,
-                        now,
-                    )
-                    .await?;
-                    period.cursor_user_id = Some(last_recipient);
+                    // The claim's count predates this walk's fresh inserts.
+                    // Another issuer may already have counted these inserts.
                     period.disbursed_count = period
                         .disbursed_count
                         .saturating_add(outcome.inserted_count as u64);
+                    let advanced =
+                        advance_cursor(db, &schedule.id, &period, &last_recipient, now).await?;
+                    if !advanced && outcome.inserted_count > 0 {
+                        progress::refresh_count(db, &period).await?;
+                    }
+                    period.cursor_user_id = Some(last_recipient);
                     remaining_budget -= grants.len();
                 }
                 Ok(())
@@ -790,17 +788,18 @@ pub(super) async fn insert_grant_chunk(
 async fn advance_cursor(
     db: &mongodb::Database,
     schedule_id: &str,
-    period_id: &str,
+    period: &CreditSchedulePeriod,
     cursor: &str,
-    inserted_count: usize,
     now: DateTime<Utc>,
-) -> AppResult<()> {
-    db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
+) -> AppResult<bool> {
+    let result = db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
-            doc! { "_id": period_id, "status": "disbursing" },
+            doc! { "_id": &period.id, "status": "disbursing" },
             doc! {
-                "$max": { "cursor_user_id": cursor },
-                "$inc": { "disbursed_count": inserted_count as i64 },
+                "$max": {
+                    "cursor_user_id": cursor,
+                    "disbursed_count": period.disbursed_count as i64,
+                },
                 "$set": {
                     "lease_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(PERIOD_LEASE_SECS)),
                     "updated_at": bson::DateTime::from_chrono(now),
@@ -812,16 +811,12 @@ async fn advance_cursor(
         .update_one(
             doc! { "_id": schedule_id },
             doc! { "$set": {
-                "last_period_start": period_id
-                    .rsplit_once(':')
-                    .and_then(|(_, millis)| millis.parse::<i64>().ok())
-                    .and_then(DateTime::from_timestamp_millis)
-                    .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
+                "last_period_start": bson::DateTime::from_chrono(period.period_start),
                 "last_disbursed_at": bson::DateTime::from_chrono(now),
             } },
         )
         .await?;
-    Ok(())
+    Ok(result.matched_count != 0)
 }
 
 async fn complete_period(
@@ -835,9 +830,8 @@ async fn complete_period(
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
             doc! { "_id": &period.id, "status": "disbursing" },
-            doc! { "$set": {
+            doc! { "$max": { "disbursed_count": disbursed_count }, "$set": {
                 "status": "complete",
-                "disbursed_count": disbursed_count,
                 "lease_expires_at": Bson::Null,
                 "updated_at": bson::DateTime::from_chrono(now),
                 "completed_at": bson::DateTime::from_chrono(now),
@@ -901,9 +895,8 @@ async fn abandon_elapsed_periods(
                     .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
                     .update_one(
                         doc! { "_id": &period.id, "status": "disbursing" },
-                        doc! { "$set": {
+                        doc! { "$max": { "disbursed_count": disbursed_count }, "$set": {
                             "status": "complete",
-                            "disbursed_count": disbursed_count,
                             "lease_expires_at": Bson::Null,
                             "updated_at": bson::DateTime::from_chrono(now),
                             "completed_at": bson::DateTime::from_chrono(now),

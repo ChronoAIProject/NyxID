@@ -372,15 +372,14 @@ async fn org_audit_request_command_counts() {
             "ORG_COMMANDS {action:?} total={} commands={commands:?}",
             commands.len()
         );
-        // Add and Join each read matching credit schedules once to grant the
-        // current period to a new member; no write occurs without schedules.
+        // Add and Join check live membership and read both schedule timings.
         let expected = match action {
-            Action::Add => 18,
+            Action::Add => 20,
             Action::Update => 18,
             Action::Revoke => 14,
             Action::Issue => 7,
             Action::Cancel => 6,
-            Action::Join => 15,
+            Action::Join => 17,
         };
         assert_eq!(commands.len(), expected, "{action:?}");
         assert_eq!(

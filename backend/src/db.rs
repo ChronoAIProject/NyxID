@@ -3774,6 +3774,10 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    credit_schedule_periods
+        .create_index(IndexModel::builder().keys(doc! { "period_end": 1 }).build())
+        .await?;
+
     db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()

@@ -12,6 +12,9 @@ use crate::models::credit_schedule_recipient::{
 use crate::models::org_membership::COLLECTION_NAME as MEMBERSHIPS;
 use crate::services::billing::reconcile::continue_reconcile;
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static STALL_BEFORE_POSTING: (); }
+
 pub const READINESS: &str = "billing:recipient-schedules-v1";
 
 fn recipient_filter(schedule_id: &str, user_id: &str) -> Document {
@@ -418,89 +421,131 @@ pub(super) async fn disburse(
             mark_ineligible(db, &recipient, now).await?;
             continue;
         }
-        let window = recipient_period(schedule.recurrence, recipient.anchor_at, now)?;
-        let expires_at = resolve_expiry(&schedule.expiry, &window, window.start);
-        if expires_at.is_some_and(|expiry| expiry <= now) {
-            // A short expiry can elapse before a delayed worker runs. Do not
-            // mint already-expired money; resume at this recipient's next cycle.
+        issue_recipient_window(db, schedule, &recipient, now, stats).await?;
+    }
+    Ok(())
+}
+
+/// Capture a committed signup or join even while paused. Login only writes
+/// when it discovers a missing or ineligible row.
+pub(super) async fn load_member(
+    db: &mongodb::Database,
+    schedule: &CreditSchedule,
+    user_id: &str,
+    existing: Option<CreditScheduleRecipient>,
+    joined: bool,
+    at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> AppResult<Option<CreditScheduleRecipient>> {
+    let row = match existing {
+        Some(row) if row.is_eligible && !joined => Some(row),
+        _ => {
+            enroll_member(db, schedule, user_id, at).await?;
+            if !schedule.is_active {
+                return Ok(None);
+            }
             db.collection::<CreditScheduleRecipient>(RECIPIENTS)
-                .update_one(
-                    doc! { "_id": &recipient.id },
-                    doc! { "$max": { "next_due_at": bson::DateTime::from_chrono(window.end) } },
-                )
-                .await?;
-            continue;
+                .find_one(recipient_filter(&schedule.id, user_id))
+                .await?
         }
-        let period = CreditSchedulePeriod {
-            id: period_id(&schedule.id, window.start),
-            schedule_id: schedule.id.clone(),
-            period_start: window.start,
-            period_end: window.end,
-            status: SchedulePeriodStatus::Disbursing,
-            amount: schedule.amount,
-            expires_at,
-            target_kind: schedule.target_kind,
-            target_user_ids: vec![],
-            target_org_ids: schedule.target_org_ids.clone(),
-            target_group_ids: schedule.target_group_ids.clone(),
-            scope: schedule.scope.clone(),
-            service_limits: schedule.service_limits.clone(),
-            reason: schedule.reason.clone(),
-            cursor_user_id: None,
-            disbursed_count: 0,
-            lease_expires_at: None,
-            created_at: now,
-            updated_at: now,
-            completed_at: None,
-        };
-        let grants = grants_for_recipients(
-            schedule,
-            &period,
-            vec![recipient.recipient_user_id.clone()],
-            now,
-        );
-        let outcome = insert_grant_chunk(db, &grants).await?;
-        #[cfg(test)]
-        tests::after_insert();
-        stats.grants_created += outcome.inserted_count;
-        stats.already_disbursed += outcome.duplicate_count;
-        // Journal the persisted snapshot, including after a concurrent insert or
-        // a crash before the posting. Never journal an edited candidate amount.
-        let grant = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .find_one(doc! { "_id": &grants[0].id })
-            .await?
-            .ok_or_else(|| AppError::Internal("Recipient credit grant disappeared".into()))?;
-        if grant.issued_ledgered_at.is_none()
-            && super::super::ledger::record_grant_event(
-                db,
-                BillingLedgerEventType::GrantIssued,
-                &grant.recipient_user_id,
-                &grant.id,
-                grant.amount,
-                None,
-                format!("grant-issued:{}", grant.id),
-            )
-            .await
-        {
-            super::super::grants::mark_issued_ledgered(db, &grant.id, now).await?;
-            stats.grants_ledgered += 1;
-        }
-        // A stale worker cannot move next_due backwards after a newer renewal.
+    };
+    Ok(row.filter(|row| schedule.is_active && row.is_eligible && row.next_due_at <= now))
+}
+
+pub(super) async fn issue_recipient_window(
+    db: &mongodb::Database,
+    schedule: &CreditSchedule,
+    recipient: &CreditScheduleRecipient,
+    now: DateTime<Utc>,
+    stats: &mut DisbursementStats,
+) -> AppResult<()> {
+    let window = recipient_period(schedule.recurrence, recipient.anchor_at, now)?;
+    let expires_at = resolve_expiry(&schedule.expiry, &window, window.start);
+    if expires_at.is_some_and(|expiry| expiry <= now) {
+        // A short expiry can elapse before a delayed worker runs. Do not
+        // mint already-expired money; resume at this recipient's next cycle.
         db.collection::<CreditScheduleRecipient>(RECIPIENTS)
             .update_one(
                 doc! { "_id": &recipient.id },
-                doc! { "$max": { "next_due_at": bson::DateTime::from_chrono(window.end) },
-                "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+                doc! { "$max": { "next_due_at": bson::DateTime::from_chrono(window.end) } },
             )
             .await?;
-        db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
-            .update_one(
-                doc! { "_id": &schedule.id },
-                doc! { "$max": { "last_disbursed_at": bson::DateTime::from_chrono(now) } },
-            )
-            .await?;
+        return Ok(());
     }
+    let period = CreditSchedulePeriod {
+        id: period_id(&schedule.id, window.start),
+        schedule_id: schedule.id.clone(),
+        period_start: window.start,
+        period_end: window.end,
+        status: SchedulePeriodStatus::Disbursing,
+        amount: schedule.amount,
+        expires_at,
+        target_kind: schedule.target_kind,
+        target_user_ids: vec![],
+        target_org_ids: schedule.target_org_ids.clone(),
+        target_group_ids: schedule.target_group_ids.clone(),
+        scope: schedule.scope.clone(),
+        service_limits: schedule.service_limits.clone(),
+        reason: schedule.reason.clone(),
+        cursor_user_id: None,
+        disbursed_count: 0,
+        lease_expires_at: None,
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    let grants = grants_for_recipients(
+        schedule,
+        &period,
+        vec![recipient.recipient_user_id.clone()],
+        now,
+    );
+    let outcome = insert_grant_chunk(db, &grants).await?;
+    #[cfg(test)]
+    {
+        tests::after_insert();
+        if STALL_BEFORE_POSTING.try_with(|_| ()).is_ok() {
+            std::future::pending::<()>().await;
+        }
+    }
+    stats.grants_created += outcome.inserted_count;
+    stats.already_disbursed += outcome.duplicate_count;
+    // Journal the persisted snapshot, including after a concurrent insert or
+    // a crash before the posting. Never journal an edited candidate amount.
+    let grant = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find_one(doc! { "_id": &grants[0].id })
+        .await?
+        .ok_or_else(|| AppError::Internal("Recipient credit grant disappeared".into()))?;
+    if grant.issued_ledgered_at.is_none()
+        && super::super::ledger::record_grant_event(
+            db,
+            BillingLedgerEventType::GrantIssued,
+            &grant.recipient_user_id,
+            &grant.id,
+            grant.amount,
+            None,
+            format!("grant-issued:{}", grant.id),
+        )
+        .await
+    {
+        super::super::grants::mark_issued_ledgered(db, &grant.id, now).await?;
+        stats.grants_ledgered += 1;
+    }
+    // A stale worker cannot move next_due backwards after a newer renewal.
+    db.collection::<CreditScheduleRecipient>(RECIPIENTS)
+        .update_one(
+            doc! { "_id": &recipient.id },
+            doc! { "$max": { "next_due_at": bson::DateTime::from_chrono(window.end) },
+            "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+        .update_one(
+            doc! { "_id": &schedule.id },
+            doc! { "$max": { "last_disbursed_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
     Ok(())
 }
 

@@ -354,13 +354,12 @@ async fn group_audit_request_command_counts() {
                 Action::Create => 8,
                 Action::Update => 10,
                 Action::Delete => 9,
-                Action::Add => 9,
+                Action::Add => 11,
                 Action::Remove => 6,
             },
             "{action:?}: {commands:?}"
         );
-        // The post-commit entitlement hook adds exactly one schedule read,
-        // without writes when this fixture has no credit schedules.
+        // The join checks live group membership and both schedule timings.
         assert_eq!(
             commands
                 .iter()
