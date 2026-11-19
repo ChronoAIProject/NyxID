@@ -603,6 +603,17 @@ pub(super) async fn replies_to_bot(
         .is_some())
 }
 
+pub(super) async fn gateway_replies_to_bot(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat_id: &str,
+    message_id: &str,
+) -> AppResult<bool> {
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    let reply_to = inbound_reply_to(state, row, message_id).await?;
+    replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await
+}
+
 /// The platform message a gateway event replies to, read from NyxID's own
 /// record of the inbound message (the gateway's activity does not say).
 pub(super) async fn inbound_reply_to(

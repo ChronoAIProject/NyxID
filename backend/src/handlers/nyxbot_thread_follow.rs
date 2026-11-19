@@ -102,9 +102,11 @@ pub(super) async fn inbound_impl(
     if payload["conversation"]["type"] != "private" {
         match &result {
             Ok(Some(outcome)) => {
-                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?
+                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?;
             }
-            Err(_) => admission_diagnostics::outcome(state, row, message, Err(())).await?,
+            Err(_) => {
+                admission_diagnostics::outcome(state, row, message, Err(())).await?;
+            }
             Ok(None) => {
                 crate::services::nyxbot_admission_service::selection(
                     &state.db, row, message, "legacy", None,
