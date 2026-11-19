@@ -328,7 +328,7 @@ async fn optional_auto_provision_requirements(
     use crate::models::{
         downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService},
         user_endpoint::{COLLECTION_NAME as ENDPOINTS, UserEndpoint},
-        user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as SERVICES, UserService},
+        user_service::{COLLECTION_NAME as SERVICES, UserService},
     };
 
     // Most explicit connections can be excluded from the resolved target alone.
@@ -345,7 +345,8 @@ async fn optional_auto_provision_requirements(
     else {
         return Ok(vec![]);
     };
-    if connection.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+    if connection.source.as_deref()
+        != Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
         || !connection.is_active
         || connection.deleted_at.is_some()
         || connection.auth_method != "none"

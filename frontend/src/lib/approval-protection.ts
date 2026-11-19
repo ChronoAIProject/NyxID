@@ -96,7 +96,7 @@ export function withActionSetting(
   setting: ActionSetting,
 ): ProtectionDraft {
   const overrides = { ...draft.overrides };
-  if (sameSetting(setting, baseSetting(draft, actionVerb(action.method)))) {
+  if (setting.choice !== "ask" && sameSetting(setting, baseSetting(draft, actionVerb(action.method)))) {
     delete overrides[action.id];
   } else {
     overrides[action.id] = setting;
@@ -351,7 +351,11 @@ function overrideRules(
   actions: readonly ProtectionAction[],
 ): ApprovalRule[] {
   const rules: ApprovalRule[] = [...draft.preserved];
-  for (const action of actions) {
+  const ordered = [...actions].sort((a, b) => {
+    const left = actionPattern(a.path), right = actionPattern(b.path);
+    return (left.match(/(?<!\\)\*/g)?.length ?? 0) - (right.match(/(?<!\\)\*/g)?.length ?? 0) || right.length - left.length;
+  });
+  for (const action of ordered) {
     const setting = draft.overrides[action.id];
     if (setting) rules.push(actionRule(action, setting));
   }
@@ -447,4 +451,15 @@ export function summarizeProtection(draft: ProtectionDraft): ProtectionSummary {
     block: settings.filter((effect) => effect === "deny").length,
     allow: settings.filter((effect) => effect === "auto_allow").length,
   };
+}
+
+/** A guided edit is permitted only for policies this compiler can reproduce
+ * exactly, with no carried-over advanced rules or inferred fallback changes. */
+export function isWizardPolicy(config: ServiceApprovalConfigItem, actions: readonly ProtectionAction[]): boolean {
+  if (config.disabled) return false;
+  const parsed = parsePolicy(config, actions);
+  if ([...(parsed.all ? [parsed.all] : []), ...parsed.keyed].some((draft) => draft.preserved.length > 0)) return false;
+  const built = buildPolicy(parsed, actions);
+  const rule = (item: ApprovalRule) => ({ methods: item.methods, resource_pattern: item.resource_pattern, verbs: item.verbs, effect: item.effect, mode: item.mode, api_key_ids: item.api_key_ids ?? [], mandatory_review: item.mandatory_review ?? false });
+  return config.approval_required === built.approvalRequired && config.approval_mode === built.approvalMode && config.default_effect === (built.defaultEffect ?? null) && JSON.stringify(config.rules.map(rule)) === JSON.stringify(built.rules.map(rule));
 }

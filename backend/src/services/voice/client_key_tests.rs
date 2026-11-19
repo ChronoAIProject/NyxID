@@ -1973,14 +1973,14 @@ async fn device_voice_key_rules_apply_at_ingress_and_ongoing_checks() {
                     "approval_required":false,"rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":if limited {vec![a.api_key_id.clone().unwrap()]} else {vec![]}}],
                     "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
                 for (auth,listed) in [(&a,true),(&b,false)] {
-                    let denied=effect=="deny" && (listed || !limited);
+                    let denied=(effect=="deny" || limited) && (listed || !limited);
                     let ingress=keys::authorize(&f.state.db,auth,&f.row.id).await;
                     assert_eq!(ingress.is_err(),denied,"ingress/{effect}/{listed}/{limited}");
                     for (method,path,ws) in [("POST","/voice/sessions",true),("POST","/voice/sessions/call/announcements",false)] {
                         assert_eq!(super::access::policy(&f.state.db,auth,&connection,method,path,ws).await.is_err(),denied,"ongoing/{effect}/{listed}/{limited}");
                     }
                 }
-                assert_eq!(keys::revalidate(&f.state.db,&call).await.is_err(),effect=="deny");
+                assert_eq!(keys::revalidate(&f.state.db,&call).await.is_err(),effect=="deny" || limited);
             }
         }
         configs.delete_many(doc! {}).await.unwrap();

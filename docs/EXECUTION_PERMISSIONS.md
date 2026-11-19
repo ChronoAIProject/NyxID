@@ -49,7 +49,7 @@ control. Nothing in this release changes those gates.
 | Floor | May v1 permission satisfy it? |
 | --- | --- |
 | Access-mode risk prompts (Auto/Ask) | Yes, within the permission's complete scope. |
-| Personal service approval layer (Grant/PerRequest) | Yes, only for the acting person's own connection. |
+| Personal service approval layer (Grant/PerRequest) | Yes, only for the acting person's own connection; an explicit key-matched per-request Ask requires a fresh decision and cannot be covered. |
 | Shared-agent connection consent | Yes, only that exact actor in the shared lane, their connection and bound agent behavior. |
 | Webhook/automation confirmation (untrusted input) | **No.** |
 | `machine_confirm` | **No.** |

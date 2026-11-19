@@ -580,7 +580,12 @@ async fn authorize_operation(
             Some("api_key"),
             auth.api_key_id.as_deref().unwrap_or_default(),
             false,
-            selected.source.as_deref() == Some("auto_provision"),
+            matches!(
+                selected.source.as_deref(),
+                Some(
+                    "auto_provision" | crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE
+                )
+            ),
             auth.assistant_chat.as_deref(),
             auth.api_key_id.as_deref(),
         )

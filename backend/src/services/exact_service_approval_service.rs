@@ -337,6 +337,8 @@ pub async fn create_request(
         pending.resolution.grant_scope.clone(),
     )
     .with_exact_service(binding);
+    operation.fresh_decision = pending.resolution.fresh_decision;
+    operation.caller_api_key_id = caller.api_key_id.clone();
     operation.assistant_group = super::org_group_service::approval_binding(
         &state.db,
         caller.assistant_group_id.as_deref(),
@@ -2261,6 +2263,7 @@ mod tests {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
@@ -2314,6 +2317,10 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            approval_protocol: None,
+            grant_expiry_days_snapshot: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -2372,6 +2379,9 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                fresh_decision: false,
+                caller_api_key_id: None,
+                protocol: None,
                 approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),

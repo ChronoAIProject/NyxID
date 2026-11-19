@@ -40,18 +40,22 @@ pub async fn require_stream_policy(
         .await?;
     // Shared agents have a personal specialist owner and a person actor;
     // the same caller key selects both principals' personal protections.
-    if configs.iter().any(|config| {
-        config.rules.iter().any(|rule| {
-            super::approval_policy::rule_applies_to_key(rule, api_key_id)
-                && rule.effect != ApprovalEffect::AutoAllow
-        }) || config
-            .default_effect
-            .as_ref()
-            .is_some_and(|effect| *effect != ApprovalEffect::AutoAllow)
-            || config.default_effect.is_none()
-                && config.rules.is_empty()
-                && config.approval_required
-    }) {
+    if configs
+        .iter()
+        .filter(|config| !config.disabled)
+        .any(|config| {
+            config.rules.iter().any(|rule| {
+                super::approval_policy::rule_applies_to_key(rule, api_key_id)
+                    && rule.effect != ApprovalEffect::AutoAllow
+            }) || config
+                .default_effect
+                .as_ref()
+                .is_some_and(|effect| *effect != ApprovalEffect::AutoAllow)
+                || config.default_effect.is_none()
+                    && config.rules.is_empty()
+                    && config.approval_required
+        })
+    {
         return Err(refused());
     }
     // A global approval requirement applies to all later writes as well. Use
@@ -64,7 +68,12 @@ pub async fn require_stream_policy(
             principal,
             &connection.id,
             &descriptor,
-            connection.source.as_deref() == Some("auto_provision"),
+            matches!(
+                connection.source.as_deref(),
+                Some(
+                    "auto_provision" | crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE
+                )
+            ),
             api_key_id,
         )
         .await?;

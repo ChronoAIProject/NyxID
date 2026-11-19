@@ -1486,6 +1486,7 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
         ApprovalOutcome::NeedsApproval(PendingApproval {
             options: Default::default(),
             resolution: ApprovalResolution {
+                fresh_decision: false,
                 required: true,
                 mode: ApprovalMode::PerRequest,
                 effect: ApprovalEffect::RequireApproval,
@@ -1507,7 +1508,15 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
         ),
         ApprovalOutcome::Allowed { required: false }
     ));
-    for outcome in [pending(&f.owner, true), pending("another-person", false)] {
+    let mut fresh = pending(&f.owner, false);
+    if let ApprovalOutcome::NeedsApproval(pending) = &mut fresh {
+        pending.resolution.fresh_decision = true;
+    }
+    for outcome in [
+        pending(&f.owner, true),
+        pending("another-person", false),
+        fresh,
+    ] {
         assert!(matches!(
             approval_outcome(Some(&context), &f.owner, Some(&f.connection), outcome),
             ApprovalOutcome::NeedsApproval(_)

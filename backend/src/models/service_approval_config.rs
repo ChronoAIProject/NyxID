@@ -123,6 +123,9 @@ fn is_false(value: &bool) -> bool {
 /// services; this explicit configuration remains authoritative in both cases.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceApprovalConfig {
+    /// Temporarily suspend this personal override without rewriting its rules.
+    #[serde(default)]
+    pub disabled: bool,
     /// UUID v4 string
     #[serde(rename = "_id")]
     pub id: String,
@@ -176,6 +179,7 @@ mod tests {
 
     fn make_config() -> ServiceApprovalConfig {
         ServiceApprovalConfig {
+            disabled: false,
             grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

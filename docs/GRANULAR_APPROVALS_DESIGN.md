@@ -7,6 +7,51 @@ Author: design exploration, 2026-05-29
 
 The original proposal is retained below as dated design history, including its old call-site table and decisions. It is not a description of current enforcement. MCP now has preparation and approval enforcement, and exact grants bind live execution authority. Current details are defined by `approval_service`, `execution_authority` and MCP preparation/redeem code. This status does not assert every original proposal item is shipped or enabled; feature gates and rollout requirements remain applicable.
 
+## Personal Rules editing and durability
+
+NyxBot Rules lists stored personal `ServiceApprovalConfig` policies directly.
+There is no migration or recompile on opening the page. The exact editor preserves
+ordered rules, SSH methods and resource globs, rule modes, key membership,
+`approval_required`, a nullable unmatched fallback, and nullable per-policy days.
+Disable suspends the personal override without rewriting it; all evaluation
+readers then use their normal account/global fallback. Removal is available for
+orphan policies and stale key groups. Removing the final key of a scoped rule
+removes that rule rather than widening it to all callers. Organization policy
+storage and its Studio editor retain their separate workflow.
+
+Guided editing is offered only after a complete round-trip proof, including order,
+fallback and modes, and only when no carried-over advanced rules remain. A guided
+change cannot overwrite an unrecognized stored policy. Published literal paths
+precede overlapping parameter paths; an explicit Ask is retained even when the
+method heuristic agrees with the base, because trusted server metadata may
+classify a POST as read-only.
+
+Policy PUT accepts `expected_revision`, returned by list/get responses. An empty
+revision means the editor observed absence. Stale saves and deletes return 409;
+an edit never upserts a deleted record. Rules and days validate before side
+effects and commit with reconciliation and an audit intent in one transaction.
+An identical save performs no write, reconciliation or audit, preserving legacy
+null/absent days, pending requests and grant identities. Omission preserves
+`default_effect` and `grant_expiry_days`; explicit null clears either. Existing
+grants keep their expiry when the policy duration changes.
+
+New grant requests freeze the issuing policy/account duration, caller key and
+protocol alongside the exact method/resource/semantic verb. Later mobile/web
+decisions use that snapshot; mobile omits its account-wide duration. An explicit
+shorter API duration remains valid; a policy-specific duration caps longer values.
+Account defaults freeze the omitted-duration choice without removing deliberate
+custom API durations. Older requests retain the legacy fallback when no snapshot
+exists. Reconciliation does not infer a key from historical requester IDs or
+reclassify saved MCP/SSH operations as HTTP.
+
+An explicit key-matched per-request Ask requires a fresh human decision. Full
+access, a saved execution permission and a scheduled durable grant cannot satisfy
+it. Paths without an approval interaction refuse it. Browser Session precedence
+and explicit Deny precedence are unchanged. **The live assistant turn's own
+stateless model call retains its existing personal approval exemption**, including
+key-specific Ask; both editors state this exception. Tool effects and ordinary
+model calls do not acquire that exemption.
+
 ## Current global default contract
 
 The unset global preference is **Writes only (default)**. **All requests** is

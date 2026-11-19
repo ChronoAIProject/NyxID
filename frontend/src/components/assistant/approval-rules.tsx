@@ -1,4 +1,5 @@
-import { useId, useMemo, useState } from "react";
+import { StoredApprovalPolicyDialog } from "./stored-approval-policy-dialog";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight, Search, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -39,9 +40,9 @@ import { SectionInfo } from "@/components/ui/section-info";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StepDots } from "@/components/ui/step-dots";
 import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ServiceIcon } from "@/components/service-icon";
 import {
+  useApprovalAuthoringCapabilities,
   useDeleteServiceApprovalConfig,
   useApprovalGrants,
   useNotificationSettings,
@@ -59,10 +60,10 @@ import {
   buildPolicy,
   effectiveSetting,
   isEmptyPolicy,
+  isWizardPolicy,
   newProtection,
   parsePolicy,
   sameScope,
-  summarizeProtection,
   withActionSetting,
   withBase,
   withKeys,
@@ -97,9 +98,13 @@ interface ProtectionScope {
   readonly keyIds: readonly string[];
 }
 
-function keyNames(keyIds: readonly string[], keys: readonly ApiKey[]): readonly string[] {
+function keyNames(
+  keyIds: readonly string[],
+  keys: readonly ApiKey[],
+): readonly string[] {
   return keyIds.map(
-    (id) => keys.find((key) => key.id === id)?.name ?? translateUi("Deleted key"),
+    (id) =>
+      keys.find((key) => key.id === id)?.name ?? translateUi("Deleted key"),
   );
 }
 
@@ -116,17 +121,20 @@ const BASE_OPTIONS: readonly {
   {
     value: "ask_changes",
     title: "Changes only",
-    detail: "Reads run without asking. Anything that changes or deletes needs your approval.",
+    detail:
+      "Reads run without asking. Anything that changes or deletes needs your approval.",
   },
   {
     value: "ask_all",
     title: "Every request",
-    detail: "Every request to this service needs your approval, including reads.",
+    detail:
+      "Every request to this service needs your approval, including reads.",
   },
   {
     value: "allow_all",
     title: "Only actions I pick",
-    detail: "Everything runs without asking, except the actions you set under Customise actions.",
+    detail:
+      "Everything runs without asking, except the actions you set under Customise actions.",
   },
 ];
 
@@ -164,19 +172,42 @@ const ACTION_OPTIONS: readonly {
   readonly hint: string;
   readonly setting: ActionSetting;
 }[] = [
-  { value: "allow", label: "Allow", hint: "Runs without asking", setting: { choice: "allow", everyTime: true } },
-  { value: "ask_every", label: "Ask", hint: "Asks you every time", setting: { choice: "ask", everyTime: true } },
-  { value: "ask_once", label: "Once", hint: "Asks once, then remembers your approval", setting: { choice: "ask", everyTime: false } },
-  { value: "block", label: "Block", hint: "Always refused", setting: { choice: "block", everyTime: true } },
+  {
+    value: "allow",
+    label: "Allow",
+    hint: "Runs without asking",
+    setting: { choice: "allow", everyTime: true },
+  },
+  {
+    value: "ask_every",
+    label: "Ask",
+    hint: "Asks you every time",
+    setting: { choice: "ask", everyTime: true },
+  },
+  {
+    value: "ask_once",
+    label: "Once",
+    hint: "Asks once, then remembers your approval",
+    setting: { choice: "ask", everyTime: false },
+  },
+  {
+    value: "block",
+    label: "Block",
+    hint: "Always refused",
+    setting: { choice: "block", everyTime: true },
+  },
 ];
 
 function actionOption(setting: ActionSetting): ActionOption {
-  if (setting.choice === "ask") return setting.everyTime ? "ask_every" : "ask_once";
+  if (setting.choice === "ask")
+    return setting.everyTime ? "ask_every" : "ask_once";
   return setting.choice;
 }
 
 function errorText(error: unknown, fallback: string): string {
-  return translateErrorMessage(error instanceof ApiError ? error.message : fallback);
+  return translateErrorMessage(
+    error instanceof ApiError ? error.message : fallback,
+  );
 }
 
 /** Catalog operation names are identifiers (`create_issue`); show them as words. */
@@ -199,6 +230,39 @@ function whereSummary(where: WhereChoice): string {
 }
 
 /** The filled or empty circle that marks a card as one choice among several. */
+function moveRadio(event: KeyboardEvent<HTMLElement>) {
+  if (
+    ![
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Home",
+      "End",
+    ].includes(event.key)
+  )
+    return;
+  const options = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>(
+      '[role="radio"]:not(:disabled)',
+    ),
+  );
+  const current = options.indexOf(event.target as HTMLButtonElement);
+  if (!options.length || current < 0) return;
+  event.preventDefault();
+  const next =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? options.length - 1
+        : (current +
+            (["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1) +
+            options.length) %
+          options.length;
+  options[next]?.focus();
+  options[next]?.click();
+}
+
 function RadioDot({ checked }: { readonly checked: boolean }) {
   return (
     <span
@@ -255,6 +319,7 @@ function ActionChoiceGroup({
   return (
     <div
       role="radiogroup"
+      onKeyDown={moveRadio}
       aria-label={label}
       className="inline-flex shrink-0 overflow-hidden rounded-md border border-hairline"
     >
@@ -264,6 +329,7 @@ function ActionChoiceGroup({
           type="button"
           role="radio"
           aria-checked={current === option.value}
+          tabIndex={current === option.value ? 0 : -1}
           title={translateUi(option.hint)}
           disabled={disabledOptions.includes(option.value)}
           onClick={() => onChange(option.setting)}
@@ -297,15 +363,27 @@ function WhereControls({
     <GroupedList>
       <GroupedRow
         title={translateUi("This Approvals page")}
-        description={translateUi("Always on, so a request can always be answered.")}
-        accessory={<Switch checked disabled aria-label={translateUi("This Approvals page")} />}
+        description={translateUi(
+          "Always on, so a request can always be answered.",
+        )}
+        accessory={
+          <Switch
+            checked
+            disabled
+            aria-label={translateUi("This Approvals page")}
+          />
+        }
       />
       <GroupedRow
         title={translateUi("Mobile app")}
         description={
           hasPhone
-            ? translateUi("Push notification to your phone, then Approve or Reject in the app.")
-            : translateUi("No phone is registered yet. Install the NyxID app and sign in to receive requests.")
+            ? translateUi(
+                "Push notification to your phone, then Approve or Reject in the app.",
+              )
+            : translateUi(
+                "No phone is registered yet. Install the NyxID app and sign in to receive requests.",
+              )
         }
         accessory={
           hasPhone ? (
@@ -317,7 +395,11 @@ function WhereControls({
             />
           ) : (
             <Button asChild variant="outline" size="sm">
-              <a href={MOBILE_APP_LINK} target="_blank" rel="noopener noreferrer">
+              <a
+                href={MOBILE_APP_LINK}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 {translateUi("Get the app")}
               </a>
             </Button>
@@ -328,7 +410,9 @@ function WhereControls({
         title={translateUi("Telegram")}
         description={
           settings.telegram_connected
-            ? translateUi("Approve and Reject buttons in your linked Telegram chat.")
+            ? translateUi(
+                "Approve and Reject buttons in your linked Telegram chat.",
+              )
             : translateUi("Telegram is not linked to your account.")
         }
         accessory={
@@ -355,7 +439,9 @@ function ProtectionSetupDialog({
   initial,
   settings,
   onClose,
+  onEditStored,
 }: {
+  readonly onEditStored: (config: ServiceApprovalConfigItem) => void;
   readonly services: readonly ProtectableService[];
   /** The protection to edit; null starts a new one. */
   readonly initial: ProtectionScope | null;
@@ -372,15 +458,24 @@ function ProtectionSetupDialog({
   const keys = (apiKeys.data ?? []).filter((key) => key.is_active);
   const [limitChosen, setLimitChosen] = useState<boolean | null>(null);
   // Each protection keeps its own number of days; a new one starts from the account setting.
-  const initialDays = initial?.service.config?.grant_expiry_days ?? settings.grant_expiry_days;
+  const initialDays =
+    initial?.service.config?.grant_expiry_days ?? settings.grant_expiry_days;
   const [rememberDays, setRememberDays] = useState(initialDays);
-  const [customDays, setCustomDays] = useState(!DAY_PRESETS.includes(initialDays));
-  const [service, setService] = useState<ProtectableService | null>(initial?.service ?? null);
+  const [customDays, setCustomDays] = useState(
+    !DAY_PRESETS.includes(initialDays),
+  );
+  const [service, setService] = useState<ProtectableService | null>(
+    initial?.service ?? null,
+  );
   const [confirmingOverride, setConfirmingOverride] = useState(false);
   const [serviceQuery, setServiceQuery] = useState("");
   const [actionQuery, setActionQuery] = useState("");
   const [customising, setCustomising] = useState(false);
   const [edited, setEdited] = useState<ProtectionDraft | null>(null);
+  const [scopeDrafts, setScopeDrafts] = useState<{
+    all?: ProtectionDraft;
+    specific?: ProtectionDraft;
+  }>({});
   const [where, setWhere] = useState<WhereChoice>({
     push: settings.push_enabled,
     telegram: settings.telegram_enabled,
@@ -415,7 +510,9 @@ function ProtectionSetupDialog({
     if (initial) {
       return (
         (initial.keyIds.length
-          ? policy.keyed.find((entry) => sameScope(entry.keyIds, initial.keyIds))
+          ? policy.keyed.find((entry) =>
+              sameScope(entry.keyIds, initial.keyIds),
+            )
           : policy.all) ?? newProtection(initial.keyIds)
       );
     }
@@ -429,16 +526,43 @@ function ProtectionSetupDialog({
   // Keys that already have their own protection for this service.
   const takenKeyIds = others.keyed.flatMap((entry) => entry.keyIds);
   // A key's own rules win over the All keys rules; say so before saving both.
-  const overridesGeneral = nextPolicy.all !== null && nextPolicy.keyed.length > 0;
+  const overridesGeneral =
+    nextPolicy.all !== null && nextPolicy.keyed.length > 0;
   const replacingGeneral = !editing && !limited && policy.all !== null;
   // Shown always, so the setting is never a surprise; locked when it cannot apply.
   const howOftenLocked = draft.keyIds.length > 0 || draft.base === "allow_all";
   const days = Math.min(365, Math.max(1, Math.round(rememberDays) || 1));
-  const oftenValue = !draft.remember || howOftenLocked ? "every_time" : customDays ? "custom" : String(days);
-  const actionsLoading = Boolean(service?.catalogServiceId) && endpoints.isLoading;
+  const oftenValue =
+    !draft.remember || howOftenLocked
+      ? "every_time"
+      : customDays
+        ? "custom"
+        : String(days);
+  const actionsLoading =
+    Boolean(service?.catalogServiceId) && endpoints.isLoading;
+  const safeEdit =
+    !service?.config ||
+    (!actionsLoading &&
+      !endpoints.isError &&
+      isWizardPolicy(service.config, actions));
 
+  const storedEditControl =
+    service?.config && !safeEdit && !actionsLoading ? (
+      <div className="space-y-2">
+        <p className="type-secondary text-text-tertiary">
+          {translateUi(
+            "This saved policy uses ordered rules. Edit the stored policy to preserve its meaning.",
+          )}
+        </p>
+        <Button variant="outline" onClick={() => onEditStored(service.config!)}>
+          {translateUi("Edit stored policy")}
+        </Button>
+      </div>
+    ) : null;
   const visibleServices = services.filter((entry) =>
-    `${entry.label} ${entry.detail}`.toLowerCase().includes(serviceQuery.trim().toLowerCase()),
+    `${entry.label} ${entry.detail}`
+      .toLowerCase()
+      .includes(serviceQuery.trim().toLowerCase()),
   );
   const visibleActions = actions.filter((action) =>
     `${action.name} ${action.method} ${action.path}`
@@ -452,28 +576,39 @@ function ProtectionSetupDialog({
   function chooseService(entry: ProtectableService) {
     setService(entry);
     setEdited(null);
+    setScopeDrafts({});
     setActionQuery("");
     setCustomising(false);
     setLimitChosen(null);
     setConfirmingOverride(false);
-    const entryDays = entry.config?.grant_expiry_days ?? settings.grant_expiry_days;
+    const entryDays =
+      entry.config?.grant_expiry_days ?? settings.grant_expiry_days;
     setRememberDays(entryDays);
     setCustomDays(!DAY_PRESETS.includes(entryDays));
   }
 
   async function turnOn() {
-    if (!service) return;
+    if (!service || !safeEdit) return;
     setConfirmingOverride(false);
     try {
       await save.mutateAsync({
         serviceId: service.id,
+        expectedRevision: service.config?.revision ?? "",
         approvalRequired: payload.approvalRequired,
         approvalMode: payload.approvalMode,
         rules: payload.rules,
         defaultEffect: payload.defaultEffect,
-        ...(draft.keyIds.length === 0 && draft.remember ? { grantExpiryDays: days } : {}),
+        ...(draft.keyIds.length === 0 &&
+        draft.remember &&
+        days !==
+          (service.config?.grant_expiry_days ?? settings.grant_expiry_days)
+          ? { grantExpiryDays: days }
+          : {}),
       });
-      if (where.push !== settings.push_enabled || where.telegram !== settings.telegram_enabled) {
+      if (
+        where.push !== settings.push_enabled ||
+        where.telegram !== settings.telegram_enabled
+      ) {
         await updateSettings.mutateAsync({
           push_enabled: where.push,
           telegram_enabled: where.telegram,
@@ -481,12 +616,20 @@ function ProtectionSetupDialog({
       }
       toast.success(
         editing
-          ? translateUi("Protection updated for {{service}}", { service: service.label })
-          : translateUi("Protection is on for {{service}}", { service: service.label }),
+          ? translateUi("Protection updated for {{service}}", {
+              service: service.label,
+            })
+          : translateUi("Protection is on for {{service}}", {
+              service: service.label,
+            }),
       );
       onClose();
     } catch (error) {
-      toast.error(errorText(error, "Failed to save the protection"));
+      toast.error(
+        translateErrorMessage(
+          errorText(error, "Failed to save the protection"),
+        ),
+      );
     }
   }
 
@@ -507,10 +650,18 @@ function ProtectionSetupDialog({
           defaultEffect: remaining.defaultEffect,
         });
       }
-      toast.success(translateUi("Protection removed from {{service}}", { service: service.label }));
+      toast.success(
+        translateUi("Protection removed from {{service}}", {
+          service: service.label,
+        }),
+      );
       onClose();
     } catch (error) {
-      toast.error(errorText(error, "Failed to remove the protection"));
+      toast.error(
+        translateErrorMessage(
+          errorText(error, "Failed to remove the protection"),
+        ),
+      );
     }
   }
 
@@ -525,7 +676,9 @@ function ProtectionSetupDialog({
       service: service?.label ?? "",
     }),
     translateUi("Where should we ask you?"),
-    editing ? translateUi("Review and save") : translateUi("Review and turn on"),
+    editing
+      ? translateUi("Review and save")
+      : translateUi("Review and turn on"),
   ];
 
   return (
@@ -536,22 +689,29 @@ function ProtectionSetupDialog({
             label={translateUi("Setup steps")}
             steps={STEPS.map((name) => translateUi(STEP_NAMES[name]))}
             index={step - 1}
-            canSelect={(position) => position < step - 1 && !(editing && position === 0)}
+            canSelect={(position) =>
+              position < step - 1 && !(editing && position === 0)
+            }
             onSelect={(position) => setStep(position + 1)}
             showCaption
             className="-mx-0.75"
           />
           <DialogTitle>
             {at === "actions" && customising
-              ? translateUi("Customise {{service}} actions", { service: service?.label ?? "" })
+              ? translateUi("Customise {{service}} actions", {
+                  service: service?.label ?? "",
+                })
               : titles[step - 1]}
           </DialogTitle>
           {editing ? (
             <DialogDescription>
-              {translateUi("Editing the {{service}} protection for {{scope}}.", {
-                service: service?.label ?? "",
-                scope: scopeLabel,
-              })}
+              {translateUi(
+                "Editing the {{service}} protection for {{scope}}.",
+                {
+                  service: service?.label ?? "",
+                  scope: scopeLabel,
+                },
+              )}
             </DialogDescription>
           ) : (
             <DialogDescription className="sr-only">
@@ -561,6 +721,8 @@ function ProtectionSetupDialog({
         </DialogHeader>
 
         <DialogBody className="space-y-4 py-4">
+          {storedEditControl}
+
           {at === "service" ? (
             <>
               <SearchField
@@ -569,13 +731,24 @@ function ProtectionSetupDialog({
                 onChange={setServiceQuery}
               />
               {visibleServices.length ? (
-                <div role="radiogroup" aria-label={titles[0]} className="space-y-2">
+                <div
+                  role="radiogroup"
+                  onKeyDown={moveRadio}
+                  aria-label={titles[0]}
+                  className="space-y-2"
+                >
                   {visibleServices.map((entry) => (
                     <button
                       key={entry.id}
                       type="button"
                       role="radio"
                       aria-checked={service?.id === entry.id}
+                      tabIndex={
+                        service?.id === entry.id ||
+                        (!service && entry === visibleServices[0])
+                          ? 0
+                          : -1
+                      }
                       onClick={() => chooseService(entry)}
                       className={cn(
                         "flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -587,11 +760,17 @@ function ProtectionSetupDialog({
                       <RadioDot checked={service?.id === entry.id} />
                       <ServiceIcon slug={entry.slug} size="sm" />
                       <span className="min-w-0 flex-1">
-                        <span className="block type-row-title text-foreground">{entry.label}</span>
-                        <span className="block type-secondary text-text-tertiary">{entry.detail}</span>
+                        <span className="block type-row-title text-foreground">
+                          {entry.label}
+                        </span>
+                        <span className="block type-secondary text-text-tertiary">
+                          {entry.detail}
+                        </span>
                       </span>
                       {entry.config ? (
-                        <Badge variant="secondary">{translateUi("Protected")}</Badge>
+                        <Badge variant="secondary">
+                          {translateUi("Protected")}
+                        </Badge>
                       ) : null}
                     </button>
                   ))}
@@ -600,7 +779,9 @@ function ProtectionSetupDialog({
                 <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center type-secondary text-text-tertiary">
                   {services.length
                     ? translateUi("No connected service matches your search.")
-                    : translateUi("Connect a service first, then come back to protect it.")}
+                    : translateUi(
+                        "Connect a service first, then come back to protect it.",
+                      )}
                 </p>
               )}
             </>
@@ -611,17 +792,26 @@ function ProtectionSetupDialog({
               <p className="type-secondary text-text-tertiary">
                 {translateUi("Choose one.")}
               </p>
-              <div role="radiogroup" aria-label={titles[1]} className="space-y-2">
+              <div
+                role="radiogroup"
+                onKeyDown={moveRadio}
+                aria-label={titles[1]}
+                className="space-y-2"
+              >
                 {[
                   {
                     limit: false,
                     title: translateUi("All keys"),
-                    detail: translateUi("Every agent key and app that uses this service follows these rules."),
+                    detail: translateUi(
+                      "Every agent key and app that uses this service follows these rules.",
+                    ),
                   },
                   {
                     limit: true,
                     title: translateUi("Specific agent keys"),
-                    detail: translateUi("Only the keys you pick follow these rules, and they ignore any All keys rules for this service."),
+                    detail: translateUi(
+                      "Only the keys you pick follow these rules, and they ignore any All keys rules for this service.",
+                    ),
                   },
                 ].map((option) => {
                   const selected = limited === option.limit;
@@ -630,19 +820,33 @@ function ProtectionSetupDialog({
                       key={String(option.limit)}
                       className={cn(
                         "rounded-lg border",
-                        selected ? "border-primary bg-overlay" : "border-hairline",
+                        selected
+                          ? "border-primary bg-overlay"
+                          : "border-hairline",
                       )}
                     >
                       <button
                         type="button"
                         role="radio"
                         aria-checked={selected}
+                        tabIndex={
+                          selected || (limitChosen === null && !option.limit)
+                            ? 0
+                            : -1
+                        }
                         // An existing protection keeps its kind; only its keys can change.
                         disabled={editing && !selected}
                         onClick={() => {
                           if (selected) return;
+                          setScopeDrafts((current) => ({
+                            ...current,
+                            [limited ? "specific" : "all"]: draft,
+                          }));
                           setLimitChosen(option.limit);
-                          setEdited(option.limit ? newProtection() : null);
+                          setEdited(
+                            scopeDrafts[option.limit ? "specific" : "all"] ??
+                              withKeys(draft, [], actions),
+                          );
                         }}
                         className={cn(
                           "flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
@@ -653,8 +857,12 @@ function ProtectionSetupDialog({
                           <RadioDot checked={selected} />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span className="block type-row-title text-foreground">{option.title}</span>
-                          <span className="block type-secondary text-text-tertiary">{option.detail}</span>
+                          <span className="block type-row-title text-foreground">
+                            {option.title}
+                          </span>
+                          <span className="block type-secondary text-text-tertiary">
+                            {option.detail}
+                          </span>
                         </span>
                       </button>
                       {option.limit && selected ? (
@@ -664,6 +872,15 @@ function ProtectionSetupDialog({
                           </p>
                           {apiKeys.isLoading ? (
                             <Skeleton className="h-24 w-full" />
+                          ) : apiKeys.isError ? (
+                            <p
+                              role="alert"
+                              className="type-secondary text-destructive"
+                            >
+                              {translateUi(
+                                "Could not load agent keys. Retry before choosing keys.",
+                              )}
+                            </p>
                           ) : keys.length ? (
                             <div className="space-y-2">
                               <ul className="divide-y divide-border/50 rounded-lg border border-border/50">
@@ -673,33 +890,47 @@ function ProtectionSetupDialog({
                                   return (
                                     <li key={key.id}>
                                       <Label
-                              className={cn(
-                                "flex items-center gap-3 px-3 py-2",
-                                taken ? "cursor-not-allowed opacity-60" : "cursor-pointer",
-                              )}
-                            >
+                                        className={cn(
+                                          "flex items-center gap-3 px-3 py-2",
+                                          taken
+                                            ? "cursor-not-allowed opacity-60"
+                                            : "cursor-pointer",
+                                        )}
+                                      >
                                         <Checkbox
                                           checked={checked}
-                                          disabled={taken}
+                                          disabled={
+                                            taken ||
+                                            (!checked &&
+                                              draft.keyIds.length >= 20)
+                                          }
                                           onCheckedChange={(next) =>
                                             setEdited(
                                               withKeys(
                                                 draft,
                                                 next === true
                                                   ? [...draft.keyIds, key.id]
-                                                  : draft.keyIds.filter((id) => id !== key.id),
+                                                  : draft.keyIds.filter(
+                                                      (id) => id !== key.id,
+                                                    ),
                                                 actions,
                                               ),
                                             )
                                           }
                                         />
                                         <span className="min-w-0 flex-1">
-                                          <span className="block break-words text-foreground">{key.name}</span>
+                                          <span className="block break-words text-foreground">
+                                            {key.name}
+                                          </span>
                                           <FieldHelp>
                                             {[
                                               key.platform,
                                               key.key_prefix,
-                                              taken ? translateUi("already has its own protection for this service") : null,
+                                              taken
+                                                ? translateUi(
+                                                    "already has its own protection for this service",
+                                                  )
+                                                : null,
                                             ]
                                               .filter(Boolean)
                                               .join(" · ")}
@@ -711,12 +942,16 @@ function ProtectionSetupDialog({
                                 })}
                               </ul>
                               <p className="type-secondary text-text-tertiary">
-                                {translateUi("Picked keys are asked every time. A remembered approval would also cover your other keys.")}
+                                {translateUi(
+                                  "Picked keys are asked every time. A remembered approval would also cover your other keys.",
+                                )}
                               </p>
                             </div>
                           ) : (
                             <p className="rounded-lg border border-dashed border-border px-4 py-4 type-secondary text-text-tertiary">
-                              {translateUi("You have no agent keys yet. Create one first, or apply this to all keys.")}
+                              {translateUi(
+                                "You have no agent keys yet. Create one first, or apply this to all keys.",
+                              )}
                             </p>
                           )}
                         </div>
@@ -728,7 +963,9 @@ function ProtectionSetupDialog({
 
               {replacingGeneral ? (
                 <p className="type-secondary text-text-tertiary">
-                  {translateUi("This service already has an All keys protection. Continuing edits that one.")}
+                  {translateUi(
+                    "This service already has an All keys protection. Continuing edits that one.",
+                  )}
                 </p>
               ) : null}
             </>
@@ -738,14 +975,26 @@ function ProtectionSetupDialog({
             <>
               <div className="space-y-1.5">
                 <div className="flex items-center gap-1 [&>button]:!mt-0">
-                  <Label htmlFor={baseId}>{translateUi("Require approval for")}</Label>
-                  <SectionInfo title={translateUi("Require approval for")} align="start">
-                    {translateUi("Sets what happens to every request to this service. You can still set individual actions under Customise actions.")}
+                  <Label htmlFor={baseId}>
+                    {translateUi("Require approval for")}
+                  </Label>
+                  <SectionInfo
+                    title={translateUi("Require approval for")}
+                    align="start"
+                  >
+                    {translateUi(
+                      "Sets what happens to every request to this service. You can still set individual actions under Customise actions.",
+                    )}
                   </SectionInfo>
                 </div>
                 <Select
                   value={draft.base}
-                  onValueChange={(value) => setEdited(withBase(draft, { base: value as BaseChoice }, actions))}
+                  disabled={actionsLoading || endpoints.isError || !safeEdit}
+                  onValueChange={(value) =>
+                    setEdited(
+                      withBase(draft, { base: value as BaseChoice }, actions),
+                    )
+                  }
                 >
                   <SelectTrigger id={baseId} className="w-full">
                     <SelectValue />
@@ -758,14 +1007,19 @@ function ProtectionSetupDialog({
                         description={translateUi(option.detail)}
                       >
                         {option.value === "ask_changes"
-                          ? translateUi("{{title}} (recommended)", { title: translateUi(option.title) })
+                          ? translateUi("{{title}} (recommended)", {
+                              title: translateUi(option.title),
+                            })
                           : translateUi(option.title)}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <p className="type-secondary text-text-tertiary">
-                  {translateUi(BASE_OPTIONS.find((option) => option.value === draft.base)!.detail)}
+                  {translateUi(
+                    BASE_OPTIONS.find((option) => option.value === draft.base)!
+                      .detail,
+                  )}
                 </p>
               </div>
 
@@ -778,7 +1032,9 @@ function ProtectionSetupDialog({
                     onValueChange={(value) => {
                       if (value === "every_time") {
                         setCustomDays(false);
-                        setEdited(withBase(draft, { remember: false }, actions));
+                        setEdited(
+                          withBase(draft, { remember: false }, actions),
+                        );
                         return;
                       }
                       setCustomDays(value === "custom");
@@ -786,13 +1042,18 @@ function ProtectionSetupDialog({
                       setEdited(withBase(draft, { remember: true }, actions));
                     }}
                   >
-                    <SelectTrigger id={oftenId} className="min-w-0 flex-1 basis-48">
+                    <SelectTrigger
+                      id={oftenId}
+                      className="min-w-0 flex-1 basis-48"
+                    >
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem
                         value="every_time"
-                        description={translateUi("Each request needs its own approve or reject.")}
+                        description={translateUi(
+                          "Each request needs its own approve or reject.",
+                        )}
                       >
                         {translateUi("Every time")}
                       </SelectItem>
@@ -800,10 +1061,14 @@ function ProtectionSetupDialog({
                         <SelectItem key={preset} value={String(preset)}>
                           {preset === 1
                             ? translateUi("After 1 day")
-                            : translateUi("After {{count}} days", { count: preset })}
+                            : translateUi("After {{count}} days", {
+                                count: preset,
+                              })}
                         </SelectItem>
                       ))}
-                      <SelectItem value="custom">{translateUi("Custom number of days")}</SelectItem>
+                      <SelectItem value="custom">
+                        {translateUi("Custom number of days")}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   {oftenValue === "custom" ? (
@@ -816,32 +1081,56 @@ function ProtectionSetupDialog({
                         step={1}
                         value={rememberDays}
                         aria-label={translateUi("Number of days")}
-                        onChange={(event) => setRememberDays(event.target.valueAsNumber)}
+                        onChange={(event) =>
+                          setRememberDays(event.target.valueAsNumber)
+                        }
                         onBlur={() => setRememberDays(days)}
                         className="w-20"
                       />
-                      <span className="type-secondary text-text-tertiary">{translateUi("days (1 to 365)")}</span>
+                      <span className="type-secondary text-text-tertiary">
+                        {translateUi("days (1 to 365)")}
+                      </span>
                     </>
                   ) : null}
                 </div>
                 <p className="type-secondary text-text-tertiary">
                   {draft.keyIds.length
-                    ? translateUi("Fixed to every time because this protection is limited to specific keys. A remembered approval would also cover your other keys.")
+                    ? translateUi(
+                        "Fixed to every time because this protection is limited to specific keys. A remembered approval would also cover your other keys.",
+                      )
                     : draft.base === "allow_all"
-                      ? translateUi("Nothing is asked by default here. Choose Ask or Once for individual actions under Customise actions.")
+                      ? translateUi(
+                          "Nothing is asked by default here. Choose Ask or Once for individual actions under Customise actions.",
+                        )
                       : draft.remember
                         ? days === 1
-                          ? translateUi("After you approve an action once, it can repeat without asking for 1 day. Other protections keep their own number of days.")
-                          : translateUi("After you approve an action once, it can repeat without asking for {{count}} days. Other protections keep their own number of days.", { count: days })
-                        : translateUi("Nothing is remembered between requests.")}
+                          ? translateUi(
+                              "After you approve an action once, it can repeat without asking for 1 day. Other protections keep their own number of days.",
+                            )
+                          : translateUi(
+                              "After you approve an action once, it can repeat without asking for {{count}} days. Other protections keep their own number of days.",
+                              { count: days },
+                            )
+                        : translateUi(
+                            "Nothing is remembered between requests.",
+                          )}
                 </p>
               </div>
 
+              {endpoints.isError && (
+                <p role="alert" className="type-secondary text-destructive">
+                  {translateUi(
+                    "Could not load published actions. Retry before saving.",
+                  )}
+                </p>
+              )}
               {actionsLoading ? (
                 <Skeleton className="h-14 w-full" />
               ) : actions.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-border px-4 py-4 type-secondary text-text-tertiary">
-                  {translateUi("This service has no published action list, so the choice above applies to all of its requests.")}
+                  {translateUi(
+                    "This service has no published action list, so the choice above applies to all of its requests.",
+                  )}
                 </p>
               ) : (
                 <button
@@ -855,31 +1144,56 @@ function ProtectionSetupDialog({
                     </span>
                     <span className="block type-secondary text-text-tertiary">
                       {picked.length
-                        ? translateUi("{{count}} of {{total}} actions set individually", {
-                            count: picked.length,
-                            total: actions.length,
-                          })
-                        : translateUi("Optional. Choose what happens for any of {{total}} actions.", {
-                            total: actions.length,
-                          })}
+                        ? translateUi(
+                            "{{count}} of {{total}} actions set individually",
+                            {
+                              count: picked.length,
+                              total: actions.length,
+                            },
+                          )
+                        : translateUi(
+                            "Optional. Choose what happens for any of {{total}} actions.",
+                            {
+                              total: actions.length,
+                            },
+                          )}
                     </span>
                   </span>
-                  <ChevronRight aria-hidden className="size-4 text-text-tertiary" />
+                  <ChevronRight
+                    aria-hidden
+                    className="size-4 text-text-tertiary"
+                  />
                 </button>
               )}
 
               {draft.preserved.length ? (
                 <p className="type-secondary text-text-tertiary">
-                  {translateUi("{{count}} advanced rules set elsewhere are kept and checked first.", {
-                    count: draft.preserved.length,
-                  })}
+                  {translateUi(
+                    "{{count}} advanced rules set elsewhere are kept and checked first.",
+                    {
+                      count: draft.preserved.length,
+                    },
+                  )}
                 </p>
               ) : null}
+              {draft.keyIds.length > 0 && (
+                <p className="type-secondary text-text-tertiary">
+                  {translateUi(
+                    "The live assistant turn's own stateless model call keeps its existing approval exemption.",
+                  )}
+                </p>
+              )}
               {tooManyRules ? (
-                <p role="alert" className="type-validation-error text-destructive">
-                  {translateUi("A service can hold {{max}} rules. Set fewer actions individually.", {
-                    max: MAX_PROTECTION_RULES,
-                  })}
+                <p
+                  role="alert"
+                  className="type-validation-error text-destructive"
+                >
+                  {translateUi(
+                    "A service can hold {{max}} rules. Set fewer actions individually.",
+                    {
+                      max: MAX_PROTECTION_RULES,
+                    },
+                  )}
                 </p>
               ) : null}
             </>
@@ -888,29 +1202,43 @@ function ProtectionSetupDialog({
           {at === "actions" && customising ? (
             <>
               <SearchField
-                label={translateUi("Search {{count}} actions", { count: actions.length })}
+                label={translateUi("Search {{count}} actions", {
+                  count: actions.length,
+                })}
                 value={actionQuery}
                 onChange={setActionQuery}
               />
               <p className="type-secondary text-text-tertiary">
                 {draft.keyIds.length
-                  ? translateUi("Ask asks every time. Once is not available when the protection is limited to specific keys.")
-                  : translateUi("Ask asks every time. Once asks once, then remembers your approval for {{count}} days.", {
-                      count: days,
-                    })}
+                  ? translateUi(
+                      "Ask asks every time. Once is not available when the protection is limited to specific keys.",
+                    )
+                  : translateUi(
+                      "Ask asks every time. Once asks once, then remembers your approval for {{count}} days.",
+                      {
+                        count: days,
+                      },
+                    )}
               </p>
               <ul className="divide-y divide-border/50 rounded-lg border border-border/50">
                 {visibleActions.map((action) => {
                   const verb = actionVerb(action.method);
                   return (
-                    <li key={action.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+                    <li
+                      key={action.id}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2"
+                    >
                       <div className="min-w-0 flex-1 basis-40">
                         <p className="flex flex-wrap items-center gap-1.5 type-row-title text-foreground">
                           <span className="break-words">{action.name}</span>
                           {verb === "destructive" ? (
-                            <Badge variant="secondary">{translateUi("Deletes")}</Badge>
+                            <Badge variant="secondary">
+                              {translateUi("Deletes")}
+                            </Badge>
                           ) : verb === "write" ? (
-                            <Badge variant="secondary">{translateUi("Changes")}</Badge>
+                            <Badge variant="secondary">
+                              {translateUi("Changes")}
+                            </Badge>
                           ) : null}
                         </p>
                         <p className="break-all type-code text-text-tertiary">
@@ -920,8 +1248,12 @@ function ProtectionSetupDialog({
                       <ActionChoiceGroup
                         label={action.name}
                         value={effectiveSetting(draft, action)}
-                        onChange={(setting) => setEdited(withActionSetting(draft, action, setting))}
-                        disabledOptions={draft.keyIds.length ? ["ask_once"] : []}
+                        onChange={(setting) =>
+                          setEdited(withActionSetting(draft, action, setting))
+                        }
+                        disabledOptions={
+                          draft.keyIds.length ? ["ask_once"] : []
+                        }
                       />
                     </li>
                   );
@@ -933,10 +1265,16 @@ function ProtectionSetupDialog({
                 ) : null}
               </ul>
               {tooManyRules ? (
-                <p role="alert" className="type-validation-error text-destructive">
-                  {translateUi("A service can hold {{max}} rules. Set fewer actions individually.", {
-                    max: MAX_PROTECTION_RULES,
-                  })}
+                <p
+                  role="alert"
+                  className="type-validation-error text-destructive"
+                >
+                  {translateUi(
+                    "A service can hold {{max}} rules. Set fewer actions individually.",
+                    {
+                      max: MAX_PROTECTION_RULES,
+                    },
+                  )}
                 </p>
               ) : null}
             </>
@@ -944,9 +1282,16 @@ function ProtectionSetupDialog({
 
           {at === "where" ? (
             <>
-              <WhereControls settings={settings} value={where} onChange={setWhere} disabled={busy} />
+              <WhereControls
+                settings={settings}
+                value={where}
+                onChange={setWhere}
+                disabled={busy}
+              />
               <p className="type-secondary text-text-tertiary">
-                {translateUi("This applies to all of your protections, not only this service.")}
+                {translateUi(
+                  "This applies to all of your protections, not only this service.",
+                )}
               </p>
             </>
           ) : null}
@@ -955,29 +1300,41 @@ function ProtectionSetupDialog({
             <dl className="grid grid-cols-[7.5rem_1fr] gap-x-3 gap-y-2.5 type-body">
               <dt className="text-text-tertiary">{translateUi("Service")}</dt>
               <dd className="text-foreground">{service.label}</dd>
-              <dt className="text-text-tertiary">{translateUi("Applies to")}</dt>
+              <dt className="text-text-tertiary">
+                {translateUi("Applies to")}
+              </dt>
+              <dd className="text-foreground">{scopeLabel}</dd>
+              <dt className="text-text-tertiary">
+                {translateUi("Require approval for")}
+              </dt>
               <dd className="text-foreground">
-                {scopeLabel}
+                {translateUi(BASE_LABELS[draft.base])}
               </dd>
-              <dt className="text-text-tertiary">{translateUi("Require approval for")}</dt>
-              <dd className="text-foreground">{translateUi(BASE_LABELS[draft.base])}</dd>
               {draft.base === "allow_all" ? null : (
                 <>
-                  <dt className="text-text-tertiary">{translateUi("How often")}</dt>
+                  <dt className="text-text-tertiary">
+                    {translateUi("How often")}
+                  </dt>
                   <dd className="text-foreground">
                     {!draft.remember
                       ? translateUi("Every time")
                       : days === 1
                         ? translateUi("Ask again after 1 day")
-                        : translateUi("Ask again after {{count}} days", { count: days })}
+                        : translateUi("Ask again after {{count}} days", {
+                            count: days,
+                          })}
                   </dd>
                 </>
               )}
               {(["allow", "ask", "block"] as const).map((choice) => {
-                const rows = picked.filter((row) => row.setting.choice === choice);
+                const rows = picked.filter(
+                  (row) => row.setting.choice === choice,
+                );
                 return rows.length ? (
                   <div key={choice} className="contents">
-                    <dt className="text-text-tertiary">{translateUi(CHOICE_LABELS[choice])}</dt>
+                    <dt className="text-text-tertiary">
+                      {translateUi(CHOICE_LABELS[choice])}
+                    </dt>
                     <dd className="space-y-0.5 text-foreground">
                       {rows.map((row) => (
                         <p key={row.action.id} className="break-words">
@@ -1018,12 +1375,20 @@ function ProtectionSetupDialog({
           <DialogFooter className="md:justify-between">
             <div className="flex gap-2">
               {step > 1 ? (
-                <Button variant="outline" disabled={busy} onClick={() => setStep(step - 1)}>
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setStep(step - 1)}
+                >
                   {translateUi("Back")}
                 </Button>
               ) : null}
               {editing ? (
-                <Button variant="destructive" disabled={busy} onClick={() => void removeProtection()}>
+                <Button
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => void removeProtection()}
+                >
                   {translateUi("Remove protection")}
                 </Button>
               ) : null}
@@ -1034,7 +1399,11 @@ function ProtectionSetupDialog({
                 disabled={
                   !service ||
                   (at === "keys" && limited && draft.keyIds.length === 0) ||
-                  (at === "actions" && (tooManyRules || actionsLoading))
+                  (at === "actions" &&
+                    (tooManyRules ||
+                      actionsLoading ||
+                      endpoints.isError ||
+                      !safeEdit))
                 }
                 onClick={() => setStep(step + 1)}
               >
@@ -1043,8 +1412,10 @@ function ProtectionSetupDialog({
             ) : (
               <Button
                 variant="primary"
-                disabled={busy || tooManyRules}
-                onClick={() => (overridesGeneral ? setConfirmingOverride(true) : void turnOn())}
+                disabled={busy || tooManyRules || !safeEdit}
+                onClick={() =>
+                  overridesGeneral ? setConfirmingOverride(true) : void turnOn()
+                }
               >
                 {editing ? translateUi("Save changes") : translateUi("Turn on")}
               </Button>
@@ -1056,25 +1427,34 @@ function ProtectionSetupDialog({
       <Dialog open={confirmingOverride} onOpenChange={setConfirmingOverride}>
         <DialogContent className="md:max-w-md">
           <DialogHeader>
-            <DialogTitle>{translateUi("Agent key rules take priority")}</DialogTitle>
+            <DialogTitle>
+              {translateUi("Agent key rules take priority")}
+            </DialogTitle>
             <DialogDescription>
-              {translateUi("{{service}} has rules for all keys and rules for specific agent keys. A key with its own rules follows only those and ignores the All keys rules, because they are more specific.", {
-                service: service?.label ?? "",
-              })}
+              {translateUi(
+                "{{service}} has rules for all keys and rules for specific agent keys. A key with its own rules follows only those and ignores the All keys rules, because they are more specific.",
+                {
+                  service: service?.label ?? "",
+                },
+              )}
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="py-3">
             <ul className="space-y-1 type-secondary text-text-tertiary">
               {nextPolicy.keyed.map((entry) => (
                 <li key={entry.keyIds.join(",")}>
-                  <span className="text-foreground">{keyNames(entry.keyIds, keys).join(", ")}</span>
+                  <span className="text-foreground">
+                    {keyNames(entry.keyIds, keys).join(", ")}
+                  </span>
                   {" · "}
                   {translateUi(BASE_LABELS[entry.base])}
                 </li>
               ))}
               {nextPolicy.all ? (
                 <li>
-                  <span className="text-foreground">{translateUi("Every other key")}</span>
+                  <span className="text-foreground">
+                    {translateUi("Every other key")}
+                  </span>
                   {" · "}
                   {translateUi(BASE_LABELS[nextPolicy.all.base])}
                 </li>
@@ -1082,10 +1462,17 @@ function ProtectionSetupDialog({
             </ul>
           </DialogBody>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmingOverride(false)}>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmingOverride(false)}
+            >
               {translateUi("Go back")}
             </Button>
-            <Button variant="primary" disabled={busy} onClick={() => void turnOn()}>
+            <Button
+              variant="primary"
+              disabled={busy}
+              onClick={() => void turnOn()}
+            >
               {editing ? translateUi("Save changes") : translateUi("Turn on")}
             </Button>
           </DialogFooter>
@@ -1095,77 +1482,6 @@ function ProtectionSetupDialog({
   );
 }
 
-/** Plain one-line summary of a protection; colour is kept for status elsewhere. */
-function ProtectionSummaryLine({
-  draft,
-  days,
-  keys,
-}: {
-  readonly draft: ProtectionDraft;
-  readonly days: number;
-  readonly keys: readonly ApiKey[];
-}) {
-  const summary = summarizeProtection(draft);
-  const names = keyNames(draft.keyIds, keys);
-  const facts = [
-    translateUi(BASE_LABELS[draft.base]),
-    draft.base === "allow_all"
-      ? null
-      : !draft.remember
-        ? translateUi("Asks every time")
-        : days === 1
-          ? translateUi("Asks again after 1 day")
-          : translateUi("Asks again after {{count}} days", { count: days }),
-    summary.ask ? translateUi("{{count}} set to ask", { count: summary.ask }) : null,
-    summary.block ? translateUi("{{count}} blocked", { count: summary.block }) : null,
-    summary.allow ? translateUi("{{count}} allowed", { count: summary.allow }) : null,
-  ].filter((fact): fact is string => Boolean(fact));
-  return (
-    <span className="mt-0.5 block type-secondary text-text-tertiary">
-      {draft.keyIds.length ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              tabIndex={0}
-              className="rounded-sm text-muted-foreground underline decoration-dotted underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {names.length > 2
-                ? translateUi("{{first}} and {{count}} more keys", {
-                    first: names[0],
-                    count: names.length - 1,
-                  })
-                : names.join(", ")}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" align="start" className="space-y-1">
-            <p className="text-foreground">{translateUi("Only these agent keys follow this protection:")}</p>
-            {draft.keyIds.map((id) => {
-              const key = keys.find((entry) => entry.id === id);
-              return (
-                <p key={id}>
-                  {key
-                    ? [key.name, key.key_prefix, key.platform].filter(Boolean).join(" · ")
-                    : translateUi("Deleted key")}
-                </p>
-              );
-            })}
-          </TooltipContent>
-        </Tooltip>
-      ) : (
-        <span className="text-muted-foreground">{translateUi("All keys")}</span>
-      )}
-      {facts.map((fact) => (
-        <span key={fact}> · {fact}</span>
-      ))}
-    </span>
-  );
-}
-
-/**
- * Approvals the owner chose to remember, with a way to take each one back.
- * Saved permissions from the newer permission cards have their own review
- * details and stay on the grants page.
- */
 function RememberedApprovals() {
   const grants = useApprovalGrants(1, 50);
   const revoke = useRevokeGrant();
@@ -1176,7 +1492,9 @@ function RememberedApprovals() {
   return (
     <GroupedList
       title={translateUi("Remembered approvals")}
-      footer={translateUi("These run without asking until they expire. Revoke one to be asked again.")}
+      footer={translateUi(
+        "These run without asking until they expire. Revoke one to be asked again.",
+      )}
     >
       {remembered.map((grant) => (
         <GroupedRow
@@ -1184,24 +1502,35 @@ function RememberedApprovals() {
           title={grant.service_name}
           description={translateUi("{{requester}} · until {{date}}", {
             requester: grant.requester_label ?? grant.requester_type,
-            date: new Date(grant.expires_at).toLocaleDateString(getFormattingLocale(), {
-              year: "numeric",
-              month: "short",
-              day: "numeric",
-            }),
+            date: new Date(grant.expires_at).toLocaleDateString(
+              getFormattingLocale(),
+              {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              },
+            ),
           })}
           accessory={
             <Button
               variant="outline"
               size="sm"
               disabled={revoke.isPending}
-              aria-label={translateUi("Revoke grant for {{value1}}", { value1: grant.service_name })}
+              aria-label={translateUi("Revoke grant for {{value1}}", {
+                value1: grant.service_name,
+              })}
               onClick={() =>
                 revoke.mutate(
                   { grantId: grant.id },
                   {
-                    onSuccess: () => toast.success(translateUi("Grant revoked")),
-                    onError: (error) => toast.error(errorText(error, "Failed to revoke grant")),
+                    onSuccess: () =>
+                      toast.success(translateUi("Grant revoked")),
+                    onError: (error) =>
+                      toast.error(
+                        translateErrorMessage(
+                          errorText(error, "Failed to revoke grant"),
+                        ),
+                      ),
                   },
                 )
               }
@@ -1223,7 +1552,12 @@ export function ApprovalRules() {
   const configs = useServiceApprovalConfigs();
   const updateSettings = useUpdateNotificationSettings();
   const apiKeys = useApiKeys();
-  const [setup, setSetup] = useState<{ readonly initial: ProtectionScope | null } | null>(null);
+  const capabilities = useApprovalAuthoringCapabilities();
+  const [storedEditor, setStoredEditor] =
+    useState<ServiceApprovalConfigItem | null>(null);
+  const [setup, setSetup] = useState<{
+    readonly initial: ProtectionScope | null;
+  } | null>(null);
 
   const services = useMemo((): readonly ProtectableService[] => {
     const stored = configs.data?.configs ?? [];
@@ -1236,7 +1570,8 @@ export function ApprovalRules() {
       stored.find(
         (config) =>
           ids.includes(config.service_id) ||
-          (config.user_service_id !== undefined && ids.includes(config.user_service_id)),
+          (config.user_service_id !== undefined &&
+            ids.includes(config.user_service_id)),
       ) ?? null;
     const out: ProtectableService[] = [];
     const seen = new Set<string>();
@@ -1272,7 +1607,9 @@ export function ApprovalRules() {
     readonly service: ProtectableService;
     readonly draft: ProtectionDraft;
   }[] => {
-    const known = new Set(services.flatMap((entry) => (entry.config ? [entry.config] : [])));
+    const known = new Set(
+      services.flatMap((entry) => (entry.config ? [entry.config] : [])),
+    );
     const orphans = (configs.data?.configs ?? [])
       .filter((config) => !known.has(config))
       .map((config) => ({
@@ -1283,19 +1620,24 @@ export function ApprovalRules() {
         catalogServiceId: null,
         config,
       }));
-    // One row per protection: the All keys one, then each agent-key one.
-    return [...services.filter((entry) => entry.config), ...orphans].flatMap((service) => {
-      const policy = parsePolicy(service.config, []);
-      return [...(policy.all ? [policy.all] : []), ...policy.keyed].map((draft) => ({
-        service,
-        draft,
-      }));
-    });
+    const seen = new Set<string>();
+    return [...services.filter((entry) => entry.config), ...orphans]
+      .filter((service) => {
+        const id = service.config!.service_id;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .map((service) => ({ service, draft: newProtection([]) }));
   }, [services, configs.data]);
 
   if (settings.isLoading || configs.isLoading || userServices.isLoading) {
     return (
-      <div role="status" aria-label={translateUi("Loading approval rules")} className="space-y-3">
+      <div
+        role="status"
+        aria-label={translateUi("Loading approval rules")}
+        className="space-y-3"
+      >
         <Skeleton className="h-20 w-full" />
         <Skeleton className="h-24 w-full" />
       </div>
@@ -1328,7 +1670,8 @@ export function ApprovalRules() {
     failure: string,
   ) {
     updateSettings.mutate(data, {
-      onError: (error) => toast.error(errorText(error, failure)),
+      onError: (error) =>
+        toast.error(translateErrorMessage(errorText(error, failure))),
     });
   }
 
@@ -1336,36 +1679,70 @@ export function ApprovalRules() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3 px-4">
         <p className="min-w-0 flex-1 basis-56 type-secondary text-text-tertiary">
-          {translateUi("Choose which actions wait for your approve or reject, one service at a time.")}
+          {translateUi(
+            "Choose which actions wait for your approve or reject, one service at a time.",
+          )}
         </p>
-        <Button variant="primary" onClick={() => setSetup({ initial: null })}>
+        <Button
+          variant="primary"
+          disabled={
+            capabilities.data?.personal_rules !== true ||
+            Boolean(capabilities.error)
+          }
+          onClick={() => setSetup({ initial: null })}
+        >
           {translateUi("Set up a protection")}
         </Button>
       </div>
 
       {protections.length ? (
         <GroupedList title={translateUi("Protections")}>
-          {protections.map(({ service, draft }) => (
-            <GroupedRow key={`${service.id}:${draft.keyIds.join(",")}`} asChild interactive>
+          {protections.map(({ service }) => (
+            <GroupedRow key={service.config!.service_id} asChild interactive>
               <button
                 type="button"
-                aria-label={translateUi("Edit {{service}} protection for {{scope}}", {
-                  service: service.label,
-                  scope: draft.keyIds.length
-                    ? keyNames(draft.keyIds, apiKeys.data ?? []).join(", ")
-                    : translateUi("All keys"),
-                })}
-                onClick={() => setSetup({ initial: { service, keyIds: draft.keyIds } })}
+                aria-label={translateUi(
+                  "Edit {{service}} protection for {{scope}}",
+                  {
+                    service: service.label,
+                    scope:
+                      service.config?.rules.length &&
+                      service.config.rules.every(
+                        (rule) => (rule.api_key_ids?.length ?? 0) > 0,
+                      ) &&
+                      !service.config.default_effect
+                        ? keyNames(
+                            [
+                              ...new Set(
+                                service.config.rules.flatMap(
+                                  (rule) => rule.api_key_ids ?? [],
+                                ),
+                              ),
+                            ],
+                            apiKeys.data ?? [],
+                          ).join(", ")
+                        : translateUi("All keys"),
+                  },
+                )}
+                onClick={() => setStoredEditor(service.config)}
               >
                 <ServiceIcon slug={service.slug} size="sm" />
                 <span className="min-w-0 flex-1 basis-32 break-words">
-                  <span className="block type-row-title text-foreground">{service.label}</span>
-                  <span className="block type-secondary text-text-tertiary">{service.detail}</span>
-                  <ProtectionSummaryLine
-                    draft={draft}
-                    days={service.config?.grant_expiry_days ?? current.grant_expiry_days}
-                    keys={apiKeys.data ?? []}
-                  />
+                  <span className="block type-row-title text-foreground">
+                    {service.label}
+                  </span>
+                  <span className="block type-secondary text-text-tertiary">
+                    {service.detail}
+                  </span>
+                  <span className="block type-secondary text-text-tertiary">
+                    {translateUi(
+                      service.config?.disabled ? "Disabled" : "Enabled",
+                    )}{" "}
+                    ·{" "}
+                    {translateUi("{{count}} ordered rules", {
+                      count: service.config?.rules.length ?? 0,
+                    })}
+                  </span>
                 </span>
                 <span className="flex shrink-0 items-center gap-1 type-secondary text-text-tertiary">
                   {translateUi("Edit")}
@@ -1380,7 +1757,9 @@ export function ApprovalRules() {
           <ShieldCheck aria-hidden className="mb-3 size-6 text-text-tertiary" />
           <p className="type-card-title">{translateUi("No protections yet")}</p>
           <p className="mt-1 max-w-sm type-secondary text-text-tertiary">
-            {translateUi("Pick a service and the actions that should wait for you. It takes about a minute.")}
+            {translateUi(
+              "Pick a service and the actions that should wait for you. It takes about a minute.",
+            )}
           </p>
         </div>
       )}
@@ -1393,7 +1772,10 @@ export function ApprovalRules() {
         </h3>
         <WhereControls
           settings={current}
-          value={{ push: current.push_enabled, telegram: current.telegram_enabled }}
+          value={{
+            push: current.push_enabled,
+            telegram: current.telegram_enabled,
+          }}
           disabled={updateSettings.isPending}
           onChange={(where) =>
             update(
@@ -1406,9 +1788,12 @@ export function ApprovalRules() {
 
       <GroupedList
         title={translateUi("Everything else")}
-        footer={translateUi("Applies to services without a protection. Unanswered requests are rejected after {{time}}.", {
-          time: timeoutLabel(current.approval_timeout_secs),
-        })}
+        footer={translateUi(
+          "Applies to services without a protection. Unanswered requests are rejected after {{time}}.",
+          {
+            time: timeoutLabel(current.approval_timeout_secs),
+          },
+        )}
       >
         <GroupedRow
           title={translateUi("Ask before requests run")}
@@ -1416,7 +1801,9 @@ export function ApprovalRules() {
             globalMode === "all"
               ? translateUi("Every request waits for you, including reads.")
               : globalMode === "off"
-                ? translateUi("Nothing waits for you unless a protection says so.")
+                ? translateUi(
+                    "Nothing waits for you unless a protection says so.",
+                  )
                 : translateUi("Reads run on their own. Changes wait for you.")
           }
           accessory={
@@ -1433,13 +1820,22 @@ export function ApprovalRules() {
                 aria-label={translateUi("Ask before requests run")}
                 className="w-auto flex-nowrap"
               >
-                <SegmentedControlTrigger value="off" disabled={updateSettings.isPending}>
+                <SegmentedControlTrigger
+                  value="off"
+                  disabled={updateSettings.isPending}
+                >
                   {translateUi("Off")}
                 </SegmentedControlTrigger>
-                <SegmentedControlTrigger value="writes_only" disabled={updateSettings.isPending}>
+                <SegmentedControlTrigger
+                  value="writes_only"
+                  disabled={updateSettings.isPending}
+                >
                   {translateUi("Changes")}
                 </SegmentedControlTrigger>
-                <SegmentedControlTrigger value="all" disabled={updateSettings.isPending}>
+                <SegmentedControlTrigger
+                  value="all"
+                  disabled={updateSettings.isPending}
+                >
                   {translateUi("All requests")}
                 </SegmentedControlTrigger>
               </SegmentedControlList>
@@ -1448,9 +1844,20 @@ export function ApprovalRules() {
         />
       </GroupedList>
 
+      {storedEditor && (
+        <StoredApprovalPolicyDialog
+          config={storedEditor}
+          apiKeys={apiKeys.data ?? []}
+          onClose={() => setStoredEditor(null)}
+        />
+      )}
       {setup ? (
         <ProtectionSetupDialog
           services={services}
+          onEditStored={(config) => {
+            setSetup(null);
+            setStoredEditor(config);
+          }}
           initial={setup.initial}
           settings={current}
           onClose={() => setSetup(null)}

@@ -1315,11 +1315,13 @@ async fn set_approval_config(
                 Path(service_id.clone()),
                 Query(approvals::ServiceApprovalConfigQuery::default()),
                 Json(approvals::SetServiceApprovalConfigRequest {
+                    disabled: None,
+                    expected_revision: None,
                     grant_expiry_days: None,
                     approval_required: Some(approval_required),
                     approval_mode,
                     rules,
-                    default_effect: default_effect.flatten(),
+                    default_effect,
                 }),
             )
             .await?;

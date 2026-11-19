@@ -432,6 +432,7 @@ mod tests {
             crate::models::service_approval_config::COLLECTION_NAME,
         )
         .insert_one(ServiceApprovalConfig {
+            disabled: false,
             grant_expiry_days: None,
             id: Uuid::new_v4().to_string(),
             user_id: TEST_USER_ID.to_string(),
@@ -1810,6 +1811,7 @@ mod tests {
         )
         .insert_many([
             ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: TEST_USER_ID.to_string(),
@@ -1823,6 +1825,7 @@ mod tests {
                 updated_at: Utc::now(),
             },
             ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: TEST_USER_ID.to_string(),

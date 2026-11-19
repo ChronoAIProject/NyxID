@@ -208,7 +208,6 @@ pub struct OwnerGrants {
     actor_id: String,
     active_owner_ids: HashSet<String>,
     readable_owner_ids: HashSet<String>,
-    org_owner_ids: HashSet<String>,
     memberships: Vec<OrgMembership>,
 }
 
@@ -264,11 +263,6 @@ impl OwnerGrants {
                 .then_with(|| left.created_at.cmp(&right.created_at))
                 .then_with(|| left.org_user_id.cmp(&right.org_user_id))
         });
-        let org_owner_ids = owners
-            .iter()
-            .filter(|u| u.user_type.is_org())
-            .map(|u| u.id.clone())
-            .collect();
         let readable_owner_ids: HashSet<String> = owners
             .into_iter()
             .filter(|u| actor_active && (u.id == owner_id || u.user_type.is_org()))
@@ -291,7 +285,6 @@ impl OwnerGrants {
             actor_id: owner_id.to_string(),
             active_owner_ids,
             readable_owner_ids,
-            org_owner_ids,
             memberships: ordered_memberships,
         })
     }
@@ -416,28 +409,6 @@ fn available_view_with_grants(
         config.audience == PlatformKeyAudience::Public
             || grants.permits(owner_id, &config.allowed_owner_ids)
     })
-}
-
-/// Automatic connections have narrower ownership rules than explicit bindings:
-/// public keys belong to active people; restricted keys require a direct owner
-/// grant. Keep this separate from the execution ACL used by explicit org rows.
-pub fn auto_provisionable_with_grants(
-    service: &DownstreamService,
-    provider: Option<&ProviderConfig>,
-    owner_id: &str,
-    grants: &OwnerGrants,
-) -> bool {
-    let Some(config) = &service.platform_key else {
-        return false;
-    };
-    grants.active_owner_ids.contains(owner_id)
-        && match config.audience {
-            PlatformKeyAudience::Public => !grants.org_owner_ids.contains(owner_id),
-            PlatformKeyAudience::Restricted => {
-                config.allowed_owner_ids.iter().any(|id| id == owner_id)
-            }
-        }
-        && available_with_grants(service, provider, owner_id, grants)
 }
 
 pub async fn require(

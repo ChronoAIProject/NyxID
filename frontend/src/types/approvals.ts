@@ -42,7 +42,7 @@ export interface UpdateNotificationSettingsRequest {
   readonly push_enabled?: boolean;
   readonly approval_required?: boolean;
   readonly approval_timeout_secs?: number;
-  readonly grant_expiry_days?: number;
+  readonly grant_expiry_days?: number | null;
 }
 
 export interface TelegramLinkResponse {
@@ -57,6 +57,7 @@ export interface TelegramDisconnectResponse {
 }
 
 export interface ApprovalRequestItem {
+  readonly grant_expiry_days?: number | null;
   readonly execution_proposal?: ExecutionProposal | null;
   readonly id: string;
   readonly service_name: string;
@@ -139,6 +140,7 @@ export type ApprovalEffect = "require_approval" | "auto_allow" | "deny";
 export type ApprovalVerb = "read" | "write" | "destructive";
 
 export interface ApprovalRule {
+  readonly mandatory_review?: boolean;
   readonly methods: readonly string[];
   readonly resource_pattern: string;
   readonly verbs: readonly ApprovalVerb[];
@@ -149,6 +151,8 @@ export interface ApprovalRule {
 }
 
 export interface ServiceApprovalConfigItem {
+  readonly revision?: string;
+  readonly disabled?: boolean;
   readonly service_id: string;
   readonly service_name: string;
   readonly approval_required: boolean;
@@ -156,7 +160,7 @@ export interface ServiceApprovalConfigItem {
   readonly rules: readonly ApprovalRule[];
   readonly default_effect: ApprovalEffect | null;
   /** Days a remembered approval lasts under this policy; absent uses the account setting. */
-  readonly grant_expiry_days?: number;
+  readonly grant_expiry_days?: number | null;
   readonly created_at: string;
   readonly updated_at: string;
   /**
@@ -199,7 +203,7 @@ export interface SetServiceApprovalConfigRequest {
   readonly approval_mode?: ApprovalMode;
   readonly rules?: readonly ApprovalRule[];
   readonly default_effect?: ApprovalEffect;
-  readonly grant_expiry_days?: number;
+  readonly grant_expiry_days?: number | null;
 }
 
 export interface SetServiceApprovalConfigResponse {

@@ -31,7 +31,8 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
             crate::models::service_approval_config::COLLECTION_NAME,
         )
         .insert_one(
-            crate::models::service_approval_config::ServiceApprovalConfig { grant_expiry_days: None,
+            crate::models::service_approval_config::ServiceApprovalConfig {
+        disabled: false, grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.caller.approval_owner_user_id.clone(),
                 service_id: approval_target.service_id,

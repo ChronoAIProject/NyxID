@@ -5,6 +5,7 @@ import {
   buildPolicy,
   effectiveSetting,
   isEmptyPolicy,
+  isWizardPolicy,
   newProtection,
   parsePolicy,
   summarizeProtection,
@@ -61,6 +62,7 @@ describe("approval protection", () => {
       defaultEffect: "auto_allow",
       rules: [
         { methods: ["DELETE"], resource_pattern: "/repos/*/*", verbs: [], effect: "deny", mode: "per_request" },
+        { methods: ["PUT"], resource_pattern: "/repos/*/*/pulls/*/merge", verbs: [], effect: "require_approval", mode: "per_request" },
         { methods: [], resource_pattern: "*", verbs: ["write", "destructive"], effect: "require_approval", mode: "per_request" },
       ],
     });
@@ -155,4 +157,27 @@ describe("approval protection", () => {
     const reread = parsePolicy(stored(buildPolicy(only(draft), actions)), []).all!;
     expect(summarizeProtection(reread)).toEqual({ ask: 0, block: 1, allow: 0 });
   });
+});
+
+it("keeps a literal Block ahead of an overlapping parameterized Allow",()=>{
+  const broad:ProtectionAction={id:"broad",name:"Any",method:"GET",path:"/items/{id}"};
+  const literal:ProtectionAction={id:"literal",name:"Status",method:"GET",path:"/items/status"};
+  let draft=withBase(newProtection(),{base:"ask_all"},[broad,literal]);
+  draft=withActionSetting(draft,broad,{choice:"allow",everyTime:true});
+  draft=withActionSetting(draft,literal,{choice:"block",everyTime:true});
+  expect(buildPolicy(only(draft),[broad,literal]).rules.map((rule)=>[rule.resource_pattern,rule.effect])).toEqual([["/items/status","deny"],["/items/*","auto_allow"]]);
+});
+it("retains an explicit POST Ask even when method heuristics agree with the base",()=>{
+  const post:ProtectionAction={id:"query",name:"Query",method:"POST",path:"/query"};
+  const draft=withActionSetting(newProtection(),post,{choice:"ask",everyTime:true});
+  expect(buildPolicy(only(draft),[post]).rules[0]).toMatchObject({methods:["POST"],resource_pattern:"/query",effect:"require_approval"});
+});
+it("only permits guided editing when the complete policy round-trips exactly",()=>{
+  const authored=buildPolicy(only(newProtection()),[]);
+  const config={...stored(authored),service_id:"svc",service_name:"Service",created_at:"old",updated_at:"old"};
+  expect(isWizardPolicy(config,[])).toBe(true);
+  expect(isWizardPolicy({...config,default_effect:"deny"},[])).toBe(false);
+  expect(isWizardPolicy({...config,default_effect:null,rules:[]},[])).toBe(false);
+  const foreign=[{methods:["EXEC"],resource_pattern:"git *",verbs:[],effect:"require_approval",mode:"grant"}] as const;
+  expect(isWizardPolicy({...config,rules:foreign},[])).toBe(false);
 });

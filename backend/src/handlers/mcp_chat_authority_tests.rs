@@ -1709,6 +1709,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
@@ -3074,6 +3075,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
@@ -5222,6 +5224,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             .db
             .collection::<ServiceApprovalConfig>(CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
@@ -5497,6 +5500,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 .db
                 .collection(configs::COLLECTION_NAME)
                 .insert_one(configs::ServiceApprovalConfig {
+                    disabled: false,
                     grant_expiry_days: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),

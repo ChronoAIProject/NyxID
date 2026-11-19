@@ -1411,6 +1411,8 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.fresh_decision = pending.resolution.fresh_decision;
+    request_operation.caller_api_key_id = auth_user.api_key_id.clone();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),
@@ -1449,6 +1451,17 @@ pub(crate) async fn authorize_ssh_access_for_connection(
                 &state.config.frontend_url,
             )
         })?;
+    approval_service::recheck_after_decision(
+        &state.db,
+        &approval_owner_user_id,
+        owner_for_resolution,
+        service_id,
+        operation,
+        false,
+        auth_user.api_key_id.as_deref(),
+        &approval_request.approval_mode,
+    )
+    .await?;
 
     Ok(auth_context)
 }

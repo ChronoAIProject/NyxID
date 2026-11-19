@@ -1997,7 +1997,7 @@ pub(crate) fn approval_outcome(
         && owner == permit.subject.actor_user_id
         && connection
             .is_some_and(|id| permit.satisfies(ExecutionFloor::PersonalServiceApproval, id))
-        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy && p.primary_owner_user_id == permit.subject.actor_user_id)
+        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy && !p.resolution.fresh_decision && p.primary_owner_user_id == permit.subject.actor_user_id)
     {
         super::approval_service::ApprovalOutcome::Allowed { required: false }
     } else {

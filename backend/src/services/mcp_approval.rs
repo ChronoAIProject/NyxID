@@ -167,6 +167,7 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                disabled: false,
                 grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner_id.to_string(),

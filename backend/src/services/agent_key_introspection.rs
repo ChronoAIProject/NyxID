@@ -212,6 +212,7 @@ async fn allows_service_wide_approval(
     };
     let configs: Vec<_> = configs
         .iter()
+        .filter(|config| !config.disabled)
         .filter(|config| {
             org_policy || super::approval_policy::has_policy_for_key(config, api_key_id)
         })
@@ -229,7 +230,10 @@ async fn allows_service_wide_approval(
     }) {
         return Ok(false);
     }
-    if connection.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
+    if matches!(
+        connection.source.as_deref(),
+        Some(AUTO_PROVISION_SOURCE | super::unified_key_service::CATALOG_OPT_IN_SOURCE)
+    ) {
         return Ok(true);
     }
     // An explicit unrestricted connection policy overrides the global fallback.

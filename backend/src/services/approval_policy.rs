@@ -83,6 +83,9 @@ pub fn evaluate(
     descriptor: &OperationDescriptor,
     api_key_id: Option<&str>,
 ) -> Option<ApprovalPolicyDecision> {
+    if config.disabled {
+        return None;
+    }
     for rule in &config.rules {
         if rule_matches(rule, descriptor, api_key_id) {
             return Some(ApprovalPolicyDecision {
@@ -133,11 +136,12 @@ pub(crate) fn mandatory_review(
     config: &ServiceApprovalConfig,
     descriptor: &OperationDescriptor,
 ) -> bool {
-    config
-        .rules
-        .iter()
-        .find(|rule| rule_matches(rule, descriptor, None))
-        .is_some_and(|rule| rule.mandatory_review)
+    !config.disabled
+        && config
+            .rules
+            .iter()
+            .find(|rule| rule_matches(rule, descriptor, None))
+            .is_some_and(|rule| rule.mandatory_review)
 }
 
 pub fn grant_scope_covers(scope: Option<&str>, descriptor: &OperationDescriptor) -> bool {
@@ -234,12 +238,13 @@ pub(crate) fn rule_applies_to_key(rule: &ApprovalRule, api_key_id: Option<&str>)
 
 /// Whether a config can override implicit defaults for this credential.
 pub(crate) fn has_policy_for_key(config: &ServiceApprovalConfig, api_key_id: Option<&str>) -> bool {
-    config.rules.is_empty()
-        || config.default_effect.is_some()
-        || config
-            .rules
-            .iter()
-            .any(|rule| rule_applies_to_key(rule, api_key_id))
+    !config.disabled
+        && (config.rules.is_empty()
+            || config.default_effect.is_some()
+            || config
+                .rules
+                .iter()
+                .any(|rule| rule_applies_to_key(rule, api_key_id)))
 }
 
 fn rule_matches(
@@ -507,6 +512,7 @@ mod tests {
     ) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            disabled: false,
             grant_expiry_days: None,
             id: "cfg-1".to_string(),
             user_id: "user-1".to_string(),
@@ -1199,4 +1205,23 @@ mod tests {
             }
         }
     }
+}
+
+/// Key-limited Ask is an explicit protection even in assistant Full access.
+/// The live turn's stateless model-call exemption remains separately documented.
+pub(crate) fn key_requires_fresh_decision(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+    key: Option<&str>,
+) -> bool {
+    !config.disabled
+        && config
+            .rules
+            .iter()
+            .find(|rule| rule_matches(rule, descriptor, key))
+            .is_some_and(|rule| {
+                !rule.api_key_ids.is_empty()
+                    && rule.effect == ApprovalEffect::RequireApproval
+                    && rule.mode == ApprovalMode::PerRequest
+            })
 }

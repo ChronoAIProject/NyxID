@@ -194,7 +194,7 @@ impl Fixture {
         let role = Role {
             id: Uuid::new_v4().to_string(),
             name: "User".into(),
-            slug: "user".into(),
+            slug: "resource-user".into(),
             description: None,
             permissions: vec!["cma:sandbox:use".into()],
             is_default: false,
@@ -230,6 +230,9 @@ impl Fixture {
         binding.source = Some("auto_provision".into());
         db.collection::<UserService>(CONNECTIONS)
             .insert_one(binding)
+            .await
+            .unwrap();
+        crate::test_utils::connect_catalog_fixture_services(&db, &owner)
             .await
             .unwrap();
         let key = key_service::create_api_key(

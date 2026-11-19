@@ -169,6 +169,9 @@ impl Fixture {
             .insert_one(service)
             .await
             .unwrap();
+        crate::test_utils::connect_catalog_fixture_services(&db, &subject)
+            .await
+            .unwrap();
         let key = key_service::create_api_key(
             &db,
             &subject,
