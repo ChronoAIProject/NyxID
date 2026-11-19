@@ -201,7 +201,11 @@ async fn inbound_impl_inner(
         kind: facts.sender_kind,
         owner_eligible: facts.sender_kind == ThreadSenderKind::Human,
         id: sender_id,
-        display_name: payload["sender"]["display_name"].as_str(),
+        display_name: if gateway {
+            payload["sender"]["display_name"].as_str()
+        } else {
+            source.sender_display_name.as_deref()
+        },
     };
     let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
     if stop_requested && !sender.original_message {

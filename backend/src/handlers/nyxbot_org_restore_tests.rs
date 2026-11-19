@@ -225,6 +225,7 @@ async fn assert_restored_admin_roundtrip(
                 "content": {"type": "text", "text": text},
                 "raw_platform_data": {"event": {"sender": {"sender_type": "user"}}}
             });
+            store_direct_source(state, live, &body).await;
             let bytes = serde_json::to_vec(&body).unwrap();
             let token = crate::crypto::jwt::generate_relay_callback_token(
                 &state.jwt_keys,
