@@ -3673,6 +3673,7 @@ fn dispatch_service_tool<'a>(
             } else {
                 auth.chat.as_ref()
             },
+            &auth.assistant_operation_scopes,
             service,
             endpoint,
             &execution_arguments,
@@ -5453,6 +5454,7 @@ async fn handle_meta_call_tool(
         } else {
             auth.chat.as_ref()
         },
+        &auth.assistant_operation_scopes,
         service,
         endpoint,
         &execution_arguments,
