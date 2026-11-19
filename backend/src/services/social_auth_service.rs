@@ -44,7 +44,7 @@ pub struct SocialProfile {
     pub avatar_url: Option<String>,
 }
 
-fn configured_callback_base<'a>(config: &'a AppConfig, origin: Option<&str>) -> &'a str {
+pub(crate) fn configured_callback_base<'a>(config: &'a AppConfig, origin: Option<&str>) -> &'a str {
     // Callers pass a server-selected request origin, never a client redirect URL.
     config
         .accepted_base_urls()
@@ -888,6 +888,7 @@ mod tests {
             android_app_package: None,
             android_app_sha256_cert_fingerprints: Vec::new(),
             mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,

@@ -1880,6 +1880,22 @@ pub static ENTRIES: &[Entry] = &[
         why: "mcp_sessions stores the person-owned mcp sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
+        collection: "mobile_social_deliveries",
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Excluded(ExclusionReason::SecretMaterial),
+        export_selector: ExportSelector::None,
+        why: "mobile_social_deliveries holds a short-lived encrypted sign-in response. Account erasure deletes it by user_id.",
+    },
+    Entry {
+        collection: "mobile_social_flows",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("pre-authentication flow with TTL"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "mobile_social_flows binds an anonymous, expiring social login attempt before the provider identifies a person.",
+    },
+    Entry {
         collection: "mfa_challenges",
         owner: OwnerSelector::Fields(&["user_id"]),
         erasure: Erasure::LocalInventory,

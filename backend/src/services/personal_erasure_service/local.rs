@@ -203,6 +203,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::session::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::session::MFA_CHALLENGES, doc! {"user_id":owner}),
+        (
+            m::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::refresh_token::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::api_key::COLLECTION_NAME, doc! {"user_id":owner}),
         (

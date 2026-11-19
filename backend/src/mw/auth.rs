@@ -2625,6 +2625,7 @@ mod tests {
             "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
+            "/api/v1/auth/social/google/mobile-code",
             "/login/device",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",

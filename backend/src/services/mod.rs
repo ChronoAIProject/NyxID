@@ -164,6 +164,7 @@ pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod mobile_social_service;
 pub mod node_credential_delivery;
 pub mod node_dispatch;
 #[cfg(test)]
