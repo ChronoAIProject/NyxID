@@ -891,7 +891,9 @@ async fn read_tool_file(
         }));
     };
     let bytes = zeroize::Zeroizing::new(file_egress_bytes(db, keys, chat, &attachment).await?);
-    if let Ok(text) = std::str::from_utf8(&bytes) {
+    if !attachment_extraction::is_pdf(&bytes)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+    {
         let extracted = Extracted {
             content_type: row.content_type.clone(),
             text: text.to_owned(),

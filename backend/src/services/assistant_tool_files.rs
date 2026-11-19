@@ -1,7 +1,9 @@
 //! Tool files stay encrypted server-side. UTF-8 files preserve short legacy text alongside handles.
 use super::{
-    assistant_acknowledgement_service::ChatAuthority, assistant_upload_service as uploads,
-    attachment_extraction::MAX_BYTES, content_type,
+    assistant_acknowledgement_service::ChatAuthority,
+    assistant_upload_service as uploads,
+    attachment_extraction::{self, MAX_BYTES},
+    content_type,
 };
 use crate::{
     crypto::aes::EncryptionKeys,
@@ -50,11 +52,12 @@ pub(crate) async fn reserve() -> Option<uploads::byte_budget::ByteReservation> {
 }
 
 /// A binary MIME alone is not enough: many providers label textual results as
-/// application/*. Preserve their original reader unless the bytes are non-UTF-8
-/// or Content-Disposition explicitly identifies a file.
+/// application/*. Preserve their original reader unless a PDF signature,
+/// non-UTF-8 bytes or Content-Disposition identifies a file.
 pub(crate) fn is_file(status: u16, mime: &str, disposition: Option<&str>, bytes: &[u8]) -> bool {
     candidate(status, mime)
-        && (std::str::from_utf8(bytes).is_err()
+        && (attachment_extraction::is_pdf(bytes)
+            || std::str::from_utf8(bytes).is_err()
             || disposition.is_some_and(|value| {
                 let mut parts = disposition_parts(value).into_iter();
                 parts
@@ -96,7 +99,11 @@ pub(crate) async fn response_text(
             omitted("attachment_storage_or_authority_unavailable")
         }
     };
-    Some(file_response_text(legacy_text, result))
+    // PDF source is not extracted document text, even when it decodes as UTF-8.
+    Some(file_response_text(
+        legacy_text.filter(|_| !attachment_extraction::is_pdf(bytes)),
+        result,
+    ))
 }
 
 fn file_response_text(legacy_text: Option<&str>, handle: String) -> String {
@@ -491,6 +498,7 @@ mod tests {
             "image/webp",
         ] {
             assert!(!candidate(200, mime), "{mime}");
+            assert!(!is_file(200, mime, None, b"%PDF-1.4"), "{mime}");
         }
         assert!(candidate(200, "application/pdf"));
         assert!(!candidate(200, "application/json"));

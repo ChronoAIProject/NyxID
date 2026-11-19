@@ -158,23 +158,110 @@ fn pdf() -> Vec<u8> {
     bytes
 }
 
+fn ascii_pdf() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 72 720 Td (Quarterly revenue) Tj ET\n";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+    ];
+    // A valid PDF need not contain a non-UTF-8 binary marker. Compute all byte
+    // offsets so the text-only fixture remains a complete, extractable PDF.
+    let mut pdf = "%PDF-1.4\n".to_owned();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    pdf.into_bytes()
+}
+
 #[tokio::test]
 async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_full_receipt() {
+    assert_pdf_roundtrip(
+        "raw_pdf_roundtrip",
+        pdf(),
+        "application/pdf",
+        Some("attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf"),
+        "文件.pdf",
+        Some("Round trip document"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn raw_attachment_ascii_pdf_download_read_upload_preserves_document_semantics() {
+    let bytes = ascii_pdf();
+    assert!(bytes.is_ascii());
+    assert!(std::str::from_utf8(&bytes).is_ok());
+    for (mime, disposition, name) in [
+        (
+            "application/pdf",
+            Some("attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf"),
+            "文件.pdf",
+        ),
+        ("application/pdf", None, "download_file"),
+        (
+            "application/octet-stream",
+            Some("attachment; filename=report.data"),
+            "report.data",
+        ),
+    ] {
+        assert_pdf_roundtrip(
+            "raw_ascii_pdf_roundtrip",
+            bytes.clone(),
+            mime,
+            disposition,
+            name,
+            Some("Quarterly revenue"),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn raw_attachment_malformed_ascii_pdf_is_not_reported_as_readable_text() {
+    assert_pdf_roundtrip(
+        "raw_malformed_ascii_pdf",
+        b"%PDF-1.7 corrupt".to_vec(),
+        "application/pdf",
+        Some("attachment; filename=broken.pdf"),
+        "broken.pdf",
+        None,
+    )
+    .await;
+}
+
+async fn assert_pdf_roundtrip(
+    name: &'static str,
+    bytes: Vec<u8>,
+    mime: &str,
+    disposition: Option<&str>,
+    expected_name: &str,
+    expected_text: Option<&str>,
+) {
     let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
-    let u = setup_raw("raw_pdf_roundtrip").await;
+    let u = setup_raw(name).await;
     mode(&u, crate::models::assistant_settings::AccessMode::Autopilot).await;
-    let bytes = pdf();
+    let mut response = ResponseTemplate::new(200)
+        .insert_header("content-type", mime)
+        .set_body_bytes(bytes.clone());
+    if let Some(disposition) = disposition {
+        response = response.insert_header("content-disposition", disposition);
+    }
     Mock::given(method("GET"))
         .and(path("/open-apis/download"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/pdf")
-                .insert_header(
-                    "content-disposition",
-                    "attachment; filename*=UTF-8''%E6%96%87%E4%BB%B6.pdf",
-                )
-                .set_body_bytes(bytes.clone()),
-        )
+        .respond_with(response)
         .mount(&u.server)
         .await;
     let auth = authenticate(&u.f).await;
@@ -184,8 +271,8 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
         assert_eq!(downloaded["result"]["isError"], false, "{downloaded}");
         let metadata: Value =
             serde_json::from_str(text(&downloaded).lines().next().unwrap()).unwrap();
-        assert_eq!(metadata["name"], "文件.pdf");
-        assert_eq!(metadata["type"], "application/pdf");
+        assert_eq!(metadata["name"], expected_name);
+        assert_eq!(metadata["type"], mime);
         assert!(!text(&downloaded).contains("%PDF"));
         let id = metadata["attachment_id"].as_str().unwrap();
         let read = uploads::read(
@@ -196,13 +283,18 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
         )
         .await
         .unwrap();
-        assert!(
-            read["text"]
-                .as_str()
-                .unwrap()
-                .contains("Round trip document"),
-            "{read}"
-        );
+        if let Some(expected_text) = expected_text {
+            assert!(
+                read["text"].as_str().unwrap().contains(expected_text),
+                "{read}"
+            );
+            assert!(!read["text"].as_str().unwrap().contains("%PDF"));
+            assert_eq!(read["section"]["label"], "Page 1");
+            assert_eq!(read["section"]["offset"], 0);
+        } else {
+            assert_eq!(read["error"], "attachment_has_no_extracted_text");
+            assert!(read.get("text").is_none());
+        }
         let result = raw_call(&u, &auth, meta, "upload_file", raw_args(id)).await;
         assert_eq!(result["result"]["isError"], false, "{result}");
         let image = engine::get(&u.f.state.db, &u.f.owner, &u.f.row.id)
@@ -246,12 +338,9 @@ async fn raw_attachment_pdf_download_read_upload_round_trips_exact_bytes_and_ful
     let receipts = acks::history(&u.f.state.db, &u.f.owner, &u.f.row.id)
         .await
         .unwrap();
-    assert!(
-        receipts
-            .iter()
-            .any(|r| r.decided_by.as_deref() == Some("access_mode")
-                && r.summary.contains("文件.pdf"))
-    );
+    assert!(receipts.iter().any(
+        |r| r.decided_by.as_deref() == Some("access_mode") && r.summary.contains(expected_name)
+    ));
     let missing = uploads::read(
         &u.f.state.db,
         &u.f.state.encryption_keys,

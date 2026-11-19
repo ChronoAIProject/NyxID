@@ -68,8 +68,9 @@ expires images at settlement.
 Successful binary service responses in a live, non-guest owner turn become
 encrypted attachments without a feature flag. NyxID selects the byte reader
 before consuming the response, using an explicitly binary, non-text content
-type. A candidate becomes a file only if its body is not valid UTF-8 or its
-Content-Disposition identifies an `attachment` or supplies `filename`/`filename*`.
+type. A candidate becomes a file if its bytes have a PDF signature, its body is
+not valid UTF-8, or its Content-Disposition identifies an `attachment` or supplies
+`filename`/`filename*`.
 Otherwise it keeps the exact existing text, including each transport's original
 charset and BOM handling. This preserves AWS JSON MIME types, JWT, JavaScript
 and JSON mislabeled as octet-stream. Missing content types, JSON, text and
@@ -124,12 +125,19 @@ format and scope fields, without an origin or image metadata; root, chunks and
 turn slot commit atomically. Channel image delivery and
 image-input continuations ignore these file rows.
 
-For a retained file whose bytes are valid UTF-8 and whose decoded text is at most
-8,000 characters, the legacy text is emitted first, followed by the handle and
+PDF signatures take precedence over generic UTF-8 handling, including PDFs
+without Content-Disposition or with an unknown filename extension. Their initial
+result contains only the handle; reads use the bounded document extractor and
+preserve extracted page text and page labels. Malformed or encrypted PDFs return
+the existing unavailable-extraction result and remain forwardable as original
+bytes; their raw PDF syntax is never presented as extracted text.
+
+For a retained non-PDF file whose bytes are valid UTF-8 and whose decoded text is
+at most 8,000 characters, the legacy text is emitted first, followed by the handle and
 one upload/read hint. Larger UTF-8 files emit only the handle and can be paged
-with `nyx__attachment_read`. The read tool pages any valid-UTF-8 tool file,
-regardless of filename extension; non-UTF-8 files continue through the bounded
-PDF/DOCX/text extractor. If the shared byte budget is busy, reads wait at most
+with `nyx__attachment_read`. The read tool pages any valid-UTF-8 non-PDF tool file,
+regardless of filename extension; PDFs and non-UTF-8 files continue through the
+bounded PDF/DOCX/text extractor. If the shared byte budget is busy, reads wait at most
 100 ms and return a retryable `attachment_busy` result. Eligible discovery can
 also perform a catalog lookup and binary capture can spend up to 100 ms waiting
 for the shared budget. Retained-file usage is metered from the original downstream
@@ -139,8 +147,9 @@ conversion. Other files use their actual size rather than the decoded or
 replacement-character length.
 
 `nyx__attachment_read` runs the existing bounded subprocess extractor on demand
-for non-UTF-8 PDF, DOCX and supported text. Unsupported or malformed documents may
-still be forwarded as their original bytes; the read result explicitly reports
+for PDF, DOCX and supported text that did not take the generic UTF-8 path.
+Unsupported or malformed documents may still be forwarded as their original
+bytes; the read result explicitly reports
 unavailable extracted text. Reads and egress require the same owner, conversation,
 active key and credential, producing live turn, non-stopped state and retention
 authority, rechecked after extraction or decryption. Tool files cannot be read
