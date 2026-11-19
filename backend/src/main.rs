@@ -152,6 +152,7 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 pub struct AppState {
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
+    pub readiness_probe: services::readiness_service::Probe,
     pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
@@ -1193,6 +1194,7 @@ async fn server_run(cli: Cli) {
     let state = AppState {
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
+        readiness_probe: services::readiness_service::Probe::default(),
         crash_reports: crash_reports.clone(),
         #[cfg(test)]
         local_machine_platform: None,

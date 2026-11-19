@@ -61,9 +61,22 @@ pub struct ReadinessResponse {
     pub failing: Vec<crate::services::readiness_service::Failure>,
 }
 
-/// GET /ready: bounded MongoDB availability and process drain state, without auth.
+/// GET /ready: preserve the drain-only, empty-body orchestration contract.
 pub async fn ready(State(state): State<AppState>) -> Response {
-    let failing = crate::services::readiness_service::check(&state.db, &state.shutdown).await;
+    let status = if state.shutdown.is_draining() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (status, [(CACHE_CONTROL, "no-store")]).into_response()
+}
+
+/// GET /ready/dependencies: bounded, shared dependency diagnostic, without auth.
+pub async fn dependencies_ready(State(state): State<AppState>) -> Response {
+    let failing = state
+        .readiness_probe
+        .check(&state.db, &state.shutdown)
+        .await;
     let (status, code) = if failing.is_empty() {
         ("ok", StatusCode::OK)
     } else {
@@ -239,27 +252,51 @@ mod tests {
         path: &str,
         expected_status: axum::http::StatusCode,
     ) -> serde_json::Value {
+        assert_probe_headers(state, path, expected_status, &[]).await
+    }
+
+    async fn assert_probe_headers(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
         use tower::ServiceExt;
-        let app = axum::Router::new()
-            .route("/health", axum::routing::get(health_check))
-            .route("/ready", axum::routing::get(ready))
+        let (_, router) = crate::routes::build_router_with_state(state.clone());
+        let app = router
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::mw::csrf::browser_csrf_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.shutdown.clone(),
+                crate::mw::shutdown::track,
+            ))
             .with_state(state);
+        let mut request = axum::http::Request::builder().uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
         let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(path)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), expected_status);
         assert_eq!(response.headers()["cache-control"], "no-store");
-        assert_eq!(response.headers()["content-type"], "application/json");
+        assert!(!response.headers().contains_key("location"));
+        assert!(!response.headers().contains_key("www-authenticate"));
+        if path != "/ready" {
+            assert_eq!(response.headers()["content-type"], "application/json");
+        }
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
+        if path == "/ready" {
+            assert!(bytes.is_empty());
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        }
     }
 
     #[tokio::test]
@@ -271,16 +308,36 @@ mod tests {
             "ok"
         );
         assert_eq!(
-            assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            assert_probe(state.clone(), "/ready", StatusCode::OK).await,
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            assert_probe(
+                state.clone(),
+                "/ready/dependencies",
+                StatusCode::SERVICE_UNAVAILABLE
+            )
+            .await,
             serde_json::json!({"status":"unavailable", "failing":["mongodb"]})
         );
         state.shutdown.begin_drain();
+        // Probe routes keep their contracts even after ordinary work is stopped.
+        state.shutdown.stop();
         assert_eq!(
             assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
             "ok"
         );
         assert_eq!(
-            assert_probe(state, "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            assert_probe(
+                state,
+                "/ready/dependencies",
+                StatusCode::SERVICE_UNAVAILABLE
+            )
+            .await,
             serde_json::json!({"status":"unavailable", "failing":["draining"]})
         );
     }
@@ -293,12 +350,50 @@ mod tests {
         assert_eq!(
             assert_probe(
                 crate::test_utils::test_app_state(db),
-                "/ready",
+                "/ready/dependencies",
                 axum::http::StatusCode::OK
             )
             .await,
             serde_json::json!({"status":"ok"})
         );
+    }
+
+    #[tokio::test]
+    async fn readiness_production_routes_ignore_missing_and_invalid_login_credentials() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        for headers in [
+            vec![],
+            vec![("authorization", "Bearer invalid.expired.token")],
+            vec![("cookie", "nyx_session=expired; nyx_access_token=expired")],
+            vec![
+                ("authorization", "Bearer nyx_invalid_agent_key"),
+                ("x-api-key", "invalid"),
+            ],
+            vec![
+                ("origin", "https://untrusted.example"),
+                ("cookie", "nyx_session=expired"),
+            ],
+        ] {
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/health", StatusCode::OK, &headers).await["status"],
+                "ok"
+            );
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/ready", StatusCode::OK, &headers).await,
+                serde_json::Value::Null
+            );
+            assert_eq!(
+                assert_probe_headers(
+                    state.clone(),
+                    "/ready/dependencies",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &headers
+                )
+                .await,
+                serde_json::json!({"status":"unavailable", "failing":["mongodb"]})
+            );
+        }
     }
 
     #[test]

@@ -2236,6 +2236,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     AppState {
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
+        readiness_probe: crate::services::readiness_service::Probe::default(),
         crash_reports: Arc::new(Default::default()),
         local_machine_platform: None,
         db: db.clone(),

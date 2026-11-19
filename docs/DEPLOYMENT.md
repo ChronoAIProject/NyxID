@@ -432,9 +432,11 @@ SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
 including ordinary requests and new turns that arrive while routing converges.
-There is no drain rejection on these request paths. While draining, `/ready`
-short-circuits without a database lookup; otherwise it checks MongoDB within
-one second (see [Health and readiness contract](HEALTH_READINESS.md)).
+There is no drain rejection on these request paths and `/ready` never accesses
+the database. Staging chrono-cd readiness/load-balancer consumers retain this
+drain-only, empty-body contract. The separate `/ready/dependencies` diagnostic
+checks MongoDB with bounded sharing and must not drive replica eviction (see
+[Health and readiness contract](HEALTH_READINESS.md)).
 
 The process stops taking new background queue claims, scheduled work and polls.
 Already claimed work finishes, with turn heartbeats, capacity renewal, node
@@ -938,8 +940,9 @@ For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
 production/staging base URLs, chrono-probe assertions and staged rollout, see
 [Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
 its backend/version proxy; frontend-only probes are `/frontend/health` and
-`/frontend/ready`. Backend `/ready` checks MongoDB within one second as well as
-draining. Production Compose uses each component's readiness for health status.
+`/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd;
+`/ready/dependencies` is the separate MongoDB diagnostic for chrono-probe.
+Production Compose keeps backend `/health` and checks frontend `/frontend/ready`.
 
 Publish Images may reuse successful CI jobs from an identical pull-request
 merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).

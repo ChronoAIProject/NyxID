@@ -5,17 +5,24 @@ Build inputs are a tiny static fixture; no npm install, user credentials or
 external service connections are required. Docker is required (including in CI).
 """
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
+import threading
 import unittest
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 import uuid
 
 FRONTEND = Path(__file__).resolve().parents[1]
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, *_):
+        return None
 
 
 def docker(*args, **kwargs):
@@ -69,16 +76,17 @@ class NginxReadiness(unittest.TestCase):
         else:
             raise RuntimeError("frontend failed to start: " + docker("logs", self.name))
 
-    def request(self, path):
+    def request(self, path, headers=None):
         try:
-            response = urlopen(self.base + path, timeout=4)
+            response = build_opener(RejectRedirects).open(
+                Request(self.base + path, headers=headers or {}), timeout=4)
         except HTTPError as error:
             response = error
         with response:
             return response.status, response.headers, response.read()
 
-    def probe(self, path, status, body):
-        actual_status, headers, data = self.request(path)
+    def probe(self, path, status, body, request_headers=None):
+        actual_status, headers, data = self.request(path, request_headers)
         self.assertEqual(actual_status, status, data)
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers.get_all("Cache-Control"), ["no-store"])
@@ -89,10 +97,31 @@ class NginxReadiness(unittest.TestCase):
         self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
         self.probe("/frontend/ready", 200, {"status": "ok", "component": "frontend"})
 
+    def checker_pid(self):
+        result = docker("exec", self.name, "python3", "-c", '''import pathlib
+for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
+ try:
+  if p.read_bytes().split(b"\\0")[:2] == [b"python3", b"/etc/nginx/nyxid/frontend-readiness.py"]:
+   print(p.parent.name)
+ except OSError:
+  pass
+''')
+        self.assertTrue(result)
+        return result
+
+    def wait_for_ready(self):
+        for _ in range(50):
+            response = self.request("/frontend/ready")
+            if response[0] == 200:
+                return response
+            time.sleep(0.1)
+        self.fail("frontend readiness did not recover: " + repr(response))
+
     def test_01_backend_down_cannot_mask_frontend_health_or_readiness(self):
         self.healthy()
         self.assertEqual(self.request("/health")[0], 502)
         self.assertEqual(self.request("/ready")[0], 502)
+        self.assertEqual(self.request("/ready/dependencies")[0], 502)
 
     def test_02_missing_or_unreadable_artifacts_fail_then_recover(self):
         for path, reason in [("index.html", "entry_html"), ("assets/app.js", "static_assets"),
@@ -116,7 +145,7 @@ class NginxReadiness(unittest.TestCase):
                     self.healthy()
 
     def test_03_explicit_routes_do_not_use_spa_fallback(self):
-        for path in ["/frontend/ready/", "/frontend/ready.js", "/frontend/health/", "/frontend/health.css", "/ready/", "/ready.js"]:
+        for path in ["/frontend/ready/", "/frontend/ready.js", "/frontend/health/", "/frontend/health.css", "/ready/", "/ready.js", "/ready/dependencies/", "/ready/dependencies.js"]:
             with self.subTest(path=path):
                 status, _, body = self.request(path)
                 self.assertEqual(status, 404)
@@ -127,11 +156,12 @@ class NginxReadiness(unittest.TestCase):
         source = '''from http.server import BaseHTTPRequestHandler, HTTPServer
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
-  self.send_response(200 if self.path == "/health" else 503)
+  self.send_response(503 if self.path == "/ready/dependencies" else 200)
   self.send_header("Content-Type", "application/json")
   self.send_header("Cache-Control", "max-age=86400")
   self.end_headers()
-  self.wfile.write(b'{"status":"ok","version":"legacy"}' if self.path == "/health" else b'{"status":"unavailable","failing":["mongodb"]}')
+  bodies = {"/health": b'{"status":"ok","version":"legacy"}', "/ready": b'{"status":"ok"}', "/ready/dependencies": b'{"status":"unavailable","failing":["mongodb"]}'}
+  self.wfile.write(bodies[self.path])
 HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
 '''
         docker("exec", "-d", self.name, "python3", "-c", source)
@@ -140,7 +170,8 @@ HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
                 break
             time.sleep(0.1)
         self.probe("/health", 200, {"status": "ok", "version": "legacy"})
-        self.probe("/ready", 503, {"status": "unavailable", "failing": ["mongodb"]})
+        self.probe("/ready", 200, {"status": "ok"})
+        self.probe("/ready/dependencies", 503, {"status": "unavailable", "failing": ["mongodb"]})
         self.healthy()
         target = "/usr/share/nginx/html/index.html"
         docker("exec", "--user", "0", self.name, "mv", target, target + ".saved")
@@ -152,12 +183,7 @@ HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
         self.healthy()
 
     def test_05_checker_unavailable_is_bounded_and_never_cached(self):
-        process = docker("exec", self.name, "python3", "-c", '''import pathlib
-for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
- if p.read_bytes().split(b"\\0")[:2] == [b"python3", b"/etc/nginx/nyxid/frontend-readiness.py"]:
-  print(p.parent.name)
-''')
-        self.assertTrue(process)
+        process = self.checker_pid()
         docker("exec", self.name, "kill", "-STOP", process)
         try:
             start = time.monotonic()
@@ -172,6 +198,66 @@ for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
         docker("stop", "--time", "2", self.name)
         with self.assertRaises((URLError, ConnectionError)):
             self.request("/frontend/health")
+
+    def test_06_crashed_checker_is_reaped_and_restarted(self):
+        process = self.checker_pid()
+        docker("exec", self.name, "kill", "-KILL", process)
+        self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
+        self.probe("/frontend/ready", 503, {"status": "unavailable", "component": "frontend", "failing": ["checker"]})
+        self.wait_for_ready()
+        self.assertNotEqual(self.checker_pid(), process)
+        docker("exec", self.name, "test", "!", "-e", "/proc/" + process)
+        self.healthy()
+
+    def test_07_concurrent_anonymous_probes_have_bounded_work(self):
+        process = self.checker_pid()
+        docker("exec", self.name, "kill", "-STOP", process)
+        barrier = threading.Barrier(12)
+
+        def request_ready(_):
+            barrier.wait(timeout=5)
+            return self.request("/frontend/ready")
+
+        try:
+            with ThreadPoolExecutor(max_workers=12) as executor:
+                pending = [executor.submit(request_ready, index) for index in range(12)]
+                self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
+                responses = [future.result(timeout=5) for future in pending]
+            reasons = []
+            for status, headers, body in responses:
+                self.assertEqual(status, 503, body)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                value = json.loads(body)
+                self.assertEqual(value["status"], "unavailable")
+                self.assertEqual(value["component"], "frontend")
+                reasons.append(value["failing"])
+            self.assertIn(["overloaded"], reasons)
+            self.assertLessEqual(reasons.count(["checker"]), 2)
+            self.assertTrue(all(reason in (["checker"], ["overloaded"]) for reason in reasons))
+        finally:
+            docker("exec", self.name, "kill", "-CONT", process)
+        self.wait_for_ready()
+        self.healthy()
+
+    def test_08_credentials_never_change_public_frontend_probes(self):
+        credential_headers = [
+            {}, {"Cookie": "nyxid_session=expired; access_token=broken; refresh_token=revoked"},
+            {"Authorization": "Bearer invalid.jwt.signature"}, {"X-API-Key": "nyx_ak_invalid"},
+            {"Authorization": "Bearer nyx_ak_revoked", "Cookie": "nyxid_session=bad"},
+            {"Authorization": "Basic invalid-credentials"},
+        ]
+        for headers in credential_headers:
+            self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"}, headers)
+            self.probe("/frontend/ready", 200, {"status": "ok", "component": "frontend"}, headers)
+        target = "/usr/share/nginx/html/index.html"
+        docker("exec", "--user", "0", self.name, "mv", target, target + ".saved")
+        try:
+            for headers in credential_headers:
+                self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"}, headers)
+                self.probe("/frontend/ready", 503, {"status": "unavailable", "component": "frontend", "failing": ["entry_html"]}, headers)
+        finally:
+            docker("exec", "--user", "0", self.name, "mv", target + ".saved", target)
+        self.healthy()
 
 
 if __name__ == "__main__":

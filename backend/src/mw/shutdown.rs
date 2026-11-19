@@ -15,7 +15,10 @@ use crate::services::shutdown::{RecoverableSubscription, Runtime, Work};
 
 pub async fn track(State(runtime): State<Runtime>, request: Request, next: Next) -> Response {
     runtime.record_received();
-    if matches!(request.uri().path(), "/health" | "/ready") {
+    if matches!(
+        request.uri().path(),
+        "/health" | "/ready" | "/ready/dependencies"
+    ) {
         let response = next.run(request).await;
         runtime.record_responded();
         return response;

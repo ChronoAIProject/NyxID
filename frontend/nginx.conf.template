@@ -35,6 +35,11 @@ map $upstream_http_permissions_policy $nyxid_proxy_permissions {
 
 include @@LEGAL_CACHE@@;
 
+# Bound anonymous readiness work across all callers of this frontend instance.
+# Shared keys keep multiple source IPs from multiplying the checker queue.
+limit_req_zone $server_name zone=nyxid_frontend_ready_rate:1m rate=10r/s;
+limit_conn_zone $server_name zone=nyxid_frontend_ready_active:1m;
+
 server {
     listen @@PORT@@;
     server_name _;
@@ -162,6 +167,11 @@ server {
     location = /frontend/ready {
         include @@STATIC_HEADERS@@;
         add_header Cache-Control "no-store" always;
+        limit_req zone=nyxid_frontend_ready_rate burst=20 nodelay;
+        limit_req_status 429;
+        limit_conn nyxid_frontend_ready_active 2;
+        limit_conn_status 429;
+        error_page 429 = @frontend_checker_overloaded;
         proxy_hide_header Cache-Control;
         proxy_pass http://unix:/tmp/nyxid-frontend-readiness.sock:/;
         proxy_connect_timeout 1s;
@@ -179,6 +189,13 @@ server {
         return 503 '{"status":"unavailable","component":"frontend","failing":["checker"]}';
     }
 
+    location @frontend_checker_overloaded {
+        include @@STATIC_HEADERS@@;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 503 '{"status":"unavailable","component":"frontend","failing":["overloaded"]}';
+    }
+
     # Reserve probe prefixes: typos/suffixes must not return 200 index.html.
     location ^~ /frontend/health { return 404; }
     location ^~ /frontend/ready { return 404; }
@@ -194,6 +211,18 @@ server {
     }
 
     location = /ready {
+        include @@PROXY_HEADERS@@;
+        proxy_pass @@BACKEND_URL@@;
+        proxy_set_header Host $host;
+        proxy_connect_timeout 1s;
+        proxy_read_timeout 2s;
+        proxy_send_timeout 1s;
+        proxy_cache off;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location = /ready/dependencies {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
         proxy_set_header Host $host;
