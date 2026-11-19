@@ -1,5 +1,7 @@
 use axum::Json;
 use axum::extract::State;
+use axum::http::{StatusCode, header::CACHE_CONTROL};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::AppState;
@@ -52,28 +54,45 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
-/// Readiness is process-local; liveness and security capability readiness are independent.
-pub async fn ready(State(state): State<AppState>) -> axum::http::StatusCode {
-    if state.shutdown.is_draining() {
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
+#[derive(Serialize)]
+pub struct ReadinessResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<crate::services::readiness_service::Failure>,
+}
+
+/// GET /ready: bounded MongoDB availability and process drain state, without auth.
+pub async fn ready(State(state): State<AppState>) -> Response {
+    let failing = crate::services::readiness_service::check(&state.db, &state.shutdown).await;
+    let (status, code) = if failing.is_empty() {
+        ("ok", StatusCode::OK)
     } else {
-        axum::http::StatusCode::OK
-    }
+        ("unavailable", StatusCode::SERVICE_UNAVAILABLE)
+    };
+    (
+        code,
+        [(CACHE_CONTROL, "no-store")],
+        Json(ReadinessResponse { status, failing }),
+    )
+        .into_response()
 }
 
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
-        encryption: EncryptionHealthResponse {
-            previous_key_configured: state.encryption_keys.has_previous(),
-            decrypt_stats: state.encryption_keys.decrypt_stats(),
-        },
-    })
+pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(HealthResponse {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
+            encryption: EncryptionHealthResponse {
+                previous_key_configured: state.encryption_keys.has_previous(),
+                decrypt_stats: state.encryption_keys.decrypt_stats(),
+            },
+        }),
+    )
 }
 
 /// Container releases stamp this after compilation. Standalone binaries keep
@@ -214,6 +233,73 @@ pub async fn automation_continuations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_probe(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+    ) -> serde_json::Value {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route("/health", axum::routing::get(health_check))
+            .route("/ready", axum::routing::get(ready))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn readiness_http_mongodb_unavailable_preserves_liveness_and_hides_errors() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            serde_json::json!({"status":"unavailable", "failing":["mongodb"]})
+        );
+        state.shutdown.begin_drain();
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state, "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            serde_json::json!({"status":"unavailable", "failing":["draining"]})
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_http_real_mongodb_succeeds_without_authentication() {
+        let db = crate::test_utils::connect_test_database("readiness_http")
+            .await
+            .unwrap();
+        assert_eq!(
+            assert_probe(
+                crate::test_utils::test_app_state(db),
+                "/ready",
+                axum::http::StatusCode::OK
+            )
+            .await,
+            serde_json::json!({"status":"ok"})
+        );
+    }
 
     #[test]
     fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {
