@@ -25,6 +25,7 @@ pub(super) enum Endpoint {
     Events,
     ResponseGet,
     Dispatches,
+    RelayCallback,
 }
 impl Endpoint {
     fn name(self) -> &'static str {
@@ -35,6 +36,7 @@ impl Endpoint {
             Self::Events => "events",
             Self::ResponseGet => "response_get",
             Self::Dispatches => "dispatches",
+            Self::RelayCallback => "relay_callback",
         }
     }
 }
@@ -165,7 +167,7 @@ pub(super) fn error(error: AppError) -> Response {
 }
 
 // A fixed number of slots; no unauthenticated identifiers or database work.
-static WARN_AFTER: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+static WARN_AFTER: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 fn warn(endpoint: Endpoint, status: StatusCode, code: &str) {
     let now = chrono::Utc::now().timestamp().max(0) as u64;
     let slot = &WARN_AFTER[endpoint as usize];

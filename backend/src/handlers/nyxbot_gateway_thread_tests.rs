@@ -1220,7 +1220,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         } else {
             let signed = |id: &str| {
                 let payload = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
-                    "conversation":{"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
+                    "conversation":{"id":f.row.route_id,"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
                     "sender":{"platform_id":"human"},"content":{"type":"image","text":"receipt with caption"},
                     "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"human"}}}}});
                 let bytes = serde_json::to_vec(&payload).unwrap();

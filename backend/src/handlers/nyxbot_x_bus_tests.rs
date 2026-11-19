@@ -257,12 +257,10 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": Uuid::new_v4().to_string(), "user_id": OWNER, "channel_bot_id": &bot.id,
-            "platform": "x", "platform_conversation_id": "*", "platform_conversation_type": "private",
-            "agent_api_key_id": &row.route_api_key_id, "default_agent": true, "is_active": true,
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-        })
+        .update_one(
+            doc! {"_id": &row.route_id},
+            doc! {"$set": {"channel_bot_id": &bot.id, "platform": "x"}},
+        )
         .await
         .unwrap();
     let deliver = |id: &str, sender: &str, text: &str| {
