@@ -2599,6 +2599,7 @@ mod tests {
             "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
+            "/login/device",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
             "/api/v1/services",
@@ -5378,4 +5379,26 @@ pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> App
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_management_boundary_tests {
+    #[test]
+    fn delegated_reads_cannot_open_crash_report_routes() {
+        for path in [
+            "/api/v1/admin/crash-reports",
+            "/api/v1/admin/crash-reports/summary",
+            "/api/v1/admin/crash-reports/123",
+            "/api/v1/admin/crash-reports/releases",
+        ] {
+            assert!(super::delegated_read_denied_path(path));
+        }
+        assert!(!super::delegated_read_denied_path(
+            "/api/v1/administer/crash-reportsX"
+        ));
+        // The existing entire admin segment also denies adjacent admin resources.
+        assert!(super::delegated_read_denied_path(
+            "/api/v1/admin/crash-reportsX"
+        ));
+    }
 }

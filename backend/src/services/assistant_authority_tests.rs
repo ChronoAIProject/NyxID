@@ -326,6 +326,7 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
@@ -2034,6 +2035,9 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
     let child = Uuid::new_v4().to_string();
     let key = &f.chat.api_key_id;
     let db = &f.state.db;
+    super::security_effect_service::ensure_indexes(db)
+        .await
+        .unwrap();
     db.collection::<bson::Document>(CHILDREN)
         .insert_one(doc! {
             "_id": &child, "api_key_id": key, "user_id": &f.owner,
@@ -2065,6 +2069,9 @@ async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_aft
             .unwrap(),
         0
     );
+    super::security_effect_service::sweep(db, &f.state.encryption_keys)
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let audit = db

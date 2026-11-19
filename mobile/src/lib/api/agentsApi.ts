@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { requestJson } from "./http";
 import type { RequestOptions } from "./authenticatedTransport";
@@ -36,7 +37,7 @@ export const agentsApi = {
       await requestJson(agentPath(id), { signal }),
     );
     if (detail.agent.id !== id)
-      throw new Error("The server returned a different agent. Please reload.");
+      throw localizedError("The server returned a different agent. Please reload.");
     return detail;
   },
   async create(input: AgentCreate) {

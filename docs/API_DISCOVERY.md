@@ -170,6 +170,27 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
+Published stored catalog Binary operations have a chat-only rendered schema
+for every eligible non-guest owner's live chat key, without a feature-flag read.
+`tools/list` and tool search preserve the original base64 body property and add a
+UUID `attachment_id`, requiring exactly one via `oneOf` and dispatch validation.
+Use body for model-authored content and attachment_id for existing uploaded or
+downloaded files; declared parameters remain unchanged. Lookup errors log a warning
+and preserve unchanged schemas, and ineligible callers or listings without
+candidates perform no attachment-schema reads. Both system overlays and
+Catalog-Manager-created rows qualify; instance-mounted specs, generic proxy,
+node routes and async operations do not. This does not set `attachment_input`
+or change the stored schema, contract digest, `/mcp/config`, exact descriptors
+or ordinary MCP discovery. Direct and meta dispatch inject authorized bytes
+server-side, bind owner confirmation to the file and request, and revalidate at
+HTTP egress. See [Assistant uploads](chat/10-uploads.md#raw-file-uploads-from-attachments)
+for fences, content types and rollout. During rolling deployment, handle calls
+reaching an old replica receive its existing base64-body-required error until it
+is upgraded; body-only calls work on both versions. Lark managed writes keep their
+separate `assistant:attachment-writes` gate. Confirmed binary files captured within the
+byte and memory limits return compact file handles in owner turns without a flag.
+Textual candidates and unavailable capture preserve the legacy response reader.
+
 The Lark/Feishu `bitable_media_upload` operation has a separate live-chat
 capability. It appears in MCP `tools/list`, search and `nyx__call_tool` only for
 owner chat keys with `assistant:attachment-writes` enabled (default off). Both
@@ -187,9 +208,15 @@ on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
 specifications, including a mounted copy of the hosted overlay, cannot grant
 this capability. User uploads retain their live conversation/key/retention checks;
 tool images retain their producing-live-turn fence. Consent binds the exact
-canonical multipart bytes and boundary content type. Body-constrained operation
-scopes still require JSON and therefore refuse this multipart upload: they cannot
-constrain its Base through `parent_node`. The upload is excluded from
+canonical multipart bytes and boundary content type. When admission to this live-chat
+operation requires a body limit, NyxID checks the caller's JSON arguments before
+attachment lookup. Uploads authorized without a body limit retain the original
+multipart encoding and confirmation identity. To pin
+the destination Base, require an exact `parent_node` and declare
+`attachment_id` and `parent_type` in the same closed object. NyxID uses those
+arguments to resolve the file and write the multipart fields. During a rolling
+upgrade, older replicas still return `body requires application/json` for a
+body-limited upload. The upload is excluded from
 `/mcp/config`, exact-operation views and descriptors, and refuses non-chat,
 feature-off, exact, durable and async execution before provider effects. Existing
 `bitable_record_create` discovery and JSON execution remain unchanged.
@@ -953,7 +980,7 @@ for bounds, owner checks, failures, and readiness-gated personal intent locks.
 
 ### Attachment eligibility and legacy publication (#2327)
 
-Chat discovery and preparation use the same live attachment eligibility gate.
+Lark attachment discovery and preparation use the same live eligibility gate.
 It checks the non-guest owner turn, bound active/unexpired conversation key,
 `assistant:attachment-writes`, exact catalog/connection identity, instance-spec
 absence and current compiled operation contracts. Managed Base creation also

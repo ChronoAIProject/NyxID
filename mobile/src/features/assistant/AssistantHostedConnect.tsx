@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { Translation } from "../../i18n/Translation";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
@@ -32,6 +36,7 @@ export function AssistantHostedConnect({
   onBusy: (busy: boolean) => void;
   onComplete?: () => void;
 }) {
+  useAppLanguage();
   const flow = useHostedConnect(token, active, onComplete);
   const [credential, setCredential] = useState("");
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
@@ -62,7 +67,7 @@ export function AssistantHostedConnect({
         const fields: Record<string, string> = {};
         for (const field of flow.credentialFields) {
           const value = fieldValues[field.name]?.trim();
-          if (!value) throw new Error(`Enter ${field.label}.`);
+          if (!value) throw localizedError("Enter {{label}}.", { label: field.label});
           fields[field.name] = value;
         }
         composed = JSON.stringify(fields);
@@ -75,10 +80,11 @@ export function AssistantHostedConnect({
       });
       await flow.approve(values);
     } catch (cause) {
-      flow.setError(
+      flow.setError(() => (
         cause instanceof Error
           ? cause.message
-          : "The connection request failed.",
+          : translateApp("The connection request failed.")
+        ),
       );
     } finally {
       setCredential("");
@@ -90,12 +96,12 @@ export function AssistantHostedConnect({
     return (
       <View style={{ gap: 12 }}>
         <Notice
-          message={flow.error ?? "Loading connection request…"}
+          message={flow.error ?? translateApp("Loading connection request…")}
           tone={flow.error ? "error" : "info"}
         />
         {flow.error ? (
           <ActionButton
-            label="Retry"
+            label={translateApp("Retry")}
             variant="secondary"
             onPress={() => void flow.reload()}
             disabled={!active || flow.loading}
@@ -113,15 +119,15 @@ export function AssistantHostedConnect({
           complete={p.status === "completed"}
           title={
             p.status === "completed"
-              ? `${p.service_name} connected`
+              ? translateApp("{{service}} connected", { service: p.service_name })
               : p.status === "cancelled"
-                ? "Connection cancelled"
-                : "Connection request expired"
+                ? translateApp("Connection cancelled")
+                : translateApp("Connection request expired")
           }
           subtitle={
             p.status === "completed"
-              ? "Your agent can now retry the original request."
-              : "You may now close this page."
+              ? translateApp("Your agent can now retry the original request.")
+              : translateApp("You may now close this page.")
           }
         />
         <SignedInAs active={active} />
@@ -133,11 +139,15 @@ export function AssistantHostedConnect({
         serviceSlug={p.service_slug}
         serviceName={p.service_name}
         iconUrl={flow.iconUrl}
-        title={`NyxID wants to connect to your ${p.service_name}`}
-        subtitle="Add your connection details and approve the request."
+        title={translateApp("NyxID wants to connect to your {{service}}", {
+          service: p.service_name,
+        })}
+        subtitle={translateApp(
+          "Add your connection details and approve the request.",
+        )}
       />
       <RequestDetails
-        requestedBy={p.requested_by ?? "Your NyxID account"}
+        requestedBy={p.requested_by ?? translateApp("Your NyxID account")}
         label={p.label}
         scopes={p.scopes}
         instructions={p.api_key_instructions}
@@ -155,24 +165,25 @@ export function AssistantHostedConnect({
       {flow.platformAvailable && p.assistant_intent_locked ? (
         <Label muted>
           {p.use_platform_key
-            ? "This link uses NyxID's platform connection."
-            : "This link connects your own account."}
+            ? translateApp("This link uses NyxID's platform connection.")
+            : translateApp("This link connects your own account.")}
         </Label>
       ) : flow.platformAvailable ? (
         <View style={{ gap: 6 }}>
-          <Label>Connection</Label>
+          <Label>{translateApp("Connection")}</Label>
           <SegmentControl
             segments={[
-              { label: "Platform key" },
-              { label: "Your credentials" },
+              { label: translateApp("Platform key") },
+              { label: translateApp("Your credentials") },
             ]}
             activeIndex={flow.usePlatformKey ? 0 : 1}
             onPress={(index) => flow.setPlatformChoice(index === 0)}
             disabled={flow.disabled || !!flow.device || !!flow.oauth}
           />
           <Label muted>
-            Platform key uses NyxID's shared connection. Your credentials use
-            your own account.
+            {translateApp(
+              "Platform key uses NyxID's shared connection. Your credentials use your own account.",
+            )}
           </Label>
         </View>
       ) : null}
@@ -200,8 +211,8 @@ export function AssistantHostedConnect({
               label={
                 p.auth_key_name.trim() ||
                 (p.requires_gateway_url
-                  ? "Gateway bearer token"
-                  : "API key or token")
+                  ? translateApp("Gateway bearer token")
+                  : translateApp("API key or token"))
               }
               value={credential}
               onChangeText={setCredential}
@@ -213,7 +224,7 @@ export function AssistantHostedConnect({
           ) : null}
           {!flow.usePlatformKey && connectShowsEndpoint(p) ? (
             <Field
-              label="Service URL"
+              label={translateApp("Service URL")}
               value={endpoint}
               onChangeText={setEndpoint}
               keyboardType="url"
@@ -224,14 +235,14 @@ export function AssistantHostedConnect({
           {!flow.usePlatformKey && connectNeedsOAuthCredentials(p) ? (
             <>
               <Field
-                label="OAuth client ID"
+                label={translateApp("OAuth client ID")}
                 value={clientId}
                 onChangeText={setClientId}
                 maxLength={1024}
                 editable={!flow.disabled}
               />
               <Field
-                label="OAuth client secret"
+                label={translateApp("OAuth client secret")}
                 value={clientSecret}
                 onChangeText={setClientSecret}
                 maxLength={16384}
@@ -244,11 +255,11 @@ export function AssistantHostedConnect({
           <ActionButton
             label={
               !flow.usePlatformKey && p.connect_method === "api_key"
-                ? "Approve & connect"
+                ? translateApp("Approve & connect")
                 : !flow.usePlatformKey &&
                     (connectShowsEndpoint(p) || connectNeedsOAuthCredentials(p))
-                  ? "Approve & continue"
-                  : "Approve connection"
+                  ? translateApp("Approve & continue")
+                  : translateApp("Approve connection")
             }
             onPress={() => void approve()}
             loading={flow.busy}
@@ -260,16 +271,18 @@ export function AssistantHostedConnect({
       {flow.oauth ? (
         <Card>
           <Label accessibilityLiveRegion="polite">
-            Finish authorization in the provider window, then return here.
+            {translateApp(
+              "Finish authorization in the provider window, then return here.",
+            )}
           </Label>
           <ActionButton
-            label="Open provider"
+            label={translateApp("Open provider")}
             variant="secondary"
             onPress={() => void flow.openProvider(flow.oauth!.url)}
             disabled={flow.disabled}
           />
           <ActionButton
-            label="Check status"
+            label={translateApp("Check status")}
             variant="secondary"
             onPress={() => void flow.check()}
             disabled={flow.disabled}
@@ -279,30 +292,39 @@ export function AssistantHostedConnect({
       {flow.device ? (
         <Card>
           <Label>
-            Enter this code at the provider. NyxID will finish the connection
-            after authorization.
+            {translateApp(
+              "Enter this code at the provider. NyxID will finish the connection after authorization.",
+            )}
           </Label>
           <Label
             selectable
             mono
-            accessibilityLabel={`Authorization code: ${flow.device.code}`}
+            accessibilityLabel={translateApp("Authorization code: {{code}}", {
+              code: flow.device.code,
+            })}
           >
             {flow.device.code}
           </Label>
           <Label muted accessibilityLiveRegion="polite">
             {flow.device.status === "slow_down"
-              ? `Provider requested a slower check. Checking again in ${flow.device.interval} seconds.`
-              : `Checking automatically every ${flow.device.interval} seconds.`}
+              ? translateApp(
+                  "Provider requested a slower check. Checking again in {{seconds}} seconds.",
+                  { seconds: flow.device.interval},
+                )
+              : translateApp(
+                  "Checking automatically every {{seconds}} seconds.",
+                  { seconds: flow.device.interval},
+                )}
           </Label>
           <ActionButton
-            label="Open provider"
+            label={translateApp("Open provider")}
             variant="secondary"
             onPress={() => void flow.openProvider(flow.device!.url)}
             disabled={flow.disabled}
           />
           {flow.error ? (
             <ActionButton
-              label="Get a new code"
+              label={translateApp("Get a new code")}
               variant="secondary"
               onPress={() => void flow.approve({})}
               disabled={flow.disabled}
@@ -311,7 +333,7 @@ export function AssistantHostedConnect({
         </Card>
       ) : null}
       <QuietAction
-        label="Decline"
+        label={translateApp("Decline")}
         onPress={() => void flow.decline()}
         disabled={flow.disabled}
       />
@@ -336,14 +358,18 @@ function RequestDetails({
   oauthScopes: boolean;
   onCredentialSetup?: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const muted = { color: colors.textMuted };
   return (
     <View style={[styles.details, { borderColor: colors.border }]}>
-      <DetailRow label="Requested by" value={requestedBy} />
-      {label ? <DetailRow label="Connection name" value={label} /> : null}
+      <DetailRow label={translateApp("Requested by")} value={requestedBy} />
+      {label ? (
+        <DetailRow label={translateApp("Connection name")} value={label} />
+      ) : null}
       {scopes.length ? (
-        <DetailRow label="Requested permissions" value={scopes.join(", ")} />
+        <DetailRow label={translateApp("Requested permissions")}
+          value={scopes.join(", ")} />
       ) : null}
       {instructions ? (
         <Text style={[styles.note, muted]}>{instructions}</Text>
@@ -355,14 +381,17 @@ function RequestDetails({
           hitSlop={{ top: 12, bottom: 12 }}
           style={styles.setup}
         >
-          <Text style={[styles.note, muted]}>Credential setup</Text>
+          <Text style={[styles.note, muted]}>
+            {translateApp("Credential setup")}
+          </Text>
           <ExternalLink size={12} color={colors.textMuted} />
         </Pressable>
       ) : null}
       {oauthScopes ? (
         <Text style={[styles.note, muted]}>
-          These additional permissions will be requested on top of the provider
-          defaults.
+          {translateApp(
+            "These additional permissions will be requested on top of the provider defaults.",
+          )}
         </Text>
       ) : null}
     </View>
@@ -370,6 +399,7 @@ function RequestDetails({
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -397,6 +427,7 @@ function QuietAction({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -419,6 +450,7 @@ function QuietAction({
 }
 
 function SignedInAs({ active }: { active: boolean }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const profile = useQuery({
     queryKey: ["account", "profile"],
@@ -435,8 +467,7 @@ function SignedInAs({ active }: { active: boolean }) {
         styles.signedIn,
         { color: colors.textMuted, borderColor: colors.border },
       ]}
-    >
-      Signed in as <Text style={{ color: colors.textPrimary }}>{email}</Text>
+    ><Translation message="Signed in as {{email}}" values={{ email: <Text style={{ color: colors.textPrimary }}>{email}</Text> }} />
     </Text>
   );
 }

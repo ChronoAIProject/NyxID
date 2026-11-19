@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -11,7 +14,7 @@ import {
 } from "react-native";
 import Markdown from "react-native-markdown-display";
 
-import { BlurBackButton } from "../../components/BlurBackButton";
+import { FloatingBackButton } from "../../components/FloatingBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { SkeletonRows } from "../../components/Skeleton";
 import { resolveLegalDocumentUrl } from "./legalDocumentUrl";
@@ -64,6 +67,7 @@ export function LegalDocumentScreen({
   onBack,
   onOpenDocument,
 }: Props) {
+  const appLanguage = useAppLanguage().language;
   const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
   const { t } = useAppLanguage();
@@ -78,7 +82,7 @@ export function LegalDocumentScreen({
   const [url, setUrl] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -95,7 +99,7 @@ export function LegalDocumentScreen({
       } else if (link.kind === "external") {
         await Linking.openURL(link.url);
       } else {
-        throw new Error("Unsupported legal document link");
+        throw localizedError("Unsupported legal document link");
       }
     } catch {
       if (!mounted.current) return;
@@ -119,13 +123,15 @@ export function LegalDocumentScreen({
     setEffectiveDate(null);
     setError(null);
     if (!url) {
-      setError("Legal document URL is not configured (LEGAL_BASE_URL).");
+      setError(
+        () => (translateApp("Legal document URL is not configured (LEGAL_BASE_URL).")),
+      );
       return;
     }
     let cancelled = false;
     fetch(url, { cache: "no-store" })
       .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (!r.ok) throw localizedError("HTTP {{code}}", { code: r.status});
         return r.text();
       })
       .then((md) => {
@@ -142,12 +148,13 @@ export function LegalDocumentScreen({
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : "Failed to load");
+        setError(() => (e instanceof Error ? e.message : translateApp("Failed to load")),
+        );
       });
     return () => {
       cancelled = true;
     };
-  }, [docKey]);
+  }, [docKey, appLanguage]);
 
   return (
     <ScreenContainer>
@@ -157,7 +164,7 @@ export function LegalDocumentScreen({
             pointerEvents="box-none"
             style={[styles.rootContent, styles.backContent]}
           >
-            <BlurBackButton
+            <FloatingBackButton
               onPress={() => {
                 capture({
                   name: "ui.mobile_nav_target_opened",
@@ -182,21 +189,18 @@ export function LegalDocumentScreen({
       >
         {!inWorkspaceSheet && <Text style={flowStyles.title}>{title}</Text>}
         {effectiveDate ? (
-          <Text style={flowStyles.subtitle}>
-            Effective date: {effectiveDate}
+          <Text style={flowStyles.subtitle}>{translateApp("Effective date: {{time}}", { time: effectiveDate })}
           </Text>
         ) : null}
 
         <View style={flowStyles.card}>
           {error ? (
             <View>
-              <Text style={styles.errorTitle}>
-                Unable to load {title.toLowerCase()}
+              <Text style={styles.errorTitle}>{translateApp("Unable to load {{title}}", {title: title })}
               </Text>
               <Text style={styles.errorBody}>{error}</Text>
               {url ? (
-                <Text style={styles.errorBody}>
-                  You can view the latest version at: {url}
+                <Text style={styles.errorBody}>{translateApp("You can view the latest version at: {{url}}", {url: url })}
                 </Text>
               ) : null}
             </View>
@@ -215,7 +219,9 @@ export function LegalDocumentScreen({
             <SkeletonRows
               rows={6}
               icon={false}
-              accessibilityLabel={`Loading ${title.toLowerCase()}`}
+              accessibilityLabel={translateApp("Loading {{listName}}", {
+                listName: title,
+              })}
             />
           )}
         </View>

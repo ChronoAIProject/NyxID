@@ -436,7 +436,7 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
     let retry = f
         .billing
         .reconciler()
-        .run_once_failing_for_test(&["usage_push", "usage_comparison", "wallet_balances"])
+        .run_once_failing_for_test(&["usage_push", "wallet_balances"])
         .await;
     assert_eq!(retry.retried, 3);
     assert!(f.provider.events.lock().unwrap().is_empty());
@@ -447,7 +447,7 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
     let ambiguous = f
         .billing
         .reconciler()
-        .run_once_failing_for_test(&["usage_push", "usage_comparison", "wallet_balances"])
+        .run_once_failing_for_test(&["usage_push", "wallet_balances"])
         .await;
     assert_eq!(ambiguous.pushed, 2);
     assert_eq!(ambiguous.retried, 1);
@@ -455,7 +455,7 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
     rows.update_many(doc! {}, age).await.unwrap();
     f.billing
         .reconciler()
-        .run_once_failing_for_test(&["usage_comparison", "wallet_balances"])
+        .run_once_failing_for_test(&["wallet_balances"])
         .await;
     assert_eq!(
         rows.count_documents(doc! {"lago_acked":true})
@@ -472,7 +472,7 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
         .unwrap();
     f.billing
         .reconciler()
-        .run_once_failing_for_test(&["usage_comparison", "wallet_balances"])
+        .run_once_failing_for_test(&["wallet_balances"])
         .await;
     assert_eq!(f.provider.attempts.load(Ordering::SeqCst), 4);
 }

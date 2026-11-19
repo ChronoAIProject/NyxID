@@ -139,16 +139,41 @@ final evidence. Its terminal transaction records zero usage and
 summary pass ID; it changes no wallet, benefit, tax, ledger or carry resource.
 The marked row's release write also acknowledges the zero and sets a 30-day
 expiry, touching only usage metadata; shared usage push and acknowledgement are
-unchanged and never select it. Waived metering-only rows therefore expire while
-ordinary measured metering-only rows still have no expiry. Rollups count a
-zero-usage request on its original day and survive source-row expiry; raw billing
-history no longer includes expired rows. Each nonempty pass writes
+unchanged and never select it. Rollups count a zero-usage request on its original
+day and survive source-row expiry; raw billing history no longer includes expired
+rows. Each nonempty pass writes
 one chained `billing_holdless_requests_ended` summary with layer/metric counts
 and age bounds, without person IDs; interrupted summaries resume durably.
 Integrity retains separate `holdless_ended_requests` and `holdless_ended_rows`
 counters. Completely finished rows are already terminal, released and
 acknowledged, so older replicas select no settlement or push work for them.
 No rollout step or environment setting is required.
+
+Ordinary metering-only rows (free services and the person's own key) receive
+`expires_at = counted_at + 30 days` in the same write that marks their rollup
+count complete. Already-dated rows keep their date; wallet-backed rows retain
+acknowledgement-owned retention. Uncounted rows receive no date from this policy.
+The existing billing pass walks 100 IDs at a time through the existing `_id_`
+index, retaining a durable cursor in `usage_rollup_state`. It keeps taking
+pages, dating only finalized (or forwarded dead-letter), counted metering-only
+rows without a date, until roughly one second has elapsed or the pass is
+drained. The cursor advances durably after every page. A complete sweep records
+its time and sleeps until the next daily due time; a dormant pass does one state
+read and no write. The cursor wraps to pick up rows counted by older replicas
+during a rolling upgrade. No new index, setting or operator step is required.
+Failed/abandoned rows without quantities and unacknowledged wallet-backed rows
+keep their existing retention behavior.
+
+`GET /api/v1/billing/usage` keeps the exact raw aggregate for `24h`, `7d`, and
+`30d`. Longer periods align their start to a UTC midnight and use permanent
+daily rollups before the retained raw window. The additive `covers_from` field
+states the earliest source time included. Rows from the permanent part set
+`detail_retained` to false because operation, machine, key, and acknowledgement
+detail is not stored there; the endpoint returns permanent rows separately from
+newer raw rows so consumers can sum service totals without inventing request
+detail. Allowance units are reported only on retained raw rows. `machine_id` and
+`job_id` filters remain raw queries and expose the retention boundary in
+`covers_from`.
 
 Final funding amounts, `settled=true`, the Lago quantity, the diagnostic
 `lago_carry_id`, and the carry cohort commit in one majority transaction, fenced
@@ -171,11 +196,13 @@ Optional actor-scoped UUID submission keys freeze exact payloads and recipient/p
 
 ### Recipient credit schedules
 
-Schedules may specify immutable `timing: recipient` instead of the legacy default `calendar`. Calendar schedule periods and their identities are preserved. Recipient schedules continuously discover new eligible owners and keep one durable `credit_schedule_recipients` row per schedule/owner, with an immutable UTC `anchor_at` and indexed `next_due_at`. Recipient reads and writes use primary/majority concerns so anchors survive failover before grants use them. These anchors are financial identity metadata and must be retained alongside their grants and journal history; only `credit_schedule_recipient_scans` is disposable progress. Leaving and rejoining does not reset an anchor. Discovery pages are bounded by the existing disbursement budget; group joins enroll directly, while discovery repairs missed enrollment writes. Eligibility is checked live before each issuance. Ineligible rows stop being due until discovery or a group join restores eligibility. Group joins advance an eligibility version even when the row still appears eligible; workers compare the version before marking a row ineligible, preserving concurrent rejoins. Joining while paused records the original anchor but issues nothing until resume. Discovery anchors use the page observation time. All-users and org-member discovery may take a complete cursor pass (population divided by available per-tick budget); a tick with exhausted issuance budget defers discovery. Direct group enrollment avoids that cursor delay.
+Schedules may specify immutable `timing: recipient` instead of the legacy default `calendar`. Calendar schedule periods and their identities are preserved. Recipient schedules continuously discover new eligible owners and keep one durable `credit_schedule_recipients` row per schedule/owner, with an immutable UTC `anchor_at` and indexed `next_due_at`. Recipient reads and writes use primary/majority concerns so anchors survive failover before grants use them. These anchors are financial identity metadata and must be retained alongside their grants and journal history; only `credit_schedule_recipient_scans` is disposable progress. Leaving and rejoining does not reset an anchor. Discovery pages are bounded by the existing disbursement budget; account creation and organization/group joins enroll directly, while discovery repairs missed enrollment writes. Eligibility is checked live before each issuance. Ineligible rows stop being due until discovery or a group join restores eligibility. Group joins advance an eligibility version even when the row still appears eligible; workers compare the version before marking a row ineligible, preserving concurrent rejoins. Joining while paused records the original anchor but issues nothing until resume. Discovery anchors use the page observation time. Older all-users and org members, selected users, and missed hooks may take a complete discovery cursor pass (population divided by available per-tick budget); a tick with exhausted issuance budget defers discovery. Direct account and organization/group enrollment avoids that cursor delay.
+
+Personal-account export includes only the requesting person's cycle metadata under `billing.credit_schedule_recipients`, using a recipient-leading index. Account erasure retains anchors as financial evidence, as it retains grants; deleted accounts fail live eligibility. The schedule-owned discovery cursor is transient coordination, contains only an opaque user ordering boundary, advances or resets on each pass, and is excluded from personal export.
 
 Daily/weekly windows are durations from the anchor. Monthly windows are calculated from the original anchor, clamping short months without drifting the original day. Each issuance retains UUID v5 `{schedule_id}:{period_start_ms}:{recipient_user_id}` and ledger dedupe `grant-issued:{grant_id}`. Concurrent/retried inserts retain the original persisted amount and policy. Journal recovery reads the persisted grant rather than a newly computed candidate. `next_due_at` advances monotonically after the grant is durable; failed posting is recovered through the existing unledgered-grant sweep. Pending grants remain unspendable. A delayed or resumed schedule issues the current window only. Expiry is resolved against the individual window; existing grants keep their rules after edits.
 
-New recipient authoring requires both `BILLING_ALLOCATIONS_ENABLED` and fleet readiness for `billing:recipient-schedules-v1`; the admin allocation overview advertises `recipient_schedules` only when both pass. The readiness gate requires durable capability activation and live serving support from every observed generation. Roster and drain declarations are advisory under the shared readiness protocol; they do not prove invisible old workers have stopped. Operators must still upgrade and drain every API replica and billing worker before authoring recipient schedules. Allocations being enabled alone cannot open recipient authoring during a mixed rollout. Upgrade **all** API replicas and billing workers before creating recipient schedules; old workers ignore the additive timing field and cannot safely process these rows. Before rolling back to old workers, pause **every** recipient schedule, stop and drain all upgraded billing workers and in-flight disbursements, then verify no active recipient schedule remains. Keep these schedules paused on old binaries. Disabling authoring alone is not a rollback. Omitted timing preserves calendar behavior, and PATCH rejects timing changes. No existing schedule or grant is converted automatically.
+New recipient authoring requires both `BILLING_ALLOCATIONS_ENABLED` and fleet readiness for `billing:recipient-schedules-v1`; the admin allocation overview advertises `recipient_schedules` only when both pass. The readiness gate requires durable capability activation and live serving support from every observed generation. Roster and drain declarations are advisory under the shared readiness protocol; they do not prove invisible old workers have stopped. Operators must still upgrade and drain every API replica and billing worker before authoring recipient schedules. Allocations being enabled alone cannot open recipient authoring during a mixed rollout. Upgrade **all** API replicas and billing workers before creating recipient schedules; old workers ignore the additive timing field and cannot safely process these rows. Before rolling back to old workers, pause **every** recipient schedule, stop and drain all upgraded billing workers and in-flight disbursements, then verify no active recipient schedule remains. Keep these schedules paused on old binaries. Resuming a paused recipient schedule is gated like authoring (allocations enabled plus this readiness), so an upgraded replica refuses it while any observed generation lacks support; an old replica cannot enforce that gate. Disabling authoring alone is not a rollback. Omitted timing preserves calendar behavior, and PATCH rejects timing changes. No existing schedule or grant is converted automatically.
 
 Enable `BILLING_ALLOCATIONS_ENABLED` only after every API replica and billing worker is upgraded and old writers drained. Dedicated authoring routes prevent old servers silently ignoring policy fields; the flag does not attest worker versions. Disabling authoring cannot make already-persisted policies safe for old binaries. No migration invents allocation balances.
 
@@ -186,6 +213,20 @@ Recipient schedules already enroll existing eligible owners automatically, regar
 Each request examines at most 50 owners and returns `period_start`, `next_user_id`, `created_count`, `existing_count` and `pending_activation_count`. Subsequent requests supply that `period_start` and `after_user_id`; an elapsed period is rejected rather than silently starting a new one. Optional `expected_updated_at` rejects stale authoring snapshots; the admin UI sends it on every page. Paused schedules and expired period benefits are rejected. The overview advertises optional `schedule_seeding`; older servers never display the action.
 
 Seeding uses the ordinary deterministic grant identity and `grant-issued:{id}` dedupe. Any existing current-period grant counts as received, including consumed, expired, revoked and pending grants. Retrying or racing the billing worker never refills that identity. Journal recovery uses the persisted grant amount, and unjournaled money remains unspendable until the existing recovery sweep succeeds. Partial success is durable; retrying the open dialog resumes from the last successful page. Reopening the dialog starts a safe scan from the beginning. Each page durably audits the acting admin and intended grant IDs before insertion, so partial failures remain attributable; new grants record that admin as `granted_by`. Active organization membership is required for org-targeted catch-up. Period counts are derived from durable grants and updated monotonically. This action writes no new schedule policy that a legacy worker could reinterpret.
+
+### Mid-period eligibility (signup, organization and group joins)
+
+Becoming eligible mid-period triggers one best-effort step after the account or membership commits:
+
+- **Account creation** (email registration including invite and bootstrap, social sign-up on web or mobile, admin creation) matches active `all_users` schedules.
+- **Organization joins** (admin add, invite acceptance, rejoin after revocation) match `org_members` schedules targeting that organization.
+- **Group additions** match `groups` schedules targeting that group.
+
+For each matching active calendar schedule whose current period has already been claimed, and whose frozen period targets include the source, the person receives that period's grant immediately: the claimed period's frozen amount, limits, expiry and targets, the ordinary deterministic identity and `grant-issued:{id}` journal. The walk, seeding, retries, a second targeted organization and a leave/rejoin in the same period therefore converge on one grant. Live eligibility is re-read first (active person; active organization with a non-revoked membership; direct group membership). An unclaimed period is left to its ordinary walk, whose snapshot includes the person; this step never opens a period. Matching recipient schedules, including paused ones, enroll the person with the eligibility time as anchor (a rejoin keeps its original anchor and restores eligibility); the next billing pass issues the first window. Paused calendar schedules grant nothing. Failures are logged, never fail the account or membership change, and **Grant missing credits** recovers them for the current period. New organization owners, reactivation and schedule target edits are not covered by this step.
+
+For other late eligibility on an existing calendar schedule (reactivation, target edits, a missed step), the completed-period cutoff remains. Use **Grant missing credits** on that schedule to recover currently eligible members in the current period.
+
+There is no in-place calendar-to-recipient conversion. Creating a replacement schedule creates a separate financial identity and can grant another full allocation to members who already received calendar credits, even if the old schedule is paused. Do not use pause-and-recreate as a duplicate-free migration. Keep the existing schedule and use current-period seeding until an administrator has explicitly chosen a transition policy for existing recipients. A successful deployment or seed does not establish that future calendar joins receive automatic rolling grants.
 
 ## D3. Balanced journal and account verification
 

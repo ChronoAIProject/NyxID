@@ -40,6 +40,7 @@ const STEPS: &[&str] = &[
     "wallet_balances",
     "rate_cache",
     "status_publication",
+    "metering_retention",
 ];
 
 const VERSION: i64 = 1;
@@ -123,6 +124,7 @@ pub(super) struct Pass {
     // Only attempted steps appear. Drain/config skips cannot clear a failure or
     // count as another failure; a successful attempt resets its streak.
     outcomes: BTreeMap<&'static str, Option<(u32, Option<u64>)>>,
+    usage_warming: bool,
 }
 
 impl Pass {
@@ -130,11 +132,15 @@ impl Pass {
         Self {
             previous: decode(checkpoint),
             outcomes: BTreeMap::new(),
+            usage_warming: false,
         }
     }
 
     pub(super) fn observe<T>(&mut self, step: &'static str, result: AppResult<T>) -> AppResult<T> {
         debug_assert!(STEPS.contains(&step));
+        if step == "usage_comparison" && result.is_ok() && super::reconcile::continue_reconcile() {
+            self.usage_warming = true;
+        }
         // Leaf batches return Ok(partial_stats) at a cooperative stop. That
         // does not prove that previously failing work in their tail succeeded.
         if result.is_err() || super::reconcile::continue_reconcile() {
@@ -242,7 +248,11 @@ impl Pass {
                 failures.remove(*step);
             }
         }
-        if failures.is_empty() {
+        let warming = self.usage_warming || fresh.contains_key("usage_warming_since");
+        if self.usage_warming && !fresh.contains_key("usage_warming_since") {
+            clocks.insert("checkpoint.usage_warming_since", "$$NOW");
+        }
+        if failures.is_empty() && !warming {
             let n = rows.delete_one(filter).await?.deleted_count;
             crate::services::shutdown::process().record_release("cluster", n);
             return Ok(n == 1);
@@ -269,6 +279,7 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
         .projection(doc! {"checkpoint":1})
         .max_time(Duration::from_secs(2))
         .await;
+    let mut items = Vec::new();
     let (detail, detected_at) = match read {
         Err(error) => (
             format!(
@@ -293,7 +304,7 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
             ),
             Checkpoint::Current(state) => {
                 if state.failures.is_empty() {
-                    return Vec::new();
+                    return items;
                 }
                 let detail = state.failures.iter().map(|(step, f)| format!(
                     "step={step} consecutive_passes={} first_failed_at={} last_failed_at={} error_code={}{}",
@@ -311,11 +322,14 @@ pub(super) async fn diagnostics(db: &Database) -> Vec<BillingStartupDiagnostic> 
             }
         },
     };
-    vec![BillingStartupDiagnostic {
+    items.push(BillingStartupDiagnostic {
+        severity: super::DiagnosticSeverity::Action,
+        technical_details: None,
         code: "billing_reconcile_steps".into(),
         summary: "Billing maintenance has failed steps".into(),
         detail,
         remediation: "Failed steps retry on later passes; successful attempted steps clear their failure status. Other independent steps continue.".into(),
         detected_at,
-    }]
+    });
+    items
 }

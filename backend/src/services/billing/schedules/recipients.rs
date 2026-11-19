@@ -10,6 +10,7 @@ use crate::models::credit_schedule_recipient::{
     SCAN_COLLECTION_NAME as SCANS,
 };
 use crate::models::org_membership::COLLECTION_NAME as MEMBERSHIPS;
+use crate::services::billing::reconcile::continue_reconcile;
 
 pub const READINESS: &str = "billing:recipient-schedules-v1";
 
@@ -98,16 +99,13 @@ async fn enroll(
     }
 }
 
-/// Capture the group join time instead of waiting for the next discovery page.
-/// Membership is already durable; discovery also recovers missed enrollments.
+#[cfg(test)]
 pub async fn enroll_group_member(
     db: &mongodb::Database,
     group_id: &str,
     user_id: &str,
     joined_at: DateTime<Utc>,
 ) -> AppResult<()> {
-    let durable_db = crate::services::transaction_service::durable_database(db);
-    let db = &durable_db;
     let schedules: Vec<CreditSchedule> = db
         .collection::<CreditSchedule>(CREDIT_SCHEDULES)
         .find(doc! { "timing": "recipient",
@@ -116,17 +114,32 @@ pub async fn enroll_group_member(
         .try_collect()
         .await?;
     for schedule in schedules {
-        enroll(
-            db,
-            &schedule,
-            user_id,
-            joined_at.max(schedule.created_at),
-            joined_at,
-        )
-        .await?;
-        restore_eligibility(db, &schedule.id, &[user_id.to_owned()], joined_at, true).await?;
+        enroll_member(db, &schedule, user_id, joined_at).await?;
     }
     Ok(())
+}
+
+/// Capture the eligibility time (account creation, organization or group
+/// join) instead of waiting for the next discovery page, including while the
+/// schedule is paused. A rejoin keeps its original anchor and restores
+/// eligibility. Discovery also recovers missed enrollments.
+pub(super) async fn enroll_member(
+    db: &mongodb::Database,
+    schedule: &CreditSchedule,
+    user_id: &str,
+    joined_at: DateTime<Utc>,
+) -> AppResult<()> {
+    let durable_db = crate::services::transaction_service::durable_database(db);
+    let db = &durable_db;
+    enroll(
+        db,
+        schedule,
+        user_id,
+        joined_at.max(schedule.created_at),
+        joined_at,
+    )
+    .await?;
+    restore_eligibility(db, &schedule.id, &[user_id.to_owned()], joined_at, true).await
 }
 
 async fn restore_eligibility(
@@ -293,6 +306,9 @@ async fn discover(
         .iter()
         .map(|row| row.recipient_user_id.as_str())
         .collect();
+    if !continue_reconcile() {
+        return Ok(());
+    }
     let observed_at = Utc::now().max(now);
     // Freeze new anchors in one bounded batch. A simultaneous group join or
     // discovery walk may win individual ids; their original anchors must win.
@@ -360,13 +376,16 @@ pub(super) async fn disburse(
     budget: &mut usize,
     stats: &mut DisbursementStats,
 ) -> AppResult<()> {
-    if !schedule.is_active || *budget == 0 {
+    if !schedule.is_active || *budget == 0 || !continue_reconcile() {
         return Ok(());
     }
     // An anchor must survive failover before any grant can use its identity.
     let durable_db = crate::services::transaction_service::durable_database(db);
     let db = &durable_db;
     discover(db, schedule, now, (*budget).min(MAX_RECIPIENTS_PER_TICK)).await?;
+    if !continue_reconcile() {
+        return Ok(());
+    }
     let now = Utc::now().max(now);
     let due: Vec<CreditScheduleRecipient> = db
         .collection::<CreditScheduleRecipient>(RECIPIENTS)
@@ -377,14 +396,24 @@ pub(super) async fn disburse(
         .await?
         .try_collect()
         .await?;
+    if !continue_reconcile() {
+        return Ok(());
+    }
     let ids: Vec<_> = due
         .iter()
         .map(|row| row.recipient_user_id.clone())
         .collect();
     let live = eligible_ids(db, schedule, &ids).await?;
     for recipient in due {
+        // Finish each insert/journal/renewal protocol before observing a drain.
+        if !continue_reconcile() {
+            break;
+        }
         *budget -= 1;
         stats.recipients_examined += 1;
+        // A full batch can run for minutes; resolve each window and expiry
+        // against the current time so an elapsed window is never minted.
+        let now = Utc::now().max(now);
         if !live.contains(&recipient.recipient_user_id) {
             mark_ineligible(db, &recipient, now).await?;
             continue;
@@ -431,6 +460,8 @@ pub(super) async fn disburse(
             now,
         );
         let outcome = insert_grant_chunk(db, &grants).await?;
+        #[cfg(test)]
+        tests::after_insert();
         stats.grants_created += outcome.inserted_count;
         stats.already_disbursed += outcome.duplicate_count;
         // Journal the persisted snapshot, including after a concurrent insert or

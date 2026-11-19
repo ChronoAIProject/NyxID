@@ -3325,6 +3325,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
 
 #[derive(Serialize)]
 pub struct ChannelLinkResponse {
+    gateway_native_activation: Option<String>,
     id: String,
     platform: String,
     bot_label: String,
@@ -3366,6 +3367,7 @@ async fn agent_responses(
                 channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
             })
             .map(|channel| ChannelLinkResponse {
+                gateway_native_activation: channel.gateway_native_activation.clone(),
                 id: channel.id.clone(),
                 platform: channel.platform.clone(),
                 bot_label: channel.bot_label.clone(),
@@ -4172,6 +4174,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    crate::services::assistant_cma_reservation_recovery::spawn_worker(state.clone());
     crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
@@ -4240,6 +4243,12 @@ pub fn spawn_sweeps(state: AppState) {
             }
             if state.shutdown.is_draining() {
                 break;
+            }
+            if crate::services::nyxbot_response_read::expire(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel response lifecycle maintenance deferred");
             }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await

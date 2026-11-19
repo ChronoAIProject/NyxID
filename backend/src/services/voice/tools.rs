@@ -43,6 +43,8 @@ type Pending = Pin<Box<dyn Future<Output = Completion> + Send>>;
 /// I/O before settling the ordinary turns. No detached execution or replay.
 #[derive(Default)]
 pub(super) struct Workers {
+    handles: Arc<std::sync::Mutex<super::link_handles::LinkHandles>>,
+    scope: Option<(String, String, String)>,
     contexts: HashMap<String, Arc<tokio::sync::Mutex<Executions>>>,
     pending: FuturesUnordered<Pending>,
     running: HashSet<String>,
@@ -60,6 +62,18 @@ impl Workers {
         if self.pending.len() >= 10 {
             return Err(AppError::VoiceQueueFull);
         }
+        let scope = (
+            call.id.clone(),
+            call.conversation_id.clone(),
+            call.user_id.clone(),
+        );
+        if self.scope.as_ref().is_some_and(|owned| owned != &scope) {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        self.scope = Some(scope);
+        let mut input = input.clone();
+        let unknown =
+            input.restore_service_handles(&self.handles.lock().expect("voice link handles"))?;
         let context = self.contexts.entry(delegation.into()).or_default().clone();
         let (state, call, delegation, call_id, input) = (
             state.clone(),
@@ -78,10 +92,24 @@ impl Workers {
             Completion {
                 delegation,
                 call_id,
-                result,
+                result: result.map(|mut output| {
+                    if !unknown.is_empty() {
+                        if !output.is_object() { output = json!({"result":output}); }
+                        output["unrecognized_link_handles"] = json!(unknown);
+                        output["link_handle_notice"] = "These handles were not recognized and were passed literally to the tool; no URL was substituted.".into();
+                    }
+                    output
+                }),
             }
         }));
         Ok(())
+    }
+
+    pub(super) fn present_output(&self, state: &AppState, output: Value) -> Value {
+        self.handles
+            .lock()
+            .expect("voice link handles")
+            .present(state, output)
     }
 
     pub(super) fn pending(&self) -> bool {
@@ -141,6 +169,7 @@ impl Workers {
     pub(super) fn cancel_pending(&mut self) {
         self.pending = FuturesUnordered::new();
         self.running.clear();
+        *self.handles.lock().expect("voice link handles") = Default::default();
     }
 }
 
@@ -239,6 +268,27 @@ impl Invocation {
             name: name.into(),
             arguments: serde_json::from_str(arguments).map_err(|_| invalid())?,
         }))
+    }
+
+    fn restore_service_handles(
+        &mut self,
+        handles: &super::link_handles::LinkHandles,
+    ) -> AppResult<Vec<String>> {
+        let tool = self.arguments["tool_name"].as_str().unwrap_or_default();
+        // Native namespaces are excluded by default, including future tools.
+        if self.name != "nyx__call_tool"
+            || tool.starts_with("nyx__")
+            || tool.starts_with("nyxid__")
+            || !tool.contains("__")
+        {
+            return Ok(Vec::new());
+        }
+        let mut arguments: Value =
+            serde_json::from_str(self.arguments["arguments_json"].as_str().unwrap_or("{}"))
+                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+        let unknown = handles.restore(&mut arguments);
+        self.arguments["arguments_json"] = arguments.to_string().into();
+        Ok(unknown)
     }
 
     pub(super) fn can_execute(&self) -> bool {
@@ -663,3 +713,39 @@ impl Executions {
 #[cfg(test)]
 #[path = "tool_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod handle_allowlist_tests {
+    use super::*;
+    #[tokio::test]
+    async fn every_native_and_meta_tool_keeps_handle_arguments_literal() {
+        let (state, _, _) = super::super::tests::setup("voice_native_handle_allowlist").await;
+        let mut handles = super::super::link_handles::LinkHandles::default();
+        let presented = handles.present(&state, json!({"url":"https://external.example/document"}));
+        let handle = presented["url"].as_str().unwrap();
+        for name in crate::services::assistant_team_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+            .chain(crate::services::assistant_account_tools::TOOL_NAMES)
+            .chain(NAMES)
+        {
+            let mut input = Invocation {
+                name: "nyx__call_tool".into(),
+                arguments: json!({"tool_name":name,"arguments_json":json!({"text":handle}).to_string()}),
+            };
+            let before = input.arguments.clone();
+            assert!(input.restore_service_handles(&handles).unwrap().is_empty());
+            assert_eq!(input.arguments, before, "{name}");
+        }
+        for name in ["nyx__search_tools", "nyx__list_connected_services"] {
+            let mut input = Invocation {
+                name: name.into(),
+                arguments: json!({"query":handle}),
+            };
+            let before = input.arguments.clone();
+            assert!(input.restore_service_handles(&handles).unwrap().is_empty());
+            assert_eq!(input.arguments, before);
+        }
+        state.db.drop().await.unwrap();
+    }
+}

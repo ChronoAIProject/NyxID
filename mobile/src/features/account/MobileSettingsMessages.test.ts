@@ -29,15 +29,15 @@ test("Voice settings translates the device dictation explanation with the shared
   );
   try {
     env.text(
-      "The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending.",
+      "This language is used for message dictation and crew voice dictation. Voice conversations use their own language preference. Words dictated into a message can be edited before sending.",
     );
     env.language("zh-CN");
     env.text(
-      "消息输入框的麦克风使用设备的语音识别，在可用时进行本地处理。识别文字会显示在消息中，您可在发送前编辑。",
+      "此语言用于消息听写和团队语音听写。语音通话使用独立的语言偏好。听写到消息中的文字可以在发送前编辑。",
     );
     env.language("zh-TW");
     env.text(
-      "訊息輸入欄的麥克風使用裝置的語音辨識，可用時會在本機處理。辨識文字會顯示在訊息中，您可在傳送前編輯。",
+      "此語言用於訊息聽寫和團隊語音聽寫。語音通話使用獨立的語言偏好。聽寫到訊息中的文字可以在傳送前編輯。",
     );
     assert.deepEqual(env.mutations, []);
   } finally {

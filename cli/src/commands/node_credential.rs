@@ -180,6 +180,9 @@ pub async fn run(command: NodeCredentialAdminCommands) -> Result<()> {
                     table.load_preset(UTF8_FULL_CONDENSED);
                     table.set_header(["ID", "Slug", "Method", "Field", "Age", "Expires"]);
                     for item in pending {
+                        if let Some(message) = item["message"].as_str() {
+                            eprintln!("{}: {message}", item["id"].as_str().unwrap_or("-"));
+                        }
                         let id = item["id"].as_str().unwrap_or("-");
                         let slug = item["service_slug"].as_str().unwrap_or("-");
                         let method = item["injection_method"].as_str().unwrap_or("-");
@@ -316,6 +319,7 @@ struct PendingCredentialPubkeyResponseCli {
 
 #[derive(Debug, Deserialize)]
 struct PendingCredentialCiphertextResponseCli {
+    message: Option<String>,
     delivery_status: String,
     remote_state: String,
     #[serde(default)]
@@ -334,6 +338,8 @@ struct PendingCredentialCiphertextPost {
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct RciInjectOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
     pending_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_url: Option<String>,
@@ -478,6 +484,7 @@ impl<'a> RciInjectSession<'a> {
         Ok(RciInjectOutcome {
             pending_id: pending.id,
             browser_url: Some(url),
+            message: unknown_delivery_message(completed.remote_state.as_deref()),
             remote_state: terminal_state(&completed).or(completed.remote_state),
             delivery_status: None,
         })
@@ -515,11 +522,17 @@ impl<'a> RciInjectSession<'a> {
             return Ok(RciInjectOutcome {
                 pending_id: pending.id,
                 browser_url: None,
+                message: response
+                    .message
+                    .or_else(|| unknown_delivery_message(Some(&response.remote_state))),
                 remote_state: Some(response.remote_state),
                 delivery_status: Some(response.delivery_status),
             });
         }
 
+        if let Some(message) = unknown_delivery_message(Some(&response.remote_state)) {
+            eprintln!("{message}");
+        }
         let completed = self.poll_terminal_state(&pending.id).await?;
         if let Some(code) = response.error_code {
             print_delivery_error_code(code);
@@ -527,8 +540,20 @@ impl<'a> RciInjectSession<'a> {
         Ok(RciInjectOutcome {
             pending_id: pending.id,
             browser_url: None,
-            remote_state: terminal_state(&completed).or(completed.remote_state),
-            delivery_status: Some(response.delivery_status),
+            message: unknown_delivery_message(completed.remote_state.as_deref()),
+            remote_state: terminal_state(&completed),
+            delivery_status: Some(
+                if response.delivery_status == "unknown"
+                    && matches!(
+                        completed.remote_state.as_deref(),
+                        Some("consumed" | "decrypt_failed" | "partial_decrypted")
+                    )
+                {
+                    "sent".into()
+                } else {
+                    response.delivery_status
+                },
+            ),
         })
     }
 
@@ -562,6 +587,7 @@ impl<'a> RciInjectSession<'a> {
 
     async fn poll_terminal_state(&mut self, pending_id: &str) -> Result<PendingCredentialInfoCli> {
         let start = tokio::time::Instant::now();
+        let mut displayed_unknown = false;
         loop {
             let response: PendingCredentialListResponseCli = self
                 .api
@@ -575,9 +601,20 @@ impl<'a> RciInjectSession<'a> {
                 .pending_credentials
                 .into_iter()
                 .find(|item| item.id == pending_id)
-                .filter(|pending| terminal_state(pending).is_some())
             {
-                return Ok(pending);
+                if terminal_state(&pending).is_some() {
+                    return Ok(pending);
+                }
+                if pending.remote_state.as_deref() == Some("delivery_unknown") {
+                    if !displayed_unknown {
+                        eprintln!("{UNKNOWN_DELIVERY_MESSAGE}");
+                        displayed_unknown = true;
+                    }
+                    if chrono::DateTime::parse_from_rfc3339(&pending.expires_at).is_ok() {
+                        tokio::time::sleep(self.poll_delay).await;
+                        continue;
+                    }
+                }
             }
 
             if start.elapsed() >= self.terminal_timeout {
@@ -721,6 +758,9 @@ fn validate_pubkey_response_matches_pending(
             pending.service_slug
         );
     }
+    if let Some(message) = unknown_delivery_message(pubkey.remote_state.as_deref()) {
+        bail!("{message}");
+    }
     if let Some(state) = pubkey.remote_state.as_deref()
         && is_terminal_remote_state(state)
     {
@@ -770,10 +810,23 @@ fn terminal_state(pending: &PendingCredentialInfoCli) -> Option<String> {
     if pending.declined_at.is_some() {
         return Some("declined".to_string());
     }
+    if pending.remote_state.as_deref() == Some("delivery_unknown")
+        && (!pending.is_active
+            || chrono::DateTime::parse_from_rfc3339(&pending.expires_at)
+                .is_ok_and(|expiry| expiry <= chrono::Utc::now()))
+    {
+        return Some("delivery_unknown".into());
+    }
     if !pending.is_active {
         return Some("expired".to_string());
     }
     None
+}
+
+const UNKNOWN_DELIVERY_MESSAGE: &str = "The credential may or may not have been installed. Check the service credential on the node. To send it again, start a new credential injection.";
+
+fn unknown_delivery_message(state: Option<&str>) -> Option<String> {
+    (state == Some("delivery_unknown")).then(|| UNKNOWN_DELIVERY_MESSAGE.to_string())
 }
 
 fn is_terminal_remote_state(state: &str) -> bool {
@@ -904,6 +957,9 @@ async fn resolve_node_id_for_optional_org(
 }
 
 fn print_inject_outcome(outcome: &RciInjectOutcome) {
+    if let Some(message) = &outcome.message {
+        eprintln!("{message}");
+    }
     eprintln!("Pending credential injection submitted.");
     eprintln!("Pending ID: {}", outcome.pending_id);
     if let Some(state) = outcome.remote_state.as_deref() {
@@ -1779,6 +1835,57 @@ mod tests {
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
         unsafe {
             std::env::remove_var("NYXID_WIZARD_NO_OPEN");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_delivery_polls_through_timeout_until_result_or_expiry() {
+        for expires in [false, true] {
+            let server = MockServer::start().await;
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/api/v1/nodes/{}/credentials/pending",
+                    node_id()
+                )))
+                .respond_with(move |_: &wiremock::Request| {
+                    let first = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    let mut list = consumed_pending_list("pending-1");
+                    if first || expires {
+                        let info = &mut list["pending_credentials"][0];
+                        info["is_active"] = true.into();
+                        info["consumed_at"] = serde_json::Value::Null;
+                        info["remote_state"] = "delivery_unknown".into();
+                        if !first {
+                            info["expires_at"] = "2000-01-01T00:00:00Z".into();
+                        }
+                    }
+                    ResponseTemplate::new(200).set_body_json(list)
+                })
+                .expect(2)
+                .mount(&server)
+                .await;
+            let mut api = test_api(&server);
+            let mut session = RciInjectSession::new(
+                &mut api,
+                node_id().to_string(),
+                None,
+                Some(inject_metadata()),
+                RciSecretSource::BrowserOnly,
+                RciFingerprintPolicy::SkipWithYes,
+                RciInjectMode::Browser,
+            );
+            session.poll_delay = Duration::ZERO;
+            session.terminal_timeout = Duration::ZERO;
+            let final_state = session.poll_terminal_state("pending-1").await.unwrap();
+            assert_eq!(
+                super::terminal_state(&final_state).as_deref(),
+                Some(if expires {
+                    "delivery_unknown"
+                } else {
+                    "consumed"
+                })
+            );
         }
     }
 

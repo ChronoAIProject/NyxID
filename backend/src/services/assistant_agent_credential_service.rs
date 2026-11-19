@@ -985,11 +985,6 @@ pub async fn audit_provision(
     credential: &AssistantCredential,
     replaced: bool,
 ) {
-    super::api_key_credential_service::audit_revocations(
-        db,
-        &credential.revoked_children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     if credential.newly_provisioned {
         let _ = super::audit_service::log_actor_event(
             db.clone(),

@@ -1198,6 +1198,79 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
     Ok(reset)
 }
 
+/// Additive account-export index, owned here with the message writer. The
+/// base startup fixture deliberately omits this later feature addition.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    ensure_checkpoint_export_index(db).await?;
+    let collection = db.collection::<bson::Document>(MESSAGES);
+    let keys = doc! {"user_id":1,"created_at":-1,"_id":-1};
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index.keys.iter().take(3).eq(keys.iter()) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(keys)
+                .options(
+                    IndexOptions::builder()
+                        .name("assistant_messages_account_export".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn ensure_checkpoint_export_index(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(CHECKPOINTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_checkpoints_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::assistant_wake_service::ensure_indexes(db).await?;
     super::collaboration_group_service::ensure_indexes(db).await?;
@@ -1478,6 +1551,37 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     }
     crate::services::nyxbot_gateway_release_service::ensure_indexes(db).await?;
     crate::services::nyxbot_response_recovery::ensure_indexes(db).await?;
+    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"dispatch_identity.keys":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("nyxbot_dispatch_keys".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"dispatch_identity.keys":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"delivery.receipt_due_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("nyxbot_receipt_due".to_owned())
+                        .partial_filter_expression(
+                            doc! {"delivery.receipt_due_at":{"$type":"date"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Retire the prefix index only after its replacement has been created.
     let channels = db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
     let obsolete_keys = doc! {"user_id": 1, "channel_bot_id": 1};
@@ -1962,7 +2066,8 @@ pub(crate) async fn write_checkpoint_in_session(
     reply: &AssistantMessage,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
-    if row.guest_turn || row.collaboration.is_some() {
+    if row.guest_turn || row.collaboration.is_some() || super::voice::links::publication_row(reply)
+    {
         return Ok(());
     }
     let collection = db.collection::<AssistantCheckpoint>(CHECKPOINTS);
@@ -1977,7 +2082,7 @@ pub(crate) async fn write_checkpoint_in_session(
             .find_one(doc! {"conversation_id": &row.id, "user_id": &row.user_id, "seq": seq, "role": "user"})
             .session(&mut *session)
             .await?
-            .map(|message| excerpt(&message.text, CHECKPOINT_GOAL_CHARS))
+            .map(|message| excerpt(&super::voice::links::message_text(&message, &message.text), CHECKPOINT_GOAL_CHARS))
             .filter(|goal| !goal.is_empty()),
         _ => None,
     };
@@ -2005,7 +2110,7 @@ pub(crate) async fn write_checkpoint_in_session(
     keep_newest(&mut completed_actions);
     keep_newest(&mut failed_actions);
     let succeeded = reply.status == "completed";
-    let checkpoint = AssistantCheckpoint {
+    let mut checkpoint = AssistantCheckpoint {
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: reply.turn_id.clone(),
@@ -2014,7 +2119,11 @@ pub(crate) async fn write_checkpoint_in_session(
         goal,
         completed_actions,
         failed_actions,
-        output: Some(excerpt(&reply.text, CHECKPOINT_OUTPUT_CHARS)).filter(|text| !text.is_empty()),
+        output: Some(excerpt(
+            &super::voice::links::message_text(reply, &reply.text),
+            CHECKPOINT_OUTPUT_CHARS,
+        ))
+        .filter(|text| !text.is_empty()),
         last_successful_turn_id: if succeeded {
             Some(reply.turn_id.clone())
         } else {
@@ -2029,6 +2138,22 @@ pub(crate) async fn write_checkpoint_in_session(
         },
         updated_at: now,
     };
+    for text in [&mut checkpoint.goal, &mut checkpoint.output]
+        .into_iter()
+        .flatten()
+        .chain(
+            checkpoint
+                .completed_actions
+                .iter_mut()
+                .chain(&mut checkpoint.failed_actions)
+                .map(|action| &mut action.label),
+        )
+    {
+        *text = super::voice::links::thread_text(
+            row.voice_parent_conversation_id.is_some(),
+            std::mem::take(text),
+        );
+    }
     collection
         .replace_one(filter, &checkpoint)
         .upsert(true)
@@ -2039,15 +2164,64 @@ pub(crate) async fn write_checkpoint_in_session(
 
 /// The durable checkpoint of an owned conversation, if any turn has settled
 /// since checkpoints were introduced.
+#[cfg(test)]
 pub async fn checkpoint(
     db: &Database,
     user_id: &str,
     id: &str,
 ) -> AppResult<Option<AssistantCheckpoint>> {
-    Ok(db
+    checkpoint_with_scope(db, user_id, id, None).await
+}
+
+pub(crate) async fn checkpoint_for_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<Option<AssistantCheckpoint>> {
+    checkpoint_with_scope(
+        db,
+        &row.user_id,
+        &row.id,
+        Some(row.voice_parent_conversation_id.is_some()),
+    )
+    .await
+}
+
+async fn checkpoint_with_scope(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    hidden_voice: Option<bool>,
+) -> AppResult<Option<AssistantCheckpoint>> {
+    let Some(mut checkpoint) = db
         .collection::<AssistantCheckpoint>(CHECKPOINTS)
         .find_one(doc! {"_id": id, "user_id": user_id})
-        .await?)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let raw = checkpoint_line(&checkpoint, false);
+    if raw != super::voice::links::redact_tokens(&raw) {
+        let hidden = match hidden_voice {
+            Some(hidden) => hidden,
+            None => super::voice::links::hidden_voice_thread(db, user_id, id).await,
+        };
+        if hidden {
+            checkpoint.goal = checkpoint
+                .goal
+                .map(|text| super::voice::links::redact_tokens(&text));
+            checkpoint.output = checkpoint
+                .output
+                .map(|text| super::voice::links::redact_tokens(&text));
+            for action in checkpoint
+                .completed_actions
+                .iter_mut()
+                .chain(&mut checkpoint.failed_actions)
+            {
+                action.label = super::voice::links::redact_tokens(&action.label);
+            }
+        }
+    }
+    Ok(Some(checkpoint))
 }
 
 /// What `GET …/context` shows: the durable checkpoint plus the live turn's
@@ -2067,7 +2241,7 @@ pub async fn checkpoint_summary(
 ) -> AppResult<CheckpointSummary> {
     let (conversation, _) = get_authorized(db, user_id, id).await?;
     authorize_thread_read(db, &conversation).await?;
-    let checkpoint = checkpoint(db, user_id, id).await?;
+    let checkpoint = checkpoint_for_conversation(db, &conversation).await?;
     let pending_actions = live_turn(&conversation, Utc::now())
         .map(|turn| {
             turn.activities
@@ -2650,7 +2824,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.role == AgentRole::Subagent
         && match row.group_id.as_deref() {
             Some(group_id) => {
-                let nyxbot = super::assistant_team_service::ensure_nyxbot(db, user_id).await?;
+                let nyxbot =
+                    super::assistant_team_service::ensure_nyxbot_in_session(db, user_id, session)
+                        .await?;
                 group_has_nyxbot_in_session(db, user_id, group_id, &nyxbot.id, session).await?
             }
             None => false,
@@ -3604,6 +3780,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                voice_link_publication: None,
+                links_in_chat: None,
                 artifact_recovery_target: row
                     .artifact_head
                     .as_ref()
@@ -4384,6 +4562,8 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                voice_link_publication: None,
+                                links_in_chat: None,
 artifact_recovery_target: None,
                                 artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
@@ -5161,6 +5341,7 @@ pub async fn attach_routed_image(
             turn_id,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5246,6 +5427,7 @@ pub(crate) async fn attach_resource_image(
                 .ok_or(AppError::AssistantTurnRequired)?,
             content_type: meta.content_type.clone(),
             size: meta.size,
+            chunks: 0,
             data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
@@ -5549,7 +5731,7 @@ pub async fn read_attachment_for_caller(
         .await?;
         return Err(not_found());
     };
-    let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+    let mut protected = super::assistant_tool_files::payload(db, keys, &row).await?;
     let bytes = std::mem::take(&mut *protected);
     Box::pin(super::assistant_upload_retention::require_available(
         db, filter,
@@ -5906,7 +6088,7 @@ pub async fn recovery_previews(
             "turn_id": {"$in": &ids}, "role": "user",
             "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
             "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
-            "execution_pending": {"$ne": true},
+            "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         })
         .await?
         .try_collect()
@@ -6042,7 +6224,7 @@ pub async fn retry_context_in_session(
             "turn_id": retry_of, "role": "user",
             "origin": {"$in":[bson::Bson::Null,bson::Bson::String("user".into())]}, "steering": bson::Bson::Null,
             "via": {"$in": [bson::Bson::Null, bson::Bson::String("voice".into())]},
-            "execution_pending": {"$ne": true},
+            "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         })
         .session(&mut *session)
         .await?;
@@ -6383,8 +6565,7 @@ pub async fn delete(
     let db = db.clone();
     let user_id = user_id.to_owned();
     let id = id.to_owned();
-    let audit_db = db.clone();
-    let (rows, children) = session
+    let (rows, _children) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db;
@@ -6395,11 +6576,6 @@ pub async fn delete(
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    super::api_key_credential_service::audit_revocations(
-        &audit_db,
-        &children,
-        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-    );
     Ok(rows)
 }
 
@@ -6533,6 +6709,14 @@ pub(crate) async fn delete_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        // Lifecycle aliases and encrypted replies follow the deleted conversation;
+        // retain the admission tombstone so a duplicate cannot recreate them.
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .update_many(doc! {"response_read.version":1,"$and":[
+                {"$or":[{"user_id":user_id},{"delivery.origin.org_execution.actor_id":user_id}]},
+                {"$or":[{"conversation_id":id},{"resolved_conversation_id":id}]}
+            ]},doc! {"$unset":{"response_read":"","response_reply":""}})
+            .session(&mut *session).await?;
         // A channel permission result may retain the original encrypted reply
         // capability after the initial stream settles. Deletion removes that
         // material together with its outbox; never reopen the original claim.
@@ -6576,7 +6760,7 @@ pub async fn recap(
     history: &[AssistantMessage],
     excluded_turn: &str,
 ) -> AppResult<String> {
-    let mut filter = doc! {"conversation_id":&row.id,"user_id":&row.user_id,"execution_pending":{"$ne":true},"turn_id":{"$ne":excluded_turn}};
+    let mut filter = doc! {"conversation_id":&row.id,"user_id":&row.user_id,"execution_pending":{"$ne":true},"turn_metadata.voice_link_publication":{"$exists":false},"turn_id":{"$ne":excluded_turn}};
     let total = db
         .collection::<AssistantMessage>(MESSAGES)
         .count_documents(filter.clone())
@@ -6646,7 +6830,10 @@ pub async fn recap(
         row.guest_turn,
         owner_total,
     );
-    Ok(recap)
+    Ok(super::voice::links::thread_text(
+        row.voice_parent_conversation_id.is_some(),
+        recap,
+    ))
 }
 
 struct RenderedRecapLine {
@@ -6685,7 +6872,10 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
         &message.text[..end],
         if truncated { " [truncated]" } else { "" }
     );
-    RenderedRecapLine { text, truncated }
+    RenderedRecapLine {
+        text: super::voice::links::message_text(message, &text).into_owned(),
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -6725,7 +6915,9 @@ fn render_recap_with_owner_total(
     for message in history
         .iter()
         .rev()
-        .filter(|message| !message.execution_pending)
+        .filter(|message| {
+            !message.execution_pending && !super::voice::links::publication_row(message)
+        })
         .take(20)
     {
         let Some(line) = recap_line(message, guest, 1000.min(4900usize.saturating_sub(bytes)))
@@ -6876,7 +7068,7 @@ pub async fn conversation_history_page(
         "conversation_id": &chat.conversation_id,
         "user_id": &chat.user_id,
         "role": "user",
-        "execution_pending": {"$ne": true},
+        "execution_pending": {"$ne": true}, "turn_metadata.voice_link_publication": {"$exists":false},
         "$or": [
             {"author": "owner"},
             {"author": bson::Bson::Null, "origin": "user"},
@@ -7021,7 +7213,12 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     const CLOSE: &str = "\nEnd prior history.";
     let mut remaining = 16384usize - OPEN.len() - CLOSE.len();
     // Newest first.
-    let window: Vec<&AssistantMessage> = history.iter().rev().take(20).collect();
+    let window: Vec<&AssistantMessage> = history
+        .iter()
+        .rev()
+        .filter(|message| !super::voice::links::publication_row(message))
+        .take(20)
+        .collect();
     let mut goal_id = None;
     let mut reserved = match window.iter().rev().find(|message| message.role == "user") {
         Some(goal) => {
@@ -7065,7 +7262,7 @@ pub(crate) fn truncate_at_boundary(text: &mut String, max: usize) {
 
 /// The checkpoint block of a recap: its scope (turn and outcome), the goal,
 /// the actions since the last successful turn, and a bounded output excerpt.
-pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
+pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint, voice_context: bool) -> String {
     let labels = |actions: &[CheckpointAction]| {
         actions
             .iter()
@@ -7105,7 +7302,11 @@ pub(crate) fn checkpoint_line(checkpoint: &AssistantCheckpoint) -> String {
     if let Some(output) = checkpoint.output.as_deref() {
         line.push_str(&format!("\n- last output: {output}"));
     }
-    line
+    if voice_context {
+        super::voice::links::redact_tokens(&line)
+    } else {
+        line
+    }
 }
 
 /// One recap line within `remaining` bytes, or absent when nothing fits.
@@ -7124,7 +7325,9 @@ fn recap_line(
             format!("{heard} [Interrupted here. Remaining generated text was not confirmed heard. Completed tool effects remain completed; do not replay them because speech was interrupted.]")
         } else {format!("{} [Generated response; delivery/hearing is {}. Do not assume the caller heard it. Completed tool effects must not be replayed automatically.]",message.text,e.status)}
     });
-    let text = projected.as_deref().unwrap_or(&message.text);
+    let redacted =
+        super::voice::links::message_text(message, projected.as_deref().unwrap_or(&message.text));
+    let text: &str = redacted.as_ref();
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest)
         && message.role == "user"
     {
@@ -7207,7 +7410,11 @@ fn recap_line(
             message.error_code.as_deref().unwrap_or("none")
         )
     };
-    let mut line = format!("{prefix}{body}{activities}{attachments}{error}");
+    let mut line = super::voice::links::message_text(
+        message,
+        &format!("{prefix}{body}{activities}{attachments}{error}"),
+    )
+    .into_owned();
     if line.len() > remaining {
         truncate_at_boundary(&mut line, remaining);
         truncated = true;

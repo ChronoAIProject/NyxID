@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { servicesApi } from "../../lib/api/servicesApi";
@@ -105,7 +106,7 @@ export function useComposerConnection(scope: string, locked: boolean) {
         !state.availability.available() ||
         state.unavailable
       )
-        throw new Error(CONNECTION_UNAVAILABLE);
+        throw localizedError(CONNECTION_UNAVAILABLE);
       return state.connection
         ? `/service ${state.connection.id}\n${text}`
         : text;

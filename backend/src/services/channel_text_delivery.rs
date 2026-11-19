@@ -30,6 +30,7 @@ pub async fn load(db: &Database, key: &str) -> AppResult<Option<ChannelTextDeliv
         .await?)
 }
 
+#[cfg(test)]
 pub async fn begin(
     db: &Database,
     key: &str,
@@ -38,11 +39,11 @@ pub async fn begin(
     fingerprint: &str,
     count: usize,
 ) -> AppResult<ChannelTextDelivery> {
-    begin_with_notice(db, key, owner, source, fingerprint, count, None).await
+    begin_versioned(db, key, owner, source, fingerprint, count, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn begin_with_notice(
+async fn begin_versioned(
     db: &Database,
     key: &str,
     owner: &str,
@@ -50,6 +51,7 @@ pub async fn begin_with_notice(
     fingerprint: &str,
     count: usize,
     notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
+    renderer_version: Option<u32>,
 ) -> AppResult<ChannelTextDelivery> {
     if count == 0 || count > super::channel_reply_delivery::MAX_REPLY_PARTS {
         return Err(AppError::ValidationError("Invalid multipart plan".into()));
@@ -60,6 +62,7 @@ pub async fn begin_with_notice(
         user_id: owner.into(),
         source_id: source.into(),
         fingerprint: fingerprint.into(),
+        renderer_version,
         notice,
         retry_at: None,
         parts: vec![
@@ -98,6 +101,56 @@ pub async fn begin_with_notice(
         return Err(AppError::Conflict("Multipart delivery plan changed".into()));
     }
     Ok(stored)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn assistant_plan(
+    db: &Database,
+    key: &str,
+    owner: &str,
+    source: &str,
+    platform: &str,
+    notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
+    build: impl Fn(
+        Option<u32>,
+        Option<&crate::models::channel_text_delivery::TextDeliveryNotice>,
+    ) -> AppResult<(Vec<super::channel_platform::OutboundReply>, String)>,
+) -> AppResult<(
+    ChannelTextDelivery,
+    Vec<super::channel_platform::OutboundReply>,
+)> {
+    for _ in 0..2 {
+        let previous = load(db, key).await?;
+        #[cfg(test)]
+        if previous.is_none() {
+            super::durable_wake_tests::after("text_renderer_before_insert").await;
+        }
+        let version = previous.as_ref().map_or_else(
+            || super::channel_reply_plan::renderer_version(platform),
+            |row| row.renderer_version,
+        );
+        let notice = previous
+            .as_ref()
+            .map_or_else(|| notice.clone(), |row| row.notice.clone());
+        let (parts, fingerprint) = build(version, notice.as_ref())?;
+        match begin_versioned(
+            db,
+            key,
+            owner,
+            source,
+            &fingerprint,
+            parts.len(),
+            notice,
+            version,
+        )
+        .await
+        {
+            Ok(row) => return Ok((row, parts)),
+            Err(AppError::Conflict(_)) if previous.is_none() => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(AppError::Conflict("Multipart delivery plan changed".into()))
 }
 
 pub fn recoverable(row: &ChannelTextDelivery) -> bool {
@@ -261,6 +314,234 @@ pub fn formatting_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn rendered(
+        version: Option<u32>,
+        platform: &str,
+    ) -> AppResult<(Vec<super::super::channel_platform::OutboundReply>, String)> {
+        let parts = super::super::channel_reply_plan::recorded_assistant_parts(
+            &"A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250),
+            platform,
+            "https://nyxid.test/thread",
+            version,
+        )?;
+        let digest = super::super::channel_reply_plan::fingerprint(&parts);
+        Ok((parts, digest))
+    }
+
+    #[tokio::test]
+    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_v2() {
+        let db = crate::test_utils::connect_transaction_test_database("text_renderer_resume").await;
+        ensure_indexes(&db).await.unwrap();
+        for platform in ["discord", "whatsapp"] {
+            for version in [None, Some(2)] {
+                let key = format!("{platform}-{version:?}");
+                let (parts, fingerprint) = rendered(version, platform).unwrap();
+                let row = if version.is_none() {
+                    begin(&db, &key, "owner", "source", &fingerprint, parts.len())
+                        .await
+                        .unwrap()
+                } else {
+                    assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
+                        rendered(v, platform)
+                    })
+                    .await
+                    .unwrap()
+                    .0
+                };
+                assert_eq!(row.renderer_version, version);
+                let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
+                    panic!("pending");
+                };
+                finish(
+                    &db,
+                    &row,
+                    0,
+                    &attempt,
+                    TextPartState::Sent,
+                    Some("accepted-prefix"),
+                    Some("outbound-prefix"),
+                )
+                .await
+                .unwrap();
+                let (resumed, resumed_parts) =
+                    assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
+                        rendered(v, platform)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(resumed.id, row.id);
+                assert_eq!(resumed.fingerprint, fingerprint);
+                assert_eq!(
+                    super::super::channel_reply_plan::fingerprint(&resumed_parts),
+                    fingerprint
+                );
+                assert!(
+                    matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-prefix"))
+                );
+                if version.is_some() {
+                    let (old_parts, old_fingerprint) = rendered(None, platform).unwrap();
+                    assert!(matches!(
+                        begin(
+                            &db,
+                            &key,
+                            "owner",
+                            "source",
+                            &old_fingerprint,
+                            old_parts.len()
+                        )
+                        .await,
+                        Err(AppError::Conflict(_))
+                    ));
+                    assert_eq!(
+                        load(&db, &key).await.unwrap().unwrap().parts[1].state,
+                        TextPartState::Pending
+                    );
+                }
+                let PartClaim::Send(attempt) = claim(&db, &resumed, 1).await.unwrap() else {
+                    panic!("suffix");
+                };
+                assert!(
+                    finish(
+                        &db,
+                        &resumed,
+                        1,
+                        "stale",
+                        TextPartState::Sent,
+                        Some("wrong"),
+                        None
+                    )
+                    .await
+                    .is_err()
+                );
+                // A crash after claiming cannot be made safe by selecting a renderer.
+                let (uncertain, _) =
+                    assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
+                        rendered(v, platform)
+                    })
+                    .await
+                    .unwrap();
+                assert!(claim(&db, &uncertain, 1).await.is_err());
+                assert!(claim(&db, &uncertain, 2).await.is_err());
+                finish(
+                    &db,
+                    &resumed,
+                    1,
+                    &attempt,
+                    TextPartState::Sent,
+                    Some("accepted-suffix"),
+                    None,
+                )
+                .await
+                .unwrap();
+                let raw = db
+                    .collection::<bson::Document>(COLLECTION_NAME)
+                    .find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(raw.contains_key("renderer_version"), version.is_some());
+                assert!(!raw.contains_key("text") && !raw.contains_key("body"));
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renderer_initialization_race_reloads_the_legacy_winner_and_pinned_notice() {
+        let db = crate::test_utils::connect_transaction_test_database("text_renderer_race").await;
+        ensure_indexes(&db).await.unwrap();
+        let versions = std::sync::Mutex::new(Vec::new());
+        let old = rendered(None, "discord").unwrap();
+        super::super::durable_wake_tests::resume_after(
+            "text_renderer_before_insert",
+            async {
+                let (row, _) = assistant_plan(
+                    &db,
+                    "race",
+                    "owner",
+                    "source",
+                    "discord",
+                    Some(crate::models::channel_text_delivery::TextDeliveryNotice {
+                        attempted: 1,
+                        sent: 0,
+                        failed: 1,
+                        unknown: 0,
+                        skipped: 0,
+                        unsupported: false,
+                        app_visible: true,
+                        automation: true,
+                        omitted: 0,
+                    }),
+                    |version, notice| {
+                        versions.lock().unwrap().push(version);
+                        assert_eq!(notice.is_some(), version == Some(2));
+                        rendered(version, "discord")
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(row.renderer_version, None);
+                assert_eq!(row.fingerprint, old.1);
+            },
+            async {
+                begin(&db, "race", "owner", "source", &old.1, old.0.len())
+                    .await
+                    .unwrap();
+            },
+        )
+        .await;
+        assert_eq!(*versions.lock().unwrap(), vec![Some(2), None]);
+        assert_eq!(
+            db.collection::<bson::Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renderer_new_plans_converge_without_changing_slack_or_telegram() {
+        let db = crate::test_utils::connect_transaction_test_database("text_renderer_new").await;
+        ensure_indexes(&db).await.unwrap();
+        for platform in ["discord", "whatsapp", "slack", "telegram"] {
+            let build =
+                |version, _: Option<&crate::models::channel_text_delivery::TextDeliveryNotice>| {
+                    rendered(version, platform)
+                };
+            let (a, b) = tokio::join!(
+                assistant_plan(&db, platform, "owner", "source", platform, None, build),
+                assistant_plan(&db, platform, "owner", "source", platform, None, build),
+            );
+            let a = a.unwrap().0;
+            let b = b.unwrap().0;
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.fingerprint, b.fingerprint);
+            assert_eq!(
+                a.renderer_version,
+                super::super::channel_reply_plan::renderer_version(platform)
+            );
+            assert!(
+                assistant_plan(
+                    &db,
+                    platform,
+                    "different-owner",
+                    "source",
+                    platform,
+                    None,
+                    build
+                )
+                .await
+                .is_err()
+            );
+            if matches!(platform, "slack" | "telegram") {
+                assert_eq!(a.fingerprint, rendered(None, platform).unwrap().1);
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn multipart_refusal_delay_survives_reload_and_fences_stale_attempts() {
         let db = crate::test_utils::connect_transaction_test_database("text_retry_delay").await;

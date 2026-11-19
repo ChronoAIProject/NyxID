@@ -774,6 +774,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             if let Some(reads) = &self.usage_reads {
                 reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }

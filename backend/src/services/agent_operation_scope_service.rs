@@ -196,8 +196,40 @@ pub fn check_inputs(
     body: &[u8],
     content_type: Option<&str>,
 ) -> AppResult<()> {
+    evaluate_inputs(
+        scopes,
+        service_id,
+        catalog_id,
+        endpoint_id,
+        method,
+        path,
+        query,
+        InputBody::Request(body, content_type),
+    )
+    .map(|_| ())
+}
+
+pub(super) enum InputBody<'a> {
+    Request(&'a [u8], Option<&'a str>),
+    /// Find whether admission requires a body schema. Defer only those rules.
+    BeforeUpload,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_inputs(
+    scopes: &OperationScopes,
+    service_id: &str,
+    catalog_id: Option<&str>,
+    endpoint_id: Option<&str>,
+    method: &str,
+    path: &CanonicalPath,
+    query: Option<&str>,
+    input: InputBody<'_>,
+) -> AppResult<bool> {
+    let mut needs_body = false;
     for scope in applicable(scopes, service_id, catalog_id) {
         let mut refusal = None;
+        let mut deferred = false;
         let accepted = scope
             .operations
             .iter()
@@ -213,6 +245,14 @@ pub fn check_inputs(
                 let Some(inputs) = &operation.inputs else {
                     return true;
                 };
+                let (body, content_type) = match input {
+                    InputBody::Request(bytes, mime) => (bytes, mime),
+                    InputBody::BeforeUpload if inputs.body.is_some() => {
+                        deferred = true;
+                        return false;
+                    }
+                    InputBody::BeforeUpload => (&[][..], None),
+                };
                 let arguments = proxy_authorization::match_path_arguments(&operation.rule, path)
                     .unwrap_or_default();
                 match inputs.check(&arguments, query, body, content_type) {
@@ -223,14 +263,16 @@ pub fn check_inputs(
                     }
                 }
             });
-        if !accepted {
+        if !accepted && deferred {
+            needs_body = true;
+        } else if !accepted {
             return Err(AppError::ApiKeyScopeForbidden(match refusal {
                 Some(error) => format!("Operation scope input limit: {error}"),
                 None => "Operation scope denied this call".into(),
             }));
         }
     }
-    Ok(())
+    Ok(needs_body)
 }
 
 pub fn mcp_catalog_id(service: &mcp_service::McpToolService) -> Option<&str> {
@@ -1734,12 +1776,25 @@ pub async fn set_key(
             "$set": {&revision_field: next},
         },
     };
-    let result = transactions::update_one(db, filter, update, None).await?;
-    if result.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "Operation scope changed; reload its revision".into(),
-        ));
-    }
+    let intent = super::api_key_audit_service::operations_changed(
+        actor,
+        &key.user_id,
+        &key.id,
+        service,
+        next,
+        scope.as_ref().map(|scope| scope.operations.len()),
+    )?;
+    let transaction_db = db.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                set_key_source_in_session(&transaction_db, &filter, &update, &intent, session)
+                    .await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
     let updated = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! {"_id": &key.id, "user_id": &key.user_id})
@@ -1747,29 +1802,25 @@ pub async fn set_key(
         .ok_or_else(|| {
             AppError::Conflict("API key changed after its operation scope update".into())
         })?;
-    super::audit_service::log_actor_event(
-        db.clone(),
-        &super::audit_service::AuditActor {
-            user_id: actor.into(),
-            ip_address: None,
-            user_agent: None,
-            api_key_id: None,
-            api_key_name: None,
-        },
-        "api_key_operations_changed",
-        Some(serde_json::json!({
-            "owner_id": updated.user_id,
-            "api_key_id": updated.id,
-            "service_id": service,
-            "revision": next,
-            "operation_count": updated
-                .assistant_operation_scopes
-                .get(service)
-                .map(|scope| scope.operations.len()),
-        })),
-    )
-    .await?;
     Ok((updated, next))
+}
+
+async fn set_key_source_in_session(
+    db: &Database,
+    filter: &bson::Document,
+    update: &bson::Document,
+    intent: &crate::models::security_effect_intent::SecurityEffectIntent,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let result =
+        transactions::update_one(db, filter.clone(), update.clone(), Some(&mut *session)).await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Operation scope changed; reload its revision".into(),
+        ));
+    }
+    super::security_effect_service::enqueue_in_session(db, session, std::slice::from_ref(intent))
+        .await
 }
 
 /// New configuration is enabled only after every replica can enforce it. Saved

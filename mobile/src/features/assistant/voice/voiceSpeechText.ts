@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import MarkdownIt from "markdown-it";
 import type Token from "markdown-it/lib/token";
 import { sanitizeAssistantMessageContent } from "../assistantChatContent";
@@ -19,7 +20,7 @@ export function voiceSpeechText(content: string): string {
       } else if (token.type === "link_close") autoLink = false;
       else if (autoLink) continue;
       else if (token.type === "fence" || token.type === "code_block")
-        result += " Code omitted. ";
+        result = [result, translateApp("Code omitted."), ""].filter((part, index) => index > 0 || part).join(" ");
       else if (token.type === "inline") result += render(token.children ?? []);
       else if (["text", "code_inline", "image"].includes(token.type))
         result += token.content;

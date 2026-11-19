@@ -741,6 +741,12 @@ pub async fn find_or_create_user_with_invite(
                     .await
                     .map_err(map_social_link_error)?;
             }
+            super::billing::schedules::eligibility::after_user_created(
+                db,
+                &new_user.id,
+                new_user.created_at,
+            )
+            .await;
             tracing::info!(
                 user_id = %new_user.id,
                 provider = %profile.provider.as_str(),
@@ -800,6 +806,7 @@ mod tests {
         google_secret: Option<&str>,
     ) -> AppConfig {
         AppConfig {
+            crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,

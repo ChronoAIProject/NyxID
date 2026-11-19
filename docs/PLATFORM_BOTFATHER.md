@@ -344,6 +344,53 @@ installation tombstones. Durable retirement progress lets interrupted cleanup
 advance in bounded batches, and ordinary accounts with no platform state keep
 standalone Mongo compatibility. Runtime validation is tracked separately.
 
+## Bot Setups regression
+
+The Bot Setups regression runs the real app entry, Router, DashboardLayout and
+StrictMode against synthetic HTTP responses, without a backend or Telegram:
+
+```bash
+cd frontend
+npm ci
+npm run test -- src/pages/platform-setups.router.test.tsx src/pages/platform-anonymous-adoption.test.tsx
+npx playwright test --config playwright.platform-setups.config.ts
+```
+
+The browser suite owns strict port 4634 and refuses an already-running server.
+Its HTTP fixture serves empty Google Fonts CSS locally and blocks other external
+requests, so provider/network availability cannot consume the page-load deadline.
+The current import flow is Linked chat → review → Adopt reviewed draft.
+
+Keep distinct account-qualified keys for the sibling draft-import and archive
+modules. With a shared sibling key, a later page render that breaks React's
+in-order fast path (for example, when saved setups settle) could orphan the
+original import DOM and mount another copy. The router tests fail on unexpected
+`console.error`, including duplicate-key warnings, and cover delayed list updates,
+navigation, account/binding changes, adoption settlement and explicit retry.
+Browser tests also check direct entry, reload, history, keyboard activation,
+validation/errors and revocation of the selected chat.
+
+The synchronous guard blocks in-flight and double-click repeats. Account,
+binding-generation or chat changes clear consent; a loaded list dropping the
+selected binding clears the selection, while refetch errors retain it. The server
+fences binding and draft revisions and makes same-owner/binding/generation
+replays idempotent; unmounted callbacks cannot clear a new review.
+
+Adoption success or definitive refusal (403/404/409) clears only the submitted
+id/revision's consent; a newer review survives. Refusals evict that rejected
+snapshot before refreshing the exact chat's drafts, so a failed refresh cannot
+offer it again. Only authoritative empty lists show the empty state, including
+during refetches. Transient failures permit explicit retry of the same snapshot.
+A draft-read denial (403/404) replaces cached private facts with a denial marker
+and clears consent. Retry restores authorized facts with consent unchecked;
+transient errors cannot revive discarded facts.
+
+The `Frontend` CI job runs the router/adoption regressions through `npm run test`.
+The browser suite runs separately with the dedicated configuration shown above.
+It is excluded from the default Playwright suite because that suite boots Vite
+in `test` mode with the assistant's in-app fixtures; these regressions exercise
+the real HTTP client. Fixtures verify browser behavior, not live delivery.
+
 ## Deployment and external acceptance
 
 No deployment or live enablement was performed for this implementation. Before a

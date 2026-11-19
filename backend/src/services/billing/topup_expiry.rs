@@ -774,6 +774,8 @@ pub(super) async fn unresolved_diagnostics(
         .collect::<Vec<_>>()
         .join("; ");
     Ok(vec![super::BillingStartupDiagnostic {
+        severity: super::DiagnosticSeverity::Info,
+        technical_details: None,
         code: "billing_expiry_unresolved".into(),
         summary: "Purchased-credit expiry needs a provider receipt".into(),
         detail: format!("{count} unresolved operations; first samples: {samples}"),
@@ -1312,6 +1314,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),

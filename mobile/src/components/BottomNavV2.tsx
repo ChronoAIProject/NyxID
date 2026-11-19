@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
 // `lucide-react-native` mirrors the lucide-react icon set used by the web app
@@ -21,6 +23,7 @@ const GAP = spacing.xs + spacing.xxs; // 6
 const FAB_WIDTH = 57;
 
 export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
@@ -77,12 +80,14 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         onPress={() => onTabPress("activity")}
       >
         <ShieldCheck size={18} color={active === "activity" ? colors.textPrimary : colors.textMuted} strokeWidth={2} />
-        <Text style={[styles.text, active === "activity" && styles.textActive]}>Activity</Text>
+        <Text style={[styles.text, active === "activity" && styles.textActive]}>
+          {translateApp("Activity")}
+        </Text>
       </Pressable>
 
       {showFab && (
         <Pressable style={styles.fabSpacer} onPress={onFabPress}>
-          <Text style={styles.fabLabel}>Ask Nyx</Text>
+          <Text style={styles.fabLabel}>{translateApp("Ask Nyx")}</Text>
         </Pressable>
       )}
 
@@ -91,7 +96,9 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         onPress={() => onTabPress("account")}
       >
         <User size={18} color={active === "account" ? colors.textPrimary : colors.textMuted} strokeWidth={2} />
-        <Text style={[styles.text, active === "account" && styles.textActive]}>Account</Text>
+        <Text style={[styles.text, active === "account" && styles.textActive]}>
+          {translateApp("Account")}
+        </Text>
       </Pressable>
     </View>
   );

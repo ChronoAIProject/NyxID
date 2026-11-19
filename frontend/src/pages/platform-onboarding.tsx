@@ -4,7 +4,8 @@ import { getFormattingLocale } from "@/lib/formatting-locale";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
-import { useEffect, useLayoutEffect, useState } from "react";
+import { isDefinitiveDraftError } from "@/lib/platform-draft-errors";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CopyableField } from "@/components/shared/copyable-field";
 import {
   captureOnboardingLink,
@@ -451,16 +452,29 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
   const query = useAnonymousDrafts(binding);
   const mutation = useAdoptAnonymousDraft(binding);
   const [review, setReview] = useState<PlatformSetup | null>(null);
+  const adoptionPending = useRef(false);
+  const denied = query.data?.status === "denied";
+  const ready = query.data?.status === "ready" ? query.data : undefined;
+  const drafts = ready?.drafts;
+  // Drop consent before committing the denial view, including on a fast retry.
+  if (denied && review) setReview(null);
   return (
     <div className="space-y-3">
       {query.isPending && (
         <p role="status">{translateUi("Loading drafts from this exact chat…")}</p>
       )}
-      {query.error && (
-        <ErrorBanner message={translateUi("Could not load drafts for this chat. Refresh your binding before trying again.")} />
+      {(query.error || denied) && (
+        <ErrorBanner
+          message={translateUi(
+            "Could not load drafts for this chat. Refresh your binding before trying again.",
+          )}
+          onRetry={() => {
+            void query.refetch();
+          }}
+        />
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
-      {query.data?.map((draft) => (
+      {drafts?.map((draft) => (
         <div key={draft.id} className="space-y-2 rounded-lg border p-3">
           <p className="font-medium">
             {draft.facts.name}{translateUi(" · revision ")}{draft.revision}
@@ -496,14 +510,34 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               review.revision !== draft.revision ||
               mutation.isPending
             }
-            onClick={() => {
-              if (review)
-                mutation.mutate(review, { onSuccess: () => setReview(null) });
+            onClick={(event) => {
+              // Block a second click before the mutation's pending render.
+              // A fast failure can settle between the clicks of a double-click;
+              // its second click must not silently retry the reviewed request.
+              if (event.detail > 1 || !review || adoptionPending.current) return;
+              adoptionPending.current = true;
+              const submitted = review;
+              const clearSubmittedReview = () =>
+                setReview((current) =>
+                  current?.id === submitted.id &&
+                  current.revision === submitted.revision
+                    ? null
+                    : current,
+                );
+              mutation.mutate(submitted, {
+                onSuccess: clearSubmittedReview,
+                onError: (error) => {
+                  if (isDefinitiveDraftError(error, "adopt")) clearSubmittedReview();
+                },
+                onSettled: () => {
+                  adoptionPending.current = false;
+                },
+              });
             }}
           >{translateUi("Adopt reviewed draft")}</Button>
         </div>
       ))}
-      {query.data?.length === 0 && (
+      {drafts?.length === 0 && !ready?.provisional && (
         <p>{translateUi("No unowned drafts remain for this chat.")}</p>
       )}
     </div>
@@ -515,6 +549,9 @@ function AnonymousDrafts() {
   const bindings = useOwnedBindings();
   const [selectedId, setSelectedId] = useState("");
   const selected = bindings.data?.find((binding) => binding.id === selectedId);
+  // Adjust before committing children so a removed chat cannot silently return
+  // as the selection later. A failed refetch retains the prior data and review.
+  if (bindings.isSuccess && selectedId && !selected) setSelectedId("");
   return (
     <DetailSection title={translateUi("Bring a Telegram draft into your account")}>
       <div className="space-y-3 p-4 text-14">
@@ -607,8 +644,8 @@ export function PlatformSetupsPage() {
       {setups.data?.length === 0 && !template && (
         <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">{translateUi("Your saved setups will appear here. Choose a starter to begin.")}</p>
       )}
-      {actor && <AnonymousDrafts key={actor} />}
-      {actor && <ArchivedSetups key={actor} />}
+      {actor && <AnonymousDrafts key={`anonymous:${actor}`} />}
+      {actor && <ArchivedSetups key={`archives:${actor}`} />}
       <OwnedOnboardingBindings />
     </div>
   );

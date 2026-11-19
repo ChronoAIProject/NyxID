@@ -243,17 +243,30 @@ async function confirmProfile() {
 }
 
 async function startAppLogin() {
+  const appPolls = () => [
+    ...callsTo("/auth/device/poll-web"),
+    ...callsTo(`/auth/approval/${approvalId}/app/poll`),
+  ];
   const trigger = await screen.findByRole("button", {
     name: "Continue with the NyxID app",
   });
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  // Poll timers and their Date.now() deadlines must advance on the same clock.
+  vi.useFakeTimers();
   try {
     await act(async () => {
       fireEvent.click(trigger);
     });
     expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(appPolls()).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(appPolls()).toHaveLength(1);
+    expect(JSON.parse(String(appPolls()[0]![1]?.body))).toEqual({
+      device_code: "nyx_adc_private",
     });
   } finally {
     vi.useRealTimers();

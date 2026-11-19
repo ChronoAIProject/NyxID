@@ -814,6 +814,14 @@ impl McpAuthContext {
         context
     }
 
+    fn attachment_chat(
+        &self,
+    ) -> Option<&crate::services::assistant_acknowledgement_service::ChatAuthority> {
+        self.chat
+            .as_ref()
+            .filter(|_| self.is_api_key && self.auth_method == AuthMethod::ApiKey)
+    }
+
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
             execution_permission: None,
@@ -2401,13 +2409,35 @@ async fn handle_tools_list(
         }
     }
 
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
             let mut tool = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&t.name).unwrap_or(&t.input_schema)),
             });
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
                 tool["title"] = annotations["title"].clone();
@@ -2620,6 +2650,109 @@ async fn artifacts_enabled(
         .await
         .unwrap_or(false)
 }
+/// Preserve the finite MCP transport (including inline notifications) while
+/// presenting only result envelopes. Id-less calls intentionally have no replay identity.
+async fn present_voice_tool_response(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+    request: &JsonRpcRequest,
+    response: Response,
+) -> Response {
+    let publication = chat
+        .turn_id
+        .as_ref()
+        .zip(chat.voice_parent_conversation_id.as_ref())
+        .map(
+            |(turn, parent)| crate::services::voice::links::Publication {
+                user_id: chat.user_id.clone(),
+                parent_id: parent.clone(),
+                conversation_id: chat.conversation_id.clone(),
+                turn_id: turn.clone(),
+            },
+        );
+    let tool_call = request
+        .id
+        .as_ref()
+        .filter(|id| !id.is_null())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (mut parts, body) = response.into_parts();
+    let sse = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    let rewrite = async |payload: &str| -> Result<String, ()> {
+        let mut envelope: serde_json::Value = serde_json::from_str(payload).map_err(|_| ())?;
+        for field in ["result", "error"] {
+            if let Some(result) = envelope.get_mut(field) {
+                *result = crate::services::voice::links::present_optional(
+                    state,
+                    publication.as_ref(),
+                    &tool_call,
+                    result.take(),
+                )
+                .await;
+            }
+        }
+        Ok(envelope.to_string())
+    };
+    let transformed: Result<String, ()> = async {
+        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024)
+            .await
+            .map_err(|_| ())?;
+        let wire = std::str::from_utf8(&bytes).map_err(|_| ())?;
+        if !sse {
+            return rewrite(wire).await;
+        }
+        let mut output = String::new();
+        for event in wire.replace("\r\n", "\n").split("\n\n") {
+            if event.is_empty() {
+                continue;
+            }
+            let data = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = if data.is_empty() {
+                None
+            } else {
+                Some(rewrite(&data).await?)
+            };
+            for line in event.lines().filter(|line| !line.starts_with("data:")) {
+                output.push_str(line);
+                output.push('\n');
+            }
+            if let Some(data) = data {
+                output.push_str("data: ");
+                output.push_str(&data);
+                output.push('\n');
+            }
+            output.push('\n');
+        }
+        Ok(output)
+    }
+    .await;
+    let body = transformed.unwrap_or_else(|()| {
+        // Presentation failure is not execution failure. Preserve the original
+        // HTTP/typed outcome and receipt digest so effects cannot be replayed.
+        let notice = "Tool output withheld; links could not be checked. Do not repeat the action or claim that a link was sent.";
+        let envelope = if let Some(code) = parts.extensions.get::<RpcFailureCode>() {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "error": {"code": code.0, "message": notice}})
+        } else {
+            serde_json::json!({"jsonrpc": JSONRPC_VERSION, "id": request.id,
+                "result": {"content": [{"type": "text", "text": notice}],
+                    "isError": parts.extensions.get::<ToolOutcome>() == Some(&ToolOutcome::Error),
+                    "link_publication": "unchecked", "links_in_chat": 0}})
+        };
+        if sse { format!("data: {envelope}\n\n") } else { envelope.to_string() }
+    });
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(body))
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2668,6 +2801,15 @@ async fn handle_tools_call(
             .await
     })
     .await;
+    let response = if let Some(chat) = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.voice_parent_conversation_id.is_some())
+    {
+        present_voice_tool_response(state, chat, request, response).await
+    } else {
+        response
+    };
     operation.finish(
         if tool_succeeded(&response) {
             crate::turn_trace::Outcome::Completed
@@ -3524,7 +3666,14 @@ fn dispatch_service_tool<'a>(
         let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
             &state.db,
             &state.encryption_keys,
-            auth.chat.as_ref(),
+            if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+                && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+            {
+                auth.attachment_chat()
+            } else {
+                auth.chat.as_ref()
+            },
+            &auth.assistant_operation_scopes,
             service,
             endpoint,
             &execution_arguments,
@@ -3913,6 +4062,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: auth.execution_permission.as_ref(),
+        attachment_owner_key: auth.attachment_chat().is_some(),
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&auth.user_id),
@@ -4540,13 +4690,17 @@ async fn webhook_service_gate(
     let summary = format!(
         "{} {} on {}",
         prepared.method(),
-        crate::services::assistant_nyxagent::identifier(&endpoint.name),
+        prepared
+            .attachment_summary(endpoint, args)
+            .unwrap_or_else(|| crate::services::assistant_nyxagent::identifier(&endpoint.name)),
         crate::services::assistant_nyxagent::identifier(&service.service_slug),
     );
     let materialized_args = prepared.attachment_confirmation_arguments(endpoint, args);
     let args = materialized_args.as_ref().unwrap_or(args);
     let result = async {
-        let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
+        let gate =
+            acks::confirmation_needed(&state.db, chat, facts, prepared.attachment_policy_floor())
+                .await?;
         if let Some(need) = gate.ask()
             && let Some(refusal) =
                 acks::confirm_action(&state.db, chat, tool, args, &need, &summary).await?
@@ -5293,7 +5447,14 @@ async fn handle_meta_call_tool(
     let prepared = match mcp_service::prepare_chat_proxy_tool_call(
         &state.db,
         &state.encryption_keys,
-        auth.chat.as_ref(),
+        if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
+            && !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+        {
+            auth.attachment_chat()
+        } else {
+            auth.chat.as_ref()
+        },
+        &auth.assistant_operation_scopes,
         service,
         endpoint,
         &execution_arguments,
@@ -5766,13 +5927,35 @@ async fn handle_meta_search(
             Default::default()
         }
     };
+    let attachment_schemas = match crate::services::raw_attachment_tool::discovery_schemas(
+        &state.db,
+        auth.attachment_chat(),
+        &services,
+    )
+    .await
+    {
+        Ok(mut schemas) => {
+            schemas.retain(|name, _| {
+                mcp_service::resolve_tool_call(name, &services)
+                    .is_some_and(|(service, _)| chat_access(auth, service) == "granted")
+            });
+            schemas
+        }
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Failed to load file upload schemas"
+            );
+            std::collections::HashMap::new()
+        }
+    };
     let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
             let mut value = serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
+                "inputSchema": webhook_tool_schema(auth, attachment_schemas.get(&tool.name).unwrap_or(&tool.input_schema)),
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
                 value["service_id"] = serde_json::json!(service.service_id);
@@ -7062,7 +7245,10 @@ async fn execute_ssh_command_internal(
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut last_error = None;
 
-    for node_id in &all_node_ids {
+    let mut nodes = all_node_ids.iter().peekable();
+    let mut retry = None;
+    let mut waited = false;
+    while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
         if let Some(chat) = auth.chat.as_ref() {
             if !crate::services::node_routing_service::is_node_id_dispatchable(
                 &state.db,
@@ -7204,9 +7390,24 @@ async fn execute_ssh_command_internal(
 
                 return Ok(response);
             }
-            Err(error @ AppError::RateLimited) => return Err(error),
-            Err(error) => {
-                if auth.chat.is_some() {
+            Err(failure) => {
+                if matches!(failure.error, AppError::RateLimited) {
+                    return Err(failure.error);
+                }
+                if !waited
+                    && nodes.peek().is_none()
+                    && let Some(handover) = &failure.handover
+                    && handover
+                        .wait(&state.db, &state.node_ws_manager, node_id)
+                        .await
+                {
+                    retry = Some(node_id);
+                    waited = true;
+                    continue;
+                }
+                let dispatched = failure.dispatched;
+                let error = failure.into_ssh_error();
+                if dispatched {
                     state.billing.fail(&metered, "ssh_outcome_unknown").await?;
                     return Err(error);
                 }
@@ -9904,9 +10105,15 @@ mod curation_auth_regressions {
             .await
             .unwrap()
             .unwrap();
-        curation_grant_service::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .unwrap();
+        curation_grant_service::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
@@ -9935,7 +10142,7 @@ mod curation_auth_regressions {
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         let fresh = token(&f, None).await;
         headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
-        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true)
+        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
@@ -11526,6 +11733,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

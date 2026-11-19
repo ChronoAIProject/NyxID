@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 export const TRANSCRIPT_SIDE_PADDING = 12;
 
 export type ChatLayout = { columnWidth: number; composerMaxHeight: number };
@@ -60,5 +61,6 @@ export function transcriptColumnStyle(
 
 /** Row and page titles for each chat layout value. */
 export function chatLayoutTitle(key: keyof ChatLayout) {
-  return key === "columnWidth" ? "Chat column width" : "Maximum composer height";
+  return key === "columnWidth" ? translateApp("Chat column width")
+    : translateApp("Maximum composer height");
 }

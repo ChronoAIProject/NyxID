@@ -55,6 +55,23 @@ pub(super) fn created_filter(owner_id: &str) -> Document {
     doc! {"user_id": owner_id, "source": NYXID_CREATED_SOURCE}
 }
 
+pub(super) async fn audit_occupied_slot(db: &Database, row: &AssistantCmaSandbox) -> AppResult<()> {
+    super::assistant_cma_slot_audit::record(db, row).await
+}
+pub(super) fn occupied_holding(row: &AssistantCmaSandbox) -> &'static str {
+    if row.retire_requested_at.is_some() || row.admission_state == SandboxAdmissionState::Retiring {
+        "retiring"
+    } else if row.cma_sandbox_id.is_some() {
+        "live_sandbox"
+    } else if row.admission_state == SandboxAdmissionState::Unknown
+        || row.submission_state == "unknown"
+    {
+        "creation_unknown"
+    } else {
+        "creation_in_progress"
+    }
+}
+
 /// Previous versions let discovery occupy the account slot. Release only
 /// metadata-only external references; never alter a durable creation intent
 /// or infer remote retirement. Keep the rows for receipt reconciliation.
@@ -182,6 +199,9 @@ pub fn prepare_creation_request(request: &[u8]) -> AppResult<NormalizedCreationR
 pub fn indexes() -> Vec<IndexModel> {
     vec![
         IndexModel::builder()
+            .keys(doc! {"source": 1, "occupies_account_slot": 1, "_id": 1})
+            .build(),
+        IndexModel::builder()
             .keys(doc! {"user_id": 1})
             .options(
                 IndexOptions::builder()
@@ -292,6 +312,7 @@ pub async fn begin_creation(
         if row.idempotency_key.as_deref() == Some(idempotency_key) {
             return same_creation(row, &service_id, &normalized.hash);
         }
+        let _ = audit_occupied_slot(&db, &row).await;
         return Err(occupied());
     }
     let previous = db
@@ -387,7 +408,10 @@ pub async fn begin_creation(
                     &normalized.hash,
                 );
             }
-            Err(error) if duplicate_app_key(&error) => return Err(occupied()),
+            Err(error) if duplicate_app_key(&error) => {
+                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
+                return Err(occupied());
+            }
             Err(error) => return Err(error),
         }
     }
@@ -397,6 +421,7 @@ pub async fn begin_creation(
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
                 same_creation(row, &service_id, &normalized.hash)
             } else {
+                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
                 Err(occupied())
             }
         }
@@ -488,7 +513,7 @@ fn has_confirmed_capacity(row: &AssistantCmaSandbox) -> bool {
         && row.memory_mib.is_some_and(|value| value > 0)
 }
 
-fn apply_observation(
+pub(super) fn apply_observation(
     row: &mut AssistantCmaSandbox,
     observation: &CmaSandbox,
     expected_generation: i64,
@@ -728,32 +753,7 @@ pub async fn associate_created(
             {
                 return Ok(current);
             }
-            let duplicate = collection.find_one(doc! {
-                "_id":{"$ne":&current.id},"user_id":&current.user_id,
-                "cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
-            }).session(&mut *tx).await?;
-            let mut changed = current.clone();
-            if let Some(duplicate) = duplicate {
-                if duplicate.occupies_account_slot
-                    || duplicate.idempotency_key.is_some()
-                    || duplicate.request_hash.is_some()
-                    || duplicate.request_ciphertext.is_some()
-                    || !matches!(duplicate.source.as_str(), "discovered" | "conflict" | "claimed")
-                {
-                    return Err(stale());
-                }
-                changed.retire_requested_at = changed.retire_requested_at.or(duplicate.retire_requested_at);
-                if changed.label == "Sandbox" { changed.label = duplicate.label.clone(); }
-                if collection.delete_one(observation_filter(&duplicate)).session(&mut *tx).await?.deleted_count != 1 {
-                    return Err(stale());
-                }
-                // Agent refs use the remote parent identity, so only its local
-                // generation changes when the provisional reference is folded.
-                db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
-                    .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
-                    .session(&mut *tx).await?;
-            }
-            apply_observation(&mut changed, observation, current.generation, Utc::now())?;
+            let changed = fold_created_observation(db, tx, &current, observation).await?;
             let mut set = observation_set(&changed)?;
             set.insert("retire_requested_at", changed.retire_requested_at.map(bson::DateTime::from_chrono));
             set.insert("label", &changed.label);
@@ -761,6 +761,60 @@ pub async fn associate_created(
                 .return_document(ReturnDocument::After).session(tx).await?.ok_or_else(stale)
         })
     }).await
+}
+
+/// The existing association fold, shared with explicit admin resolution.
+/// The caller holds the owner-erasure and parent-revision fences in this transaction.
+pub(super) async fn fold_created_observation(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    current: &AssistantCmaSandbox,
+    observation: &CmaSandbox,
+) -> AppResult<AssistantCmaSandbox> {
+    let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
+    let duplicate = collection
+        .find_one(doc! {
+            "_id":{"$ne":&current.id},"user_id":&current.user_id,
+            "cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,
+        })
+        .session(&mut *tx)
+        .await?;
+    let mut changed = current.clone();
+    if let Some(duplicate) = duplicate {
+        if duplicate.occupies_account_slot
+            || duplicate.idempotency_key.is_some()
+            || duplicate.request_hash.is_some()
+            || duplicate.request_ciphertext.is_some()
+            || !matches!(
+                duplicate.source.as_str(),
+                "discovered" | "conflict" | "claimed"
+            )
+        {
+            return Err(stale());
+        }
+        changed.retire_requested_at = changed
+            .retire_requested_at
+            .or(duplicate.retire_requested_at);
+        if changed.label == "Sandbox" {
+            changed.label = duplicate.label.clone();
+        }
+        if collection
+            .delete_one(observation_filter(&duplicate))
+            .session(&mut *tx)
+            .await?
+            .deleted_count
+            != 1
+        {
+            return Err(stale());
+        }
+        // Agent refs use the remote parent identity, so only its local
+        // generation changes when the provisional reference is folded.
+        db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
+                    .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
+                    .session(&mut *tx).await?;
+    }
+    apply_observation(&mut changed, observation, current.generation, Utc::now())?;
+    Ok(changed)
 }
 
 /// Persist submission before network I/O and retain the same identity on a
@@ -1099,17 +1153,31 @@ pub async fn resolve_created(
     owner_id: &str,
     remote_id: &str,
 ) -> AppResult<AssistantCmaSandbox> {
+    let row = find_created(db, gateway, owner_id, remote_id)
+        .await?
+        .ok_or_else(missing_creation)?;
+    observe(db, gateway, owner_id, &row.id, row.generation).await
+}
+
+pub(super) fn missing_creation() -> AppError {
+    AppError::NotFound("Sandbox was not created through NyxID".into())
+}
+
+pub(super) async fn find_created(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner_id: &str,
+    remote_id: &str,
+) -> AppResult<Option<AssistantCmaSandbox>> {
     validate_remote_id(remote_id)?;
     let service_id = gateway.service_id(owner_id).await?;
     let mut filter = created_filter(owner_id);
     filter.insert("cma_service_id", service_id);
     filter.insert("cma_sandbox_id", remote_id);
-    let row = db
+    Ok(db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(filter)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
-    observe(db, gateway, owner_id, &row.id, row.generation).await
+        .await?)
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -198,6 +198,7 @@ async fn create_user_with_actor(
         }),
     )?;
     audit::insert_user(db, &new_user, intent).await?;
+    super::billing::schedules::eligibility::after_user_created(db, &new_user.id, now).await;
 
     tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
 

@@ -1,9 +1,10 @@
+import androidCases from "../assistant/voice/dictation-android-cases.json";
 import { createAssistantDraftStore } from "../assistant/assistantDraftStore";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
-type E = { type: any; props: Record<string, any> };
+type E = { type: any; props: Record<string, any>; key?: unknown };
 const nodes = (n: any): E[] =>
   n?.props
     ? typeof n.type === "function" &&
@@ -27,11 +28,15 @@ const nodes = (n: any): E[] =>
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
+  cornerWindow = false,
+  android = undefined as (typeof androidCases)[number] | undefined,
 } = {}) {
   let options: any;
+  let columnHeader: any;
   let settingsOpened = 0;
   let dictationOptions: any;
-  const dictation = { active: false, phase: "idle" };
+  let dictation: any = { active: false, phase: "idle" };
+  const nativeStarts: any[] = [];
   const members = [
     { id: "bot", name: "nyxbot", display_name: "NyxBot", kind: "nyxbot" },
     {
@@ -66,7 +71,10 @@ function setup({
       collaboration_decisions: [] as any[],
     },
   };
+  let fontScale = 1;
+  const corner = {value:cornerWindow};
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceQuickRailContext:corner},
     "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
@@ -79,11 +87,27 @@ function setup({
       assistantDraftStore: draftStore,
     },
     "react/jsx-runtime": {
-      jsx: (type: unknown, props: unknown) => ({ type, props }),
-      jsxs: (type: unknown, props: unknown) => ({ type, props }),
+      jsx: (type: unknown, props: unknown, key?: unknown) => ({
+        type,
+        props,
+        key,
+      }),
+      jsxs: (type: unknown, props: unknown, key?: unknown) => ({
+        type,
+        props,
+        key,
+      }),
+    },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ top: 0, left: 0, bottom: 0, right: 0 }),
     },
     "react-native": {
-      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+      Platform: { OS: android ? "android" : "ios" },
+      AppState: {
+        currentState: "active",
+        addEventListener: () => ({ remove() {} }),
+      },
+      useWindowDimensions: () => ({ width: 390, height: 844, fontScale }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -152,6 +176,9 @@ function setup({
       WorkspaceHeaderVisibility: "Visibility",
       useWorkspaceBack: (p: any) => {
         options = p.options;
+      },
+      useWorkspaceColumnHeader: (p: any) => {
+        columnHeader = p;
       },
     },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
@@ -240,6 +267,49 @@ function setup({
       fileURLToPath(new URL("../assistant/ChatSurface.tsx", import.meta.url)),
     ),
   );
+  if (android) {
+    h.mock("expo-speech-recognition", {
+      ExpoSpeechRecognitionModule: {
+        isRecognitionAvailable: () => true,
+        getPermissionsAsync: async () => ({
+          granted: true,
+          status: "granted",
+          canAskAgain: true,
+        }),
+        getSupportedLocales: async () => {
+          if (android.reject) throw new Error("Unavailable");
+          return { locales: android.locales };
+        },
+        addListener: () => ({ remove() {} }),
+        start: (options: unknown) => nativeStarts.push(options),
+        abort() {},
+      },
+    });
+    h.mock("@react-navigation/native", { useIsFocused: () => true });
+    h.mock("../../i18n/deviceLanguages", {
+      deviceLanguages: () => android.preferred ?? ["en-US"],
+    });
+    h.mock("./voice/dictationLanguage", {
+      savedDictationLanguage: async () => android.saved,
+      languageLabel: (value: string) => value,
+    });
+    h.mock("../../lib/accessibility/workspaceAccessibility", {
+      useWorkspaceAccessibility: () => ({ sheetOpen: false }),
+    });
+    const hooks = h.load(
+      fileURLToPath(
+        new URL("../assistant/useComposerDictation.ts", import.meta.url),
+      ),
+    ) as typeof import("../assistant/useComposerDictation");
+    h.mock("../assistant/useComposerDictation", {
+      ...hooks,
+      useComposerDictation: (options: any) => {
+        dictationOptions = options;
+        dictation = hooks.useComposerDictation(options);
+        return dictation;
+      },
+    });
+  }
   const Screen = h.load(
     fileURLToPath(new URL("./GroupChatScreen.tsx", import.meta.url)),
   ).GroupChatScreen as any;
@@ -267,11 +337,18 @@ function setup({
     attachmentChoices,
     identity,
     headerActions: () => nodes(options.headerRight()),
+    columnHeader: () => columnHeader,
     settingsOpened: () => settingsOpened,
     input,
     submit,
     dictation,
     dictationOptions: () => dictationOptions,
+    realDictation: () => dictation,
+    nativeStarts,
+    setFontScale: (value: number) => {
+      fontScale = value;
+      h.render();
+    },
   };
 }
 
@@ -355,6 +432,26 @@ test("crew header shows member identity and narrows recipients through its picke
       .props.ListFooterComponent.props.children.filter(Boolean).length,
     0,
   );
+  h.unmount();
+});
+
+test("on the Duo's full screen the crew's bar controls move to the column: Back, the crew's picker, Crew options", () => {
+  const { h, columnHeader, settingsOpened } = setup();
+  const column = columnHeader();
+  // The same Back as the bar (the crew is pushed), the crew as its member
+  // avatars with one spoken name, and Crew options.
+  assert.equal(column.role, "back");
+  assert.equal(column.disabled, false);
+  assert.equal(column.identity.label, "Launch crew. Choose agent");
+  assert.equal(column.identity.members.length, 2);
+  assert.equal(column.identity.disabled, false);
+  assert.equal(column.more.label, "Crew options");
+  // The crew opens the same recipient picker as the identity pill.
+  column.identity.onPress();
+  h.flush();
+  assert.ok(nodes(h.value()).some((n) => n.type === "Modal" && n.props.visible));
+  column.more.onPress();
+  assert.equal(settingsOpened(), 1);
   h.unmount();
 });
 
@@ -856,5 +953,56 @@ test("crew options use the private header overflow affordance and avoid a duplic
     false,
   );
   assert.equal(f.identity().props.members.length, 2);
+  f.h.unmount();
+});
+
+for (const scenario of androidCases) {
+  test(`Android GroupChatScreen composer: ${scenario.name}`, async () => {
+    const x = setup({ android: scenario });
+    assert.equal(x.dictationOptions().enabled, true);
+    await x.realDictation().start();
+    await x.h.settle();
+    assert.equal(x.nativeStarts.length, scenario.hardError ? 0 : 1);
+    assert.equal(x.nativeStarts[0]?.lang, scenario.expected);
+    assert.equal(x.realDictation().chooseLanguage, !!scenario.hardError);
+    x.h.unmount();
+  });
+}
+
+test("on the Duo a live text-size change remounts the crew transcript so every row re-measures", () => {
+  const f = setup({cornerWindow:true});
+  const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  const before = list().key;
+  f.h.render();
+  assert.equal(list().key, before, "ordinary renders keep the list");
+  f.setFontScale(3.12);
+  assert.notEqual(list().key, before);
+  f.h.unmount();
+});
+
+test("scrolling the crew transcript dismisses the keyboard and never swallows a first tap", () => {
+  const f = setup();
+  const list = nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  assert.equal(list.props.keyboardDismissMode, "on-drag");
+  assert.equal(list.props.keyboardShouldPersistTaps, "handled");
+  f.h.unmount();
+});
+
+test("only an idle folded Duo crew composer may collapse to one row, like private chats", () => {
+  const ordinary = setup();
+  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  ordinary.h.unmount();
+  const f = setup({cornerWindow:true});
+  assert.equal(f.input().props.compactWhenIdle, true);
+  f.h.unmount();
+});
+
+
+test("P9 ordinary crew transcript keeps its base identity across text size changes", () => {
+  const f=setup();
+  const list=()=>nodes(f.h.value()).find(n=>n.type === "FlatList")!;
+  const before=list().key;
+  f.setFontScale(3.12);
+  assert.equal(list().key,before);
   f.h.unmount();
 });

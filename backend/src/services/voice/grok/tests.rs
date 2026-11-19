@@ -157,6 +157,7 @@ async fn grok_fixture_manual_transcription_during_output_is_cumulative_and_does_
         let final_event=grok.events.back().unwrap();
         assert_eq!(final_event["segment"]["sealed"],true);
         assert_eq!(final_event["segment"]["complete"],false); // Cancelled speech cannot arm a readback.
+        assert_eq!(final_event["segment"]["interrupted"],true);
         assert!(uuid::Uuid::parse_str(final_event["segment"]["id"].as_str().unwrap()).is_ok());
         assert_eq!(grok.events.len(),2); // Draft and one final, never a replay.
         // Trailing playback still has a truncation target after response.done.

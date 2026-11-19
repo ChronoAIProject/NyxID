@@ -21,7 +21,7 @@ const XCODE_PROJECT_PATH = path.join(
   "NyxIDMobile.xcodeproj",
   "project.pbxproj",
 );
-const REQUIRED_IOS_PODS = ["ExpoCameraBarcodeScanning", "ZXingObjC"];
+const REQUIRED_IOS_PODS = ["ExpoCameraBarcodeScanning", "ZXingObjC", "NyxCrashReporter", "PLCrashReporter"];
 
 function runJson(command, args, env = process.env) {
   const commandEnv = { ...env };

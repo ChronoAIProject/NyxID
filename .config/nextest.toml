@@ -107,12 +107,20 @@ threads-required = "num-cpus"
 # failCommand is one server-wide setting: appName scopes its effects, but a
 # second configureFailPoint replaces the first test's setting. Reserve the
 # runner slots while these fixtures install and clear their failure injection.
+# Index-build failpoints also pause server-wide builders.
 [[profile.ci.overrides]]
 filter = """
+test(db::index_tests::races::) |
 test(handlers::oauth::tests::round3_) |
 test(=tests::round2_stale_permissive_broker_read_failure_is_retryable) |
 test(=tests::broker_policy_reload_failure_expires_only_the_unhealthy_replica) |
 test(=services::channel_image_delivery::tests::channel_image_claims_fail_closed_on_uncommitted_and_committed_uncertain_writes) |
 test(=services::audit_service::durability_tests::rejected_commit_does_not_report_success_or_publish_partial_revocation)
 """
+threads-required = "num-cpus"
+
+# A failCommand write-boundary matrix owns the server-wide failpoint until its
+# injection is cleared; other failpoint tests must not replace it concurrently.
+[[profile.ci.overrides]]
+filter = "test(db::startup_migration_tests::startup_migration_) | test(::route_sync::route_write_boundaries)"
 threads-required = "num-cpus"

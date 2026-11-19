@@ -98,6 +98,12 @@ pub(super) async fn image_fixture(platform: &str, transport: &str) -> (Fixture, 
                 platform,
             ),
         )
+    } else if platform == "discord" {
+        std::sync::Arc::new(
+            crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
+                &server.uri(),
+            ),
+        )
     } else if platform == "slack" {
         std::sync::Arc::new(
             crate::services::channel_adapters::slack::SlackAdapter::media_test_adapter(
@@ -133,6 +139,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             turn_id: f.event.turn_id.clone().unwrap(),
             content_type: "image/png".into(),
             size: bytes.len() as i64,
+            chunks: 0,
             data_encrypted: f
                 .state
                 .encryption_keys
@@ -362,6 +369,39 @@ async fn attachment_normal_send_command_counts() {
             2
         );
     }
+}
+
+#[tokio::test]
+async fn nyxbot_non_image_tool_files_never_enter_channel_image_delivery() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let attachments = [None, Some(true), Some(false)]
+        .into_iter()
+        .map(|delivery| TurnAttachment {
+            image_input_reason: None,
+            artifact: Default::default(),
+            id: Uuid::new_v4().to_string(),
+            origin: "tool".into(),
+            label: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 100,
+            pages: None,
+            chat_delivery: delivery,
+            image_input: None,
+            image_inspection: None,
+        })
+        .collect();
+    send_plan(&f, attachments, None).await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_image_delivery::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -4246,4 +4286,33 @@ async fn attachment_authority_observation_is_discarded_between_effects() {
     .await;
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_discord_renderer_v2_posts_and_automation_preserve_urls_with_local_transport() {
+    Box::pin(async {
+        let (f, server) = image_fixture("discord", "direct").await;
+        let chat = live_image_authority(&f, &[]).await;
+        let target = thread(&f).await;
+        Mock::given(method("POST")).and(path("/channels/123/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"accepted"})))
+            .mount(&server).await;
+        let text = "… November 16 (Singapore time).\n\nThanks for joining the ChronoAI launch event! … once it's ready.\n\n… is now available: https://www.youtube.com/watch?v=Vre-ZFYv9as";
+        for _ in 0..2 {
+            let result = chats::post_current_turn(&f.state, &chat, &target.id, text, false).await.unwrap();
+            assert_eq!(result["text"], "sent");
+        }
+        let long = format!("{text}\n\n").repeat(60);
+        for _ in 0..2 {
+            chats::post_automation(&f.state, &chat.user_id, &target.id, &long, None, &chat.conversation_id, "discord-v2-run").await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<Value> = requests.iter().map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
+        assert_eq!(bodies[0]["content"], text);
+        assert_eq!(bodies[1..].iter().map(|b| b["content"].as_str().unwrap()).collect::<String>(), long.trim_end());
+        assert!(bodies.iter().all(|b| b["content"].as_str().unwrap().encode_utf16().count() <= 2000));
+        assert_eq!(f.state.db.collection::<bson::Document>(crate::models::channel_text_delivery::COLLECTION_NAME)
+            .count_documents(doc! {"renderer_version":2}).await.unwrap(), 2);
+        f.state.db.drop().await.unwrap();
+    }).await;
 }

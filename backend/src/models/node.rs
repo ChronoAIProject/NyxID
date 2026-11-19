@@ -72,6 +72,10 @@ pub struct NodeMetrics {
 /// distinguishes reconnects handled by the same process.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeConnectionOwner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement_hash_v1: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub handover_pending: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub http_cancellation: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -367,6 +371,8 @@ mod tests {
     fn connection_owner_debug_redacts_internal_address() {
         let now = Utc::now();
         let owner = NodeConnectionOwner {
+            retirement_hash_v1: None,
+            handover_pending: false,
             http_signature_v2: false,
             proxy_upload_v1: false,
             http_cancellation: false,

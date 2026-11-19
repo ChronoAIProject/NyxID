@@ -318,11 +318,11 @@ Credit benefits use five base financial/policy collections. A separate `credit_a
 
 All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
 
-One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Calendar schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect calendar pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Recipient schedules continuously enroll eligible owners and renew from their individual UTC anchors; normal group additions capture the join timestamp directly. See [recipient schedules and calendar catch-up](BILLING_EXACT_ACCOUNTING.md#recipient-credit-schedules). Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
+One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Calendar schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Person accounts created, and organization or group members added, after a period's claim receive that period's grant when they become eligible instead. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect calendar pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Recipient schedules continuously enroll eligible owners and renew from their individual UTC anchors; normal group additions capture the join timestamp directly. See [recipient schedules and calendar catch-up](BILLING_EXACT_ACCOUNTING.md#recipient-credit-schedules). Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
 
 The new provenance vectors default to empty when absent. This is an additive wire/storage change for upgraded replicas; older replicas cannot deserialize the new enum values. Upgrade all readers and writers before enabling the new target kinds, and migrate every persisted new-kind row before rolling back to older binaries.
 
-An "all users" one-shot grant snapshots active person and organization owners at issuance. A calendar schedule takes that snapshot when it claims the UTC period. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused calendar schedule finishes an open period but opens no later period; a paused recipient schedule issues nothing until resumed.
+An "all users" one-shot grant snapshots active person and organization owners at issuance. A calendar schedule takes that snapshot when it claims the UTC period, and new person accounts created later in that period receive its grant at creation. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused calendar schedule finishes an open period but opens no later period; a paused recipient schedule issues nothing until resumed.
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
 
@@ -666,7 +666,23 @@ Webhook-target dedup uses durable delivery records. Agent and notification targe
 
 FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
-## SMTP (Optional)
+## Verified Mobile Login Links (Optional)
+
+Android uses the existing [Android App Links](#android-app-links) identity settings
+below. iOS uses the existing `APNS_TEAM_ID` and `APNS_TOPIC` to serve
+`/.well-known/apple-app-site-association`; the APNs push private key is not
+required for that file.
+
+The additive `app_verification_uri` in device-login responses requires an HTTPS
+origin-only `BASE_URL`, a different `FRONTEND_URL` origin (scheme, host and port),
+and a configured Apple (nonblank team + topic) or Android app-link identity.
+Identity configuration alone does not verify that external associations work.
+Its `/login/device?user_code=…` fallback redirects to the configured frontend
+approval page; the backend returns 404 for a same-origin target to avoid a loop.
+HTTP local development retains the ordinary web verification QR without a tap target. See the
+[mobile app-link runbook](../mobile/docs/APP_LINKS.md) for rollout and device checks.
+
+## SMTP (Reserved; currently unused)
 
 | Variable | Description |
 |----------|-------------|
@@ -676,7 +692,7 @@ FCM and APNs are independent -- configure either or both. Push notifications are
 | `SMTP_PASSWORD` | SMTP authentication password |
 | `SMTP_FROM_ADDRESS` | Sender address for outbound email |
 
-For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
+These variables are reserved for a future mail transport. The current NyxID server does not send email, so setting them has no effect on account verification or password-reset delivery. For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025`, web UI at `http://localhost:8025`).
 
 ## Credential Nodes (Optional)
 
@@ -908,3 +924,36 @@ once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
+
+## Crash diagnostics
+
+See [CRASH_REPORTING.md](CRASH_REPORTING.md) for owner acceptance, project
+settings and readiness required before activation. All diagnostics defaults off.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CRASH_REPORTS_SENTRY_DSN_WEB` | empty | Optional HTTPS Sentry web project DSN; invalid values fail startup. |
+| `CRASH_REPORTS_SENTRY_DSN_MOBILE` | empty | Optional separate mobile project DSN; no vendor SDK on clients. |
+| `CRASH_REPORTS_RETENTION_DAYS` | `30` | Local retention, integer 1–30; empty or whitespace uses the default. |
+| `CRASH_REPORTS_EXPORT_INTERVAL_SECS` | `10` | Export batch cadence, 0 disables worker, maximum 86400; empty or whitespace uses the default. |
+| `CRASH_ARTIFACTS_SENTRY_AUTH_TOKEN` | empty | Build-only symbol upload token; never VITE-prefixed or in runtime image. |
+| `CRASH_ARTIFACTS_SENTRY_ORG` | empty | Build-only Sentry organization. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_WEB` | empty | Build-only web artifact project. |
+| `CRASH_ARTIFACTS_SENTRY_PROJECT_MOBILE` | empty | Build-only mobile artifact project. |
+| `NYXID_CRASH_ARTIFACT_ID` | generated per mobile build | UUID embedded in `extra.crashArtifactId`; no authority or secret. |
+
+Docker accepts optional BuildKit secret `crash_artifacts_sentry`, a JSON object
+containing the auth-token, organization and web-project variables. Configuring
+only part of the required upload settings fails the build. Runtime export and
+build upload credentials are independent. Vendor projects must have retention
+≤30 days, IP storage prevention and server-side scrubbing on, separate projects,
+and owner acceptance of local-link deletion plus vendor expiry.
+
+`CRASH_REPORTS_EXPORT_INTERVAL_SECS=0` disables crash export even with configured
+DSNs: new rows have export status `disabled`, existing pending rows are not
+worked and TTL-expire, and ingestion health displays “Export disabled”. Web
+private maps are retained only when upload is configured or
+`CRASH_ARTIFACTS_RETAIN=1`; all builds remove public maps and assert no public
+`sourceMappingURL`. The frontend image publication workflow passes optional
+GitHub secret `CRASH_ARTIFACTS_SENTRY` as BuildKit `crash_artifacts_sentry`.
+Missing/empty secrets perform no upload or uploader dependency installation.

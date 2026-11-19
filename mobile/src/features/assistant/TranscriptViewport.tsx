@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useState, type PropsWithChildren, type Ref } from "react";
 import { Animated, StyleSheet, View } from "react-native";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
@@ -15,6 +17,7 @@ export function TranscriptViewport({
   viewportRef?: Ref<View>;
   onTouchStart?: () => void;
 }>) {
+  useAppLanguage();
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
   const [opacity] = useState(() => new Animated.Value(0));
@@ -56,7 +59,7 @@ export function TranscriptViewport({
           <SkeletonRows
             rows={3}
             icon={false}
-            accessibilityLabel="Loading messages"
+            accessibilityLabel={translateApp("Loading messages")}
           />
         </View>
       )}

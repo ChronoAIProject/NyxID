@@ -354,10 +354,21 @@ async fn group_audit_request_command_counts() {
                 Action::Create => 8,
                 Action::Update => 10,
                 Action::Delete => 9,
-                Action::Add => 8,
+                Action::Add => 9,
                 Action::Remove => 6,
             },
             "{action:?}: {commands:?}"
+        );
+        // The post-commit entitlement hook adds exactly one schedule read,
+        // without writes when this fixture has no credit schedules.
+        assert_eq!(
+            commands
+                .iter()
+                .filter(
+                    |(command, collection)| command == "find" && collection == "credit_schedules"
+                )
+                .count(),
+            usize::from(matches!(action, Action::Add))
         );
         println!(
             "GROUP_COMMANDS {action:?} total={} commands={commands:?}",

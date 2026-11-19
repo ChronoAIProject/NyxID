@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -44,6 +48,7 @@ import {
   type AuthoredSkillAction,
   type AuthoredSkillReference,
 } from "./authoredSkillReviewState";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 /** The transcript holds only a route launcher; owner review is content in the slab. */
 export function NativeAuthoredSkillReview({
@@ -58,6 +63,7 @@ export function NativeAuthoredSkillReview({
   conversationId: string;
   initiallyOpen?: boolean;
 }) {
+  useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
   const opened = useRef<string | undefined>(undefined);
@@ -78,7 +84,7 @@ export function NativeAuthoredSkillReview({
   }, [initiallyOpen, focused, acknowledgement.id]);
   return reference ? (
     <ActionButton
-      label="Review skill draft"
+      label={translateApp("Review skill draft")}
       variant="secondary"
       onPress={open}
     />
@@ -88,6 +94,7 @@ export function NativeAuthoredSkillReview({
 export function AuthoredSkillPage({
   route,
 }: ContentScreenProps<"AuthoredSkillReview">) {
+  useAppLanguage();
   const params: AuthoredSkillPageParams = route.params;
   const assistant = useAssistant(
     params.conversationId,
@@ -100,7 +107,7 @@ export function AuthoredSkillPage({
   );
   return (
     <WorkspacePage
-      title="Review skill draft"
+      title={translateApp("Review skill draft")}
       showHeading={false}
       scroll={false}
       contentStyle={styles.page}
@@ -110,7 +117,7 @@ export function AuthoredSkillPage({
         <SkeletonRows
           rows={3}
           title
-          accessibilityLabel="Loading skill confirmation"
+          accessibilityLabel={translateApp("Loading skill confirmation")}
         />
       )}
       {acknowledgement?.authored_skill ? (
@@ -123,7 +130,10 @@ export function AuthoredSkillPage({
         />
       ) : (
         !assistant.loading && (
-          <Notice message="This skill confirmation is no longer available. Return to the conversation and reload its latest history." />
+          <Notice message={translateApp(
+              "This skill confirmation is no longer available. Return to the conversation and reload its latest history.",
+            )}
+          />
         )
       )}
     </WorkspacePage>
@@ -147,14 +157,16 @@ export function AuthoredSkillReviewContent({
   onDecision: (choice: "allow" | "deny") => Promise<unknown>;
   onRefresh?: () => Promise<unknown> | void;
 }) {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const focused = useIsFocused();
   const client = useQueryClient();
   const reference = acknowledgement.authored_skill;
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
   );
@@ -215,9 +227,7 @@ export function AuthoredSkillReviewContent({
     setNotice(undefined);
     try {
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          "Your account session changed. Reopen this confirmation.",
-        );
+        throw localizedError("Your account session changed. Reopen this confirmation.");
       const request = authoredSkillActionRequest(
         reference,
         data,
@@ -234,26 +244,36 @@ export function AuthoredSkillReviewContent({
           request.body,
         );
         if (request.action === "approve")
-          setNotice("A new confirmation was posted in this conversation.");
+          setNotice(
+            () => (translateApp("A new confirmation was posted in this conversation.")),
+          );
         if (request.action === "reprepare")
           setNotice(
-            result?.card_pending
-              ? "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it."
-              : "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.",
+            () => (result?.card_pending
+              ? translateApp(
+                  "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it.",
+                )
+              : translateApp(
+                  "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.",
+                )),
           );
       }
     } catch (cause) {
       setError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
-          : "Publication did not finish. Reload the current state before trying again.",
+          : translateApp(
+              "Publication did not finish. Reload the current state before trying again.",
+            )),
       );
     } finally {
       try {
         await refresh();
       } catch {
         setError(
-          "The current publication state could not be refreshed. Reload before trying again.",
+          () => (translateApp(
+            "The current publication state could not be refreshed. Reload before trying again.",
+          )),
         );
       }
       lock.current = false;
@@ -264,7 +284,9 @@ export function AuthoredSkillReviewContent({
   // load (skeleton) and the user's own Reload show progress.
   const reload = usePullRefresh(() =>
     refresh().catch(() =>
-      setError("The confirmation could not be refreshed. Try again."),
+      setError(
+        () => (translateApp("The confirmation could not be refreshed. Try again.")),
+      ),
     ),
   );
   useWorkspaceBack({
@@ -286,20 +308,24 @@ export function AuthoredSkillReviewContent({
         automaticallyAdjustKeyboardInsets
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.content}
+        {...railIndicator}
       >
         {!online && (
-          <Notice message="Connect to the internet to load and confirm the current draft." />
+          <Notice message={translateApp(
+              "Connect to the internet to load and confirm the current draft.",
+            )}
+          />
         )}
         {preview.isPending && preview.isFetching ? (
           <SkeletonRows
             rows={3}
             icon={false}
-            accessibilityLabel="Loading complete skill draft"
+            accessibilityLabel={translateApp("Loading complete skill draft")}
           />
         ) : (
           reload.refreshing && (
             <ActivityIndicator
-              accessibilityLabel="Loading complete skill draft"
+              accessibilityLabel={translateApp("Loading complete skill draft")}
               color={colors.primary}
             />
           )
@@ -307,14 +333,18 @@ export function AuthoredSkillReviewContent({
         {preview.isError && (
           <Notice
             tone="error"
-            message="Draft unavailable or changed. Reload and review it again."
+            message={translateApp(
+              "Draft unavailable or changed. Reload and review it again.",
+            )}
           />
         )}
         {error && <Notice tone="error" message={error} />}
         {notice && <Notice tone="success" message={notice} />}
         {busy && (
           <ActivityIndicator
-            accessibilityLabel="Updating skill publication state"
+            accessibilityLabel={translateApp(
+              "Updating skill publication state",
+            )}
             color={colors.primary}
           />
         )}
@@ -323,29 +353,40 @@ export function AuthoredSkillReviewContent({
             <SettingsGroup
               footer={
                 active
-                  ? "Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions."
+                  ? translateApp(
+                      "Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.",
+                    )
                   : undefined
               }
             >
               <SettingsRow
                 icon={BookOpen}
                 label={data.name}
-                detail={`Attach to ${data.agent_name}`}
+                detail={translateApp("Attach to {{agentName}}", {
+                  agentName: data.agent_name,
+                })}
                 value={data.version}
               />
-              <SettingsRow label="Draft revision" value={String(data.revision)} />
+              <SettingsRow label={translateApp("Draft revision")}
+                value={String(data.revision)} />
               <SettingsRow
-                label="Skills revision"
+                label={translateApp("Skills revision")}
                 value={String(data.skills_revision)}
               />
             </SettingsGroup>
             {!matched && (
-              <Notice message="This confirmation does not match the current reviewed draft, or it predates supported review metadata. Reload the confirmation from the conversation." />
+              <Notice message={translateApp(
+                  "This confirmation does not match the current reviewed draft, or it predates supported review metadata. Reload the confirmation from the conversation.",
+                )}
+              />
             )}
             {active && (
               <>
                 {data.base_scripts_not_copied && (
-                  <Notice message="Scripts and executable files from the source skill are not copied into this draft." />
+                  <Notice message={translateApp(
+                      "Scripts and executable files from the source skill are not copied into this draft.",
+                    )}
+                  />
                 )}
                 {data.files.map((file, index) => (
                   <SettingsGroup key={`${file.path}:${index}`} title={file.path}>
@@ -353,6 +394,7 @@ export function AuthoredSkillReviewContent({
                       style={styles.fileScroll}
                       contentContainerStyle={styles.file}
                       nestedScrollEnabled
+                      {...railIndicator}
                     >
                       <Label selectable mono style={styles.fileContent}>
                         {file.content}
@@ -366,7 +408,7 @@ export function AuthoredSkillReviewContent({
               <Notice
                 message={
                   data.lease_live
-                    ? "Publication is in progress."
+                    ? translateApp("Publication is in progress.")
                     : interruptedPublicationText(actions)
                 }
               />
@@ -389,7 +431,7 @@ export function AuthoredSkillReviewContent({
                   inset={false}
                   footer={
                     active && !negative
-                      ? "To change this skill, ask NyxBot."
+                      ? translateApp("To change this skill, ask NyxBot.")
                       : undefined
                   }
                 >
@@ -415,14 +457,14 @@ export function AuthoredSkillReviewContent({
                   actions.includes(action) && !NEGATIVE_ACTIONS.has(action),
               ) && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  To change this skill, ask NyxBot.
+                  {translateApp("To change this skill, ask NyxBot.")}
                 </Text>
               )}
           </>
         )}
         <SettingsGroup inset={false}>
           <SettingsRow
-            label="Reload confirmation"
+            label={translateApp("Reload confirmation")}
             tone="action"
             disabled={busy || !online}
             onPress={reload.onRefresh}

@@ -122,13 +122,14 @@ impl RenewableSlotGuard {
         self.lost.clone()
     }
 
-    pub async fn run_until_lost<F, T>(&self, future: F) -> AppResult<T>
+    pub async fn run_until_lost<F, T, E>(&self, future: F) -> Result<T, E>
     where
-        F: Future<Output = AppResult<T>>,
+        F: Future<Output = Result<T, E>>,
+        E: From<AppError>,
     {
         tokio::select! {
             biased;
-            () = self.cancelled() => Err(AppError::RateLimited),
+            () = self.cancelled() => Err(AppError::RateLimited.into()),
             result = future => result,
         }
     }

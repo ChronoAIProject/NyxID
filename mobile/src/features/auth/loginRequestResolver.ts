@@ -117,8 +117,9 @@ export async function resolveLoginRequest(
   throw new LoginRequestError("not_found");
 }
 
-// Only explicit manual Continue can publish a preview. Deep links only consume
-// an exact, short-lived handoff; they never initiate a request.
+// Manual resolution publishes an exact, short-lived cached preview for the
+// destination. Device links without one separately load a public preview through
+// the shared resolver; neither path makes an approval decision.
 let handoff: { code: string; result: LoginRequest; at: number } | null = null;
 let handoffTimeout: ReturnType<typeof setTimeout> | undefined;
 function clearHandoff() {

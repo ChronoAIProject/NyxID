@@ -25,6 +25,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
+pub mod eligibility;
 mod progress;
 pub mod recipients;
 pub mod seeding;

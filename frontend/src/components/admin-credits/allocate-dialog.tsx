@@ -294,7 +294,7 @@ export function AllocateDialog({
                             "New members receive a full first allocation on the next billing update. Each recipient renews from their own start date; monthly renewals use the same date each month. Existing members start when first covered by this schedule.",
                           )
                         : translateUi(
-                            "Each UTC period captures eligible recipients. Later signups and organization joins wait until the next period. Each issuance gets a fresh total and fresh service limits.",
+                            "Calendar periods use UTC. New signups and organization or group joins can receive the current period's grant. Use Grant missing credits to recover missed grants. Each issuance gets a fresh total and service limits.",
                           )
                   }
                 />

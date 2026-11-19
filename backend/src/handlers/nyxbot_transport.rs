@@ -166,8 +166,14 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
         channels
             .update_one(doc! {"_id": &row.id, "transport": "direct"}, {
                 let mut set = doc! {"gateway_fallback_at":bson::DateTime::now()};
-                if row.gateway_source.is_some() {
+                if row.gateway_source.is_some()
+                    || (row.platform == "discord" && code == "gateway_native_draining")
+                {
                     set.insert("gateway_native_activation", code);
+                    if code == "gateway_native_draining" {
+                        set.insert("gateway_native_activation_detail", bson::Bson::Null);
+                        set.insert("gateway_native_activation_operation", bson::Bson::Null);
+                    }
                 }
                 doc! {"$set":set}
             })

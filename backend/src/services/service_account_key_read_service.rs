@@ -136,6 +136,7 @@ pub async fn issue(
     actor: &str,
     ids: &[String],
     expires_at: Option<DateTime<Utc>>,
+    audit_actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<ServiceAccountKeyReadGrant> {
     if ids.is_empty()
         || ids.len() > 100
@@ -174,11 +175,7 @@ pub async fn issue(
         super::erasure_admission::fence_in_session(db, actor, &mut tx).await?;
         super::erasure_admission::fence_credential_target_in_session(db, sa_id, owner, &mut tx)
             .await?;
-        db.collection::<ServiceAccountKeyReadGrant>(GRANTS)
-            .replace_one(doc! {"_id": sa_id}, &grant)
-            .upsert(true)
-            .session(&mut tx)
-            .await?;
+        publish_grant_in_session(db, &mut tx, &grant, audit_actor).await?;
         Ok(())
     }
     .await;
@@ -186,11 +183,64 @@ pub async fn issue(
     Ok(grant)
 }
 
-pub async fn revoke(db: &Database, sa_id: &str) -> AppResult<Option<ServiceAccountKeyReadGrant>> {
-    Ok(db
+pub(super) async fn publish_grant_in_session(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    grant: &ServiceAccountKeyReadGrant,
+    audit_actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<()> {
+    let written = db
         .collection::<ServiceAccountKeyReadGrant>(GRANTS)
-        .find_one_and_delete(doc! {"_id": sa_id})
-        .await?)
+        .replace_one(doc! {"_id": &grant.service_account_id}, grant)
+        .upsert(true)
+        .session(&mut *tx)
+        .await?;
+    if (written.modified_count > 0 || written.upserted_id.is_some())
+        && let Some(actor) = audit_actor
+    {
+        let intent = super::service_account_grant_audit::key_granted(actor, grant)?;
+        super::security_effect_service::enqueue_in_session(db, tx, &[intent]).await?;
+    }
+    Ok(())
+}
+
+pub async fn revoke(
+    db: &Database,
+    sa_id: &str,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<Option<ServiceAccountKeyReadGrant>> {
+    if let Some(actor) = actor {
+        super::transaction_service::run_db_only(db, &(db, sa_id, actor), |tx, context| {
+            Box::pin(revoke_in_session(tx, context))
+        })
+        .await
+    } else {
+        delete_grant(db, sa_id, None).await
+    }
+}
+async fn delete_grant(
+    db: &Database,
+    sa_id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Option<ServiceAccountKeyReadGrant>> {
+    let collection = db.collection::<ServiceAccountKeyReadGrant>(GRANTS);
+    let mut delete = collection.find_one_and_delete(doc! {"_id":sa_id});
+    if let Some(session) = session {
+        delete = delete.session(session);
+    }
+    Ok(delete.await?)
+}
+async fn revoke_in_session(
+    tx: &mut mongodb::ClientSession,
+    context: &(&Database, &str, &super::audit_service::AuditActor),
+) -> AppResult<Option<ServiceAccountKeyReadGrant>> {
+    let (db, id, actor) = context;
+    let previous = delete_grant(db, id, Some(&mut *tx)).await?;
+    if let Some(grant) = &previous {
+        let intent = super::service_account_grant_audit::key_revoked(actor, id, grant)?;
+        super::security_effect_service::enqueue_in_session(db, tx, &[intent]).await?;
+    }
+    Ok(previous)
 }
 
 fn authorize_scope(sa: &ServiceAccount, token_scope: &str) -> AppResult<()> {

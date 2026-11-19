@@ -265,6 +265,55 @@ async fn hold_release_command_counts() {
     f.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn usage_capture_fake_refuses_blank_subscription() {
+    let provider = FakeLago::default();
+    for subscription in ["", " \t\n"] {
+        assert!(provider.current_usage("owner", subscription).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn usage_capture_hot_path_command_counts() {
+    let f = Fixture::new().await;
+    let warm = f.service.open(&f.request()).await.unwrap();
+    f.service.fail(&warm, "warmup").await.unwrap();
+    f.commands.lock().unwrap().clear();
+    let metered = f.service.open(&f.request()).await.unwrap();
+    let admission = std::mem::take(&mut *f.commands.lock().unwrap());
+    f.service.mark_forwarded(&metered).await.unwrap();
+    let forwarding = std::mem::take(&mut *f.commands.lock().unwrap());
+    f.service
+        .settle(&metered, PlatformUsage::single_request(0), None, None)
+        .await
+        .unwrap();
+    let settlement = std::mem::take(&mut *f.commands.lock().unwrap());
+    let unforwarded = f.service.open(&f.request()).await.unwrap();
+    f.commands.lock().unwrap().clear();
+    f.service.fail(&unforwarded, "release").await.unwrap();
+    let release = std::mem::take(&mut *f.commands.lock().unwrap());
+    for commands in [&admission, &forwarding, &settlement, &release] {
+        assert!(commands.iter().all(|c| !c.contains("billing_usage_")));
+    }
+    assert_eq!(
+        (
+            admission.len(),
+            forwarding.len(),
+            settlement.len(),
+            release.len()
+        ),
+        (18, 1, 29, 5)
+    );
+    println!(
+        "USAGE_CAPTURE_HOT_PATH admission={} forwarding={} settlement={} release={}",
+        admission.len(),
+        forwarding.len(),
+        settlement.len(),
+        release.len()
+    );
+    f.db.drop().await.unwrap();
+}
+
 impl Fixture {
     async fn mixed_request(&self) -> (BillingRouteContext, String) {
         use crate::models::billing_target::BillingTargetKind;
@@ -665,7 +714,9 @@ async fn hold_conservation_settlement_lock_handoffs_are_exact() {
         let backlog = diagnostics
             .iter()
             .find(|d| d.code == "billing_hold_backlog");
-        let detail = backlog.map(|d| d.detail.as_str()).unwrap_or("");
+        let detail = backlog
+            .and_then(|d| d.technical_details.as_deref())
+            .unwrap_or("");
         assert!(!detail.contains("complete=false"), "{phase:?}: {detail}");
         for (kind, collection, field, unit) in [
             ("wallet", BILLING_WALLET, "reserved_credits", "credits"),

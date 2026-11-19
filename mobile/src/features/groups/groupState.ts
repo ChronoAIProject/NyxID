@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type {
   Group,
@@ -212,22 +214,39 @@ export function groupAgentUnavailableReason(member: {
   readonly unavailable_reason?: string | null;
   readonly owner_name?: string | null;
 }): string {
-  const owner = member.owner_name ?? "the agent owner";
+  const owner = member.owner_name ?? translateApp("the agent owner");
   switch (member.unavailable_reason) {
     case "destroyed":
-      return "This agent was destroyed. Ask the creator to remove it.";
+      return translateApp(
+        "This agent was destroyed. Ask the creator to remove it.",
+      );
     case "removed":
-      return "This agent is no longer available. Ask the creator to remove it.";
+      return translateApp(
+        "This agent is no longer available. Ask the creator to remove it.",
+      );
     case "org_agent_not_guestable":
-      return "Organization agents cannot allow guests. Ask an organization administrator for access.";
+      return translateApp(
+        "Organization agents cannot allow guests. Ask an organization administrator for access.",
+      );
     case "owner_approval_pending":
-      return `Waiting for ${owner} to allow participants.`;
+      return translateApp("Waiting for {{organization}} to allow participants.", {
+        organization: owner,
+      });
     case "not_shared_with_you":
-      return `Not shared with you. Ask ${owner} to allow participants.`;
+      return translateApp(
+        "Not shared with you. Ask {{organization}} to allow participants.",
+        { organization: owner},
+      );
     case "guest_access_off":
-      return `Participant access is off. Ask ${owner} to allow participants.`;
+      return translateApp(
+        "Participant access is off. Ask {{organization}} to allow participants.",
+        { organization: owner},
+      );
     default:
-      return `This agent is unavailable to you. Ask ${owner} for access.`;
+      return translateApp(
+        "This agent is unavailable to you. Ask {{organization}} for access.",
+        { organization: owner},
+      );
   }
 }
 
@@ -250,7 +269,7 @@ export function mergeGroupPage(
   if (!current)
     return { ...incoming, messages: mergeGroupMessages([], incoming.messages) };
   if (current.group.id !== incoming.group.id)
-    throw new Error("Cannot combine messages from different crews.");
+    throw localizedError("Cannot combine messages from different crews.");
   if (mode === "older")
     return {
       ...current,
@@ -284,9 +303,15 @@ export const groupCanLeave = canLeaveGroup;
 /** Same compact live-status wording as the web crew transcript. */
 export function groupWorkingLabel(names: readonly string[]): string {
   if (!names.length) return "";
-  if (names.length === 1) return `${names[0]!} is working…`;
-  if (names.length === 2) return `${names[0]!} and ${names[1]!} are working…`;
-  return `${names[0]!}, ${names[1]!} and ${String(names.length - 2)} more are working…`;
+  if (names.length === 1) return translateApp("{{name}} is working…", { name: names[0]!});
+  if (names.length === 2) return translateApp("{{firstAgent}} and {{secondAgent}} are working…", {
+      firstAgent: names[0]!,
+      secondAgent: names[1]!,
+    });
+  return translateApp(
+    "{{firstAgent}}, {{secondAgent}} and {{count}} more are working…",
+    { firstAgent: names[0]!, secondAgent: names[1]!, count: String(names.length - 2)},
+  );
 }
 
 /** Personal groups may use shared org agents that the caller can use. */

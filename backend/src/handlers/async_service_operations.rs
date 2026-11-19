@@ -172,6 +172,7 @@ pub(super) async fn call(
                 crate::services::billing::route_inventory::BillingIngress::Mcp,
             )?;
         let mut exec = mcp_exec_context(&auth);
+        exec.attachment_owner_key = false;
         exec.response_body_limit = Some(
             if crate::services::generated_artifacts::admitted(watch)
                 && name == watch.contract.result_operation

@@ -1,7 +1,8 @@
+import { localizedError } from "../../../i18n/localizedError";
 export const VOICE_RECOVERY_TIMEOUT_MS = 8_000;
 
 function abortError() {
-  const error = new Error("Voice request was cancelled");
+  const error = localizedError("Voice request was cancelled");
   error.name = "AbortError";
   return error;
 }
@@ -20,7 +21,7 @@ export function withVoiceRequestDeadline<T>(
   const onAbort = () => rejectInterrupted(abortError());
   controller.signal.addEventListener("abort", onAbort, { once: true });
   const timer = setTimeout(() => {
-    const error = new Error("Voice recovery request timed out");
+    const error = localizedError("Voice recovery request timed out");
     error.name = "VoiceRequestTimeoutError";
     // Reject first so the abort notification cannot replace the timeout error.
     rejectInterrupted(error);

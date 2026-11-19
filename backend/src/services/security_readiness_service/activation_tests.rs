@@ -23,6 +23,72 @@ async fn active(db: &Database, local: &Runtime, capability: &str) -> bool {
     report_for(db, local, capability).await.unwrap().activated
 }
 
+#[tokio::test]
+async fn gateway_reply_activation_matches_existing_relay_without_operator_configuration() {
+    let (db, mut local) = fixture("gateway_reply_activation", false).await;
+    local.config.expected_replicas.clear();
+    local.config.drained = false;
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$set":{
+                "expected_replicas":[],"drained":false,
+            }},
+        )
+        .await
+        .unwrap();
+    let capabilities = [
+        crate::services::nyxbot_dispatch_identity::READINESS,
+        crate::services::nyxbot_response_recovery::RELAY_READINESS,
+    ];
+    let start = Instant::now();
+    record_activations(&db, &local, &capabilities, start)
+        .await
+        .unwrap();
+    for capability in capabilities {
+        assert!(
+            !report_for(&db, &local, capability)
+                .await
+                .unwrap()
+                .serving_ready
+        );
+    }
+    assess_every_ten_seconds(
+        &db,
+        &local,
+        &capabilities,
+        start,
+        start + ACTIVATION_SETTLE_WINDOW,
+    )
+    .await;
+    for capability in capabilities {
+        let report = report_for(&db, &local, capability).await.unwrap();
+        assert!(report.serving_ready);
+        assert!(report.activated);
+    }
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":"a2"},
+            doc! {
+                "$pull":{"capabilities":capabilities[0]},
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !report_for(&db, &local, capabilities[0])
+            .await
+            .unwrap()
+            .serving_ready
+    );
+    assert!(
+        report_for(&db, &local, capabilities[1])
+            .await
+            .unwrap()
+            .serving_ready
+    );
+}
+
 pub(super) async fn assess_every_ten_seconds(
     db: &Database,
     local: &Runtime,
@@ -652,7 +718,15 @@ async fn heartbeat_command_counts_keep_steady_state_unchanged_and_add_only_inser
     let after_new = commands.lock().unwrap().clone();
     assert_eq!(
         after_new,
-        ["update", "find", "find", "update", "find", "insert"]
+        [
+            "update",
+            "find",
+            "find",
+            "update",
+            "find",
+            "insert",
+            "commitTransaction",
+        ]
     );
     commands.lock().unwrap().clear();
     publish_observation(&db, &local, &[cap]).await.unwrap();

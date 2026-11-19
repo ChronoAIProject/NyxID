@@ -180,6 +180,24 @@ async fn native_response_replays_after_restart_with_cursor_and_current_binding()
         .unwrap()
         .unwrap();
     assert!(saved.conversation_id.is_some());
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let mut lookup_headers = bearer(&key);
+    lookup_headers.insert("idempotency-key", "native-500".parse().unwrap());
+    let found = dispatches::get(
+        State(state.clone()),
+        lookup_headers,
+        axum::extract::Query(dispatches::Query {
+            dispatched_at: None,
+        }),
+    )
+    .await;
+    assert_eq!(found.status(), StatusCode::OK);
+    let found: Value = serde_json::from_str(&body_text(found).await).unwrap();
+    assert_eq!(found["state"], "finished");
+    assert_eq!(found["response_id"], id);
+    assert_eq!(found["provider_delivery"], "none");
+    assert_eq!(found["stored_response"], true);
+
     assert!(!String::from_utf8_lossy(&saved.payload_ciphertext).contains("Here is your answer"));
     // No broadcast receiver, producer task or process cache is needed by GET.
     let snap =

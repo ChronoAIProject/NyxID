@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import {
   attachmentSchema,
@@ -24,9 +25,11 @@ export const groupReferenceSchema = z
   .min(1)
   .max(256)
   .refine(
-    (value) => !/[\s\u0000-\u001f\u007f]/.test(value),
-    "Enter a valid reference",
-  );
+    (value) => !/[\s\u0000-\u001f\u007f]/.test(value), {
+    get error() {
+      return () => translateApp("Enter a valid reference");
+    },
+  });
 const instant = z.string().datetime({ offset: true });
 const person = z.object({ id: z.string().uuid(), display_name: z.string() });
 const agent = z.object({
@@ -120,19 +123,40 @@ const groupName = z
   .trim()
   .refine(
     (value) => [...value].length >= 1 && [...value].length <= MAX_GROUP_NAME,
-    "Use a crew name between 1 and 60 characters.",
+    {
+      get error() {
+        return () =>
+          translateApp("Use a crew name between 1 and 60 characters.");
+      },
+    },
   );
 const distinct = (values: readonly string[]) =>
   new Set(values).size === values.length;
 const members = z
   .array(groupReferenceSchema)
-  .min(1, "Pick at least one agent.")
-  .max(MAX_GROUP_MEMBERS, "A crew has at most 8 agents.")
-  .refine(distinct, "Choose each agent only once.");
+  .min(1, {
+    get error() {
+      return () => translateApp("Pick at least one agent.");
+    },
+  })
+  .max(MAX_GROUP_MEMBERS, {
+    get error() {
+      return () => translateApp("A crew has at most 8 agents.");
+    },
+  })
+  .refine(distinct, {
+    get error() {
+      return () => translateApp("Choose each agent only once.");
+    },
+  });
 const participants = z
   .array(z.string().uuid())
   .max(MAX_GROUP_PARTICIPANTS)
-  .refine(distinct, "Choose each person only once.");
+  .refine(distinct, {
+    get error() {
+      return () => translateApp("Choose each person only once.");
+    },
+  });
 
 /** Create intentionally has no lead_agent_id: the backend rejects it. */
 export const groupCreateSchema = z
@@ -151,20 +175,25 @@ export const groupCreateSchema = z
     )
       context.addIssue({
         code: "custom",
-        message: "Invite people after creating a personal collaboration group.",
+        error: () =>
+          translateApp(
+            "Invite people after creating a personal collaboration group.",
+          ),
       });
     if (!value.org && value.participant_user_ids?.length)
       context.addIssue({
         code: "custom",
         path: ["participant_user_ids"],
-        message: "Participants require an organization crew.",
+        error: () => translateApp("Participants require an organization crew."),
       });
   });
 export const groupUpdateSchema = z
   .object({
-    participant_user_ids: participants
-      .min(1, "Keep at least one participant.")
-      .optional(),
+    get participant_user_ids() {
+      return participants
+      .min(1, { error: () => translateApp("Keep at least one participant.") })
+      .optional();
+    },
     lead_agent_id: groupReferenceSchema.optional(),
     leave: z.boolean().optional(),
     name: groupName.optional(),
@@ -180,7 +209,8 @@ export const groupUpdateSchema = z
     ) {
       context.addIssue({
         code: "custom",
-        message: "Leave the crew separately from editing its settings.",
+        error: () =>
+          translateApp("Leave the crew separately from editing its settings."),
       });
     }
     if (
@@ -191,19 +221,23 @@ export const groupUpdateSchema = z
       context.addIssue({
         code: "custom",
         path: ["lead_agent_id"],
-        message: "The lead must be a selected agent.",
+        error: () => translateApp("The lead must be a selected agent."),
       });
     }
   });
 export const groupPostRequestSchema = z
   .object({
-    text: z
+    get text() {
+      return z
       .string()
       .trim()
       .refine(
-        (value) => [...value].length <= MAX_GROUP_MESSAGE,
-        "Keep the message under 32,768 characters.",
+        (value) => [...value].length <= MAX_GROUP_MESSAGE, {
+          error: () =>
+            translateApp("Keep the message under 32,768 characters.",
       ),
+        });
+    },
     attachment_ids: z
       .array(z.string().uuid())
       .max(MAX_ASSISTANT_ATTACHMENTS)
@@ -222,14 +256,16 @@ export const groupPostRequestSchema = z
       context.addIssue({
         code: "custom",
         path: ["text"],
-        message: "Enter a message or attach a file.",
+        error: () => translateApp("Enter a message or attach a file."),
       });
     if (value.recipient_agent_ids?.length === 0 && value.attachment_ids?.length)
       context.addIssue({
         code: "custom",
         path: ["attachment_ids"],
-        message:
-          "Attachments need an agent recipient. Choose an agent or remove the attachments.",
+        error: () =>
+          translateApp(
+            "Attachments need an agent recipient. Choose an agent or remove the attachments.",
+          ),
       });
   });
 

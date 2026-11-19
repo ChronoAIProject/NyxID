@@ -89,7 +89,9 @@ async fn signup_storage_command_counts() {
     .unwrap();
     let direct = std::mem::take(&mut *commands.lock().unwrap());
     println!("INVITE_COMMANDS password_direct: {direct:?}");
-    assert_eq!(direct.len(), 3);
+    // One read of active all-users credit schedules grants new accounts their
+    // current-period entitlement; it adds no write when none exist.
+    assert_eq!(direct.len(), 4);
     let reservation = reserve_invite_code(&db, &code.code, "invited@example.test")
         .await
         .unwrap();
@@ -106,7 +108,7 @@ async fn signup_storage_command_counts() {
     assert!(user.actually_created);
     let invited = std::mem::take(&mut *commands.lock().unwrap());
     println!("INVITE_COMMANDS password_invited: {invited:?}");
-    assert_eq!(invited.len(), 6);
+    assert_eq!(invited.len(), 7);
     db.drop().await.unwrap();
 }
 

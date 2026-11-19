@@ -201,7 +201,21 @@ an old process or socket cannot change its replacement.
 
 ### NodeServiceBinding (collection: `node_service_bindings`)
 
-Maps which services a node handles for its owner. When a proxy request arrives for a bound service, NyxID routes it to the node instead of using stored credentials.
+A connection stores its primary node in `UserService.node_id`. Active bindings
+for the same owner and catalog supply fallback and credential fan-out targets.
+
+Creating a catalog connection on a node or explicitly setting its node through
+either PUT or the assistant route action ensures an active binding for the node
+and catalog. When another owner already holds that binding, the connection saves
+its own primary and priority and leaves the existing owner's binding untouched.
+A move, clear or disconnect deactivates the connection owner's previous
+binding when the last active connection for that owner and catalog leaves the
+node. The connection change and these binding writes commit together. Pending
+authorization cleanup applies the same rule when its conditional revoke wins.
+
+New bindings start at priority zero. Existing bindings retain their priority.
+Editing the connection priority changes the connection alone. Owners manage
+additional fallback nodes and their ordering through the binding endpoints.
 
 ```rust
 // File: backend/src/models/node_service_binding.rs

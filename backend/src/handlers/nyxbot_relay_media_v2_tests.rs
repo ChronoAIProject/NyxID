@@ -214,26 +214,20 @@ async fn saved_source(
     } else {
         format!("oc_{sender}")
     });
+    let provider_ref = |id: &str| match row.platform.as_str() {
+        "telegram" => id.to_owned(),
+        "whatsapp" => format!("{}/{id}", provider.uri()),
+        _ => format!("{}/download/{id}", provider.uri()),
+    };
     let mut image = source.attachments[0].clone();
-    image.provider_ref = format!(
-        "{}/{}456",
-        provider.uri(),
-        if row.platform == "whatsapp" {
-            ""
-        } else {
-            "download/"
-        }
-    );
-    if row.platform == "telegram" {
-        image.provider_ref = "456".into();
-    }
+    image.provider_ref = provider_ref("456");
     image.image_key = None;
     image.file_key = Some("456".into());
     image.filename = None; // WhatsApp images commonly have no filename.
     image.mime_type = Some("image/png".into());
     image.size_bytes = None;
     let mut original = image.clone();
-    original.provider_ref = image.provider_ref.replace("456", "457");
+    original.provider_ref = provider_ref("457");
     original.file_key = Some("457".into());
     original.content_type = "file".into();
     original.filename = Some("original.bin".into());
@@ -417,6 +411,19 @@ async fn channel_media_v2_all_adapters_owner_history_model_originals_and_duplica
                 let response = respond(&state, &key, &body, "retry").await;
                 assert_eq!(response.status(), StatusCode::OK);
                 let _ = body_text(response).await;
+                let alias =
+                    crate::services::nyxbot_dispatch_identity::dispatch_key(&row.id, "retry");
+                let winner = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(doc! {"dispatch_identity.keys":alias})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    winner.id, event.id,
+                    "{name}/{transport}: retry alias must resolve the admitted media event"
+                );
             }
             assert_eq!(calls.lock().await.len(), count);
             assert_eq!(provider.received_requests().await.unwrap().len(), downloads);
@@ -805,6 +812,19 @@ async fn channel_guest_media_relay_adapters_and_gateway_relay_retain_only_curren
                 let reply = respond(&state, &key, &provider_event(&row, &source), "retry").await;
                 assert_eq!(reply.status(), StatusCode::OK);
                 let _ = body_text(reply).await;
+                let alias =
+                    crate::services::nyxbot_dispatch_identity::dispatch_key(&row.id, "retry");
+                let winner = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(doc! {"dispatch_identity.keys":alias})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    winner.id, event.id,
+                    "{name}/{transport}: retry alias must resolve the admitted media event"
+                );
             }
             assert_eq!(calls.lock().await.len(), count);
             assert_eq!(provider.received_requests().await.unwrap().len(), downloads);

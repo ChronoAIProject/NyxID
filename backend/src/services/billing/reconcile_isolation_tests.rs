@@ -158,16 +158,50 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
         Some(provider.clone()),
         Arc::new(billing_enabled_config()),
     );
+    db.collection::<Document>(USAGE)
+        .insert_one(doc! {
+            "_id": "metering-counted", "status": "finalized", "quantity": 1_i64,
+            "rollup_pending": false, "released": true, "forwarded": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    seen.lock().unwrap().clear();
     r.run_once().await.unwrap();
+    assert!(
+        seen.lock().unwrap().iter().all(|(_, command)| {
+            command.get_str("find").ok() != Some("usage_rollup_state")
+                && command.get_str("update").ok() != Some("usage_rollup_state")
+        }),
+        "closed readiness gate must not run metering retention"
+    );
     assert!(
         provider.calls.lock().unwrap().is_empty(),
         "migration readiness must stop all later work"
+    );
+    assert!(
+        db.collection::<Document>(USAGE)
+            .find_one(doc! {"_id": "metering-counted"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get("expires_at")
+            .is_none()
     );
     db.collection::<Document>("billing_migrations")
         .insert_one(doc! {"_id":"exact-v2","completed_at":bson::DateTime::now()})
         .await
         .unwrap();
     r.run_once().await.unwrap();
+    assert!(
+        db.collection::<Document>(USAGE)
+            .find_one(doc! {"_id": "metering-counted"})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("expires_at")
+            .is_ok()
+    );
     seen.lock().unwrap().clear();
     r.run_once().await.unwrap();
     let commands: Vec<_> = seen
@@ -182,12 +216,12 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     );
     assert_eq!(
         commands.len(),
-        46,
-        "clean pass includes the holdless state and registry reads"
+        53,
+        "comparison adds four coverage commands and two discovery reads while unactivated"
     );
     assert_eq!(
         commands.iter().filter(|c| c.as_str() == "delete").count(),
-        1
+        0
     );
     assert!(failures(&db).await.is_empty());
     db.collection::<Document>("credit_schedules")
@@ -203,7 +237,7 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     assert!(error.contains("schedules:") && error.contains("grant_expiry:"));
     assert_eq!(
         seen.lock().unwrap().len(),
-        46,
+        53,
         "failure publication adds no extra command beyond the holdless reads"
     );
     let count = |command: &str| {
@@ -231,17 +265,17 @@ async fn billing_pass_isolation_prerequisite_and_clean_commands() {
     r.run_once().await.unwrap();
     assert_eq!(
         seen.lock().unwrap().len(),
-        46,
+        53,
         "clearing status adds no command"
     );
-    assert_eq!(count("update"), 0);
+    assert_eq!(count("update"), 1);
     assert_eq!(
         count("delete"),
-        1,
-        "clearing status is the normal lease release delete"
+        0,
+        "clearing failures retains the informational warming timestamp"
     );
     println!(
-        "BILLING_PASS_STATUS failure_commands=46 clear_commands=46 failed_updates=1 clear_deletes=1 added_commands=0"
+        "BILLING_PASS_STATUS failure_commands=53 clear_commands=53 failed_updates=1 clear_updates=1 added_commands=0"
     );
     db.drop().await.unwrap();
 }
@@ -270,11 +304,9 @@ async fn billing_pass_isolation_drain_preserves_unattempted_failure() {
         .delete_one(doc! {"_id":"poison"})
         .await
         .unwrap();
-    f.db.collection::<Document>(USAGE)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"lago_acked":false,"updated_at":bson::DateTime::from_millis(0)}},
-        )
+    // Acknowledged meter/receipt pairs are terminal; drain a fresh delivery.
+    f.db.collection::<UsageMeterRow>(USAGE)
+        .insert_one(finalized_row("drain-fresh-delivery"))
         .await
         .unwrap();
     f.db.collection::<Document>(USAGE)

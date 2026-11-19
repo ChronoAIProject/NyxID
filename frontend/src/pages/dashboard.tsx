@@ -35,11 +35,10 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { MOBILE_APP_LINK } from "@/lib/mobile-app-link";
 
 const AI_SETUP_DISMISSED_KEY = "nyxid:ai-setup-dismissed";
 const ONBOARDING_DISMISSED_KEY = "nyxid:onboarding-dismissed";
-
-const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 
 export function DashboardPage() {
   useUiTranslation();

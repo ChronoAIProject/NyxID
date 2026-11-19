@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import {
   useCallback,
   useEffect,
@@ -48,6 +50,7 @@ export function AssistantLinkHost({
   scope: string;
   children: ReactNode;
 }) {
+  useAppLanguage();
   return (
     <ScopedAssistantLinkHost scope={scope}>{children}</ScopedAssistantLinkHost>
   );
@@ -59,6 +62,7 @@ export function ScopedAssistantLinkHost({
   scope: string;
   children: ReactNode;
 }) {
+  useAppLanguage();
   const navigation = useNavigation();
   const availability = useGroupAvailability();
   const { colors } = useTheme();
@@ -84,8 +88,12 @@ export function ScopedAssistantLinkHost({
     };
   }, []);
   const open = useCallback(
-    (href: string, source?: number) => {
-      const value = assistantLinkTarget(href, firstPartyFrontendUrls());
+    (href: string, source?: number, bareAutolink = false) => {
+      const value = assistantLinkTarget(
+        href,
+        firstPartyFrontendUrls(),
+        bareAutolink,
+      );
       if (!value) return false;
       if (!available.current()) return true;
       trigger.current = source;
@@ -219,13 +227,13 @@ export function ScopedAssistantLinkHost({
                   style={{ flex: 1, fontSize: 18 }}
                 >
                   {target?.kind === "channel"
-                    ? "Connect a channel"
-                    : "NyxBot settings"}
+                    ? translateApp("Connect a channel")
+                    : translateApp("NyxBot settings")}
                 </Label>
               )}
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Close"
+                accessibilityLabel={translateApp("Close")}
                 disabled={busy}
                 onPress={close}
                 style={workspaceCloseControlStyle(colors.cardSoft)}
@@ -252,13 +260,18 @@ export function ScopedAssistantLinkHost({
                 <Card>
                   <Label>
                     {target.kind === "channel"
-                      ? `Continue setting up ${target.platform} on the web.`
-                      : "View automations and manage agents here. Global limits and channel management are available on the web."}
+                      ? translateApp(
+                          "Continue setting up {{platform}} on the web.",
+                          { platform: target.platform},
+                        )
+                      : translateApp(
+                          "View automations and manage agents here. Global limits and channel management are available on the web.",
+                        )}
                   </Label>
                   {target.kind === "account" ? (
                     <>
                       <ActionButton
-                        label="Automations"
+                        label={translateApp("Automations")}
                         variant="secondary"
                         onPress={() => {
                           close();
@@ -268,7 +281,7 @@ export function ScopedAssistantLinkHost({
                         }}
                       />
                       <ActionButton
-                        label="Agents"
+                        label={translateApp("Agents")}
                         variant="secondary"
                         onPress={() => {
                           close();
@@ -282,7 +295,7 @@ export function ScopedAssistantLinkHost({
                     </>
                   ) : null}
                   <ActionButton
-                    label="Continue on the web"
+                    label={translateApp("Continue on the web")}
                     onPress={() => {
                       if (available.current())
                         void WebBrowser.openBrowserAsync(target.href).catch(

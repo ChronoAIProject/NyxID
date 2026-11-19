@@ -332,7 +332,10 @@ async fn admin_audit_request_command_counts() {
         assert_eq!(
             commands.len(),
             match action {
-                Action::Create | Action::Role | Action::Sessions => 12,
+                // Create reads matching credit schedules once for new-account
+                // entitlement; no write occurs without schedules.
+                Action::Create => 13,
+                Action::Role | Action::Sessions => 12,
                 Action::Update => 10,
                 Action::Status => 13,
                 Action::Password => 14,

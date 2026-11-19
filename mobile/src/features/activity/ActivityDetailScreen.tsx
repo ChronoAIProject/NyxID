@@ -1,3 +1,6 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { getFrontendUrl } from "../../lib/env";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -45,6 +48,7 @@ type Props = NativeStackScreenProps<
 >;
 
 export function ActivityDetailScreen({ navigation, route }: Props) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { challengeId } = route.params;
   const queryClient = useQueryClient();
@@ -270,10 +274,11 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       void queryClient.invalidateQueries({
         queryKey: ["challenge", challengeId],
       });
-      setToast({
-        message: decision === "APPROVE" ? "Approved" : "Denied",
+      setToast(localizedToast(() => ({
+        message: decision === "APPROVE" ? translateApp("Approved")
+            : translateApp("Denied"),
         kind: "success",
-      });
+      })));
       returnTimer.current = setTimeout(() => {
         if (!navigation.isFocused()) return;
         if (navigation.canGoBack()) {
@@ -284,7 +289,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       }, 600);
     },
     onError: (err) => {
-      setToast({ message: getDecisionErrorMessage(err), kind: "error" });
+      setToast(localizedToast(() => ({ message: getDecisionErrorMessage(err), kind: "error" })));
     },
   });
 
@@ -298,7 +303,8 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   if (isLoading) {
     return (
       <SettingsPage>
-        <SkeletonRows rows={4} icon={false} accessibilityLabel="Loading request" />
+        <SkeletonRows rows={4} icon={false} accessibilityLabel={translateApp("Loading request")}
+        />
         <SkeletonRows rows={2} icon={false} detail={false} />
       </SettingsPage>
     );
@@ -311,10 +317,11 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           inset={false}
           footer={getChallengeQueryErrorMessage(error)}
         >
-          <SettingsRow label="Request unavailable" />
+          <SettingsRow label={translateApp("Request unavailable")} />
         </SettingsGroup>
         <SettingsGroup inset={false}>
-          <SettingsRow tone="action" label="Retry" onPress={() => refetch()} />
+          <SettingsRow tone="action" label={translateApp("Retry")}
+            onPress={() => refetch()} />
         </SettingsGroup>
       </SettingsPage>
     );
@@ -328,17 +335,21 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const summary =
     data.summary.trim() || `${data.action} ${data.resource}`.trim();
   const status =
-    actionState.statusLabel.charAt(0) +
-    actionState.statusLabel.slice(1).toLowerCase();
-  const risk =
-    data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1);
+    actionState.statusLabel;
+  const risk = translateApp(
+    data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1),
+  );
   const decisionNotes = [
-    data.is_destructive === true ? "This operation is destructive." : null,
+    data.is_destructive === true ? translateApp("This operation is destructive.")
+      : null,
     actionState.reason,
     actionState.canDecide
       ? isGrantMode
-        ? `Approving allows matching requests for ${grantDurationLabel} without another decision.`
-        : "Approval applies only to this request."
+        ? translateApp(
+            "Approving allows matching requests for {{label}} without another decision.",
+            { label: grantDurationLabel },
+          )
+        : translateApp("Approval applies only to this request.")
       : null,
   ].filter(Boolean);
 
@@ -348,7 +359,9 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
         <SettingsGroup
           footer={
             data.from_org_policy
-              ? `On behalf of ${data.org_name ?? "your org"}.`
+              ? translateApp("On behalf of {{organization}}.", {
+                  organization: data.org_name ?? "your org",
+                })
               : undefined
           }
         >
@@ -358,20 +371,22 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
             detail={summary}
           />
         </SettingsGroup>
-        <SettingsGroup title="Request" inset={false}>
-          <SettingsRow label="Action" value={data.action} />
-          <SettingsRow label="Resource" value={data.resource} />
-          <SettingsRow label="Client" value={data.request_context.client} />
+        <SettingsGroup title={translateApp("Request")} inset={false}>
+          <SettingsRow label={translateApp("Action")} value={data.action} />
+          <SettingsRow label={translateApp("Resource")} value={data.resource} />
+          <SettingsRow label={translateApp("Client")}
+            value={data.request_context.client} />
           <SettingsRow
-            label="Requester"
+            label={translateApp("Requester")}
             value={data.request_context.requester}
           />
           {data.from_org_policy ? (
-            <SettingsRow label="Org" value={data.org_name ?? "Unnamed org"} />
+            <SettingsRow label={translateApp("Org")}
+              value={data.org_name ?? translateApp("Unnamed org")} />
           ) : null}
         </SettingsGroup>
         <SettingsGroup
-          title="Decision"
+          title={translateApp("Decision")}
           inset={false}
           footer={
             decisionNotes.length ? (
@@ -392,30 +407,34 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           }
         >
           <SettingsRow
-            label="Status"
+            label={translateApp("Status")}
             value={status}
-            accessibilityLabel={`Status, ${status}`}
+            accessibilityLabel={translateApp("Status, {{status}}", {
+              status: status,
+            })}
           />
           <SettingsRow
-            label="Risk level"
+            label={translateApp("Risk level")}
             value={risk}
             valueTone={data.risk_level === "high" ? "danger" : "default"}
           />
           <SettingsRow
-            label="Approval"
-            value={isGrantMode ? "Grant mode" : "Per-request"}
+            label={translateApp("Approval")}
+            value={isGrantMode ? translateApp("Grant mode") : "Per-request"}
           />
           {isGrantMode && (
-            <SettingsRow label="Grant duration" value={grantDurationLabel} />
+            <SettingsRow label={translateApp("Grant duration")}
+              value={grantDurationLabel} />
           )}
-          <SettingsRow label="Expires" value={approvalExpiryLabel(data)} />
+          <SettingsRow label={translateApp("Expires")}
+            value={approvalExpiryLabel(data)} />
         </SettingsGroup>
         <ApprovalEvidence challenge={data} />
         {data.execution_proposal && (
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"
-              label="Review in the web app"
+              label={translateApp("Review in the web app")}
               accessibilityRole="link"
               onPress={() =>
                 void Linking.openURL(`${getFrontendUrl()}/assistant/approvals`)

@@ -254,17 +254,9 @@ pub async fn issue_grant(
         &auth.user_id.to_string(),
         &body.user_service_ids,
         body.expires_at,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.key_read_granted",
-        Some(
-            serde_json::json!({"target_sa_id": id, "owner_id": grant.owner_id,
-            "targets": grant.targets, "expires_at": grant.expires_at}),
-        ),
-    );
     Ok(Json(grant.into()))
 }
 
@@ -275,15 +267,12 @@ pub async fn revoke_grant(
 ) -> AppResult<Json<serde_json::Value>> {
     super::admin_helpers::require_admin(&state, &auth).await?;
     service_account_service::get_service_account(&state.db, &id).await?;
-    let previous = reads::revoke(&state.db, &id).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.key_read_revoked",
-        Some(
-            serde_json::json!({"target_sa_id": id, "previous_grant": previous.map(GrantResponse::from)}),
-        ),
-    );
+    reads::revoke(
+        &state.db,
+        &id,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
+    )
+    .await?;
     Ok(Json(
         serde_json::json!({"message": "Key read grant revoked"}),
     ))

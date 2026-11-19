@@ -4,6 +4,16 @@ use crate::models::user::UserType;
 use crate::test_utils::{connect_transaction_test_database, test_user};
 use chrono::TimeZone;
 
+tokio::task_local! {
+    static DRAIN_AFTER_INSERT: ();
+}
+
+pub(super) fn after_insert() {
+    if DRAIN_AFTER_INSERT.try_with(|_| ()).is_ok() {
+        crate::services::billing::reconcile::drain_for_test();
+    }
+}
+
 #[test]
 fn recipient_windows_preserve_join_time_and_original_month_day() {
     let anchor = Utc.with_ymd_and_hms(2028, 1, 31, 13, 42, 7).unwrap();
@@ -108,7 +118,9 @@ async fn setup() -> (mongodb::Database, CreditSchedule, DateTime<Utc>) {
     )
     .await
     .unwrap();
-    (db, schedule, now + Duration::seconds(1))
+    let start = DateTime::from_timestamp_millis(schedule.created_at.timestamp_millis()).unwrap()
+        + Duration::seconds(1);
+    (db, schedule, start)
 }
 
 async fn join(db: &mongodb::Database, id: &str, at: DateTime<Utc>) {
@@ -165,6 +177,96 @@ async fn new_group_members_get_full_grants_and_independent_monthly_renewals() {
         .unwrap();
     assert_eq!(second.schedule_origin.as_ref().unwrap().period_start, later);
     assert_eq!(second.expires_at, later.checked_add_months(Months::new(1)));
+}
+
+#[tokio::test]
+async fn drain_finishes_current_issuance_and_leaves_next_recipient_due() {
+    let (db, schedule, start) = setup().await;
+    join(&db, "first", start).await;
+    join(&db, "second", start + Duration::milliseconds(1)).await;
+    let now = start + Duration::seconds(1);
+    let stats = crate::services::billing::reconcile::with_drain_for_test(
+        DRAIN_AFTER_INSERT.scope((), tick(&db, now)),
+    )
+    .await;
+    assert_eq!(stats.recipients_examined, 1);
+    assert_eq!(stats.grants_created, 1);
+    assert_eq!(stats.grants_ledgered, 1);
+    let grants: Vec<CreditGrant> = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "schedule_origin.schedule_id": &schedule.id })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].recipient_user_id, "first");
+    assert!(grants[0].issued_ledgered_at.is_some());
+    for (id, expected) in [
+        ("first", start.checked_add_months(Months::new(1)).unwrap()),
+        ("second", start + Duration::milliseconds(1)),
+    ] {
+        let recipient = db
+            .collection::<CreditScheduleRecipient>(RECIPIENTS)
+            .find_one(recipient_filter(&schedule.id, id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recipient.next_due_at, expected);
+    }
+    assert_eq!(tick(&db, now).await.grants_created, 1);
+    assert_eq!(tick(&db, now).await.grants_created, 0);
+    assert_eq!(
+        db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
+            .count_documents(doc! { "dedupe_key": { "$in": [
+                format!("grant-issued:{}", grant_id(&schedule.id, start, "first")),
+                format!("grant-issued:{}", grant_id(&schedule.id, start + Duration::milliseconds(1), "second")),
+            ] } })
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn drained_worker_starts_no_discovery_or_issuance() {
+    let (db, schedule, start) = setup().await;
+    let mut user = test_user("missed-person", UserType::Person);
+    user.group_ids = vec!["group".into()];
+    db.collection::<User>(USERS).insert_one(user).await.unwrap();
+    let mut budget = MAX_RECIPIENTS_PER_TICK;
+    let mut stats = DisbursementStats::default();
+    crate::services::billing::reconcile::with_drain_for_test(async {
+        crate::services::billing::reconcile::drain_for_test();
+        disburse(&db, &schedule, start, &mut budget, &mut stats)
+            .await
+            .unwrap();
+    })
+    .await;
+    assert_eq!(budget, MAX_RECIPIENTS_PER_TICK);
+    assert_eq!(stats.recipients_examined, 0);
+    assert_eq!(
+        db.collection::<Document>(RECIPIENTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<Document>(SCANS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<Document>(CREDIT_GRANTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -312,6 +414,141 @@ async fn group_service_records_join_anchor_and_retry_keeps_persisted_grant_polic
             .unwrap(),
         1
     );
+}
+
+#[tokio::test]
+async fn registered_members_receive_spendable_credits_even_after_a_missed_enrollment() {
+    use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS};
+    use crate::models::service_billing::{BillingMetric, PlatformUsage};
+    use crate::models::usage_meter::{BillingLayer, CredentialClass};
+    use crate::services::billing::{
+        BillingIngress, BillingRouteContext, NodeIntent, funding, meter,
+        reservation::LayerReservation,
+    };
+
+    let (db, schedule, _) = setup().await;
+    for missed_hook in [false, true] {
+        let registration = crate::services::auth_service::register_user(
+            &db,
+            &format!("signup-{missed_hook}@example.com"),
+            "test-registration-password",
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(registration.actually_created);
+        let owner = registration.user_id;
+        // Signup does not imply group membership. The audited membership
+        // mutation establishes eligibility and normally captures the anchor.
+        assert_eq!(tick(&db, Utc::now()).await.grants_created, 0);
+        crate::services::group_service::add_member(&db, "group", &owner)
+            .await
+            .unwrap();
+        if missed_hook {
+            // Model a crash after the membership transaction commits but before
+            // its best-effort enrollment persists. Recovery must use membership.
+            db.collection::<CreditScheduleRecipient>(RECIPIENTS)
+                .delete_one(recipient_filter(&schedule.id, &owner))
+                .await
+                .unwrap();
+        }
+        assert_eq!(tick(&db, Utc::now()).await.grants_created, 1);
+        let grant = db
+            .collection::<CreditGrant>(CREDIT_GRANTS)
+            .find_one(doc! { "recipient_user_id": &owner })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.amount, Credits::from_whole(100));
+
+        // A zero-balance wallet proves the scheduled grant actually funds the
+        // request, rather than merely appearing as an active grant in the UI.
+        let now = bson::DateTime::now();
+        let wallet: BillingWallet = bson::from_document(doc! {
+            "_id": Uuid::new_v4().to_string(), "owner_id": &owner,
+            "lago_customer_id": "test-customer", "plan_kind": "prepaid",
+            "balance_credits": Credits::ZERO, "reserved_credits": Credits::ZERO,
+            "collection_state": "good", "balance_synced_at": now,
+            "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        db.collection::<BillingWallet>(WALLETS)
+            .insert_one(&wallet)
+            .await
+            .unwrap();
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.clone(),
+            owner.clone(),
+            None,
+            None,
+            Some("test-service".into()),
+            Some("test-service".into()),
+            NodeIntent::Direct,
+            "bearer".into(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            None,
+            false,
+        )
+        .with_platform_metering(true);
+        let reservation = funding::reserve_and_open_ordinary(
+            &db,
+            &ctx,
+            &wallet,
+            vec![LayerReservation {
+                layer: BillingLayer::Platform,
+                metric: BillingMetric::Requests,
+                lago_metric_code: ctx.platform_lago_metric_code.clone(),
+                estimated_quantity: 1,
+                credits_per_unit_micros: 25_000_000,
+                credits_per_unit_pico: None,
+                reserved_credits: Credits::from_whole(25),
+                allowance_reservations: vec![],
+                grant_reservations: vec![],
+                tax_cache_ttl_secs: 900,
+                applied_tax: None,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(reservation.total_reserved_credits, Credits::ZERO);
+        assert_eq!(reservation.layers[0].grant_reservations.len(), 1);
+        assert_eq!(
+            reservation.layers[0].grant_reservations[0].grant_id,
+            grant.id
+        );
+        assert_eq!(
+            reservation.layers[0].grant_reservations[0].amount,
+            Credits::from_whole(25)
+        );
+        let metered = meter::MeteredProxyContext::from_route(&ctx).with_funding(true);
+        meter::mark_forwarded(&db, &metered).await.unwrap();
+        meter::settle(&db, &metered, PlatformUsage::single_request(0), None, None)
+            .await
+            .unwrap();
+        let spent = db
+            .collection::<CreditGrant>(CREDIT_GRANTS)
+            .find_one(doc! { "_id": &grant.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spent.remaining, Credits::from_whole(75));
+        assert_eq!(spent.reserved, Credits::ZERO);
+        assert_eq!(tick(&db, Utc::now()).await.grants_created, 0);
+        assert_eq!(
+            db.collection::<CreditGrant>(CREDIT_GRANTS)
+                .find_one(doc! { "_id": &grant.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .remaining,
+            Credits::from_whole(75),
+        );
+    }
 }
 
 #[tokio::test]
@@ -590,6 +827,12 @@ async fn pending_recipient_issuance_recovers_without_a_period_row_or_refilling()
         .unwrap()
         .unwrap();
     assert!(pending.issued_ledgered_at.is_none());
+    assert!(
+        super::super::super::grants::list_active_for_user(&db, "pending-person", now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         db.collection::<Document>(CREDIT_SCHEDULE_PERIODS)
             .count_documents(doc! {})

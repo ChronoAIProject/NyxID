@@ -17,6 +17,8 @@ export type AssistantParams = {
   /** Local identity of an unsent compose session; never sent to the server. */
   draftId?: string;
   conversationId?: string;
+  /** Resolve any persisted segment ID to its displayed transcript row. */
+  messageId?: string;
   acknowledgementId?: string;
   agentId?: string;
   draft?: boolean;
@@ -136,12 +138,17 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   NotificationSettings: undefined;
   DisplaySettings: undefined;
   LanguageSettings: undefined;
+  /** The Duo rail's quick-access list (saved to the account). */
+  QuickAccessSettings: undefined;
   /** `voice` false: only dictation settings (no live voice for this account). */
   VoiceSettings: { voice?: boolean } | undefined;
+  AppleWatchSettings: undefined;
   PrivacySettings: undefined;
   ProfileEdit: { field: "display_name" | "avatar_url" };
   SessionDetail: { sessionId: string };
   ChatLayoutEdit: { key: "columnWidth" | "composerMaxHeight" };
+  /** The folded Duo quick rail's Recent chats. */
+  RecentChats: undefined;
 };
 
 export type RootStackParamList = SharedEntryParamList & {
@@ -227,10 +234,13 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "NotificationSettings",
   "DisplaySettings",
   "LanguageSettings",
+  "QuickAccessSettings",
   "VoiceSettings",
+  "AppleWatchSettings",
   "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",
+  "RecentChats",
   "TermsOfService",
   "PrivacyPolicy",
   "OpenSourceNotices",

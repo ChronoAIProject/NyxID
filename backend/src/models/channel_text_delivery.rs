@@ -12,6 +12,8 @@ pub struct ChannelTextDelivery {
     pub user_id: String,
     pub source_id: String,
     pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_version: Option<u32>,
     pub notice: Option<TextDeliveryNotice>,
     pub parts: Vec<TextPart>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

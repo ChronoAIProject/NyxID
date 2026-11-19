@@ -19,6 +19,8 @@ pub mod dictation;
 pub mod execution;
 pub mod grok;
 pub mod grok_runtime;
+mod link_handles;
+pub(crate) mod links;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;
@@ -29,6 +31,8 @@ pub(crate) use responses::{RESPONSE_USAGE_LIMIT, recorded_usage as recorded_resp
 pub mod runtime;
 pub mod session;
 mod speech;
+#[cfg(test)]
+mod startup_tests;
 #[cfg(test)]
 mod tests;
 mod tokens;

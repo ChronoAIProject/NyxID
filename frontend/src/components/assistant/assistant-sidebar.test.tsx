@@ -1168,12 +1168,11 @@ describe("NyxBot agents in the sidebar", () => {
     expect(document.querySelectorAll("[data-unread-marker]")).toHaveLength(0);
   });
 
-  it("invites a first group when there are none", async () => {
-    const user = userEvent.setup();
-    const onNewGroup = vi.fn();
-    renderAgents({}, { groups: { groups: [], onSelectGroup: vi.fn(), onNewGroup } });
-    await user.click(screen.getByRole("button", { name: "Chat with several agents at once" }));
-    expect(onNewGroup).toHaveBeenCalledOnce();
+  it("hides the crew section when there are no personal or organization crews", () => {
+    renderAgents({}, { groups: { groups: [], onSelectGroup: vi.fn(), onNewGroup: vi.fn() } });
+    expect(screen.queryByRole("region", { name: "Personal crews" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /crews$/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Chat with several agents at once")).not.toBeInTheDocument();
   });
 
   it("offers no new thread for a destroyed agent", () => {

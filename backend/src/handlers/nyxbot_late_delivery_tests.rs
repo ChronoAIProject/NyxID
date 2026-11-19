@@ -428,7 +428,9 @@ async fn uncertain_dispatch_and_crashed_claim_are_never_reissued() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"reply_target_ref":"cmaeg1.rt.original", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()}))).mount(&f.gateway).await;
     Mock::given(method("POST"))
         .and(path("/reply-targets/cmaeg1.rt.original/messages"))
-        .respond_with(ResponseTemplate::new(503))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"delivery":{"outcome":"unknown"}})),
+        )
         .mount(&f.gateway)
         .await;
     settled(&f, false).await;
@@ -893,6 +895,8 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                voice_link_publication: None,
+                links_in_chat: None,
                 artifact_recovery_target: None,
                 artifact_delivery: None,
                 failure_reason: reason.map(|reason| {
@@ -1552,6 +1556,12 @@ async fn late_gateway_acceptance_without_receipt_is_terminal_and_visible() {
     )
     .await;
     assert_eq!(sends(&f).await.len(), 1);
+    // A pre-#2561 sender did not freeze the reply request.
+    patch(
+        &f,
+        doc! {"delivery.preparation.gateway_request_hash":bson::Bson::Null},
+    )
+    .await;
     expire_text_preparation(&f).await;
     let (a, b) = tokio::join!(
         late_delivery::sweep(&f.state),
@@ -1703,6 +1713,12 @@ async fn late_dispatch_marker_without_receipt_never_reopens_preparation() {
     .await;
     assert_eq!(status(&f).await, "sending");
     assert!(sends(&f).await.is_empty());
+    // A pre-#2561 sender did not freeze the reply request.
+    patch(
+        &f,
+        doc! {"delivery.preparation.gateway_request_hash":bson::Bson::Null},
+    )
+    .await;
     expire_text_preparation(&f).await;
     late_delivery::sweep(&f.state).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap();
@@ -1737,3 +1753,9 @@ async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
     assert!(!counts.keys().any(|key| key.ends_with(":nyxbot_events")));
     assert_eq!(status(&f).await, "waiting");
 }
+
+#[path = "nyxbot_gateway_reply_tests.rs"]
+mod gateway_reply_tests;
+
+#[path = "nyxbot_response_read_delivery_tests.rs"]
+mod response_read_delivery_tests;

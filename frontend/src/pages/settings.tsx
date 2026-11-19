@@ -12,7 +12,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable, useRevokeSession } from "@/hooks/use-auth";
-import { api, apiClient, ApiError } from "@/lib/api-client";
+import { api, apiFetch, apiClient, ApiError } from "@/lib/api-client";
+import { validateAccountExport } from "@/lib/account-export";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
 import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
@@ -263,9 +264,18 @@ function ProfileForm({ user }: { readonly user: User }) {
   async function save(values: { display_name: string }) {
     form.clearErrors("root");
     try {
-      const updated = await api.put<User>("/users/me", values);
-      setUser(updated);
-      queryClient.setQueryData(["user", "me"], updated);
+      const updated = await api.put<Pick<User, "id" | "email" | "display_name" | "avatar_url">>("/users/me", values, {
+        authorityGuard: () => {
+          if (useAuthStore.getState().user?.id !== user.id) throw new Error("Account changed; try again from the current account.");
+        },
+      });
+      const current = useAuthStore.getState().user;
+      if (!current || current.id !== user.id || updated.id !== user.id) throw new Error("Profile response did not match the current account.");
+      // PUT returns only editable profile fields. Retain account preferences
+      // and capabilities from the current full profile, including consent.
+      const merged = { ...current, email: updated.email, display_name: updated.display_name, avatar_url: updated.avatar_url };
+      setUser(merged);
+      queryClient.setQueryData(["user", "me"], merged);
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });
       if (draft !== values.display_name) form.setValue("display_name", draft);
@@ -1070,38 +1080,128 @@ function SessionsTab() {
 
 function PrivacyTab() {
   useUiTranslation();
+  const [reviewDiagnostics, setReviewDiagnostics] = useState(false);
+  const devicePolicy = useConsentStore((s) => s.policy);
   const consentEnabled = useConsentStore((s) => s.enabled);
   const persistenceError = useConsentStore((s) => s.persistenceError);
   const setConsent = useConsentStore((s) => s.setConsent);
   const accountId = useAuthStore((s) => s.user?.id);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const permission = useQuery({
     queryKey: ["analytics-consent", accountId],
     queryFn: () => readAnalyticsConsent(accountId!),
     enabled: Boolean(accountId),
     staleTime: 0,
   });
-  async function handleToggle(next: boolean) {
+  const diagnosticsEnabled =
+    permission.data?.diagnostics_available &&
+    consentEnabled &&
+    devicePolicy === 2;
+  async function handleToggle(next: boolean, policy: 1|2 = 1) {
     if (!accountId) return;
     setSaving(true);
     try {
-      await saveAnalyticsConsent(accountId, next);
+      await saveAnalyticsConsent(accountId, next, policy);
       await permission.refetch();
     } catch {
       toast.error(
-        translateErrorMessage("Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
+        translateErrorMessage(next && policy === 2 && consentEnabled ? "Could not save updated analytics permission." : "Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
       );
     } finally {
       setSaving(false);
     }
   }
 
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const response = await apiFetch("/users/me/export", { method: "POST" });
+      const blob = await response.blob();
+      await validateAccountExport(blob, response.headers);
+      const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/i)?.[1];
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download =
+        filename ??
+        `nyxid-account-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success(translateUi("Your data export is ready."));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 429) {
+          const seconds = error.retryAfter;
+          const minutes = error.retryAfter
+            ? Math.max(1, Math.ceil(error.retryAfter / 60))
+            : undefined;
+          toast.error(
+            translateUi(
+              minutes === undefined
+                ? "Your data export is temporarily rate limited."
+                : seconds && seconds < 60
+                  ? seconds === 1
+                    ? "Your data export is temporarily rate limited. Try again in 1 second."
+                    : "Your data export is temporarily rate limited. Try again in {{seconds}} seconds."
+                  : minutes === 1
+                  ? "Your data export is temporarily rate limited. Try again in 1 minute."
+                  : "Your data export is temporarily rate limited. Try again in {{minutes}} minutes.",
+              minutes === undefined ? undefined : { minutes, seconds },
+            ),
+          );
+        } else if (error.status === 404 || error.status === 405) {
+          toast.error(
+            translateUi("Data export is not available on this server yet."),
+          );
+        } else {
+          toast.error(
+            translateUi("We couldn't create your data export. Please try again."),
+          );
+        }
+      } else {
+        toast.error(
+          translateUi("We couldn't create your data export. Please try again."),
+        );
+      }
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
-    <GroupedList
+    <>
+      <GroupedList
+        title={translateUi("Your data")}
+        footer={translateUi(
+          "Download a JSON copy of your account profile, services, activity, your assistant inputs, private assistant replies to web/mobile turns without platform routing, and channel metadata, session metadata, machine metadata and billing summary. Passwords, tokens, keys, secrets, raw files and transient coordination records are excluded; large sections may be truncated.",
+        )}
+      >
+        <GroupedRow
+          title={translateUi("Download your data")}
+          description={translateUi(
+            "Creates a bounded JSON export. You can request one up to three times per hour.",
+          )}
+          accessory={
+            <Button
+              variant="outline"
+              size="sm"
+              isLoading={exporting}
+              onClick={() => void handleExport()}
+            >
+              {translateUi("Download")}
+            </Button>
+          }
+        />
+      </GroupedList>
+      <GroupedList
       title={translateUi("Usage analytics")}
       footer={
         <>
-          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
+          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track or Global Privacy Control always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
             <div role="alert" className="space-y-2">
               <p>{translateUi("This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.")}</p>
@@ -1154,7 +1254,7 @@ function PrivacyTab() {
                 permission.isError ||
                 permission.isFetching
               }
-              onCheckedChange={(next) => void handleToggle(next)}
+              onCheckedChange={(next) => void handleToggle(next, permission.data?.diagnostics_offered && (permission.data?.policy_version === "2" || devicePolicy === 2) ? 2 : 1)}
               aria-label={translateUi("Allow account usage analytics")}
             />
           </>
@@ -1172,13 +1272,71 @@ function PrivacyTab() {
                 permission.isFetching)
             }
             onCheckedChange={(next) => {
-              setConsent(next);
+              setConsent(next, useConsentStore.getState().policy ?? 1);
               if (!next) disableTelemetry();
             }}
             aria-label={translateUi("Allow usage analytics on this browser")}
           />
         }
       />
-    </GroupedList>
+        {permission.data?.diagnostics_offered === true && (
+          <GroupedRow
+            title={translateUi("Crash diagnostics")}
+            description={translateUi(
+              diagnosticsEnabled
+                ? "Crash diagnostics enabled"
+                : "Crash diagnostics need updated permission",
+            )}
+            accessory={
+              diagnosticsEnabled ? undefined : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    saving || permission.data?.current_policy_version !== "2"
+                  }
+                  onClick={() => setReviewDiagnostics(true)}
+                >
+                  {translateUi("Review updated analytics")}
+                </Button>
+              )
+            }
+          />
+        )}
+      </GroupedList>
+      {permission.data?.diagnostics_offered === true && (
+        <Dialog open={reviewDiagnostics} onOpenChange={setReviewDiagnostics}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {translateUi("Review updated analytics")}
+              </DialogTitle>
+              <DialogDescription>
+                {translateUi(
+                  "Analytics updated: optional crash diagnostics include app version and sanitized code locations, without messages or URLs. Reports are kept for up to 30 days. Allow updated analytics for this account and browser, or keep your current choice.",
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setReviewDiagnostics(false)}
+              >
+                {translateUi("Not now")}
+              </Button>
+              <Button
+                disabled={saving}
+                onClick={() => {
+                  void handleToggle(true, 2);
+                  setReviewDiagnostics(false);
+                }}
+              >
+                {translateUi("Allow updated analytics")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
   );
 }

@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { NativeModules } from "react-native";
+import { deviceLanguages } from "./deviceLanguages";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   initialLanguage,
@@ -16,6 +16,8 @@ import {
   type Language,
 } from "./language";
 import { translate, type TranslationValues } from "./translate";
+
+import { setAppTranslationLanguage } from "./appTranslation";
 
 type AppLanguage = {
   language: Language;
@@ -32,19 +34,6 @@ const LanguageContext = createContext<AppLanguage>({
   t: (phrase, values) => translate("en", phrase, values),
 });
 
-function deviceLanguages(): string[] {
-  const settings = NativeModules.SettingsManager?.settings;
-  const preferred = settings?.AppleLanguages;
-  const locales = Array.isArray(preferred)
-    ? preferred.filter((value): value is string => typeof value === "string")
-    : [];
-  try {
-    return [...locales, Intl.DateTimeFormat().resolvedOptions().locale];
-  } catch {
-    return locales;
-  }
-}
-
 export function LanguageProvider({ children }: { children: ReactNode }) {
   const [language, setLanguage] = useState<Language>("en");
   const [loaded, setLoaded] = useState(false);
@@ -59,7 +48,12 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
       .catch(() => null)
       .then((saved) => {
         if (!active) return;
-        setLanguage(initialLanguage(saved, deviceLanguages()));
+        const initial = initialLanguage(
+          saved,
+          deviceLanguages({ includeLocaleFallback: true }),
+        );
+        setAppTranslationLanguage(initial);
+        setLanguage(initial);
         setLoaded(true);
       });
     return () => {
@@ -68,6 +62,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     };
   }, []);
   const choose = useCallback((next: Language) => {
+    setAppTranslationLanguage(next);
     setLanguage(next);
     const write = ++revision.current;
     setPersistenceError(false);

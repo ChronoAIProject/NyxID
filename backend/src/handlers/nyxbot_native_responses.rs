@@ -77,10 +77,7 @@ async fn accept(
         .as_str()
         .filter(|s| valid_partition(s))
         .ok_or_else(|| AppError::ValidationError("Invalid native conversation".into()))?;
-    let response_id = format!(
-        "resp_{}",
-        &sha256_hex(format!("{}:{binding}:{idempotency}", row.id))[..32]
-    );
+    let response_id = dispatch_identity::native_response(&row.id, binding, idempotency);
     let request_hash = sha256_hex(request.to_string());
     if let Some(stored) = recovery::load(&state.db, row, &response_id).await? {
         if stored.request_hash != request_hash {
@@ -158,8 +155,9 @@ async fn accept(
         }
     };
     let now = Utc::now();
-    let event_key = sha256_hex(format!("native-response:{}", response_id));
+    let event_key = dispatch_identity::native_event(&response_id);
     let event = NyxbotEvent {
+        dispatch_identity: Some(dispatch_identity::admission(&row.id, idempotency)),
         trace_request_id: crate::turn_trace::ingress_request_id(),
         id: event_key.clone(),
         channel_id: row.id.clone(),
@@ -483,14 +481,31 @@ async fn snapshot_inner(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) => {
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Snapshot,
+            ))
+            .await;
+        }
     };
-    if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return provider_refusal::error(error);
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) => {
+            return ([("cache-control", "no-store")], Json(view.payload.snapshot)).into_response();
+        }
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
     }
-    match current(&state, &row, &id).await {
+    let output = match relay_responses::claim_replay(&state, &row, &id).await {
+        Ok(output) => output,
+        Err(error) => return provider_refusal::error(error),
+    };
+    match current(&state, &row, &id, !output).await {
         Ok(Some((_, body, trace))) => {
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
@@ -524,18 +539,41 @@ async fn events_inner(
     Query(query): Query<Cursor>,
     headers: HeaderMap,
 ) -> Response {
-    let (row, _) = match provider_channel(&state, &headers).await {
+    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(failure) if failure.closed.is_some() => {
+            let after = match cursor(query.starting_after.as_deref()) {
+                Ok(after) => after,
+                Err(error) => return provider_refusal::error(error),
+            };
+            return Box::pin(response_read::closed_response(
+                &state,
+                failure,
+                &id,
+                None,
+                response_read::Format::Events(after),
+            ))
+            .await;
+        }
+        Err(failure) => return failure.response,
     };
     let after = match cursor(query.starting_after.as_deref()) {
         Ok(v) => v,
         Err(e) => return provider_refusal::error(e),
     };
-    if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return provider_refusal::error(error);
+    match response_read::load(&state, &row, &id).await {
+        Ok(Some(view)) if after.is_none_or(|n| n < view.payload.frames.len() as u64) => {
+            return response_read::stream(state, row, headers, id, after);
+        }
+        Ok(Some(_)) => return problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
+        Ok(None) => {}
+        Err(error) => return provider_refusal::error(error),
     }
-    match current(&state, &row, &id).await {
+    let output = match relay_responses::claim_replay(&state, &row, &id).await {
+        Ok(output) => output,
+        Err(error) => return provider_refusal::error(error),
+    };
+    match current(&state, &row, &id, !output).await {
         Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
@@ -551,6 +589,7 @@ async fn current(
     state: &AppState,
     row: &NyxbotChannel,
     id: &str,
+    suppress: bool,
 ) -> AppResult<
     Option<(
         StoredResponse,
@@ -632,10 +671,13 @@ async fn current(
             .collection::<NyxbotEvent>(EVENTS)
             .find_one(doc! {"_id":&stored.event_key})
             .await?;
-        if event
-            .as_ref()
-            .and_then(|e| e.delivery.as_ref())
-            .is_some_and(|d| matches!(d.state.as_str(), "sending" | "sent" | "unknown" | "refused"))
+        if suppress
+            || event
+                .as_ref()
+                .and_then(|e| e.delivery.as_ref())
+                .is_some_and(|d| {
+                    matches!(d.state.as_str(), "sending" | "sent" | "unknown" | "refused")
+                })
         {
             relay_responses::suppress_output(&mut payload);
         }
@@ -660,7 +702,7 @@ pub(super) fn stream(
             // Recheck the fresh key and binding, including while a stream waits.
             let live=provider_channel(&state,&headers).await;
             let result=match live {
-                Ok((live,_)) if live.id==row.id && live.binding_id==row.binding_id => current(&state,&live,&id).await,
+                Ok((live,_)) if live.id==row.id && live.binding_id==row.binding_id => current(&state,&live,&id,false).await,
                 _=>Err(AppError::OAuthAuthorityUnavailable),
             };
             match result {

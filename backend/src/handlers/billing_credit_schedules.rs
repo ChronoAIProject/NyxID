@@ -299,6 +299,26 @@ pub async fn update_schedule(
     if body.service_limits.is_some() {
         super::billing_credits::require_allocation_capability(&state)?;
     }
+    if body.is_active == Some(true) {
+        // Resuming is authoring: an older replica would walk a recipient
+        // schedule as calendar periods and issue a second grant set.
+        let recipient_schedule = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule_id, "timing": "recipient" })
+            .await?
+            .is_some();
+        // Gate every request that can enable recipient issuance. A concurrent
+        // pause may happen before the service loads its own CAS snapshot.
+        if recipient_schedule {
+            super::billing_credits::require_allocation_capability(&state)?;
+            crate::services::security_readiness_service::require_serving(
+                &state.db,
+                billing::schedules::recipients::READINESS,
+            )
+            .await?;
+        }
+    }
     let schedule = billing::schedules::update_schedule(
         &state.db,
         &schedule_id,
@@ -578,6 +598,129 @@ mod tests {
             create_schedule(State(state), test_auth_user(&admin), Json(body)).await,
             Err(AppError::SecurityReadinessUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_recipient_schedule_requires_the_fleet_readiness_again() {
+        let Some((mut state, admin, _, _)) = setup("schedule_recipient_resume").await else {
+            return;
+        };
+        state.config.billing_allocations_enabled = true;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        let Json(schedule) =
+            create_schedule(State(state.clone()), test_auth_user(&admin), Json(body))
+                .await
+                .unwrap();
+        let toggle = |is_active| UpdateCreditScheduleRequest {
+            is_active: Some(is_active),
+            ..Default::default()
+        };
+        let Json(paused) = update_schedule(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path(schedule.id.clone()),
+            Json(toggle(false)),
+        )
+        .await
+        .unwrap();
+        assert!(!paused.is_active);
+        // A legacy process rejoins while the schedule is paused.
+        state
+            .db
+            .collection::<bson::Document>("security_replicas")
+            .insert_one(doc! { "_id": "old-worker", "generation_id": "old-worker",
+            "instance_name": "old-worker", "protocol": 1, "capabilities": [],
+            "expected_replicas": ["test-backend"], "drained": true,
+            "platform_policy_required": false, "observed_at": bson::DateTime::now() })
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(toggle(true)),
+            )
+            .await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        let stored = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_active);
+        // Pausing and sparse edits remain available while the fleet is mixed.
+        let Json(repaused) = update_schedule(
+            State(state),
+            test_auth_user(&admin),
+            Path(schedule.id),
+            Json(toggle(false)),
+        )
+        .await
+        .unwrap();
+        assert!(!repaused.is_active);
+    }
+
+    #[tokio::test]
+    async fn enabling_an_active_recipient_schedule_still_requires_authoring_readiness() {
+        let (mut state, admin, _, _) = setup("schedule_active_enable_readiness").await.unwrap();
+        state.config.billing_allocations_enabled = true;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        let Json(schedule) =
+            create_schedule(State(state.clone()), test_auth_user(&admin), Json(body))
+                .await
+                .unwrap();
+        let enable = || UpdateCreditScheduleRequest {
+            is_active: Some(true),
+            ..Default::default()
+        };
+        // Even an apparently redundant enable can race a concurrent pause.
+        state.config.billing_allocations_enabled = false;
+        assert!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(enable())
+            )
+            .await
+            .is_err()
+        );
+        state.config.billing_allocations_enabled = true;
+        state
+            .db
+            .collection::<bson::Document>("security_replicas")
+            .insert_one(doc! { "_id": "old-worker", "generation_id": "old-worker",
+            "instance_name": "old-worker", "protocol": 1, "capabilities": [],
+            "expected_replicas": ["test-backend"], "drained": true,
+            "platform_policy_required": false, "observed_at": bson::DateTime::now() })
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(enable())
+            )
+            .await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        let stored = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_active);
     }
 
     #[tokio::test]

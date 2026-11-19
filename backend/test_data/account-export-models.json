@@ -1,0 +1,4984 @@
+{
+  "agent_key_login_requests": [
+    {
+      "_id": "fixture-value",
+      "device_code_hmac": "fixture-value",
+      "user_code_hmac": "fixture-value",
+      "status": "pending",
+      "poll_interval_secs": 1,
+      "client_ip_attribution": "verified",
+      "initiating_origin_status": "absent",
+      "approved_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "agent_service_bindings": [
+    {
+      "_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "user_service_id": "fixture-value",
+      "user_api_key_id": "fixture-value",
+      "user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "api_key_credentials": [
+    {
+      "_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "user_id": "fixture-value",
+      "secret_hash": "fixture-value",
+      "secret_prefix": "fixture-value",
+      "kind": "agent_key_login",
+      "label": "fixture-value",
+      "login_request_id": "fixture-value",
+      "is_active": true,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "api_keys": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "name": "fixture-value",
+      "key_prefix": "fixture-value",
+      "key_hash": "fixture-value",
+      "scopes": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "approval_grants": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "service_name": "fixture-value",
+      "requester_type": "fixture-value",
+      "requester_id": "fixture-value",
+      "approval_request_id": "fixture-value",
+      "granted_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "approval_requests": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "service_name": "fixture-value",
+      "service_slug": "fixture-value",
+      "requester_type": "fixture-value",
+      "requester_id": "fixture-value",
+      "operation_summary": "fixture-value",
+      "status": "fixture-value",
+      "idempotency_key": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_acknowledgements": [
+    {
+      "_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "user_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "kind": "fixture-value",
+      "service_id": "fixture-value",
+      "service_slug": "fixture-value",
+      "summary": "fixture-value",
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_action_receipts": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "action": "fixture-value",
+      "action_request_id": "fixture-value",
+      "request_fingerprint": "fixture-value",
+      "resource_id": "fixture-value",
+      "status": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_consents": [
+    {
+      "_id": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "connection_id": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "policy_revision": 1,
+      "behavior_digest": "fixture-value",
+      "authority_digest": "fixture-value",
+      "operation_digest": "fixture-value",
+      "decision": "pending",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_learning": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_learning_members": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "member_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_learning_proposals": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "run_id": "fixture-value",
+      "status": "fixture-value",
+      "config_revision": 1,
+      "agent_skills_revision": 1,
+      "fingerprint": "fixture-value",
+      "body_bytes": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_learning_runs": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "actor_id": "fixture-value",
+      "mode": "fixture-value",
+      "config_revision": 1,
+      "learning_epoch": 1,
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_learning_skill_roots": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "skill_id": "fixture-value",
+      "version": "fixture-value",
+      "sha256": "fixture-value",
+      "operation_id": "fixture-value",
+      "proposal_id": "fixture-value",
+      "config_revision": 1,
+      "agent_skills_revision": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_private_notes": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "revision": 1,
+      "notes": [
+        {
+          "id": "fixture-value",
+          "text": "fixture-value",
+          "created_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          },
+          "updated_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          }
+        }
+      ],
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_shares": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "subject_kind": "person",
+      "subject_id": "fixture-value",
+      "role": "user",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agent_sharing": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_agents": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "kind": "nyxbot",
+      "name": "fixture-value",
+      "description": "fixture-value",
+      "specialty": "fixture-value",
+      "created_by": "fixture-value",
+      "model": "fixture-value",
+      "memory": [
+        {
+          "id": "fixture-value",
+          "text": "fixture-value",
+          "created_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          },
+          "updated_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          }
+        }
+      ],
+      "display_name": "fixture-value",
+      "persona": "fixture-value",
+      "voice_instructions": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_artifact_deliveries": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "originating_turn_id": "fixture-value",
+      "event_turn_id": "fixture-value",
+      "watch_id": "fixture-value",
+      "operation_id": "fixture-value",
+      "source_result_identity": "fixture-value",
+      "attachment_ids": [],
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "seq": 1
+    }
+  ],
+  "assistant_async_operations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "service_id": "fixture-value",
+      "submit_endpoint_id": "fixture-value",
+      "contract": {
+        "status_operation": "fixture-value",
+        "result_operation": "fixture-value",
+        "id_field": "fixture-value",
+        "id_parameter": "fixture-value",
+        "status_field": "fixture-value",
+        "success_states": [],
+        "failure_states": []
+      },
+      "delivery": {
+        "origin": "user"
+      },
+      "state": "fixture-value",
+      "attempts": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deadline": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "poll_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "lease_until": null
+    }
+  ],
+  "assistant_async_quotas": [
+    {
+      "user_id": "fixture-value",
+      "generation": 1
+    }
+  ],
+  "assistant_attachment_expiry": [
+    {
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expired_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_attachments": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "content_type": "fixture-value",
+      "size": 1,
+      "data_encrypted": [],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_authored_draft_claims": [
+    {
+      "owner_id": "fixture-person",
+      "claim": {
+        "proposal_id": "fixture-value",
+        "conversation_id": "fixture-value",
+        "api_key_id": "fixture-value",
+        "turn_id": "fixture-value"
+      }
+    }
+  ],
+  "assistant_checkpoints": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "status": "fixture-value",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_cma_agents": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "cma_service_id": "fixture-value",
+      "cma_agent_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_cma_creations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "cma_service_id": "fixture-value",
+      "deployment_fingerprint": "fixture-value",
+      "method": "fixture-value",
+      "path": "fixture-value",
+      "idempotency_key": "fixture-value",
+      "request_hash": "fixture-value",
+      "sandbox_ref_id": "fixture-value",
+      "sandbox_generation": 1,
+      "creates_sandbox": true,
+      "submission_state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_cma_sandboxes": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "cma_service_id": "fixture-value",
+      "label": "fixture-value",
+      "occupies_account_slot": true,
+      "creation_ref": "fixture-value",
+      "generation": 1,
+      "source": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_cma_session_origins": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "remote_agent_id": "fixture-value",
+      "connection_binding": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_conversations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "title": "fixture-value",
+      "model": "fixture-value",
+      "credential_api_key_id": "fixture-value",
+      "message_count": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "shared_agent_thread": false,
+      "guest_turn": false,
+      "invocation_controlled": false,
+      "deliver_also": []
+    }
+  ],
+  "assistant_direct_handoffs": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "run_id": "fixture-value",
+      "parent_thread_id": "fixture-value",
+      "parent_turn_id": "fixture-value",
+      "child_thread_id": "fixture-value",
+      "child_turn_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "state": "fixture-value",
+      "work": {
+        "run_id": "fixture-value",
+        "work_id": "fixture-value",
+        "coordinator_thread_id": "fixture-value",
+        "role": "fixture-value"
+      },
+      "parent_work": {
+        "run_id": "fixture-value",
+        "work_id": "fixture-value",
+        "coordinator_thread_id": "fixture-value",
+        "role": "fixture-value"
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_agent_access": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "added_by_user_id": "fixture-value",
+      "membership_generation": 1,
+      "revision": 1,
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_agent_proposals": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "proposed_by": "fixture-value",
+      "membership_revision": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_execution_slots": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "original_requester_id": "fixture-value",
+      "lane": "fixture-value",
+      "conversation_id": "fixture-value",
+      "membership_revision": 1,
+      "authority": {
+        "owner_id": "fixture-value",
+        "lane": "owner",
+        "revision": 1
+      },
+      "revoked": true
+    }
+  ],
+  "assistant_group_invites": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "issuer_user_id": "fixture-value",
+      "token_hash": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_mention_notifications": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "user_id": "fixture-value",
+      "message_id": "fixture-value",
+      "seq": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_messages": [
+    {
+      "author_user_id": "fixture-value",
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "user_id": "fixture-value",
+      "seq": 1,
+      "role": "fixture-value",
+      "text": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_group_read_states": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "user_id": "fixture-value"
+    }
+  ],
+  "assistant_group_requests": [
+    {
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "user_id": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "message_seq": 1,
+      "attachment_ids": [],
+      "pending_agent_ids": [],
+      "hops_remaining": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_groups": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "name": "fixture-value",
+      "member_agent_ids": [],
+      "lead_agent_id": "fixture-value",
+      "created_by": "fixture-value",
+      "message_count": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_invocation_turns": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "invocation_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "state": "fixture-value",
+      "hooks_pending": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "settled_at": null
+    }
+  ],
+  "assistant_invocations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "idempotency_key": "fixture-value",
+      "request_digest": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "cancel_requested": true,
+      "conversation_deleted": true,
+      "generation": 1,
+      "turn_count": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_learning_migrations": [
+    {
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_learning_publication_targets": [
+    {
+      "_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "proposal_id": "fixture-value",
+      "operation_id": "fixture-value",
+      "package_sha256": "fixture-value",
+      "state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_message_feedback": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "message_id": "fixture-value",
+      "vote": "fixture-value",
+      "comment": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_messages": [
+    {
+      "_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "user_id": "fixture-value",
+      "seq": 1,
+      "turn_id": "fixture-value",
+      "role": "user",
+      "text": "fixture-value",
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "author": "owner"
+    }
+  ],
+  "assistant_notification_push_budgets": [
+    {
+      "reservations": [
+        {
+          "at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          }
+        }
+      ],
+      "_id": "fixture-person"
+    }
+  ],
+  "assistant_notification_push_sources": [
+    {
+      "user_id": "fixture-value",
+      "sent_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_notifications": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "kind": "automation_result",
+      "source": {
+        "type": "conversation",
+        "id": "fixture-value"
+      },
+      "source_key": "fixture-value",
+      "coalesced": true,
+      "unread": true,
+      "count": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_onboarding": [
+    {
+      "_id": "fixture-value",
+      "intro_version": 1,
+      "outcome": "completed",
+      "topics": [
+        "inbox"
+      ],
+      "work_style": "solo",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_resources": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "guest": true,
+      "identity": "fixture-value",
+      "source": {
+        "adapter": "fixture-value",
+        "service_id": "fixture-value",
+        "endpoint_id": "fixture-value",
+        "generation": 1,
+        "endpoint_digest": "fixture-value",
+        "authority_digest": "fixture-value",
+        "tool_name": "fixture-value"
+      },
+      "arguments": "fixture-value",
+      "selector": "fixture-value",
+      "revision": "fixture-value",
+      "attachment_id": "fixture-value",
+      "completed": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_service_execution": [
+    {
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value"
+    }
+  ],
+  "assistant_settings": [
+    {
+      "_id": "fixture-value",
+      "skip_destructive_confirmation": true,
+      "access_mode": "autopilot",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "timezone": "fixture-value",
+      "voice": {
+        "service_id": "fixture-value",
+        "key_source": "platform",
+        "model": "fixture-value",
+        "voice": "fixture-value",
+        "input_mode": "push_to_talk",
+        "language": "fixture-value"
+      },
+      "notifications": {
+        "push": {
+          "automation_result": true,
+          "automation_problem": true,
+          "needs_decision": true,
+          "agent_update": true,
+          "chat_update": true,
+          "group_mention": true
+        }
+      }
+    }
+  ],
+  "assistant_skill_draft_attempts": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "rejections": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_tool_results": [
+    {
+      "_id": "fixture-value",
+      "version": 1,
+      "user_id": "fixture-value",
+      "actor_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "api_key_id": "fixture-value",
+      "key_authority_fence": 1,
+      "agent_id": "fixture-value",
+      "guest": true,
+      "size": 1,
+      "boundaries": [],
+      "data_encrypted": [],
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_voice_announcements": [
+    {
+      "_id": "fixture-value",
+      "request_id": "fixture-value",
+      "session_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "text": "fixture-value",
+      "state": "fixture-value",
+      "not_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_voice_requests": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "session_id": "fixture-value",
+      "source_id": "fixture-value",
+      "message_id": "fixture-value",
+      "message_seq": 1,
+      "turn_id": "fixture-value",
+      "state": "queued",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_voice_windows": [
+    {
+      "_id": "fixture-value",
+      "billing_request_id": "fixture-value",
+      "session_id": "fixture-value",
+      "user_id": "fixture-value",
+      "context_identity": "fixture-value",
+      "start_second": 1,
+      "reserved_seconds": 1,
+      "observed_seconds": 1,
+      "sealed": true,
+      "settled": true,
+      "uncertain": true,
+      "deadline": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_wire_logs": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "payload": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "async_service_operation_artifacts": [
+    {
+      "_id": "fixture-value",
+      "watch_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "operation_id": "fixture-value",
+      "source_result_identity": "fixture-value",
+      "artifact_index": 1,
+      "filename": "fixture-value",
+      "source_path_sha256": "fixture-value",
+      "content_type": "fixture-value",
+      "size": 1,
+      "sha256": "fixture-value",
+      "preview_kind": "fixture-value",
+      "state": "fixture-value",
+      "assistant_attachment_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "auth_device_codes": [
+    {
+      "_id": "fixture-value",
+      "device_code_hmac": "fixture-value",
+      "user_code_hmac": "fixture-value",
+      "status": "pending",
+      "poll_interval_secs": 1,
+      "slow_down_increments": 1,
+      "approved_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "auth_device_codes_v2": [
+    {
+      "_id": "fixture-value",
+      "device_code_hmac": "fixture-value",
+      "user_code_hmac": "fixture-value",
+      "status": "pending",
+      "poll_interval_secs": 1,
+      "slow_down_increments": 1,
+      "approved_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "authorization_codes": [
+    {
+      "_id": "fixture-value",
+      "code_hash": "fixture-value",
+      "client_id": "fixture-value",
+      "user_id": "fixture-value",
+      "redirect_uri": "fixture-value",
+      "scope": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "used": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "billing_wallet": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "lago_customer_id": "fixture-value",
+      "plan_kind": "prepaid",
+      "balance_credits": {
+        "$numberDecimal": "10"
+      },
+      "reserved_credits": {
+        "$numberDecimal": "10"
+      },
+      "pending_lago_debits": {
+        "$numberDecimal": "10"
+      },
+      "pending_topup_expiry_credits": {
+        "$numberDecimal": "10"
+      },
+      "has_payment_instrument": true,
+      "overdraft_cap_credits": {
+        "$numberDecimal": "10"
+      },
+      "suspended": true,
+      "collection_state": "good",
+      "balance_synced_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "catalog_delegation_grants": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "actor_client_id": "fixture-value",
+      "receiving_client_id": "fixture-value",
+      "scope": "fixture-value",
+      "resources": [],
+      "allow_all_services": true,
+      "allowed_service_ids": [],
+      "allow_all_nodes": true,
+      "allowed_node_ids": [],
+      "revoked": true,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_activity_notifications": [
+    {
+      "_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "user_id": "fixture-value",
+      "direction": "fixture-value",
+      "platform": "fixture-value",
+      "content_type": "fixture-value",
+      "callback_status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_accounts": [
+    {
+      "_id": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "provider": "fixture-value",
+      "account_id": "fixture-value",
+      "revision": 1,
+      "configured_by": "fixture-value",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_allocations": [
+    {
+      "_id": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "user_id": "fixture-value",
+      "provider": "fixture-value",
+      "account_id": "fixture-value",
+      "resource_id": "fixture-value",
+      "phone_number": "fixture-value",
+      "application_id": "fixture-value",
+      "allocated_by": "fixture-value",
+      "revision": 1,
+      "tariff_version": "fixture-value",
+      "tariff_source": "fixture-value",
+      "includes_all_provider_charges": true,
+      "tariff_verified_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_bindings": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "profile": "telnyx_relay",
+      "contract_version": 1,
+      "revision": 1,
+      "label": "fixture-value",
+      "agent_id": "fixture-value",
+      "credential": {
+        "kind": "connection",
+        "user_service_id": "fixture-value"
+      },
+      "account_id": "fixture-value",
+      "resource_id": "fixture-value",
+      "phone_number": "fixture-value",
+      "application_id": "fixture-value",
+      "voice": "fixture-value",
+      "language": "fixture-value",
+      "enabled": true,
+      "verified_credential_identity": "fixture-value",
+      "verified_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_events": [
+    {
+      "_id": "fixture-value",
+      "identity_key": "fixture-value",
+      "user_id": "fixture-value",
+      "binding_id": "fixture-value",
+      "binding_revision": 1,
+      "event_kind": "fixture-value",
+      "status": "fixture-value",
+      "delivery": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_resource_claims": [
+    {
+      "_id": "fixture-value",
+      "identity_key": "fixture-value",
+      "user_id": "fixture-value",
+      "provider": "fixture-value",
+      "resource_kind": "fixture-value",
+      "resource_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_adapter_sessions": [
+    {
+      "_id": "fixture-value",
+      "identity_key": "fixture-value",
+      "user_id": "fixture-value",
+      "binding_id": "fixture-value",
+      "binding_revision": 1,
+      "profile": "telnyx_relay",
+      "contract_version": 1,
+      "credential_identity": "fixture-value",
+      "provider_call_id": "fixture-value",
+      "from": "fixture-value",
+      "to": "fixture-value",
+      "conversation_id": "fixture-value",
+      "state": "prepared",
+      "generation": 1,
+      "next_utterance": 1,
+      "billing_request_id": "fixture-value",
+      "observed_seconds": 1,
+      "billing_finalized": true,
+      "delivery": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "lease_expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_bots": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "platform": "fixture-value",
+      "label": "fixture-value",
+      "bot_token_encrypted": [],
+      "platform_bot_id": "fixture-value",
+      "platform_bot_username": "fixture-value",
+      "webhook_registered": true,
+      "webhook_secret_hash": "fixture-value",
+      "status": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_connect_links": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "created_by_user_id": "fixture-value",
+      "platform": "fixture-value",
+      "label": "fixture-value",
+      "token_hash": "fixture-value",
+      "status": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "delivery_attempts": 1
+    }
+  ],
+  "channel_conversations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "platform": "fixture-value",
+      "platform_conversation_id": "fixture-value",
+      "platform_conversation_type": "fixture-value",
+      "agent_api_key_id": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_delivery_receipts": [
+    {
+      "_id": "fixture-value",
+      "identity_key": "fixture-value",
+      "bot_id": "fixture-value",
+      "user_id": "fixture-value",
+      "phone_number_id": "fixture-value",
+      "recipient_id": "fixture-value",
+      "platform_message_id": "fixture-value",
+      "times": {},
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_email_batches": [
+    {
+      "_id": "fixture-value",
+      "bot_id": "fixture-value",
+      "user_id": "fixture-value",
+      "digest": "fixture-value",
+      "next_offset": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_email_receipts": [
+    {
+      "_id": "fixture-value",
+      "bot_id": "fixture-value",
+      "user_id": "fixture-value",
+      "platform_message_id": "fixture-value",
+      "completed": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_email_sends": [
+    {
+      "_id": "fixture-value",
+      "bot_id": "fixture-value",
+      "user_id": "fixture-value",
+      "account_id": "fixture-value",
+      "platform_message_id": "fixture-value",
+      "inbound_message_id": "fixture-value",
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_email_subscriptions": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "account_id": "fixture-value",
+      "notification_url": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_messages": [
+    {
+      "_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "user_id": "fixture-value",
+      "direction": "fixture-value",
+      "platform": "fixture-value",
+      "content_type": "fixture-value",
+      "callback_status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_reply_deliveries": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "inbound_message_id": "fixture-value",
+      "expected_parts": 1,
+      "complete": true,
+      "parts": [],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_text_deliveries": [
+    {
+      "_id": "fixture-value",
+      "logical_key": "fixture-value",
+      "user_id": "fixture-value",
+      "source_id": "fixture-value",
+      "fingerprint": "fixture-value",
+      "parts": [],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "channel_whatsapp_native": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "meta_app_id": "fixture-value",
+      "waba_id": "fixture-value",
+      "phone_number_id": "fixture-value",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "cli_pairings": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "code_hash": "fixture-value",
+      "kind": "fixture-value",
+      "prefill": "fixture-value",
+      "status": "pending",
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "connect_links": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_slug": "fixture-value",
+      "service_id": "fixture-value",
+      "token_hash": "fixture-value",
+      "status": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "consents": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "client_id": "fixture-value",
+      "scopes": "fixture-value",
+      "granted_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "credit_grants": [
+    {
+      "_id": "fixture-value",
+      "batch_id": "fixture-value",
+      "recipient_user_id": "fixture-value",
+      "target_kind": "all_users",
+      "amount_credits": 1,
+      "amount": {
+        "$numberDecimal": "10"
+      },
+      "remaining": {
+        "$numberDecimal": "10"
+      },
+      "reserved": {
+        "$numberDecimal": "10"
+      },
+      "scope": {},
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "reason": "fixture-value",
+      "granted_by": "fixture-value",
+      "status": "active",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "consumed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expired_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "revoked_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "credit_schedule_recipients": [
+    {
+      "_id": "fixture-recipient",
+      "schedule_id": "fixture-schedule",
+      "recipient_user_id": "fixture-value",
+      "anchor_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "next_due_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "is_eligible": true,
+      "eligibility_version": 0,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "device_codes": [
+    {
+      "_id": "fixture-value",
+      "device_code_hash": "fixture-value",
+      "device_pubkey": [],
+      "hw_id": "fixture-value",
+      "user_code_history": [],
+      "status": "pending",
+      "approved_by_user_id": "fixture-value",
+      "failed_poll_count": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_rotated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "device_onboard_credentials": [
+    {
+      "_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "bootstrap_token_hash": "fixture-value",
+      "label": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "encrypted_record_migration_findings": [
+    {
+      "collection": "fixture-value",
+      "category": "fixture-value",
+      "observed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "encrypted_record_migration_runs": [
+    {
+      "phase": "fixture-value",
+      "scanned": 1,
+      "rewritten": 1,
+      "started_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "execution_permission_deliveries": [
+    {
+      "_id": "fixture-value",
+      "occurrence_key": "fixture-value",
+      "version": 1,
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "message_id": "fixture-value",
+      "turn_id": "fixture-value",
+      "task": {
+        "version": 1,
+        "task": {
+          "root_kind": "message",
+          "root_id": "fixture-value"
+        },
+        "actor_user_id": "fixture-value",
+        "audience": {
+          "kind": "private",
+          "user_id": "fixture-value"
+        },
+        "epoch": 1,
+        "hard_deadline": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "cancelled": true
+      },
+      "state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "feature_flag_overrides": [
+    {
+      "_id": "fixture-value",
+      "flag_key": "fixture-value",
+      "target_kind": "global",
+      "enabled": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_by": "fixture-value"
+    }
+  ],
+  "invite_codes": [
+    {
+      "_id": "fixture-value",
+      "code": "fixture-value",
+      "max_uses": 1,
+      "used_count": 1,
+      "created_by": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "usages": [
+        {
+          "user_id": "fixture-value",
+          "used_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "invocation_diagnostics": [
+    {
+      "_id": "fixture-value",
+      "handle_hash": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "original_auth_method": "fixture-value",
+      "exact_user_service_id": "fixture-value",
+      "state": "pending",
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "lark_base_write_photos": [
+    {
+      "_id": "fixture-value",
+      "photo_key": "fixture-value",
+      "user_id": "fixture-value",
+      "write_id": "fixture-value",
+      "attempt": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "lark_base_writes": [
+    {
+      "_id": "fixture-value",
+      "key": "fixture-value",
+      "user_id": "fixture-value",
+      "attempt": "fixture-value",
+      "state": "uploading",
+      "principal": {
+        "user_service_id": "fixture-value",
+        "credential_id": "fixture-value",
+        "epoch": 1
+      },
+      "contract_digests": {},
+      "upload_ids": [],
+      "files": [],
+      "logical_request_sha256": "fixture-value",
+      "client_token": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deadline_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "login_approvals": [
+    {
+      "_id": "fixture-value",
+      "browser_hash": "fixture-value",
+      "flow": "device",
+      "user_code": "fixture-value",
+      "request_id": "fixture-value",
+      "keep_signed_in": true,
+      "user_id": "fixture-value",
+      "verified": true,
+      "mfa_verified": true,
+      "closed": true,
+      "attempts": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "protocol": null
+    }
+  ],
+  "login_codes": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "code_hmac": "fixture-value",
+      "status": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "machine_confirmations": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "node_id": "fixture-value",
+      "principal": {
+        "kind": "oauth",
+        "user_id": "fixture-value",
+        "oauth_client_id": "fixture-value"
+      },
+      "grant_id": "fixture-value",
+      "grant_revision": 1,
+      "assignment_revision": 1,
+      "runtime_id": "fixture-value",
+      "operation": "exec",
+      "parameters_digest": "fixture-value",
+      "binding_digest": "fixture-value",
+      "state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "machine_free_slots": [
+    {
+      "_id": "fixture-value",
+      "machine_id": "fixture-value",
+      "state": "reserved",
+      "revision": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "machine_jobs": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "node_id": "fixture-value",
+      "state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "machine_orphan_inventory": [
+    {
+      "owner_id": "fixture-value",
+      "machine_id": "fixture-value",
+      "state": "fixture-value",
+      "reason": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_seen_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "mcp_session_notifications": [
+    {
+      "_id": "fixture-value",
+      "session_id": "fixture-value",
+      "sequence": 1,
+      "payload": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "mcp_session_slots": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "session_id": "fixture-value",
+      "slot": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "mfa_challenges": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "token_hash": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "revoked": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_active_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "mfa_factors": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "factor_type": "fixture-value",
+      "is_verified": true,
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "node_registration_tokens": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "token_hash": "fixture-value",
+      "name": "fixture-value",
+      "used": true,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "name": "fixture-value",
+      "status": "online",
+      "auth_token_hash": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "notification_channels": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_channels": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "platform": "fixture-value",
+      "bot_label": "fixture-value",
+      "transport": "fixture-value",
+      "status": "fixture-value",
+      "route_api_key_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_event_bindings": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "agent_owner_id": "fixture-value",
+      "destination_channel_id": "fixture-value",
+      "destination_partition": "fixture-value",
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_events": [
+    {
+      "_id": "fixture-value",
+      "channel_id": "fixture-value",
+      "user_id": "fixture-value",
+      "partition": "fixture-value",
+      "event_id": "fixture-value",
+      "status": "fixture-value",
+      "conversation_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_gateway_responses": [
+    {
+      "_id": "fixture-value",
+      "response_id": "fixture-value",
+      "user_id": "fixture-value",
+      "channel_id": "fixture-value",
+      "binding_id": "fixture-value",
+      "partition": "fixture-value",
+      "event_key": "fixture-value",
+      "request_hash": "fixture-value",
+      "conversation_id": "fixture-value",
+      "terminal": true,
+      "revision": 1,
+      "payload_ciphertext": [],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_image_deliveries": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "attachment_id": "fixture-value",
+      "audience_key": "fixture-value",
+      "state": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_image_deliveries_v2": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "attachment_id": "fixture-value",
+      "audience_key": "fixture-value",
+      "state": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_threads": [
+    {
+      "_id": "fixture-value",
+      "channel_id": "fixture-value",
+      "user_id": "fixture-value",
+      "partition": "fixture-value",
+      "conversation_id": "fixture-value",
+      "kind": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "nyxbot_watches": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "kind": "fixture-value",
+      "conversation_id": "fixture-value",
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oauth_broker_bindings": [
+    {
+      "_id": "fixture-value",
+      "client_id": "fixture-value",
+      "user_id": "fixture-value",
+      "refresh_token_jti": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oauth_clients": [
+    {
+      "_id": "fixture-value",
+      "client_name": "fixture-value",
+      "client_secret_hash": "fixture-value",
+      "redirect_uris": [
+        "fixture-value"
+      ],
+      "allowed_scopes": "fixture-value",
+      "grant_types": "fixture-value",
+      "client_type": "fixture-value",
+      "is_active": true,
+      "delegation_scopes": "fixture-value",
+      "default_service_catalog_slugs": [
+        "fixture-value"
+      ],
+      "broker_capability_enabled": true,
+      "revocation_webhook_url": "fixture-value",
+      "connection_webhook_url": "fixture-value",
+      "connection_webhook_enabled": true,
+      "created_by": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oauth_consent_requests": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "signed_request": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oauth_delegation_authorities": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "actor_client_id": "fixture-value",
+      "scope": "fixture-value",
+      "claims_fingerprint": "fixture-value",
+      "consents": [],
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oauth_states": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "provider_config_id": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "openclaw_channel_mappings": [
+    {
+      "_id": "fixture-value",
+      "channel": "fixture-value",
+      "channel_user_id": "fixture-value",
+      "nyxid_user_id": "fixture-value",
+      "webhook_secret_hash": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_pools": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "slug": "fixture-value",
+      "name": "fixture-value",
+      "visibility": "private",
+      "worker_token_hash": "fixture-value",
+      "max_workers": 1,
+      "max_queue_length": 1,
+      "per_user_max_inflight": 1,
+      "task_timeout_secs": 1,
+      "is_active": true,
+      "deleted_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "org_invites": [
+    {
+      "_id": "fixture-value",
+      "org_user_id": "fixture-value",
+      "nonce": "fixture-value",
+      "role": "admin",
+      "created_by": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "org_memberships": [
+    {
+      "_id": "fixture-value",
+      "org_user_id": "fixture-value",
+      "member_user_id": "fixture-value",
+      "role": "admin",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "permission_key_policies": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "user_service_id": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "execution_authority_digest": "fixture-value",
+      "policy": {
+        "version": 1,
+        "name": "Fixture",
+        "provider": "google",
+        "resource": {
+          "type": "google_drive_folder",
+          "root_folder_id": "root",
+          "include_descendants": true
+        },
+        "allowed_operations": []
+      },
+      "paused": true,
+      "revision": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_bot_cleanup": [
+    {
+      "_id": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "kind": "fixture-value",
+      "resource_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "completed": true,
+      "retry_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_bot_configs": [
+    {
+      "_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "manager_bot_id": "fixture-value",
+      "observation_id": "fixture-value",
+      "execution_profile": "platform_onboarding",
+      "generation": 1,
+      "enabled": true,
+      "funding_owner_user_id": "fixture-value",
+      "configured_by": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deleted_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_bot_installations": [
+    {
+      "_id": "fixture-value",
+      "setup_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "agent_id": "fixture-value",
+      "generation": 1,
+      "state": "fixture-value",
+      "authority": {
+        "setup_id": "fixture-value",
+        "owner_user_id": "fixture-value",
+        "setup_revision": 1,
+        "digest": "fixture-value",
+        "authority_generation": 1,
+        "platform_config_id": "fixture-value",
+        "profile_generation": 1,
+        "binding_id": "fixture-value",
+        "binding_generation": 1,
+        "manager_bot_id": 1,
+        "telegram_sender_id": 1,
+        "step": "begin_telegram"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_delivery_tests": [
+    {
+      "_id": "fixture-value",
+      "installation_id": "fixture-value",
+      "installation_generation": 1,
+      "setup_revision": 1,
+      "digest": "fixture-value",
+      "customer_sender_id": "fixture-value",
+      "customer_chat_id": "fixture-value",
+      "challenge_hmac": "fixture-value",
+      "state": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_discord_control_installation_history": [
+    {
+      "_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "attempt_id": "fixture-value",
+      "requested_by": "fixture-value",
+      "credential_fingerprint": "fixture-value",
+      "platform_bot_id": "fixture-value",
+      "application_id": "fixture-value",
+      "schema_digest": "fixture-value",
+      "state": "prepared",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "dispatch_deadline": null
+    }
+  ],
+  "platform_discord_control_installations": [
+    {
+      "_id": "fixture-value",
+      "channel_bot_id": "fixture-value",
+      "attempt_id": "fixture-value",
+      "requested_by": "fixture-value",
+      "credential_fingerprint": "fixture-value",
+      "platform_bot_id": "fixture-value",
+      "application_id": "fixture-value",
+      "schema_digest": "fixture-value",
+      "state": "prepared",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "dispatch_deadline": null
+    }
+  ],
+  "platform_guide_selections": [
+    {
+      "binding_id": "fixture-value",
+      "generation": 1,
+      "setup_id": "fixture-value",
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_native_replies": [
+    {
+      "source_id": "fixture-value",
+      "kind": "fixture-value",
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_onboarding_binding_requests": [
+    {
+      "_id": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "manager_bot_id": "fixture-value",
+      "profile_generation": 1,
+      "telegram_sender_id": "fixture-value",
+      "telegram_chat_id": "fixture-value",
+      "code_hmac": "fixture-value",
+      "initiation_ref": 1,
+      "state": "pending",
+      "approved_user_id": "fixture-value",
+      "replace_existing": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_onboarding_bindings": [
+    {
+      "_id": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "manager_bot_id": "fixture-value",
+      "profile_generation": 1,
+      "telegram_sender_id": "fixture-value",
+      "telegram_chat_id": "fixture-value",
+      "user_id": "fixture-value",
+      "generation": 1,
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_personal_decision_spacing": [
+    {
+      "last_decision_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "_id": "fixture-person"
+    }
+  ],
+  "platform_personal_setup_selections": [
+    {
+      "_id": "fixture-value",
+      "binding_generation": 1,
+      "user_id": "fixture-value",
+      "setup_id": "fixture-value",
+      "setup_revision": 1,
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_personal_stop_effects": [
+    {
+      "_id": "fixture-value",
+      "active_turn": {
+        "conversation_id": "fixture-value",
+        "turn_id": "fixture-value",
+        "origin": {
+          "platform_config_id": "fixture-value",
+          "manager_bot_id": "1",
+          "telegram_bot_id": 1,
+          "manager_authority_epoch": 1,
+          "telegram_sender_id": 1,
+          "telegram_chat_id": 1,
+          "binding_id": "fixture-value",
+          "binding_generation": 1,
+          "personal_control_revision": 1,
+          "user_id": "fixture-value",
+          "nyxbot_agent_id": "fixture-value",
+          "source": {
+            "kind": "ingress",
+            "receipt_id": "fixture-value",
+            "claim_id": "fixture-value"
+          }
+        }
+      },
+      "machine_jobs": [],
+      "machine_scopes": [],
+      "stop_requested_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "completed": true,
+      "retry_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "lease_expires_at": null
+    }
+  ],
+  "platform_public_deployment_activations": [
+    {
+      "_id": "fixture-value",
+      "binding": {
+        "profile_id": "fixture-value",
+        "manager_bot_id": "1",
+        "telegram_bot_id": 1,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "fixture-value",
+        "candidate_digest": "fixture-value"
+      },
+      "policy_digest": "fixture-value",
+      "activated_by": "fixture-value",
+      "effect_revision": 1,
+      "activated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_public_deployment_proofs": [
+    {
+      "_id": "fixture-value",
+      "profile_id": "fixture-value",
+      "public_policy_revision": 1,
+      "candidate_digest": "fixture-value",
+      "status": "fixture-value",
+      "proof_gaps": [],
+      "effect_revision": 1,
+      "checked_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_public_probe_consents": [
+    {
+      "_id": "fixture-value",
+      "binding": {
+        "profile_id": "fixture-value",
+        "manager_bot_id": "1",
+        "telegram_bot_id": 1,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "fixture-value",
+        "candidate_digest": "fixture-value"
+      },
+      "actor_user_id": "fixture-value",
+      "profile_generation": 1,
+      "manager_authority_epoch": 1,
+      "personal_control_revision": 1,
+      "public_policy_revision": 1,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_public_readiness_probes": [
+    {
+      "_id": "fixture-value",
+      "binding": {
+        "profile_id": "fixture-value",
+        "manager_bot_id": "1",
+        "telegram_bot_id": 1,
+        "manager_authority_epoch": 1,
+        "public_policy_revision": 1,
+        "sponsor_owner_user_id": "fixture-value",
+        "candidate_digest": "fixture-value"
+      },
+      "selected_profile": "fixture-value",
+      "manifest": {
+        "contract": "fixture-value",
+        "build": "fixture-value",
+        "runtime_digest": "fixture-value",
+        "model_contract": "fixture-value",
+        "cleanup_contract": "fixture-value",
+        "tool_contract": "fixture-value",
+        "credential_bound": true,
+        "callback_only": true,
+        "bounded_compaction": true,
+        "absolute_expiry": true,
+        "cleanup_after_revocation": true,
+        "native_tools_disabled": true,
+        "provider_tools_disabled": true,
+        "profiles": []
+      },
+      "nyxagent_service_id": "fixture-value",
+      "nyxagent_catalog_digest": "fixture-value",
+      "operation": {
+        "service_id": "fixture-value",
+        "operation": "fixture-value",
+        "method": "fixture-value",
+        "canonical_path": "fixture-value",
+        "protocol": "fixture-value",
+        "execution_authority_digest": "fixture-value",
+        "endpoint_generation": 1,
+        "endpoint_set_digest": "fixture-value",
+        "model_id": "fixture-value",
+        "max_input_bytes": 1,
+        "max_input_tokens": 1,
+        "max_output_tokens": 1,
+        "max_response_bytes": 1
+      },
+      "request_digest": "fixture-value",
+      "route_digest": "fixture-value",
+      "pricing_digest": "fixture-value",
+      "meter_row_ids": [],
+      "bucket_id": "fixture-value",
+      "state": "fixture-value",
+      "maximum": {
+        "$numberDecimal": "10"
+      },
+      "exact_model_observed": true,
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_setup_notices": [
+    {
+      "_id": "fixture-value",
+      "setup_id": "fixture-value",
+      "revision": 1,
+      "authority_generation": 1,
+      "kind": "fixture-value",
+      "binding_id": "fixture-value",
+      "binding_generation": 1,
+      "profile_id": "fixture-value",
+      "profile_generation": 1,
+      "completed": true,
+      "attempts": 1,
+      "retry_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_setup_steps": [
+    {
+      "_id": "fixture-value",
+      "setup_id": "fixture-value",
+      "authority": {
+        "setup_id": "fixture-value",
+        "owner_user_id": "fixture-value",
+        "setup_revision": 1,
+        "digest": "fixture-value",
+        "authority_generation": 1,
+        "platform_config_id": "fixture-value",
+        "profile_generation": 1,
+        "binding_id": "fixture-value",
+        "binding_generation": 1,
+        "manager_bot_id": 1,
+        "telegram_sender_id": 1,
+        "step": "begin_telegram"
+      },
+      "phase": "fixture-value",
+      "generation": 1,
+      "attempts": 1,
+      "retry_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_setups": [
+    {
+      "_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "source": "fixture-value",
+      "idempotency_key": "fixture-value",
+      "idempotency_scope": "fixture-value",
+      "template": "telegram-assistant",
+      "template_version": 1,
+      "revision": 1,
+      "authority_generation": 1,
+      "state": "draft",
+      "facts_ciphertext": [],
+      "limits": {
+        "daily_credits": {
+          "$numberDecimal": "10"
+        },
+        "turns_per_hour": 1,
+        "concurrent_turns": 1,
+        "max_input_chars": 1,
+        "max_output_tokens": 1
+      },
+      "resources": {},
+      "delivery_tested": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "refresh_tokens": [
+    {
+      "_id": "fixture-value",
+      "jti": "fixture-value",
+      "client_id": "fixture-value",
+      "user_id": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "revoked": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "saved_logins": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "allowed_origins": [],
+      "username_encrypted": [],
+      "username_hint": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "service_account_key_read_grants": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "targets": [],
+      "issued_by": "fixture-value",
+      "issued_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "service_accounts": [
+    {
+      "_id": "fixture-value",
+      "name": "fixture-value",
+      "description": "fixture-value",
+      "client_id": "fixture-value",
+      "client_secret_hash": "fixture-value",
+      "secret_prefix": "fixture-value",
+      "role_ids": [
+        "fixture-value"
+      ],
+      "allowed_scopes": "fixture-value",
+      "is_active": true,
+      "purpose": "general",
+      "rate_limit_override": 1,
+      "created_by": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_authenticated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "service_approval_configs": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "service_name": "fixture-value",
+      "approval_required": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "service_change_events": [
+    {
+      "_id": "fixture-value",
+      "schema_version": 1,
+      "service_sequence": 1,
+      "service_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "change_group_id": "fixture-value",
+      "entity_type": "fixture-value",
+      "entity_id": "fixture-value",
+      "action": "fixture-value",
+      "actor": {
+        "kind": "person",
+        "id": "fixture-value",
+        "name": "fixture-value",
+        "person_id": "fixture-value",
+        "app_id": "fixture-value"
+      },
+      "operation": "fixture-value",
+      "committed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "changes": [],
+      "additional_changes": true
+    }
+  ],
+  "service_pool_member_health": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "user_service_id": "fixture-value",
+      "owner_id": "fixture-value",
+      "credential_identity": "fixture-value",
+      "destination_fingerprint": "fixture-value",
+      "config_fingerprint": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_failure_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "cooldown_until": null
+    }
+  ],
+  "service_pools": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "slug": "fixture-value",
+      "name": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "service_preferences": [
+    {
+      "_id": "fixture-value",
+      "ordered": [
+        "fixture-value"
+      ],
+      "version": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "purpose": "authenticated",
+      "token_hash": "fixture-value",
+      "ip_address": "fixture-value",
+      "user_agent": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "revoked": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_active_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "telegram_bot_claims": [
+    {
+      "_id": "fixture-value",
+      "code_hash": "fixture-value",
+      "manager_bot_id": 1,
+      "telegram_bot_id": 1,
+      "telegram_user_id": 1,
+      "bot_username": "fixture-value",
+      "observation_id": "fixture-value",
+      "manager_revision": 1,
+      "status": "pending",
+      "actor_user_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "delivered": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "telegram_bot_requests": [
+    {
+      "_id": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "manager_bot_id": 1,
+      "observation_id": "fixture-value",
+      "label": "fixture-value",
+      "destination": "fixture-value",
+      "status": "waiting_telegram",
+      "active": true,
+      "revision": 1,
+      "challenge_hash": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "telegram_managed_bot_events": [
+    {
+      "_id": "fixture-value",
+      "manager_bot_id": 1,
+      "telegram_bot_id": 1,
+      "telegram_user_id": 1,
+      "revision": 1,
+      "update_ids": [],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "trigger_deliveries": [
+    {
+      "_id": "fixture-value",
+      "trigger_id": "fixture-value",
+      "user_id": "fixture-value",
+      "event_id": "fixture-value",
+      "status": "pending",
+      "attempts": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "trigger_owner_limits": [
+    {
+      "version": 1,
+      "_id": "fixture-person"
+    }
+  ],
+  "trigger_runs": [
+    {
+      "_id": "fixture-value",
+      "trigger_id": "fixture-value",
+      "user_id": "fixture-value",
+      "scheduled_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deadline": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "outcome": "pending",
+      "fence": "fixture-value",
+      "lease_until": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "trigger_work": [
+    {
+      "trigger_id": "fixture-value",
+      "user_id": "fixture-value",
+      "kind": "fixture-value",
+      "at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "triggers": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "webhook",
+        "url": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "agent",
+        "conversation_id": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "notification"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "assistant",
+        "confirmation_policy": "changes",
+        "agent_id": "fixture-value",
+        "thread_policy": null,
+        "instruction": "fixture-value",
+        "deliver_to": {
+          "type": "thread"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "webhook",
+        "url": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "agent",
+        "conversation_id": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "notification"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "assistant",
+        "confirmation_policy": "changes",
+        "agent_id": "fixture-value",
+        "thread_policy": null,
+        "instruction": "fixture-value",
+        "deliver_to": {
+          "type": "thread"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "webhook",
+        "url": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "agent",
+        "conversation_id": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "notification"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "cron",
+        "expression": "fixture-value",
+        "timezone": "fixture-value",
+        "start": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "end": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        },
+        "max_runs": 1,
+        "grace_seconds": 1
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "assistant",
+        "confirmation_policy": "changes",
+        "agent_id": "fixture-value",
+        "thread_policy": null,
+        "instruction": "fixture-value",
+        "deliver_to": {
+          "type": "thread"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "every",
+        "amount": 1,
+        "unit": "hours",
+        "anchor": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        }
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "webhook",
+        "url": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    },
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "status": "active",
+      "source": "webhook",
+      "schedule": {
+        "kind": "at",
+        "at": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        }
+      },
+      "schedule_state": {},
+      "overlap": "skip",
+      "secret_hash": "fixture-value",
+      "verification": {
+        "mode": "schedule"
+      },
+      "delivery": {
+        "type": "webhook",
+        "url": "fixture-value"
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "usage_meter": [
+    {
+      "_id": "fixture-value",
+      "transaction_id": "fixture-value",
+      "billing_request_id": "fixture-value",
+      "layer": "platform",
+      "billing_owner_id": "fixture-value",
+      "actor_user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "service_slug": "fixture-value",
+      "metric": "tokens",
+      "lago_metric_code": "fixture-value",
+      "credential_class": "nyxid_managed_master",
+      "quantity": 1,
+      "status": "reserved",
+      "forwarded": true,
+      "released": true,
+      "lago_acked": true,
+      "attempt": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "usage_workspaces": [
+    {
+      "_id": "fixture-value",
+      "revision": 1,
+      "config": "fixture-value",
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "user_api_keys": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "credential_type": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "user_endpoints": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "label": "fixture-value",
+      "url": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "openapi_spec_url": "fixture-value",
+      "recommended_skills": [
+        "fixture-value"
+      ],
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "user_provider_credentials": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "provider_config_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "user_provider_tokens": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "provider_config_id": "fixture-value",
+      "token_type": "fixture-value",
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "status": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "user_service_connections": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "service_id": "fixture-value",
+      "credential_type": "fixture-value",
+      "credential_label": "fixture-value",
+      "metadata": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "credential_encrypted": null
+    }
+  ],
+  "user_services": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "slug": "fixture-value",
+      "endpoint_id": "fixture-value",
+      "auth_method": "fixture-value",
+      "auth_key_name": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "service_type": "fixture-value",
+      "is_active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "assistant_voice_sessions": [
+    {
+      "responses": "Disabled",
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "client_request_id": "fixture-value",
+      "preferences": {
+        "service_id": "fixture-value",
+        "key_source": "platform",
+        "model": "fixture-value"
+      },
+      "protocol": "openai_live",
+      "dictation": true,
+      "measured_ms": 1,
+      "state": "starting",
+      "live_slot": true,
+      "generation": 1,
+      "lease_owner": "fixture-value",
+      "lease_until": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deadline": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_user_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "heartbeat_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "closed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "credential_identity": "fixture-value",
+      "desired_muted": true,
+      "end_requested": true,
+      "observed_seconds": 1,
+      "reserved_until": 1,
+      "final_usage_confirmed": true,
+      "billing_finalized": true,
+      "playback_ms": 1,
+      "playback_revision": 1,
+      "control_revision": 1,
+      "notify_on_completion": true,
+      "reconcile_deadline": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "generated_artifact_content_series": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "catalog_service_id": "fixture-value",
+      "source_path_sha256": "fixture-value",
+      "sha256": "fixture-value",
+      "revision": 1,
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_login_snapshots": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "format_version": 1,
+      "encrypted_envelope": [],
+      "envelope_size": 1,
+      "created_by_user_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_sessions": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "owner_user_id": "fixture-value",
+      "origin": "fixture-value",
+      "tag": "fixture-value",
+      "chatgpt_url": "fixture-value",
+      "owner_worker_label": "fixture-value",
+      "turn_count": 1,
+      "last_task_id": "fixture-value",
+      "closed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_tasks": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "submitter_user_id": "fixture-value",
+      "kind": "fixture-value",
+      "target_url": "fixture-value",
+      "prompt": "fixture-value",
+      "model_label": "fixture-value",
+      "project_url": "fixture-value",
+      "tag": "fixture-value",
+      "pdf_name": "fixture-value",
+      "attachment_name": "fixture-value",
+      "conversation_id": "fixture-value",
+      "required_worker_label": "fixture-value",
+      "status": "queued",
+      "phase": "fixture-value",
+      "phase_detail": "fixture-value",
+      "response": "fixture-value",
+      "response_chars": 1,
+      "chatgpt_url": "fixture-value",
+      "failure_reason": "fixture-value",
+      "observed_model_switcher": "fixture-value",
+      "observed_model_effort": "fixture-value",
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_worker_commands": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "worker_label": "fixture-value",
+      "kind": "drain",
+      "status": "queued",
+      "created_by_user_id": "fixture-value",
+      "required_capability": "fixture-value",
+      "delivery_count": 1,
+      "result_code": "fixture-value",
+      "bundle_version": "fixture-value",
+      "delivered_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "completed_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "deadline_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "oracle_workers": [
+    {
+      "_id": "fixture-value",
+      "pool_id": "fixture-value",
+      "worker_label": "fixture-value",
+      "generation": "fixture-value",
+      "last_seen_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "current_task_id": "fixture-value",
+      "script_version": "fixture-value",
+      "page_url": "fixture-value",
+      "first_seen_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "provisioned_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "enrollment": {
+        "owner_user_id": "fixture-value",
+        "credential_hash": "fixture-value",
+        "pool_token_hash": "fixture-value"
+      },
+      "platform": "fixture-value",
+      "capabilities": [
+        "fixture-value"
+      ],
+      "desired_state": "active",
+      "logged_in": true,
+      "chrome_alive": true,
+      "last_error": "fixture-value",
+      "cooldown_until": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "org_channel_lanes": [
+    {
+      "actor_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "org_channel_link_challenges": [
+    {
+      "user_id": "fixture-value",
+      "org_id": "fixture-value",
+      "state": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "org_channel_messages": [
+    {
+      "author_user_id": "fixture-value",
+      "_id": "fixture-value",
+      "group_id": "fixture-value",
+      "user_id": "fixture-value",
+      "seq": 1,
+      "role": "fixture-value",
+      "text": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "channel_id": "fixture-value",
+      "conversation_id": "fixture-value",
+      "actor_id": "fixture-value"
+    }
+  ],
+  "org_channel_sender_links": [
+    {
+      "_id": "fixture-value",
+      "channel_id": "fixture-value",
+      "org_id": "fixture-value",
+      "revision": "fixture-value",
+      "binding_revision": "fixture-value",
+      "sender_hash": "fixture-value",
+      "user_id": "fixture-value",
+      "active": true,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_personal_bindings": [
+    {
+      "_id": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "manager_bot_id": "1",
+      "telegram_bot_id": 1,
+      "manager_authority_epoch": 1,
+      "telegram_sender_id": 1,
+      "telegram_chat_id": 1,
+      "user_id": "fixture-value",
+      "generation": 1,
+      "state": "active",
+      "consent_version": 1,
+      "review_digest": "fixture-value",
+      "reviewed_access_mode": "fixture-value",
+      "conversation_id": "fixture-value",
+      "effect_revision": 1,
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "consented_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "revoked_at": null
+    }
+  ],
+  "platform_personal_link_challenges": [
+    {
+      "_id": "fixture-value",
+      "intent_id": "fixture-value",
+      "purpose": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "manager_bot_id": "1",
+      "telegram_bot_id": 1,
+      "manager_authority_epoch": 1,
+      "telegram_sender_id": 1,
+      "telegram_chat_id": 1,
+      "reviewed_user_id": "fixture-value",
+      "reviewed_access_mode": "fixture-value",
+      "consent_version": 1,
+      "review_digest": "fixture-value",
+      "state": "review",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "platform_personal_link_intents": [
+    {
+      "_id": "fixture-value",
+      "purpose": "fixture-value",
+      "platform_config_id": "fixture-value",
+      "manager_bot_id": "1",
+      "telegram_bot_id": 1,
+      "manager_authority_epoch": 1,
+      "telegram_sender_id": 1,
+      "telegram_chat_id": 1,
+      "initiation_ref": "fixture-value",
+      "token_lookup_hmac": "fixture-value",
+      "token_hmac": "fixture-value",
+      "state": "pending",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "purge_after": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "users": [
+    {
+      "_id": "fixture-value",
+      "email": "fixture-value",
+      "display_name": "fixture-value",
+      "avatar_url": "fixture-value",
+      "email_verified": true,
+      "is_active": true,
+      "is_admin": true,
+      "mfa_enabled": true,
+      "social_provider": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "last_login_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "profile_config": {
+        "security": {
+          "skip_mfa_for_approved_sign_ins": true
+        },
+        "analytics": {
+          "enabled": true
+        },
+        "onboarding": {
+          "ai_services_completed_at": {
+            "$date": {
+              "$numberLong": "1700000000000"
+            }
+          }
+        },
+        "services_view": {
+          "search": "fixture-value",
+          "source": "all",
+          "state": "all",
+          "service_type": "all",
+          "show_auto_connected": true
+        },
+        "service_views": {
+          "views": []
+        }
+      }
+    }
+  ],
+  "audit_log": [
+    {
+      "_id": "fixture-value",
+      "event_type": "fixture-value",
+      "created_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
+  "client_error_reports": [
+    {
+      "_id": "fixture-value",
+      "user_id": "fixture-value",
+      "event_id": "fixture-value",
+      "consent_revision": "consent-sentinel",
+      "report": {
+        "schema_version": 1,
+        "event_id": "fixture-value",
+        "captured_at": "2023-11-14T22:13:20Z",
+        "platform": "ios",
+        "kind": "native_crash",
+        "exception_class": "Error",
+        "native_signal": "SIGSEGV",
+        "app_version": "1.2.3",
+        "app_build": "123",
+        "artifact_id": "artifact-sentinel",
+        "os_version": "18",
+        "runtime": {
+          "name": "hermes",
+          "major": 1
+        },
+        "js_frames": [
+          {
+            "asset": "frame-sentinel",
+            "line": 1,
+            "column": 2
+          }
+        ],
+        "native_images": [
+          {
+            "uuid": "image-sentinel",
+            "name": "image",
+            "size": 10
+          }
+        ],
+        "native_frames": [
+          {
+            "image": 0,
+            "offset": 1
+          }
+        ]
+      },
+      "environment": "prod",
+      "severity": "fatal",
+      "fingerprint": "fingerprint-sentinel",
+      "received_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "expires_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      },
+      "export": {
+        "status": "pending",
+        "destination_id": "delivery-sentinel",
+        "deadline": {
+          "$date": {
+            "$numberLong": "1700000000000"
+          }
+        }
+      }
+    }
+  ]
+}

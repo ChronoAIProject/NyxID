@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Pressable, StyleSheet, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
@@ -16,6 +19,7 @@ export function AssistantCopyButton({
   afterDate?: boolean;
   foreground?: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [copiedText, setCopiedText] = useState<string>();
   const [copying, setCopying] = useState(false);
@@ -34,20 +38,23 @@ export function AssistantCopyButton({
   if (!text.trim()) return null;
   const copied = copiedText === text;
   const label = copied
-    ? "Copied"
+    ? translateApp("Copied")
     : partial
-      ? "Copy response so far"
-      : "Copy message";
+      ? translateApp("Copy response so far")
+      : translateApp("Copy message");
   async function copy() {
     if (copying) return;
     setCopying(true);
     try {
       const success = await Clipboard.setStringAsync(text);
-      if (!success) throw new Error("Clipboard unavailable");
+      if (!success) throw localizedError("Clipboard unavailable");
       if (mounted.current) setCopiedText(text);
     } catch {
       if (mounted.current)
-        Alert.alert("Couldn't copy message", "Please try again.");
+        Alert.alert(
+          translateApp("Couldn't copy message"),
+          translateApp("Please try again."),
+        );
     } finally {
       if (mounted.current) setCopying(false);
     }
@@ -58,8 +65,10 @@ export function AssistantCopyButton({
       accessibilityLabel={label}
       accessibilityHint={
         partial
-          ? "Copy the response text received so far to the clipboard"
-          : "Copy this message to the clipboard"
+          ? translateApp(
+              "Copy the response text received so far to the clipboard",
+            )
+          : translateApp("Copy this message to the clipboard")
       }
       accessibilityState={{ disabled: copying }}
       disabled={copying}

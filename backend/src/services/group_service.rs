@@ -223,15 +223,12 @@ pub async fn add_member_as(
     let joined_at = Utc::now();
     audit::user_group(db, user_id, group_id, audit::Membership::Add, actor).await?;
 
-    if let Err(error) = crate::services::billing::schedules::recipients::enroll_group_member(
+    // Membership succeeded; scheduled credits are best effort and never turn
+    // a successful join into an error. Discovery or admin seeding recovers.
+    crate::services::billing::schedules::eligibility::after_group_joined(
         db, group_id, user_id, joined_at,
     )
-    .await
-    {
-        // Membership succeeded. The bounded billing discovery walk repairs a
-        // missed enrollment without turning a successful join into an error.
-        tracing::warn!(%error, "Credit schedule enrollment deferred to billing reconciliation");
-    }
+    .await;
     Ok(())
 }
 

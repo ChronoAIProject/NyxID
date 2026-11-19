@@ -61,30 +61,69 @@ pub(crate) fn identifier_list(
     name: &'static str,
     ids: &[String],
 ) -> serde_json::Map<String, serde_json::Value> {
-    let mut kept = Vec::new();
-    let mut bytes = 5; // BSON document length and trailing zero.
-    for id in ids {
+    bounded_identifier_list(name, ids.iter().map(|id| [id.as_str()]), |[id]| {
         let value = text(TextField::Identifier, id);
-        // Type byte + decimal index cstring + string length + string terminator.
-        let element_bytes = 7 + kept.len().to_string().len() + value.len();
-        if bytes + element_bytes > MAX_IDENTIFIER_LIST_BYTES {
-            break;
+        let bytes = 5 + value.len(); // BSON string length, bytes, terminator.
+        (value.into(), bytes)
+    })
+}
+
+/// The same list budget for ordered pairs of identifiers, preserving each
+/// record's field names. The digest joins all original IDs in record/field
+/// order with newlines, just as the scalar form does.
+pub(crate) fn identifier_pairs(
+    name: &'static str,
+    keys: [&'static str; 2],
+    pairs: &[(&str, &str)],
+) -> serde_json::Map<String, serde_json::Value> {
+    bounded_identifier_list(name, pairs.iter().map(|(a, b)| [*a, *b]), |ids| {
+        let mut value = serde_json::Map::new();
+        let mut bytes = 5; // BSON embedded document length and terminator.
+        for (key, id) in keys.into_iter().zip(ids) {
+            let id = text(TextField::Identifier, id);
+            bytes += key.len() + 7 + id.len(); // Type, key cstring, string length and terminator.
+            value.insert(key.into(), id.into());
         }
-        bytes += element_bytes;
-        kept.push(value);
-    }
-    let shortened = kept.len() != ids.len();
-    let mut fields = serde_json::Map::new();
-    fields.insert(name.to_owned(), serde_json::json!(kept));
-    if shortened {
-        let mut digest = Sha256::new();
-        for (index, id) in ids.iter().enumerate() {
-            if index != 0 {
+        (value.into(), bytes)
+    })
+}
+
+fn bounded_identifier_list<'a, const N: usize>(
+    name: &'static str,
+    entries: impl IntoIterator<Item = [&'a str; N]>,
+    render: impl Fn([&'a str; N]) -> (serde_json::Value, usize),
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut kept = Vec::new();
+    let mut bytes = 5;
+    let mut count = 0_usize;
+    let mut digest = Sha256::new();
+    let mut first_id = true;
+    let mut full = false;
+    for ids in entries {
+        count += 1;
+        for id in ids {
+            if !first_id {
                 digest.update(b"\n");
             }
+            first_id = false;
             digest.update(id.as_bytes());
         }
-        fields.insert(format!("{name}_count"), ids.len().into());
+        if !full {
+            let (value, value_bytes) = render(ids);
+            let element_bytes = 2 + kept.len().to_string().len() + value_bytes;
+            if bytes + element_bytes <= MAX_IDENTIFIER_LIST_BYTES {
+                bytes += element_bytes;
+                kept.push(value);
+            } else {
+                full = true;
+            }
+        }
+    }
+    let shortened = kept.len() != count;
+    let mut fields = serde_json::Map::new();
+    fields.insert(name.into(), kept.into());
+    if shortened {
+        fields.insert(format!("{name}_count"), count.into());
         fields.insert(format!("{name}_truncated"), true.into());
         fields.insert(
             format!("{name}_sha256"),

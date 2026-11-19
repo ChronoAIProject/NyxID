@@ -22,9 +22,34 @@ use mongodb::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "nyxbot_gateway_release_recovery.rs"]
+mod recovery;
+use recovery::Answer;
+pub(crate) use recovery::reason as diagnostic_reason;
+
 const MIGRATIONS: &str = "schema_migrations";
 /// Shared by the provisional deadline and stale transport-move selection.
 pub(crate) const SETUP_MINUTES: i64 = 30;
+pub(crate) const ACCEPTED_RELEASE_RESOLUTIONS: &[&str] = &[
+    "released",
+    "missing",
+    "cancelled",
+    "not_created",
+    "confirmed_missing",
+];
+
+pub(crate) fn accepted_resolutions_bson() -> bson::Bson {
+    bson::Bson::Array(
+        ACCEPTED_RELEASE_RESOLUTIONS
+            .iter()
+            .map(|value| bson::Bson::String((*value).to_owned()))
+            .collect(),
+    )
+}
+
+pub(crate) fn is_accepted_resolution(value: Option<&str>) -> bool {
+    value.is_some_and(|value| ACCEPTED_RELEASE_RESOLUTIONS.contains(&value))
+}
 const UNCERTAIN_HOURS: i64 = 24;
 const BINDING_REPAIR_WINDOW_MINUTES: i64 = 15;
 const BINDING_REPAIR_REFUSED_HOURS: i64 = 6;
@@ -66,6 +91,9 @@ fn encoded(value: &str) -> String {
 pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     for keys in [
         doc! {"state":1,"next_attempt_at":1,"lease_until":1,"_id":1},
+        // Recovery filters platform/guard/state/resolution before examining due
+        // timestamps; settled successes are excluded by the resolution bounds.
+        doc! {"platform":1,"native_drain_for":1,"state":1,"resolution":1,"next_attempt_at":1,"_id":1},
         doc! {"state":1,"provisional_expires_at":1,"_id":1},
         doc! {"state":1,"native_checked_at":1},
         doc! {"channel_id":1,"state":1},
@@ -226,6 +254,9 @@ async fn new_release(
         lease_until: None,
         revision: 0,
         last_error: None,
+        review_reason: None,
+        last_gateway_answer: None,
+        failure_audit: None,
         observed_version: None,
         resolution: None,
         reviewed_by: None,
@@ -617,7 +648,7 @@ pub(crate) async fn retire_attempt(
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
             let mut filter=doc! {"_id":&id,"$or":[{"state":{"$in":["provisional","due","review_required"]}},
-                {"state":"settled","resolution":{"$in":["not_created","cancelled","released","missing","confirmed_missing"]}}]};
+                {"state":"settled"}]};
             if reason==ReleaseReason::StaleSetup {filter.insert("$expr",doc! {"$lte":[{"$ifNull":["$provisional_expires_at",{"$dateAdd":{"startDate":"$updated_at","unit":"minute","amount":SETUP_MINUTES}}]},"$$NOW"]});}
             let Some(release)=db.collection::<Release>(RELEASES).find_one(filter).session(&mut *session).await? else {return Ok(());};
             let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&release.channel_id}).session(&mut *session).await?;
@@ -633,6 +664,17 @@ pub(crate) async fn retire_attempt(
                     let mut set=doc! {"gateway_no_progress":false,"updated_at":bson::DateTime::now()};
                     let mut unset=doc! {"gateway_setup_release_id":"","pending_agent_api_key_id":"","pending_route_api_key_id":"",
                         "binding_id":"","gateway_source":"","gateway_native_phase":""};
+                    if release.state == ReleaseState::Settled
+                        && !is_accepted_resolution(release.resolution.as_deref())
+                    {
+                        // An exact setup marker does not license clearing a
+                        // concurrently replaced pending credential or binding.
+                        if row.pending_agent_api_key_id.as_deref() != Some(&release.agent_api_key_id) { unset.remove("pending_agent_api_key_id"); }
+                        if row.pending_route_api_key_id.as_deref() != Some(&release.route_api_key_id) { unset.remove("pending_route_api_key_id"); }
+                        if row.binding_id.as_deref() != Some(&release.binding_id) {
+                            unset.remove("binding_id"); unset.remove("gateway_source"); unset.remove("gateway_native_phase");
+                        }
+                    }
                     if row.status=="pending" {
                         set.insert("status","failed");set.insert("last_error","setup_interrupted");
                         unset.insert("agent_key_ciphertext","");
@@ -641,6 +683,15 @@ pub(crate) async fn retire_attempt(
                     db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"gateway_setup_release_id":&id},doc! {
                         "$inc":{"execution_policy_revision":1_i64},"$set":set,"$unset":unset}).session(&mut *session).await?;
                 }
+            }
+            // Preservation deliberately retains a remote record which may
+            // still authenticate callbacks/provider calls with these keys.
+            // Read-only observation uses creator_bearer, not these credentials.
+            // Detach stale preparation references only; never revoke its keys.
+            if release.state == ReleaseState::Settled
+                && !is_accepted_resolution(release.resolution.as_deref())
+            {
+                return Ok(());
             }
             queue(&db,&release,reason,session).await?;
             // Fence a due worker's stale local-reference observation as we
@@ -668,17 +719,19 @@ pub(crate) async fn retire_connection(
     status: &str,
     error: Option<&str>,
 ) -> AppResult<Vec<String>> {
-    let state = state.clone();
+    let scoped_state = state.clone();
     let db = state.db.clone();
-    let row = row.clone();
+    let scoped_row = row.clone();
     let status = status.to_owned();
     let error = error.map(str::to_owned);
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    let (ids, retired_org_thread) = session.start_transaction().and_run2(async move |session| {
+        let state = &scoped_state;
+        let row = &scoped_row;
         let work:AppResult<_>=Box::pin(async {
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
-            if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok(Vec::new());}
-            let ids=retire_in_session(&state,&current,reason,session).await?;
+            if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}
+            let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
@@ -698,9 +751,13 @@ pub(crate) async fn retire_connection(
                 audit(&db, session, &current.user_id, "nyxbot_channel_org_access_lost",
                     json!({"channel_agent_id":current.id,"platform":current.platform})).await?;
             }
-            Ok(ids)
+            Ok((ids, current.transport == "gateway" && current.org_specialist.is_some() && matches!(current.platform.as_str(), "lark" | "feishu")))
         }).await;transactions::transaction_result(work)
-    }).await.map_err(transactions::map_transaction_error)
+    }).await.map_err(transactions::map_transaction_error)?;
+    if retired_org_thread {
+        super::org_thread_notice::after_retirement(state.db.clone(), row.id.clone());
+    }
+    Ok(ids)
 }
 
 fn live_filter(release: &Release) -> Document {
@@ -766,6 +823,7 @@ async fn transition(
     state: ReleaseState,
     code: &str,
     observed: Option<i64>,
+    answer: Answer,
 ) -> AppResult<bool> {
     let db = db.clone();
     let release = release.clone();
@@ -777,15 +835,23 @@ async fn transition(
     let changed=session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
             let now=Utc::now();
-            let mut set=doc! {"state":bson::to_bson(&state).map_err(|_| conflict())?,"last_error":&code,"observed_version":observed,
+            let mut set=doc! {"state":bson::to_bson(&state).map_err(|_| conflict())?,"last_error":&code,"last_gateway_answer":bson::to_bson(&answer).map_err(|_|conflict())?,"observed_version":observed,
                 "claim_id":bson::Bson::Null,"lease_until":bson::Bson::Null,"updated_at":bson::DateTime::from_chrono(now)};
-            if state==ReleaseState::Due {set.insert("next_attempt_at",bson::DateTime::from_chrono(now+Duration::seconds(backoff(release.attempt_count))));}
+            if state == ReleaseState::ReviewRequired && release.review_reason.is_none() {
+                set.insert("review_reason", diagnostic_reason(Some(&code)));
+            }
+            if state!=ReleaseState::Settled {set.insert("next_attempt_at",bson::DateTime::from_chrono(now+Duration::seconds(backoff(release.attempt_count))));}
             if state==ReleaseState::Settled {set.insert("settled_at",bson::DateTime::from_chrono(now));set.insert("resolution",&code);}
             if db.collection::<Document>(RELEASES).update_one(claim_fence(&release),doc! {"$set":set,"$inc":{"revision":1_i64}}).session(&mut *session).await?.matched_count!=1 {return Ok(false);}
-            if state!=ReleaseState::Due {
+            if state!=ReleaseState::Due && (state != release.state || release.last_error.as_deref() != Some(code.as_str())) {
                 audit(&db,session,&release.owner_user_id,if state==ReleaseState::Settled {"nyxbot_gateway_release_settled"} else {"nyxbot_gateway_release_review_required"},
                     json!({"obligation_id":release.id,"channel_id":release.channel_id,"reason":code})).await?;
-            } Ok(true)
+            }
+            if state != ReleaseState::Settled {
+                recovery::failed_audit(&db, session, &release, state, &code, answer,
+                    now + Duration::seconds(backoff(release.attempt_count))).await?;
+            }
+            Ok(true)
         }).await;transactions::transaction_result(work)
     }).await.map_err(transactions::map_transaction_error)?;
     if changed && state == ReleaseState::ReviewRequired {
@@ -1548,6 +1614,23 @@ fn remote_identity(release: &Release, body: &Value) -> Observation {
 }
 
 pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Observation> {
+    observe_with_answer(state, release).await.0
+}
+
+async fn observe_with_answer(
+    state: &AppState,
+    release: &Release,
+) -> (AppResult<Observation>, Answer) {
+    let mut answer = Answer::NotRequested;
+    let result = observe_inner(state, release, &mut answer).await;
+    (result, answer)
+}
+
+async fn observe_inner(
+    state: &AppState,
+    release: &Release,
+    answer: &mut Answer,
+) -> AppResult<Observation> {
     if !destination(state, release).await? {
         return Ok(Observation::DestinationChanged);
     }
@@ -1572,7 +1655,7 @@ pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Ob
     } else {
         return Ok(Observation::Malformed);
     };
-    let response = match gateway::gateway_call_at_base(
+    let response = gateway::gateway_call_at_base(
         &release.gateway_base_url,
         reqwest::Method::GET,
         &path,
@@ -1580,8 +1663,9 @@ pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Ob
         None,
         None,
     )
-    .await
-    {
+    .await;
+    *answer = Answer::from_response(&response);
+    let response = match response {
         Err(AppError::ValidationError(code)) if code == "gateway_invalid_response" => {
             return Ok(Observation::Malformed);
         }
@@ -1599,7 +1683,13 @@ pub(crate) async fn observe(state: &AppState, release: &Release) -> AppResult<Ob
                     "owner_user_id":&retained.owner_user_id,"channel_bot_id":&retained.channel_bot_id,
                     "gateway_service_id":&retained.gateway_service_id,"gateway_base_url":&retained.gateway_base_url,
                 }).await? {retained.gateway_source=guard.gateway_source;}
-            Ok(remote_identity(&retained, &response.body))
+            let observed = remote_identity(&retained, &response.body);
+            *answer = match &observed {
+                Observation::Matching { .. } => Answer::MatchingRecord,
+                Observation::Changed { .. } => Answer::DifferentVersion,
+                _ => Answer::InvalidResponse,
+            };
+            Ok(observed)
         }
         401 | 403 => Err(AppError::Forbidden("gateway_authority_refused".into())),
         _ => Err(AppError::OAuthAuthorityUnavailable),
@@ -1613,15 +1703,56 @@ pub(crate) async fn execute(state: &AppState, release: Release) -> AppResult<boo
         filter: doc! {"_id": &release.id, "claim_id": &release.claim_id, "revision": release.revision, "state": "due"},
         update: doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}},
     });
-    let result = execute_claimed(state, release).await;
+    let mut answer = Answer::NotRequested;
+    let result = execute_claimed(state, release.clone(), &mut answer).await;
+    if result.is_err() {
+        // A diagnostic failure cannot replace the original worker failure.
+        record_escaped_failure(state, &release, answer).await;
+    }
     if result.is_ok() {
         ticket.completed();
     }
     result
 }
 
-async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bool> {
-    let observation = match observe(state, &release).await {
+async fn record_escaped_failure(state: &AppState, release: &Release, answer: Answer) {
+    let diagnostic: AppResult<()> = async {
+        if let Some(current) = state
+            .db
+            .collection::<Release>(RELEASES)
+            .find_one(doc! {
+                "_id":&release.id,"claim_id":&release.claim_id,"state":"due",
+                "$expr":{"$gt":["$lease_until","$$NOW"]},
+            })
+            .await?
+        {
+            transition(
+                &state.db,
+                &current,
+                ReleaseState::Due,
+                "release_attempt_failed",
+                None,
+                answer,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if diagnostic.is_err() {
+        tracing::warn!(obligation_id=%release.id, channel_id=%release.channel_id,
+            code="release_diagnostic_failed", "Gateway release diagnostic deferred");
+    }
+}
+
+async fn execute_claimed(
+    state: &AppState,
+    mut release: Release,
+    last_answer: &mut Answer,
+) -> AppResult<bool> {
+    let (observation, answer) = observe_with_answer(state, &release).await;
+    *last_answer = answer;
+    let observation = match observation {
         Ok(observation) => observation,
         Err(error) => {
             let auth = matches!(error, AppError::Forbidden(_));
@@ -1642,6 +1773,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                     "gateway_unavailable"
                 },
                 None,
+                answer,
             )
             .await?;
             return Ok(false);
@@ -1652,8 +1784,15 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
             // A known remote identity can be conclusively absent. An uncertain
             // dispatch's 404 is only an observation and never proves no create.
             if release.gateway_channel_id.is_some() {
-                return transition(&state.db, &release, ReleaseState::Settled, "missing", None)
-                    .await;
+                return transition(
+                    &state.db,
+                    &release,
+                    ReleaseState::Settled,
+                    "missing",
+                    None,
+                    answer,
+                )
+                .await;
             }
             let expired = release
                 .dispatch_started_at
@@ -1672,6 +1811,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                     "create_not_observed"
                 },
                 None,
+                answer,
             )
             .await?;
             Ok(false)
@@ -1697,6 +1837,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                     ReleaseState::ReviewRequired,
                     "gateway_destination_changed",
                     None,
+                    answer,
                 )
                 .await?;
                 return Ok(false);
@@ -1715,6 +1856,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                 None,
             )
             .await;
+            *last_answer = Answer::from_response(&response);
             match response {
                 Ok(r) if matches!(r.status, 200 | 204 | 404) => {
                     transition(
@@ -1723,6 +1865,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                         ReleaseState::Settled,
                         "released",
                         Some(version),
+                        Answer::from_response(&Ok(r)),
                     )
                     .await
                 }
@@ -1733,11 +1876,13 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                         ReleaseState::ReviewRequired,
                         "remote_version_changed",
                         None,
+                        Answer::DifferentVersion,
                     )
                     .await?;
                     Ok(false)
                 }
                 result => {
+                    let answer = Answer::from_response(&result);
                     let refused = result.as_ref().is_ok_and(|r| matches!(r.status, 401 | 403));
                     let expired = release
                         .due_at
@@ -1756,6 +1901,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                             "release_unconfirmed"
                         },
                         None,
+                        answer,
                     )
                     .await?;
                     Ok(false)
@@ -1776,6 +1922,7 @@ async fn execute_claimed(state: &AppState, mut release: Release) -> AppResult<bo
                 ReleaseState::ReviewRequired,
                 code,
                 version,
+                answer,
             )
             .await?;
             Ok(false)
@@ -1793,8 +1940,7 @@ pub(crate) async fn try_inline(state: &AppState, ids: &[String]) -> bool {
                 released &= state
                     .db
                     .collection::<Release>(RELEASES)
-                    .find_one(doc! {"_id":id,"state":"settled","resolution":{"$in":[
-                    "released","missing","cancelled","not_created","confirmed_missing"]}})
+                    .find_one(doc! {"_id":id,"state":"settled","resolution":{"$in":accepted_resolutions_bson()}})
                     .await
                     .ok()
                     .flatten()
@@ -1913,9 +2059,17 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
             )
             .await?;
         let release = guard.get_str("native_drain_for").map_err(|_| conflict())?;
-        let Some(done) = db.collection::<Release>(RELEASES).find_one(doc! {"_id":release,"state":"settled",
-            "resolution":{"$in":["released","missing","cancelled","not_created","confirmed_missing"]}}).await? else { continue; };
+        let Some(done) = db
+            .collection::<Release>(RELEASES)
+            .find_one(doc! {"_id":release,"state":"settled",
+            "resolution":{"$in":accepted_resolutions_bson()}})
+            .await?
+        else {
+            recovery::record_guard_deferred(db, &guard).await;
+            continue;
+        };
         if done.settled_at.is_none() {
+            recovery::record_guard_deferred(db, &guard).await;
             continue;
         }
         let fence = doc! {"_id":guard.get_str("_id").map_err(|_|conflict())?,"state":"review_required","native_drain_for":release};
@@ -1945,7 +2099,7 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
                     "gateway_setup_release_id":bson::Bson::Null,
                     "$or":[
                         {"gateway_source":guard.get("gateway_source").cloned().ok_or_else(conflict)?},
-                        {"gateway_source":bson::Bson::Null,"gateway_native_activation":"relay_draining"},
+                        {"gateway_source":bson::Bson::Null,"gateway_native_activation":{"$in":["relay_draining","gateway_native_draining"]}},
                     ],
                 },doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_native_activation":if released {"relay_ready"} else {"relay_draining"}},
                     "$unset":{"gateway_source":"","gateway_native_phase":""}}).session(&mut *session).await?;
@@ -2000,7 +2154,11 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     for result in results {
         result?;
     }
-    reconcile_step(state).await
+    reconcile_step(state).await?;
+    // Discord review recovery is best effort and must not starve the existing
+    // stale, due, or reconciliation stages when one parked row is unhealthy.
+    recovery::sweep(state).await;
+    Ok(())
 }
 
 pub(crate) fn spawn_worker(state: AppState) -> tokio::task::JoinHandle<()> {

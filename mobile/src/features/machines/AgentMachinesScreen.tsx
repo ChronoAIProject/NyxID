@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import type { ContentScreenProps } from "../../app/navigationTypes";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useRef, useState, type PropsWithChildren } from "react";
@@ -36,10 +40,10 @@ import {
 
 export function agentMachineModeLabel(machine: AgentMachine) {
   return selectionRequired(machine)
-    ? "Owner selection required"
+    ? translateApp("Owner selection required")
     : machine.mode === "separated"
-      ? "Separate workspace and browser"
-      : "Shared legacy";
+      ? translateApp("Separate workspace and browser")
+      : translateApp("Shared legacy");
 }
 
 export function AgentMachinesScreen({
@@ -48,12 +52,13 @@ export function AgentMachinesScreen({
 }:
   | ContentScreenProps<"AgentMachines">
   | ContentScreenProps<"AgentMachineEditor">) {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const client = useQueryClient();
   const openChat = useOpenWorkspaceChat();
   const selected =
     route.name === "AgentMachineEditor" ? route.params.machineId : undefined;
-  const [notice, setNotice] = useState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const refreshedAt = useRef(0);
   const queryKey = [
     ...machineKeys(runtime.epoch),
@@ -71,7 +76,7 @@ export function AgentMachinesScreen({
   const machine = query.data?.machines.find((row) => row.node_id === selected);
   async function refresh() {
     if (Date.now() - refreshedAt.current < 1000)
-      throw new Error("Wait a moment before refreshing again.");
+      throw localizedError("Wait a moment before refreshing again.");
     refreshedAt.current = Date.now();
     const result = await query.refetch();
     if (result.error) throw result.error;
@@ -80,7 +85,7 @@ export function AgentMachinesScreen({
   const pull = usePullRefresh(async () => {
     if (!runtime.active) return;
     await refresh().catch((cause) => {
-      if (runtime.current()) setNotice(machineError(cause));
+      if (runtime.current()) setNotice(() => (machineError(cause)));
     });
   });
   if (machine && query.data) {
@@ -100,7 +105,9 @@ export function AgentMachinesScreen({
         onSaved={(machines) => {
           client.setQueryData(queryKey, { ...query.data, machines });
           setNotice(
-            "Capabilities saved. Review cleanup and acknowledgement status before starting new work.",
+            () => (translateApp(
+              "Capabilities saved. Review cleanup and acknowledgement status before starting new work.",
+            )),
           );
           void client.invalidateQueries({
             queryKey: ["workspace", "agents"],
@@ -126,13 +133,13 @@ export function AgentMachinesScreen({
             rows={5}
             icon={false}
             detail={false}
-            accessibilityLabel="Loading agent machine access"
+            accessibilityLabel={translateApp("Loading agent machine access")}
           />
         ) : (
           <SkeletonRows
             rows={3}
             title
-            accessibilityLabel="Loading agent machine access"
+            accessibilityLabel={translateApp("Loading agent machine access")}
           />
         ))}
       {query.error && (
@@ -142,14 +149,16 @@ export function AgentMachinesScreen({
         <>
           <SettingsGroup
             inset={false}
-            footer="Machine permissions only narrow the local capability ceiling. Saving cancels this agent's current work on that machine. External API-key and OAuth grants remain on the web."
+            footer={translateApp(
+              "Machine permissions only narrow the local capability ceiling. Saving cancels this agent's current work on that machine. External API-key and OAuth grants remain on the web.",
+            )}
           >
             <SettingsRow
               leading={<AgentAvatar agent={query.data.agent} size="md" />}
               label={query.data.agent.display_name ?? query.data.agent.name}
             />
           </SettingsGroup>
-          <SettingsGroup title="Machines" inset={false}>
+          <SettingsGroup title={translateApp("Machines")} inset={false}>
             {query.data.machines.map((row) => (
               <SettingsRow
                 key={row.node_id}
@@ -161,11 +170,17 @@ export function AgentMachinesScreen({
                     ? "danger"
                     : "default"
                 }
-                accessibilityLabel={`Review ${row.name} access. ${[
+                accessibilityLabel={translateApp(
+                  "Review {{name}} access. {{label}}",
+                  {
+                    name: row.name,
+                    label: [
                   agentMachineModeLabel(row),
                   `Revision ${row.revision}`,
                   ...machineAccessState(row),
-                ].join(". ")}`}
+                ].join(". "),
+                  },
+                )}
                 onPress={() =>
                   navigation.push("AgentMachineEditor", {
                     agentId: route.params.agentId,
@@ -175,13 +190,17 @@ export function AgentMachinesScreen({
               />
             ))}
             {!query.data.machines.length && (
-              <SettingsRow label="No machines are available to this agent." />
+              <SettingsRow label={translateApp("No machines are available to this agent.")}
+              />
             )}
           </SettingsGroup>
         </>
       )}
       {selected && query.data && !machine && (
-        <Notice message="This machine is no longer available to this agent. Return to the list and review current access." />
+        <Notice message={translateApp(
+            "This machine is no longer available to this agent. Return to the list and review current access.",
+          )}
+        />
       )}
     </AgentMachineListPage>
   );
@@ -199,10 +218,11 @@ function AgentMachineListPage({
   refreshing: boolean;
   onRefresh: () => void;
 }>) {
+  useAppLanguage();
   useWorkspaceBack({ active: false, defaultRole: "back", onBack });
   return (
     <WorkspacePage
-      title="Agent machine access"
+      title={translateApp("Agent machine access")}
       showHeading={false}
       refreshing={refreshing}
       onRefresh={onRefresh}
@@ -240,6 +260,7 @@ export function AgentMachineEditor({
   onSaved: (machines: AgentMachine[]) => void;
   onOpenApproval: (conversationId: string, acknowledgementId: string) => void;
 }) {
+  useAppLanguage();
   const write = useMachineWrite();
   const [caps, setCaps] = useState(machine.capabilities);
   const [legacyAccepted, setLegacyAccepted] = useState(false);
@@ -248,7 +269,7 @@ export function AgentMachineEditor({
     conversation_id: string;
     acknowledgement_id: string;
   }>();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   // Guards a reload in flight; the pull spinner itself comes from `pull`.
   const [reloading, setReloading] = useState(false);
   const dirty = JSON.stringify(caps) !== JSON.stringify(machine.capabilities);
@@ -266,9 +287,10 @@ export function AgentMachineEditor({
     discardOnClose:
       dirty || confirmMode
         ? {
-            title: "Discard machine access changes?",
-            message:
+            title: translateApp("Discard machine access changes?"),
+            message: translateApp(
               "Unsaved capability changes and context review will be closed.",
+            ),
           }
         : undefined,
   });
@@ -279,14 +301,14 @@ export function AgentMachineEditor({
       const latest = await onRefresh();
       if (!write.current()) return;
       if (!latest)
-        throw new Error("This machine is no longer available to this agent.");
+        throw localizedError("This machine is no longer available to this agent.");
       setCaps(latest.capabilities);
       setConfirmMode(undefined);
       setLegacyAccepted(false);
       write.reviewed();
       setRefreshError(undefined);
     } catch (cause) {
-      if (write.current()) setRefreshError(machineError(cause));
+      if (write.current()) setRefreshError(() => (machineError(cause)));
     } finally {
       setReloading(false);
     }
@@ -303,7 +325,7 @@ export function AgentMachineEditor({
   });
   return (
     <WorkspacePage
-      title="Agent machine access"
+      title={translateApp("Agent machine access")}
       showHeading={false}
       refreshing={pull.refreshing}
       onRefresh={pull.onRefresh}
@@ -319,11 +341,12 @@ export function AgentMachineEditor({
             .join("\n\n") || undefined
         }
       >
-        <SettingsRow label="Agent" value={agentName} />
-        <SettingsRow label="Machine" value={machine.name} />
-        <SettingsRow label="Revision" value={String(machine.revision)} />
+        <SettingsRow label={translateApp("Agent")} value={agentName} />
+        <SettingsRow label={translateApp("Machine")} value={machine.name} />
+        <SettingsRow label={translateApp("Revision")}
+          value={String(machine.revision)} />
         <SettingsRow
-          label="Mode"
+          label={translateApp("Mode")}
           value={agentMachineModeLabel(machine)}
           valueTone={
             machine.mode === "separated" && !selectionRequired(machine)
@@ -332,11 +355,13 @@ export function AgentMachineEditor({
           }
         />
         <SettingsRow
-          label="Separation"
+          label={translateApp("Separation")}
           value={
             separationAvailable(machine)
-              ? `Available (Landlock ABI ${machine.separated?.landlock_abi ?? "unknown"})`
-              : (machine.separated?.reason ?? "Unavailable")
+              ? translateApp("Available (Landlock ABI {{details}})", {
+                  details: machine.separated?.landlock_abi ?? "unknown",
+                })
+              : (machine.separated?.reason ?? translateApp("Unavailable"))
           }
         />
       </SettingsGroup>
@@ -349,31 +374,37 @@ export function AgentMachineEditor({
         <Notice
           message={
             !features.includes("assistant:machine-capabilities")
-              ? "Capability editing is not enabled. Existing restrictions remain in effect."
+              ? translateApp(
+                  "Capability editing is not enabled. Existing restrictions remain in effect.",
+                )
               : !machine.can_edit
-                ? "Only the machine owner or an organization Admin can edit access."
+                ? translateApp(
+                    "Only the machine owner or an organization Admin can edit access.",
+                  )
                 : !machine.protocol_v2
-                  ? "Update this machine before editing capabilities. Existing access continues."
-                  : "Complete owner selection before editing capabilities."
+                  ? translateApp(
+                      "Update this machine before editing capabilities. Existing access continues.",
+                    )
+                  : translateApp(
+                      "Complete owner selection before editing capabilities.",
+                    )
           }
         />
       )}
       <SettingsGroup
-        title="Capabilities"
+        title={translateApp("Capabilities")}
         inset={false}
-        footer={`Shell uses its OS user's full permissions even with File tools off. Computer control operates applications. Developer browser permits JavaScript in its separate browser; saved logins stay in Secure browser.\n\nSaved-login access is preserved: ${
-          machine.saved_login_ids === null
-            ? "legacy selection"
-            : `${machine.saved_login_ids.length} selected`
-        }. Review saved-login grants on the web.`}
+        footer={(machine.saved_login_ids === null
+            ? translateApp("Shell uses its OS user's full permissions even with File tools off. Computer control operates applications. Developer browser permits JavaScript in its separate browser; saved logins stay in Secure browser.\n\nSaved-login access is preserved: legacy selection. Review saved-login grants on the web.") : translateApp("Shell uses its OS user's full permissions even with File tools off. Computer control operates applications. Developer browser permits JavaScript in its separate browser; saved logins stay in Secure browser.\n\nSaved-login access is preserved: {{count}} selected. Review saved-login grants on the web.", { count: machine.saved_login_ids.length }))}
       >
         {(Object.keys(capabilityLabels) as (keyof MachineCapabilities)[]).map(
           (key) => (
             <MachineSwitch
               key={key}
               label={capabilityLabels[key]}
-              detail={machine.ceiling[key] ? undefined : "Off on machine"}
-              accessibilityLabel={`${capabilityLabels[key]}${machine.ceiling[key] ? "" : " (off on machine)"}`}
+              detail={machine.ceiling[key] ? undefined : translateApp("Off on machine")
+              }
+              accessibilityLabel={(machine.ceiling[key] ? capabilityLabels[key] : translateApp("{{capability}} (off on machine)", { capability: capabilityLabels[key] }))}
               value={caps[key]}
               disabled={
                 blocked ||
@@ -392,8 +423,10 @@ export function AgentMachineEditor({
       <SettingsGroup inset={false}>
         <SettingsRow
           tone="action"
-          label={write.busy ? "Saving…" : "Save Capabilities"}
-          accessibilityLabel="Save agent machine capabilities"
+          label={write.busy ? translateApp("Saving…")
+              : translateApp("Save Capabilities")
+          }
+          accessibilityLabel={translateApp("Save agent machine capabilities")}
           disabled={blocked || !editable || !dirty}
           onPress={() =>
             void write.run(async (current) => {
@@ -412,15 +445,17 @@ export function AgentMachineEditor({
       {machine.can_edit && (
         <>
           {machine.mode !== "shared_legacy" && (
-            <Notice message={SHARED_LEGACY_WARNING} />
+            <Notice message={translateApp(SHARED_LEGACY_WARNING)} />
           )}
           <SettingsGroup
-            title="Workspace and browser mode"
+            title={translateApp("Workspace and browser mode")}
             inset={false}
-            footer="Mode changes require a separate owner action card in the Assistant. Requesting approval does not apply the change. Save or discard capability edits first."
+            footer={translateApp(
+              "Mode changes require a separate owner action card in the Assistant. Requesting approval does not apply the change. Save or discard capability edits first.",
+            )}
           >
             <SettingsRow
-              label="Current mode"
+              label={translateApp("Current mode")}
               value={agentMachineModeLabel(machine)}
             />
             {features.includes("assistant:machine-contexts") &&
@@ -428,17 +463,21 @@ export function AgentMachineEditor({
               separationAvailable(machine) && (
                 <SettingsRow
                   tone="action"
-                  label="Review Separate Workspace Request"
-                  accessibilityLabel="Review separate workspace request"
+                  label={translateApp("Review Separate Workspace Request")}
+                  accessibilityLabel={translateApp(
+                    "Review separate workspace request",
+                  )}
                   disabled={blocked || dirty || !!approval}
                   onPress={() => setConfirmMode("separated")}
                 />
               )}
             {machine.mode !== "shared_legacy" && (
               <MachineSwitch
-                label="Choose shared legacy access"
-                detail="I acknowledge the risk"
-                accessibilityLabel="I explicitly choose shared legacy access and acknowledge the risk"
+                label={translateApp("Choose shared legacy access")}
+                detail={translateApp("I acknowledge the risk")}
+                accessibilityLabel={translateApp(
+                  "I explicitly choose shared legacy access and acknowledge the risk",
+                )}
                 value={legacyAccepted}
                 disabled={blocked || dirty || !!approval}
                 onChange={setLegacyAccepted}
@@ -447,8 +486,10 @@ export function AgentMachineEditor({
             {machine.mode !== "shared_legacy" && (
               <SettingsRow
                 tone="action"
-                label="Review Shared Legacy Request"
-                accessibilityLabel="Review shared legacy request"
+                label={translateApp("Review Shared Legacy Request")}
+                accessibilityLabel={translateApp(
+                  "Review shared legacy request",
+                )}
                 disabled={blocked || dirty || !legacyAccepted || !!approval}
                 onPress={() => setConfirmMode("shared_legacy")}
               />
@@ -457,13 +498,13 @@ export function AgentMachineEditor({
           {confirmMode && (
             <>
               <Notice
-                message={`Request owner approval for ${agentName} on ${machine.name}: ${confirmMode === "separated" ? "separate workspace and browser" : "shared legacy access"}? Current capability and saved-login selections are preserved.`}
+                message={(confirmMode === "separated" ? translateApp("Request owner approval for {{agent}} on {{name}}: separate workspace and browser? Current capability and saved-login selections are preserved.", { agent: agentName, name: machine.name }) : translateApp("Request owner approval for {{agent}} on {{name}}: shared legacy access? Current capability and saved-login selections are preserved.", { agent: agentName, name: machine.name }))}
               />
               <SettingsGroup inset={false}>
                 <SettingsRow
                   tone="action"
-                  label="Request Owner Action Card"
-                  accessibilityLabel="Request owner action card"
+                  label={translateApp("Request Owner Action Card")}
+                  accessibilityLabel={translateApp("Request owner action card")}
                   disabled={
                     blocked ||
                     dirty ||
@@ -486,8 +527,8 @@ export function AgentMachineEditor({
                 />
                 <SettingsRow
                   tone="action"
-                  label="Cancel Context Request"
-                  accessibilityLabel="Cancel context request"
+                  label={translateApp("Cancel Context Request")}
+                  accessibilityLabel={translateApp("Cancel context request")}
                   disabled={write.busy}
                   onPress={() => setConfirmMode(undefined)}
                 />
@@ -496,11 +537,16 @@ export function AgentMachineEditor({
           )}
           {approval && (
             <>
-              <Notice message="Owner approval requested. Review the action card in its Assistant conversation. Access changes only after approval succeeds." />
+              <Notice message={translateApp(
+                  "Owner approval requested. Review the action card in its Assistant conversation. Access changes only after approval succeeds.",
+                )}
+              />
               <SettingsGroup inset={false}>
                 <SettingsRow
-                  label="Review Owner Action Card in Assistant"
-                  accessibilityLabel="Review owner action card in Assistant"
+                  label={translateApp("Review Owner Action Card in Assistant")}
+                  accessibilityLabel={translateApp(
+                    "Review owner action card in Assistant",
+                  )}
                   disabled={write.busy}
                   onPress={() =>
                     onOpenApproval(
@@ -517,8 +563,8 @@ export function AgentMachineEditor({
       <SettingsGroup inset={false}>
         <SettingsRow
           tone="action"
-          label="Reload Access and Recovery Status"
-          accessibilityLabel="Reload access and recovery status"
+          label={translateApp("Reload Access and Recovery Status")}
+          accessibilityLabel={translateApp("Reload access and recovery status")}
           disabled={write.busy || !write.active || reloading}
           onPress={reviewRefresh}
         />

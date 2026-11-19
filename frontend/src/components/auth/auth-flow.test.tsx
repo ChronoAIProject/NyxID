@@ -253,6 +253,34 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
+  it("shows a clean wrong-password message for the server's authentication_failed response", async () => {
+    // Exact shape the backend returns for a wrong email or password.
+    loginFn.mockRejectedValue(
+      new ApiError(401, {
+        error: "authentication_failed",
+        error_code: 2000,
+        message: "Authentication failed: Invalid email or password",
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={0} />);
+
+    await fillLoginAndSubmit(user);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /^Invalid email or password$/,
+    );
+    expect(screen.queryByText(/Authentication failed:/)).not.toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["Invalid MFA code", "This account uses social login. Please sign in with your social provider.", "Password authentication is unavailable", "Authentication changed; sign in again", "Unknown server authentication detail"])("P2-3 sign-in preserves code2000 detail: %s", async (message) => {
+    loginFn.mockRejectedValue(new ApiError(401,{error:"authentication_failed",error_code:2000,message:`Authentication failed: ${message}`}));
+    const user=userEvent.setup();render(<AuthFlow initialPanel={0}/>);await fillLoginAndSubmit(user);
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.queryByText(/Authentication failed:/)).not.toBeInTheDocument();
+  });
+
   it("does not navigate when the login response signals MFA is required", async () => {
     loginFn.mockResolvedValue({ mfaRequired: true });
     const user = userEvent.setup();

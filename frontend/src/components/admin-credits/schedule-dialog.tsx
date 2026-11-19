@@ -358,7 +358,7 @@ export function ScheduleDialog({
                           "New members receive a full first allocation on the next billing update, then renew from their own start date. Monthly renewals use the same date each month.",
                         )
                       : translateUi(
-                          "Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period.",
+                          "Each calendar period freezes its recipient policy. New signups and organization or group joins can receive its grant. Use Grant missing credits to recover missed grants.",
                         )
                   }
                 />
