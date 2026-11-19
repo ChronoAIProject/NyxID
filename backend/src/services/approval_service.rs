@@ -1124,12 +1124,12 @@ pub async fn process_decision(
     idempotency_key: Option<&str>,
     decision_channel: &str,
 ) -> AppResult<ApprovalRequest> {
-    let current = get_request(db, request_id).await?;
+    let current = read_decision_request(db, request_id).await?;
     let source = if decision_channel == "telegram" {
         DecisionSource::Telegram
     } else {
         DecisionSource::Web(AuditActor {
-            user_id: current.user_id.clone(),
+            user_id: current.request.user_id.clone(),
             ip_address: None,
             user_agent: None,
             api_key_id: None,
@@ -1159,13 +1159,17 @@ pub(crate) async fn process_decision_with_access(
     http_client: &reqwest::Client,
     fcm_auth: Option<Arc<FcmAuth>>,
     apns_auth: Option<Arc<ApnsAuth>>,
-    current: ApprovalRequest,
+    decision_request: DecisionRequest,
     approved: bool,
     duration_sec: Option<i64>,
     idempotency_key: Option<&str>,
     source: DecisionSource,
     snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<ApprovalRequest> {
+    let DecisionRequest {
+        request: current,
+        mut session,
+    } = decision_request;
     super::execution_permission_dispatch::proposals::legacy_refusal(&current)?;
     if let Some(binding) = &current.assistant_group {
         super::org_group_service::authorize_approval(
@@ -1221,7 +1225,7 @@ pub(crate) async fn process_decision_with_access(
         grant_id: uuid::Uuid::new_v4().to_string(),
         intent: source.intent(&current.id, &current.service_id, &current.user_id, approved)?,
     };
-    let updated = match Box::pin(decision.commit(db)).await? {
+    let updated = match Box::pin(decision.commit(db, &mut session)).await? {
         DecisionOutcome::Applied(updated) => *updated,
         DecisionOutcome::ModeConflict => {
             return Err(AppError::Conflict(
@@ -1291,9 +1295,12 @@ struct DecisionMutation {
 struct ChannelCreationRace;
 
 impl DecisionMutation {
-    async fn commit(self, db: &Database) -> AppResult<DecisionOutcome> {
+    async fn commit(
+        self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<DecisionOutcome> {
         let context = Arc::new((db.clone(), self));
-        let mut session = db.client().start_session().await?;
         let mut raced = false;
         loop {
             let context = context.clone();
@@ -2015,10 +2022,36 @@ pub async fn list_requests_with_proposals(
 
 /// Get a single approval request by ID (for status polling).
 pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalRequest> {
-    db.collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! { "_id": request_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
+    read_request(db, request_id, None).await
+}
+
+// Keep the snapshot transaction causally after the card read used for authorization.
+pub(crate) struct DecisionRequest {
+    pub request: ApprovalRequest,
+    session: ClientSession,
+}
+
+pub(crate) async fn read_decision_request(
+    db: &Database,
+    request_id: &str,
+) -> AppResult<DecisionRequest> {
+    let mut session = db.client().start_session().causal_consistency(true).await?;
+    let request = read_request(db, request_id, Some(&mut session)).await?;
+    Ok(DecisionRequest { request, session })
+}
+
+async fn read_request(
+    db: &Database,
+    request_id: &str,
+    session: Option<&mut ClientSession>,
+) -> AppResult<ApprovalRequest> {
+    let requests = db.collection::<ApprovalRequest>(REQUESTS);
+    let find = requests.find_one(doc! { "_id": request_id });
+    let request = match session {
+        Some(session) => find.session(session).await?,
+        None => find.await?,
+    };
+    request.ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
 }
 
 fn service_config_supports_grants(config: &ServiceApprovalConfig) -> bool {

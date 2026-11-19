@@ -151,7 +151,7 @@ async fn handle_callback_query(
         }
     };
 
-    let request = match approval_service::get_request(&state.db, &request_id).await {
+    let decision = match approval_service::read_decision_request(&state.db, &request_id).await {
         Ok(r) => r,
         Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
@@ -174,6 +174,7 @@ async fn handle_callback_query(
         .map(|m| m.chat.id)
         .unwrap_or(callback.from.id);
 
+    let request = &decision.request;
     if !callback_can_decide(
         request.telegram_chat_id,
         chat_id,
@@ -200,7 +201,7 @@ async fn handle_callback_query(
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        request,
+        decision,
         approved,
         None,
         Some(decision_idempotency_key.as_str()),
