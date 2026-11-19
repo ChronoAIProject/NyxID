@@ -204,6 +204,23 @@ Returns service health status. No authentication required.
 curl http://localhost:3001/health
 ```
 
+This is a dependency-free process liveness check and remains HTTP 200 during
+draining or a MongoDB outage. Existing `commit` and `encryption` diagnostics are
+also retained. Responses use `Cache-Control: no-store`.
+
+#### GET /ready
+
+No authentication required. Returns HTTP 200 with `{"status":"ok"}` when the
+process is not draining and MongoDB responds to a read-only ping within one
+second. Returns HTTP 503 with `{"status":"unavailable","failing":["mongodb"]}`
+on dependency failure/timeout, or `failing:["draining"]` immediately during
+shutdown. Responses use `Cache-Control: no-store`; raw errors are never exposed.
+
+The production frontend serves its own `/frontend/health` and `/frontend/ready`
+and preserves `/health` as a backend proxy. See the complete
+[health/readiness contract](HEALTH_READINESS.md) for body assertions, independent
+failure scopes, public target URLs and rollout requirements.
+
 ---
 
 ### Public Configuration
