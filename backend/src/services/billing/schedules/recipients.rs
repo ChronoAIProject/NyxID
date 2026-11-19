@@ -330,23 +330,22 @@ async fn discover(
             updated_at: observed_at,
         })
         .collect();
-    if !new_recipients.is_empty() {
-        if let Err(error) = db
+    if !new_recipients.is_empty()
+        && let Err(error) = db
             .collection::<CreditScheduleRecipient>(RECIPIENTS)
             .insert_many(new_recipients)
             .ordered(false)
             .await
+    {
+        let mongodb::error::ErrorKind::InsertMany(failure) = error.kind.as_ref() else {
+            return Err(error.into());
+        };
+        if failure.write_concern_error.is_some()
+            || failure.write_errors.as_ref().is_none_or(|errors| {
+                errors.is_empty() || errors.iter().any(|item| item.code != 11000)
+            })
         {
-            let mongodb::error::ErrorKind::InsertMany(failure) = error.kind.as_ref() else {
-                return Err(error.into());
-            };
-            if failure.write_concern_error.is_some()
-                || failure.write_errors.as_ref().is_none_or(|errors| {
-                    errors.is_empty() || errors.iter().any(|item| item.code != 11000)
-                })
-            {
-                return Err(error.into());
-            }
+            return Err(error.into());
         }
     }
     restore_eligibility(
