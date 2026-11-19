@@ -384,6 +384,19 @@ async fn expired_group_loss_is_revalidated_after_renewal_or_finish() {
                     .text
                     .contains("editor failed (turn_lost)")
             );
+            let now = Utc::now();
+            assert!(
+                !engine::mark_queued(
+                    &state.db,
+                    &member,
+                    &turn.turn_id,
+                    now,
+                    now + Duration::seconds(30)
+                )
+                .await
+                .unwrap(),
+                "a turn that has been reported lost could still renew its lease"
+            );
         }
         server.abort();
     }

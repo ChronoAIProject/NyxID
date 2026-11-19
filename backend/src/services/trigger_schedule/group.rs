@@ -303,22 +303,27 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     {
                         let threads = db.collection::<AssistantConversation>(THREADS);
                         let active = doc! {"_id": thread, "user_id": owner, "active_turn.turn_id": turn};
-                        if let Some(row) = threads.find_one(active.clone()).session(&mut *session).await? {
-                            if super::super::assistant_nyxagent::live_turn(&row, Utc::now()).is_some() {
-                                return Ok(());
-                            }
-                            // A renewal or finish after this snapshot must conflict
-                            // with the loss decision on the exact active thread.
-                            if threads.update_one(active, doc! {"$inc": {"automation_handoff_version": 1_i64}})
-                                .session(&mut *session).await?.matched_count != 1
-                            {
-                                return Ok(());
-                            }
+                        let current = threads.find_one(active.clone()).session(&mut *session).await?;
+                        if current.as_ref().is_some_and(|row| {
+                            super::super::assistant_nyxagent::live_turn(row, Utc::now()).is_some()
+                        }) {
+                            return Ok(());
                         }
                         // A cleared active turn and its reply commit together.
                         saved_reply = db.collection::<AssistantMessage>(REPLIES)
                             .find_one(doc! {"user_id": owner, "conversation_id": thread, "turn_id": turn, "role": "assistant"})
                             .session(&mut *session).await?;
+                        if saved_reply.is_none() && current.is_some() {
+                            // Serialize with concurrent lease renewal or finish,
+                            // and prevent this expired turn from renewing after loss.
+                            let stopped = threads.update_one(active, doc! {
+                                "$set": {"active_turn.stop_requested": true},
+                                "$inc": {"automation_handoff_version": 1_i64},
+                            }).session(&mut *session).await?;
+                            if stopped.matched_count != 1 {
+                                return Ok(());
+                            }
+                        }
                     }
                     let reply = reply.as_ref().or(saved_reply.as_ref());
                     let text = reply.map(|m| m.text.as_str()).unwrap_or("Group member unavailable");
