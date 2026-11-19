@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Linking, View } from "react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
@@ -15,12 +18,13 @@ export function NextStepConnect({ step, onStart, onClose }: {
   onStart: (step: NextStep) => void;
   onClose: () => void;
 }) {
+  useAppLanguage();
   const availability = useGroupAvailability();
   const [token, setToken] = useState<string>();
   const [setup, setSetup] = useState<SuggestionSetup>();
   const [busy, setBusy] = useState(true);
   const [opened, setOpened] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const live = useRef(true);
   const started = useRef(false);
   const generation = useRef(0);
@@ -52,7 +56,7 @@ export function NextStepConnect({ step, onStart, onClose }: {
         if (currentRequest()) setOpened(true);
       }
     } catch {
-      if (currentRequest()) setError("Could not load connection options. Try again.");
+      if (currentRequest()) setError(() => (translateApp("Could not load connection options. Try again.")));
     } finally {
       if (currentRequest()) setBusy(false);
     }
@@ -66,17 +70,25 @@ export function NextStepConnect({ step, onStart, onClose }: {
   }, []);
   return (
     <View style={{ padding: 12, gap: 10 }}>
-      <Label muted>{token ? "Finish connecting your account below." : busy ? "Checking your connections…" : "Choose a provider to connect your account."}</Label>
+      <Label muted>{token ? translateApp("Finish connecting your account below.")
+          : busy ? translateApp("Checking your connections…")
+            : translateApp("Choose a provider to connect your account.")}</Label>
       {error ? <Label accessibilityRole="alert">{error}</Label> : null}
-      {token ? <AssistantHostedConnect
+      {token ? (
+        <AssistantHostedConnect
         key={token} token={token} active={availability.active}
         onBusy={setBusy} onComplete={() => { setToken(undefined); void resolve(); }}
-      /> : null}
+      />
+      ) : null}
       {!token && setup?.choices.map((choice) => (
-        <ActionButton key={choice.slug} label={`Connect ${choice.name}`} disabled={busy} onPress={() => void resolve(choice.slug)} />
+        <ActionButton key={choice.slug} label={translateApp("Connect {{name}}", { name: choice.name})} disabled={busy} onPress={() => void resolve(choice.slug)} />
       ))}
-      {!token && (opened || error) ? <ActionButton label={error ? "Try again" : "Continue with connected account"} disabled={busy} onPress={() => void resolve()} /> : null}
-      <ActionButton label="Cancel" onPress={onClose} />
+      {!token && (opened || error) ? (
+        <ActionButton label={error ? translateApp("Try again")
+              : translateApp("Continue with connected account")
+          } disabled={busy} onPress={() => void resolve()} />
+      ) : null}
+      <ActionButton label={translateApp("Cancel")} onPress={onClose} />
     </View>
   );
 }

@@ -99,6 +99,7 @@ async fn assert_parity(
         &u.f.state.db,
         &u.f.state.encryption_keys,
         auth.chat.as_ref(),
+        &auth.assistant_operation_scopes,
         &service,
         endpoint,
         &input,

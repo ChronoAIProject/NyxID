@@ -1,9 +1,11 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 /** Read-only metadata: future strings are unknown, never successful or authorized. */
 export function historyEnum<const T extends readonly [string, ...string[]]>(values: T) {
   return z.string().transform((value): T[number] | "unknown" =>
-    values.includes(value) ? value as T[number] : "unknown",
+    values.includes(value) ? (value as T[number]) : "unknown",
   );
 }
 
@@ -46,11 +48,12 @@ export function activityPresentationStatus<T extends string>(status: T, kind?: s
 
 /** Validation diagnostics may contain wire data and are never user-facing copy. */
 export function historyErrorMessage(error: Error | null | undefined): string | undefined {
-  return error?.name === "ZodError" ? HISTORY_UNAVAILABLE : error?.message;
+  return error?.name === "ZodError" ? translateApp(HISTORY_UNAVAILABLE)
+    : error?.message;
 }
 
 export function parseHistoryResponse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
-  if (!result.success) throw new Error(HISTORY_UNAVAILABLE);
+  if (!result.success) throw localizedError(HISTORY_UNAVAILABLE);
   return result.data;
 }

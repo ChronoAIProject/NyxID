@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../../theme/ThemeContext";
@@ -16,6 +18,7 @@ export function AssistantMessageTime({
   beforeCopy?: boolean;
   foreground?: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [size, setSize] = useState({ width: 0, height: 0 });
   const time = messageTime(value);
@@ -27,8 +30,10 @@ export function AssistantMessageTime({
     <Pressable
       accessibilityRole="text"
       accessibilityLabel={time.label}
-      accessibilityHint="Touch and hold for the full date and time"
-      onLongPress={() => Alert.alert("Message sent", time.label)}
+      accessibilityHint={translateApp(
+        "Touch and hold for the full date and time",
+      )}
+      onLongPress={() => Alert.alert(translateApp("Message sent"), time.label)}
       hitSlop={{
         top: vertical,
         bottom: vertical,
@@ -63,8 +68,13 @@ export function AssistantMessageFooter({
   /** Completed agent replies only; omitted for people and pending turns. */
   report?: ReplyReportTarget & { reported?: boolean };
 }) {
-  const copy = <AssistantCopyButton text={text} afterDate={user} foreground={foreground} />;
-  const time = <AssistantMessageTime value={timestamp} beforeCopy={user} foreground={foreground} />;
+  useAppLanguage();
+  const copy = (
+    <AssistantCopyButton text={text} afterDate={user} foreground={foreground} />
+  );
+  const time = (
+    <AssistantMessageTime value={timestamp} beforeCopy={user} foreground={foreground} />
+  );
   const row = [styles.row, user && styles.userRow];
   if (user)
     return (

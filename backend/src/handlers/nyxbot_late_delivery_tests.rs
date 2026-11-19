@@ -726,6 +726,39 @@ async fn external_bot_delayed_answer_keeps_guest_authority_despite_owner_id_over
 }
 
 #[tokio::test]
+async fn detached_observer_capacity_notice_dispatches_at_settlement_once() {
+    let f = fixture("channel_capacity_detached_observer").await;
+    settled(&f, true).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id": &f.event.conversation_id, "turn_id": &f.event.turn_id},
+            doc! {"$set": {"text": "", "error_code": "capacity_exceeded", "error_detail": {
+                "stage": "upstream_response", "http_status": 503, "attempts": 20,
+                "turn_id": &f.event.turn_id, "occurred_at": bson::DateTime::now(),
+                "continuations": 0, "capacity_wait_ms": 120_098_i64
+            }}},
+        )
+        .await
+        .unwrap();
+
+    // An older replica can disappear between recording observer detach and
+    // giving the late sender ownership. The stream deadline is still ahead.
+    patch(&f, doc! {"gateway_observer_detached": true}).await;
+    late_delivery::settled(&f.state, &f.event.id).await;
+    let requests = sends(&f).await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["text"],
+        crate::services::assistant_turn_observability::capacity_message(Some(120_098))
+    );
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(sends(&f).await.len(), 1);
+}
+
+#[tokio::test]
 async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() {
     let f = fixture("channel_late_capacity_complete").await;
     settled(&f, true).await;

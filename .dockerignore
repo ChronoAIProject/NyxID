@@ -23,6 +23,9 @@ docs/
 !docs/site/**
 k8s/
 node_modules/
+tools/crash-artifacts/node_modules/
+crash-artifacts/
+mobile/release/crash-artifacts/
 SERVICES_OVERHAUL_PLAN.md
 CODE_REVIEW_FINDINGS.md
 SECURITY_REVIEW_FINDINGS.md

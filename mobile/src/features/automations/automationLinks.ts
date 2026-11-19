@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 export type AutomationLinkParams = {
   agentId?: string;
 };
@@ -35,8 +36,9 @@ export function parseAutomationLink(
     if (setup.length > 1 || (setup.length && !setupId.test(setup[0]!)))
       return {
         kind: "invalid",
-        message:
+        message: translateApp(
           "This automation setup link is invalid. Ask NyxBot for a new link.",
+        ),
       };
     if (
       agent.length > 1 ||
@@ -47,8 +49,9 @@ export function parseAutomationLink(
     )
       return {
         kind: "invalid",
-        message:
+        message: translateApp(
           "This automation link has an invalid agent. Ask NyxBot for a new link.",
+        ),
       };
     if (agent.length) params.agentId = agent[0]!;
     // Setup authoring is not native. Only the read-only agent filter crosses.

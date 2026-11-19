@@ -32,8 +32,15 @@ tokio::task_local! { static REQUEST: (); }
 #[derive(Default)]
 struct Monitor {
     commands: Vec<(String, String)>,
+    transaction_commands: Vec<(String, String, Document, i64)>,
     stop_after_source: bool,
     stop_on_ack: Option<i32>,
+    before_insert: Option<InterleavedInsert>,
+}
+struct InterleavedInsert {
+    command: &'static str,
+    collection: &'static str,
+    insert: Box<dyn FnOnce() + Send>,
 }
 #[derive(Debug)]
 struct ProcessStopped;
@@ -42,12 +49,19 @@ struct Fixture {
     state: AppState,
     owner: String,
     grant: String,
+    request_id: String,
     service: String,
     monitor: Arc<Mutex<Monitor>>,
 }
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_command_observer(|_| {}).await
+    }
+
+    async fn with_command_observer(
+        observe: impl Fn(&CommandEvent) + Send + Sync + 'static,
+    ) -> Self {
         let monitor = Arc::new(Mutex::new(Monitor::default()));
         let seen = monitor.clone();
         let db = connect_transaction_test_database_with_command_handler(
@@ -56,14 +70,21 @@ impl Fixture {
                 if REQUEST.try_with(|_| ()).is_err() {
                     return;
                 }
+                observe(&event);
                 let mut m = seen.lock().unwrap();
                 match event {
                     CommandEvent::Started(e) => {
                         let coll = e.command.get_str(&e.command_name).unwrap_or("").to_owned();
                         if m.stop_after_source
-                            && ((e.command_name == "update"
-                                && coll == GRANTS
-                                && !e.command.contains_key("autocommit"))
+                            && (((e.command_name == "update" && coll == GRANTS)
+                                || (e.command_name == "findAndModify"
+                                    && matches!(
+                                        coll.as_str(),
+                                        "approval_requests" | "service_approval_configs"
+                                    ))
+                                || (e.command_name == "delete"
+                                    && coll == "service_approval_configs"))
+                                && !e.command.contains_key("autocommit")
                                 || e.command_name == "commitTransaction")
                         {
                             m.stop_on_ack = Some(e.request_id);
@@ -74,7 +95,26 @@ impl Fixture {
                                 Ok("majority")
                             );
                         }
+                        if e.command.get_bool("autocommit") == Ok(false) {
+                            m.transaction_commands.push((
+                                e.command_name.clone(),
+                                coll.clone(),
+                                e.command.get_document("lsid").unwrap().clone(),
+                                e.command.get_i64("txnNumber").unwrap(),
+                            ));
+                        }
+                        let before_write = if m.before_insert.as_ref().is_some_and(|hook| {
+                            hook.command == e.command_name && hook.collection == coll
+                        }) {
+                            m.before_insert.take()
+                        } else {
+                            None
+                        };
                         m.commands.push((e.command_name, coll));
+                        drop(m);
+                        if let Some(insert_winner) = before_write {
+                            (insert_winner.insert)();
+                        }
                     }
                     CommandEvent::Succeeded(e) if m.stop_on_ack == Some(e.request_id) => {
                         m.stop_on_ack = None;
@@ -99,6 +139,7 @@ impl Fixture {
             state: test_app_state(db),
             owner,
             grant,
+            request_id: Uuid::new_v4().to_string(),
             service,
             monitor,
         }
@@ -350,3 +391,6 @@ async fn repeated_web_revoke_remains_a_successful_audited_match() {
     assert_eq!(f.rows(INTENTS).await.len(), 2);
     f.state.db.drop().await.unwrap();
 }
+
+#[path = "approval_change_audit_tests.rs"]
+mod changes;

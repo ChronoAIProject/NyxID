@@ -152,6 +152,7 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 pub struct AppState {
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
+    pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
@@ -1062,7 +1063,6 @@ async fn server_run(cli: Cli) {
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
@@ -1186,9 +1186,14 @@ async fn server_run(cli: Cli) {
 
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
+    let crash_reports = Arc::new(
+        services::crash_report_export::CrashConfig::from_config(&config)
+            .expect("Invalid crash reporting configuration"),
+    );
     let state = AppState {
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
+        crash_reports: crash_reports.clone(),
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
@@ -1377,6 +1382,22 @@ async fn server_run(cli: Cli) {
         execution_enrollment,
     };
 
+    services::shutdown::process().spawn_worker(services::crash_report_service::public_config::run(
+        db.clone(),
+        services::shutdown::process(),
+    ));
+    services::shutdown::process().spawn_worker(
+        services::crash_report_service::releases::run_manifest_refresh(
+            db.clone(),
+            Arc::new(config.clone()),
+            services::shutdown::process(),
+        ),
+    );
+    services::shutdown::process().spawn_worker(services::crash_report_export::worker::run(
+        db.clone(),
+        crash_reports,
+        services::shutdown::process(),
+    ));
     state
         .shutdown
         .spawn_worker(services::node_credential_delivery::run_worker(
@@ -2076,9 +2097,21 @@ async fn server_run(cli: Cli) {
         // ten percent; ordinary budgets reserve at most five seconds.
         let reserve = drain.cleanup_reserve();
         let work_deadline = drain.work_deadline();
+        // A peer with a failed connect can distinguish a graceful handover of
+        // a legacy socket from a crash with an unstealable live lease.
+        let identity = shutdown_state.replica_identity.clone();
+        let db = shutdown_state.db.clone();
+        let announce = async move {
+            let _ = db.collection::<mongodb::bson::Document>(models::node::COLLECTION_NAME)
+                .update_many(mongodb::bson::doc! { "connection_owner.generation_id": &identity.generation_id, "connection_owner.instance_name": &identity.instance_name },
+                    mongodb::bson::doc! { "$set": { "connection_owner.handover_pending": true } }).await;
+        };
         let finish = async {
+            tokio::pin!(announce);
+            let mut announced = false;
             let end = loop {
                 let end = tokio::select! {
+                    () = &mut announce, if !announced => { announced = true; continue; }
                     () = servers.failed() => End::ListenerFailure,
                     end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
                 };

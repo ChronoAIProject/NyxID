@@ -1,0 +1,8 @@
+{
+  "name": "nyxid-crash-artifacts",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "upload": "node upload.mjs", "test": "node --test upload.test.mjs" },
+  "dependencies": { "@sentry/cli": "3.8.2" }
+}

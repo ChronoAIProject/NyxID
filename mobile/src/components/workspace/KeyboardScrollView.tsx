@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, type Ref } from "react";
-import { ScrollView, TextInput, type ScrollViewProps } from "react-native";
+import { useCallback, useEffect, useLayoutEffect, useRef, type Ref, type RefObject } from "react";
+import { ScrollView, TextInput, type ScrollViewProps, type View } from "react-native";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { spacing } from "../../theme/designTokens";
 import {
@@ -7,15 +7,23 @@ import {
   type KeyboardViewportFrame,
 } from "./KeyboardViewport";
 
+type RevealView = Pick<View, "measureInWindow">;
+export type KeyboardScrollViewHandle = {reveal: (view: RevealView | null) => void};
+
 /** A measured viewport reserves only the keyboard overlap. Focus is revealed
  * separately, including when an alert returns focus without a new IME frame. */
 export function KeyboardScrollView({
   scrollRef,
+  revealController,
   ...props
-}: ScrollViewProps & { scrollRef?: Ref<ScrollView> }) {
+}: ScrollViewProps & {
+  scrollRef?: Ref<ScrollView>;
+  revealController?: RefObject<KeyboardScrollViewHandle | null>;
+}) {
   const scroller = useRef<ScrollView | null>(null);
   const focused =
     useRef<ReturnType<typeof TextInput.State.currentlyFocusedInput>>(null);
+  const requested = useRef<RevealView | null>(null);
   const viewport = useRef<KeyboardViewportFrame | undefined>(undefined);
   const offset = useRef(0);
   const revision = useRef(0);
@@ -32,7 +40,8 @@ export function KeyboardScrollView({
   }, []);
   const reveal = useCallback(() => {
     cancelReveal();
-    const input = focused.current;
+    const explicit = requested.current;
+    const input = explicit ?? focused.current;
     const scroll = scroller.current;
     const frame = viewport.current;
     if (!input || !scroll || !frame || frame.height <= 0) return;
@@ -47,8 +56,9 @@ export function KeyboardScrollView({
           !mounted.current ||
           revision.current !== current ||
           scroller.current !== scroll ||
-          focused.current !== input ||
-          TextInput.State.currentlyFocusedInput() !== input ||
+          (explicit ? requested.current !== input : (
+            focused.current !== input || TextInput.State.currentlyFocusedInput() !== input
+          )) ||
           offset.current !== measuredOffset ||
           !Number.isFinite(y) ||
           !Number.isFinite(height) ||
@@ -70,6 +80,15 @@ export function KeyboardScrollView({
       });
     });
   }, [cancelReveal, reducedMotion]);
+  useLayoutEffect(() => {
+    if (!revealController) return;
+    const handle: KeyboardScrollViewHandle = {reveal: (view) => {
+      requested.current = view;
+      reveal();
+    }};
+    revealController.current = handle;
+    return () => {if (revealController.current === handle) revealController.current = null;};
+  }, [reveal, revealController]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -103,11 +122,13 @@ export function KeyboardScrollView({
         ref={attach}
         automaticallyAdjustKeyboardInsets={false}
         onFocus={(event) => {
+          requested.current = null;
           focused.current = TextInput.State.currentlyFocusedInput();
           reveal();
           props.onFocus?.(event);
         }}
         onBlur={(event) => {
+          requested.current = null;
           focused.current = null;
           cancelReveal();
           props.onBlur?.(event);
@@ -130,6 +151,7 @@ export function KeyboardScrollView({
           props.onScroll?.(event);
         }}
         onScrollBeginDrag={(event) => {
+          requested.current = null;
           cancelReveal();
           props.onScrollBeginDrag?.(event);
         }}

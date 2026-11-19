@@ -1,8 +1,8 @@
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::Database;
 use mongodb::bson::{self, Document, doc};
-use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
+use mongodb::options::{FindOptions, ReturnDocument};
+use mongodb::{ClientSession, Database};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,11 +14,13 @@ use crate::models::approval_request::{
     ApprovalRequest, COLLECTION_NAME as REQUESTS, ExactServiceApprovalBinding,
 };
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+use crate::models::security_effect_intent::SecurityEffectIntent;
 use crate::models::service_approval_config::{
     ApprovalEffect, ApprovalMode, ApprovalRule, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS,
     ServiceApprovalConfig,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::services::api_key_mutation_service::{map_transaction_error, transaction_result};
 use crate::services::approval_policy;
 use crate::services::audit_service::{AuditActor, required};
 use crate::services::notification_service;
@@ -56,14 +58,16 @@ impl ApprovalOptions {
 }
 
 /// Resolve the approval mode for a (user, service) pair.
-pub async fn resolve_approval_mode(
+async fn resolve_approval_mode(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    session: &mut ClientSession,
 ) -> AppResult<ApprovalMode> {
     let per_service = db
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
         .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .session(session)
         .await?;
 
     Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
@@ -1060,9 +1064,53 @@ pub async fn create_tool_approval_request(
     }
 }
 
-/// Process a user's approval decision (from Telegram callback or web UI).
-/// Atomically updates status from "pending" to "approved"/"rejected".
-/// On approval: creates an ApprovalGrant with the user's configured expiry.
+pub(crate) enum DecisionSource {
+    Web(AuditActor),
+    Telegram,
+}
+
+impl DecisionSource {
+    fn channel(&self) -> &'static str {
+        match self {
+            Self::Web(_) => "web",
+            Self::Telegram => "telegram",
+        }
+    }
+
+    fn intent(
+        &self,
+        request_id: &str,
+        service_id: &str,
+        owner_id: &str,
+        approved: bool,
+    ) -> AppResult<SecurityEffectIntent> {
+        let owner;
+        let actor = match self {
+            Self::Web(actor) => actor,
+            Self::Telegram => {
+                owner = AuditActor {
+                    user_id: owner_id.to_string(),
+                    ip_address: None,
+                    user_agent: None,
+                    api_key_id: None,
+                    api_key_name: None,
+                };
+                &owner
+            }
+        };
+        required::intent_preserving_actor(
+            actor,
+            "approval_decision",
+            Some(serde_json::json!({
+                "request_id": required::text(required::TextField::Identifier, request_id),
+                "service_id": required::text(required::TextField::Identifier, service_id),
+                "approved": approved, "channel": self.channel(),
+            })),
+        )
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn process_decision(
     db: &Database,
@@ -1076,17 +1124,29 @@ pub async fn process_decision(
     idempotency_key: Option<&str>,
     decision_channel: &str,
 ) -> AppResult<ApprovalRequest> {
+    let current = read_decision_request(db, request_id).await?;
+    let source = if decision_channel == "telegram" {
+        DecisionSource::Telegram
+    } else {
+        DecisionSource::Web(AuditActor {
+            user_id: current.request.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        })
+    };
     Box::pin(process_decision_with_access(
         db,
         config,
         http_client,
         fcm_auth,
         apns_auth,
-        request_id,
+        current,
         approved,
         duration_sec,
         idempotency_key,
-        decision_channel,
+        source,
         None,
     ))
     .await
@@ -1099,14 +1159,17 @@ pub(crate) async fn process_decision_with_access(
     http_client: &reqwest::Client,
     fcm_auth: Option<Arc<FcmAuth>>,
     apns_auth: Option<Arc<ApnsAuth>>,
-    request_id: &str,
+    decision_request: DecisionRequest,
     approved: bool,
     duration_sec: Option<i64>,
     idempotency_key: Option<&str>,
-    decision_channel: &str,
+    source: DecisionSource,
     snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<ApprovalRequest> {
-    let current = get_request(db, request_id).await?;
+    let DecisionRequest {
+        request: current,
+        mut session,
+    } = decision_request;
     super::execution_permission_dispatch::proposals::legacy_refusal(&current)?;
     if let Some(binding) = &current.assistant_group {
         super::org_group_service::authorize_approval(
@@ -1117,74 +1180,62 @@ pub(crate) async fn process_decision_with_access(
         )
         .await?;
     }
+    let collaboration = if let Some(binding) = &current.assistant_group
+        && super::collaboration_group_service::marked(db, &binding.group_id).await?
+    {
+        Some(binding.clone())
+    } else {
+        None
+    };
     let now = Utc::now();
-    let new_status = if approved { "approved" } else { "rejected" };
-    let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let mut update_set = doc! {
-        "status": new_status,
+    let mut update = doc! {
+        "status": if approved { "approved" } else { "rejected" },
         "decided_at": bson::DateTime::from_chrono(now),
-        "decision_channel": decision_channel,
+        "decision_channel": source.channel(),
     };
     if let Some(key) = idempotency_key {
-        update_set.insert("decision_idempotency_key", key);
+        update.insert("decision_idempotency_key", key);
     }
-
-    // Collaboration decisions serialize with departure/cancellation and keep
-    // their continuation bound to the same request. Unrelated approvals keep
-    // their existing single-write path with no collaboration reads.
-    let collaboration = if let Some(binding) = &current.assistant_group {
-        super::collaboration_group_service::marked(db, &binding.group_id).await?
-    } else {
-        false
+    // The handler has already authorized this request. Bind its identity and
+    // group to the write, including for legacy documents missing optional fields.
+    let mut filter = doc! {
+        "_id": &current.id,
+        "status": "pending",
+        "user_id": &current.user_id,
+        "service_id": &current.service_id,
+        "execution_proposal": bson::Bson::Null,
     };
-    let updated = if collaboration {
-        let binding = current
-            .assistant_group
-            .as_ref()
-            .expect("checked group binding");
-        let mut session = db.client().start_session().await?;
-        session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), binding.clone(), collection.clone(), request_id.to_owned(), update_set), |session, context| {let (db,binding,collection,request_id,update_set)=&*context;let request_id=request_id.as_str();Box::pin(async move {
-            let result:AppResult<Option<ApprovalRequest>>=async {
-                let row=db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-                    .find_one(doc! {"_id":&binding.conversation_id,"collaboration.request_id":&binding.request_id}).session(&mut *session).await?
-                    .ok_or_else(||AppError::NotFound("Approval request not found".into()))?;
-                super::collaboration_group_service::runtime::fence_decision(db,&row,&binding.actor_user_id,session).await?;
-                let updated=collection.find_one_and_update(doc! {"_id":request_id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":update_set.clone()})
-                    .return_document(ReturnDocument::After).session(&mut *session).await?;
-                if updated.is_some() && row.active_turn.is_none() {
-                    super::collaboration_group_service::runtime::queue_decision(db,&row,session).await?;
-                }
-                Ok(updated)
-            }.await;
-            super::api_key_mutation_service::transaction_result(result)
-        })}).await.map_err(super::api_key_mutation_service::map_transaction_error)?
+    if let Some(binding) = &current.assistant_group {
+        filter.extend(doc! {
+            "assistant_group.group_id": &binding.group_id,
+            "assistant_group.request_id": &binding.request_id,
+            "assistant_group.actor_user_id": &binding.actor_user_id,
+            "assistant_group.conversation_id": &binding.conversation_id,
+        });
     } else {
-        collection
-            .find_one_and_update(
-                doc! {
-                    "_id": request_id,
-                    "status": "pending",
-                },
-                doc! {
-                    "$set": update_set
-                },
-            )
-            .with_options(
-                FindOneAndUpdateOptions::builder()
-                    .return_document(ReturnDocument::After)
-                    .build(),
-            )
-            .await?
+        filter.insert("assistant_group", bson::Bson::Null);
+    }
+    let decision = DecisionMutation {
+        filter,
+        update,
+        collaboration,
+        approved,
+        duration_sec,
+        now,
+        grant_id: uuid::Uuid::new_v4().to_string(),
+        intent: source.intent(&current.id, &current.service_id, &current.user_id, approved)?,
     };
-
-    let updated = match updated {
-        Some(updated) => updated,
-        None => {
-            let existing = get_request(db, request_id).await?;
-            // Provide a specific error for expired requests instead of the
-            // generic "decision_state_conflict" from is_idempotent_replay.
+    let updated = match Box::pin(decision.commit(db, &mut session)).await? {
+        DecisionOutcome::Applied(updated) => *updated,
+        DecisionOutcome::ModeConflict => {
+            return Err(AppError::Conflict(
+                "Service approval mode has changed; this request is no longer valid".into(),
+            ));
+        }
+        DecisionOutcome::Unmatched => {
+            let existing = get_request(db, &current.id).await?;
             if existing.status == "expired" {
-                return Err(AppError::Forbidden("Approval request expired".to_string()));
+                return Err(AppError::Forbidden("Approval request expired".into()));
             }
             if is_idempotent_replay(
                 &existing.status,
@@ -1194,91 +1245,9 @@ pub(crate) async fn process_decision_with_access(
             )? {
                 return Ok(existing);
             }
-            return Err(AppError::Conflict("already_decided".to_string()));
+            return Err(AppError::Conflict("already_decided".into()));
         }
     };
-
-    // Guard: reject decisions on grant-mode requests if the service has since
-    // switched to per_request. Normally these requests are cancelled at
-    // mode-switch time (#153), but this catches any that slip through a
-    // TOCTOU race. We roll back the decision so the request stays "pending"
-    // (and will be picked up by the next expiry sweep).
-    if approved && requires_legacy_grant_mode_recheck(&updated) {
-        let current_mode = resolve_approval_mode(db, &updated.user_id, &updated.service_id).await?;
-        if current_mode != ApprovalMode::Grant {
-            // Roll back the decision atomically. The filter guards against a
-            // concurrent rollback so we don't clobber a different status.
-            let rollback = db
-                .collection::<ApprovalRequest>(REQUESTS)
-                .update_one(
-                    doc! { "_id": request_id, "status": new_status },
-                    doc! { "$set": {
-                        "status": "expired",
-                        "decided_at": bson::DateTime::from_chrono(now),
-                    }},
-                )
-                .await
-                .map_err(AppError::DatabaseError)?;
-
-            if rollback.matched_count == 0 {
-                // Another process already changed the status (e.g. expiry sweep).
-                // The request is no longer "approved", so the conflict is resolved.
-                tracing::warn!(
-                    request_id,
-                    "Rollback matched no document; concurrent state change"
-                );
-            }
-
-            return Err(AppError::Conflict(
-                "Service approval mode has changed; this request is no longer valid".to_string(),
-            ));
-        }
-    }
-
-    // On approval: create a grant when the request was originally created
-    // in grant mode AND the service is still in grant mode (verified above).
-    //
-    // Note: a TOCTOU race exists if a concurrent request switches the service
-    // to per_request between the check above and the insert_one below. If
-    // that happens, the grant is inert: the proxy handler skips grants in
-    // per_request mode, and list_grants() filters them out at read time.
-    // The grant will expire naturally.
-    //
-    // For org-policy requests (`updated.from_org_policy == true`) the grant
-    // is minted as `org_scoped` so it covers every member of the owning org
-    // for its full lifetime (see ChronoAIProject/NyxID#364). Channel defaults
-    // (grant expiry days) fall back to the request owner, which for org-policy
-    // is the org itself (no channel row) -- `get_or_create_channel` creates a
-    // default row whose `grant_expiry_days` is the system default, so the
-    // expiry computation still works.
-    if approved && updated.approval_mode == ApprovalMode::Grant {
-        let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
-        let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
-
-        let grant = ApprovalGrant {
-            execution_review: None,
-            execution_last_used_at: None,
-            execution_use: None,
-            execution: None,
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: updated.user_id.clone(),
-            service_id: updated.service_id.clone(),
-            service_name: updated.service_name.clone(),
-            requester_type: updated.requester_type.clone(),
-            requester_id: updated.requester_id.clone(),
-            requester_label: updated.requester_label.clone(),
-            approval_request_id: updated.id.clone(),
-            scope: updated.grant_scope.clone(),
-            granted_at: now,
-            expires_at: grant_expiry,
-            revoked: false,
-            org_scoped: updated.from_org_policy,
-        };
-
-        db.collection::<ApprovalGrant>(GRANTS)
-            .insert_one(&grant)
-            .await?;
-    }
 
     // Notify channels about the decision (best-effort, non-blocking).
     let request_clone = updated.clone();
@@ -1301,6 +1270,181 @@ pub(crate) async fn process_decision_with_access(
     });
 
     Ok(updated)
+}
+
+enum DecisionOutcome {
+    Applied(Box<ApprovalRequest>),
+    ModeConflict,
+    Unmatched,
+}
+
+struct DecisionMutation {
+    filter: Document,
+    update: Document,
+    collaboration: Option<crate::models::approval_request::GroupApprovalBinding>,
+    approved: bool,
+    duration_sec: Option<i64>,
+    now: chrono::DateTime<Utc>,
+    grant_id: String,
+    intent: SecurityEffectIntent,
+}
+
+// Only a collision creating the lazy channel can retry the decision as a whole.
+// A duplicate grant or audit ID must surface as a failed decision.
+#[derive(Debug)]
+struct ChannelCreationRace;
+
+impl DecisionMutation {
+    async fn commit(
+        self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<DecisionOutcome> {
+        let context = Arc::new((db.clone(), self));
+        let mut raced = false;
+        loop {
+            let context = context.clone();
+            let result = session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(mongodb::options::WriteConcern::majority())
+                .and_run2(async move |session| {
+                    let (db, mutation) = &*context;
+                    transaction_result(mutation.apply(db, session).await)
+                })
+                .await;
+            match result {
+                Err(error) if !raced && error.get_custom::<ChannelCreationRace>().is_some() => {
+                    raced = true
+                }
+                result => return result.map_err(map_transaction_error),
+            }
+        }
+    }
+
+    async fn apply(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+    ) -> AppResult<DecisionOutcome> {
+        use super::collaboration_group_service::runtime;
+        use crate::models::assistant_conversation::{
+            AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+        };
+        let mut filter = self.filter.clone();
+        let conversation = if let Some(binding) = &self.collaboration {
+            let row = db
+                .collection::<AssistantConversation>(CONVERSATIONS)
+                .find_one(doc! {
+                    "_id": &binding.conversation_id,
+                    "collaboration.request_id": &binding.request_id,
+                })
+                .session(&mut *session)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Approval request not found".into()))?;
+            runtime::fence_decision(db, &row, &binding.actor_user_id, session).await?;
+            filter.insert("expires_at", doc! {"$gt":bson::DateTime::now()});
+            Some(row)
+        } else {
+            None
+        };
+        let requests = db.collection::<ApprovalRequest>(REQUESTS);
+        let Some(updated) = requests
+            .find_one_and_update(filter, doc! {"$set":self.update.clone()})
+            .return_document(ReturnDocument::After)
+            .session(&mut *session)
+            .await?
+        else {
+            return Ok(DecisionOutcome::Unmatched);
+        };
+        if let Some(row) = conversation
+            && row.active_turn.is_none()
+        {
+            runtime::queue_decision(db, &row, session).await?;
+        }
+        if self.approved
+            && requires_legacy_grant_mode_recheck(&updated)
+            && resolve_approval_mode(db, &updated.user_id, &updated.service_id, session).await?
+                != ApprovalMode::Grant
+        {
+            requests
+                .update_one(
+                    doc! {"_id":&updated.id,"status":"approved"},
+                    doc! {"$set":{"status":"expired"}},
+                )
+                .session(&mut *session)
+                .await?;
+            return Ok(DecisionOutcome::ModeConflict);
+        }
+        if self.approved && updated.approval_mode == ApprovalMode::Grant {
+            self.create_grant(db, &updated, session).await?;
+        }
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(&self.intent),
+        )
+        .await?;
+        Ok(DecisionOutcome::Applied(Box::new(updated)))
+    }
+
+    async fn create_grant(
+        &self,
+        db: &Database,
+        updated: &ApprovalRequest,
+        session: &mut ClientSession,
+    ) -> AppResult<()> {
+        let channels = db.collection::<NotificationChannel>(CHANNELS);
+        let channel = match channels
+            .find_one(doc! {"user_id":&updated.user_id})
+            .session(&mut *session)
+            .await?
+        {
+            Some(channel) => channel,
+            None => {
+                let channel = notification_service::default_channel(&updated.user_id);
+                channels
+                    .insert_one(&channel)
+                    .session(&mut *session)
+                    .await
+                    .map_err(|error| {
+                        if is_duplicate_key_error(&error) {
+                            mongodb::error::Error::custom(ChannelCreationRace)
+                        } else {
+                            error
+                        }
+                    })?;
+                channel
+            }
+        };
+        let grant_expiry =
+            resolve_grant_expiry(self.now, self.duration_sec, channel.grant_expiry_days);
+        let grant = ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
+            id: self.grant_id.clone(),
+            user_id: updated.user_id.clone(),
+            service_id: updated.service_id.clone(),
+            service_name: updated.service_name.clone(),
+            requester_type: updated.requester_type.clone(),
+            requester_id: updated.requester_id.clone(),
+            requester_label: updated.requester_label.clone(),
+            approval_request_id: updated.id.clone(),
+            scope: updated.grant_scope.clone(),
+            granted_at: self.now,
+            expires_at: grant_expiry,
+            revoked: false,
+            org_scoped: updated.from_org_policy,
+        };
+
+        db.collection::<ApprovalGrant>(GRANTS)
+            .insert_one(&grant)
+            .session(session)
+            .await?;
+        Ok(())
+    }
 }
 
 fn requires_legacy_grant_mode_recheck(request: &ApprovalRequest) -> bool {
@@ -1878,10 +2022,36 @@ pub async fn list_requests_with_proposals(
 
 /// Get a single approval request by ID (for status polling).
 pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalRequest> {
-    db.collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! { "_id": request_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
+    read_request(db, request_id, None).await
+}
+
+// Keep the snapshot transaction causally after the card read used for authorization.
+pub(crate) struct DecisionRequest {
+    pub request: ApprovalRequest,
+    session: ClientSession,
+}
+
+pub(crate) async fn read_decision_request(
+    db: &Database,
+    request_id: &str,
+) -> AppResult<DecisionRequest> {
+    let mut session = db.client().start_session().causal_consistency(true).await?;
+    let request = read_request(db, request_id, Some(&mut session)).await?;
+    Ok(DecisionRequest { request, session })
+}
+
+async fn read_request(
+    db: &Database,
+    request_id: &str,
+    session: Option<&mut ClientSession>,
+) -> AppResult<ApprovalRequest> {
+    let requests = db.collection::<ApprovalRequest>(REQUESTS);
+    let find = requests.find_one(doc! { "_id": request_id });
+    let request = match session {
+        Some(session) => find.session(session).await?,
+        None => find.await?,
+    };
+    request.ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
 }
 
 fn service_config_supports_grants(config: &ServiceApprovalConfig) -> bool {
@@ -2190,12 +2360,67 @@ pub async fn list_service_approval_configs(
     Ok(configs)
 }
 
-/// Set a per-service approval config (atomic upsert).
-/// If a config already exists for (user, service), it is updated.
-/// Otherwise, a new config is created. Uses `findOneAndUpdate` with
-/// `upsert: true` to avoid race conditions from concurrent requests.
+pub(crate) struct ConfigAudit {
+    pub actor: AuditActor,
+    pub user_service_id: Option<String>,
+}
+
+impl ConfigAudit {
+    fn metadata(&self, owner: &str, service: &str) -> serde_json::Value {
+        use required::{TextField::Identifier, text};
+        serde_json::json!({
+            "service_id": text(Identifier, service),
+            "user_service_id": self.user_service_id.as_deref().map(|id| text(Identifier, id)),
+            "policy_owner_user_id": text(Identifier, owner),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_intent(
+        &self,
+        owner: &str,
+        service: &str,
+        name: &str,
+        required: bool,
+        mode: &ApprovalMode,
+        rule_count: usize,
+        effect: Option<&ApprovalEffect>,
+    ) -> AppResult<SecurityEffectIntent> {
+        let mut data = self.metadata(owner, service);
+        data["service_name"] = required::text(required::TextField::DisplayName, name).into();
+        data["approval_required"] = required.into();
+        data["approval_mode"] = mode.as_str().into();
+        data["approval_rule_count"] = rule_count.into();
+        data["default_effect"] = serde_json::json!(effect.map(ApprovalEffect::as_str));
+        required::intent_preserving_actor(&self.actor, "service_approval_config_set", Some(data))
+    }
+
+    fn delete_intent(&self, owner: &str, service: &str) -> AppResult<SecurityEffectIntent> {
+        required::intent_preserving_actor(
+            &self.actor,
+            "service_approval_config_deleted",
+            Some(self.metadata(owner, service)),
+        )
+    }
+}
+
+#[cfg(test)]
+fn test_config_audit(id: &str) -> ConfigAudit {
+    ConfigAudit {
+        actor: AuditActor {
+            user_id: id.into(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        user_service_id: None,
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub async fn set_service_approval_config(
+pub(crate) async fn set_service_approval_config(
     db: &Database,
     user_id: &str,
     service_id: &str,
@@ -2204,6 +2429,32 @@ pub async fn set_service_approval_config(
     approval_mode: Option<&ApprovalMode>,
     rules: Option<&[ApprovalRule]>,
     default_effect: Option<&ApprovalEffect>,
+) -> AppResult<ServiceApprovalConfig> {
+    set_config(
+        db,
+        user_id,
+        service_id,
+        service_name,
+        approval_required,
+        approval_mode,
+        rules,
+        default_effect,
+        test_config_audit(user_id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn set_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    service_name: &str,
+    approval_required: Option<bool>,
+    approval_mode: Option<&ApprovalMode>,
+    rules: Option<&[ApprovalRule]>,
+    default_effect: Option<&ApprovalEffect>,
+    audit: ConfigAudit,
 ) -> AppResult<ServiceApprovalConfig> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
@@ -2217,66 +2468,113 @@ pub async fn set_service_approval_config(
         default_effect,
     )?;
 
-    for _attempt in 0..2 {
-        let rules_bson = bson::to_bson(&rules)
-            .map_err(|e| AppError::Internal(format!("Failed to serialize approval rules: {e}")))?;
-        let default_effect_bson = bson::to_bson(&default_effect).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize approval default effect: {e}"))
-        })?;
-        let config = collection
-            .find_one_and_update(
-                filter.clone(),
-                doc! {
-                    "$set": {
-                        "approval_required": approval_required,
-                        "approval_mode": approval_mode.as_str(),
-                        "rules": rules_bson,
-                        "default_effect": default_effect_bson,
-                        "service_name": service_name,
-                        "updated_at": now,
-                    },
-                    "$setOnInsert": {
-                        "_id": uuid::Uuid::new_v4().to_string(),
-                        "user_id": user_id,
-                        "service_id": service_id,
-                        "created_at": now,
-                    }
-                },
-            )
-            .with_options(
-                FindOneAndUpdateOptions::builder()
-                    .upsert(true)
-                    .return_document(ReturnDocument::After)
-                    .build(),
-            )
-            .await;
-
-        match config {
-            Ok(Some(cfg)) => {
-                reconcile_grant_state_for_config(db, user_id, service_id, &cfg).await?;
-                return Ok(cfg);
-            }
-            Ok(None) => {
-                return Err(AppError::Internal(
-                    "Upsert returned no document".to_string(),
-                ));
-            }
-            Err(e) if is_duplicate_key_error(&e) => {
-                // Concurrent upserts can race on the unique (user_id, service_id) index.
-                // Read-after-write resolves to the winning document.
-                if let Some(existing) = collection.find_one(filter.clone()).await? {
-                    reconcile_grant_state_for_config(db, user_id, service_id, &existing).await?;
-                    return Ok(existing);
-                }
-                continue;
-            }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+    let intent = audit.set_intent(
+        user_id,
+        service_id,
+        service_name,
+        approval_required,
+        &approval_mode,
+        rules.len(),
+        default_effect.as_ref(),
+    )?;
+    let rules_bson = bson::to_bson(&rules)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize approval rules: {e}")))?;
+    let effect_bson = bson::to_bson(&default_effect).map_err(|e| {
+        AppError::Internal(format!("Failed to serialize approval default effect: {e}"))
+    })?;
+    let config_id = uuid::Uuid::new_v4().to_string();
+    let update = doc! {
+        "$set": {
+            "approval_required": approval_required,
+            "approval_mode": approval_mode.as_str(),
+            "rules": rules_bson,
+            "default_effect": effect_bson,
+            "service_name": service_name,
+            "updated_at": now,
+        },
+        "$setOnInsert": {
+            "_id": &config_id,
+            "user_id": user_id,
+            "service_id": service_id,
+            "created_at": now,
         }
+    };
+    let mut write_filter = filter.clone();
+    // Two audited creators that observed absence must contend for the unique
+    // owner/service key even if a transaction body is retried after a conflict.
+    if existing.is_none() {
+        write_filter.insert("_id", &config_id);
     }
-
+    for _attempt in 0..2 {
+        let mut session = db.client().start_session().await?;
+        let (source_db, upsert_filter, update, intent) = (
+            db.clone(),
+            write_filter.clone(),
+            update.clone(),
+            intent.clone(),
+        );
+        let result = session
+            .start_transaction()
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .and_run2(async move |session| {
+                let row = upsert_config(&source_db, &upsert_filter, &update, session).await?;
+                transaction_result(
+                    super::security_effect_service::enqueue_in_session(
+                        &source_db,
+                        session,
+                        std::slice::from_ref(&intent),
+                    )
+                    .await,
+                )?;
+                Ok(row)
+            })
+            .await;
+        let cfg = match result {
+            Ok(cfg) => cfg,
+            Err(error) if error.get_custom::<ConfigCreationRace>().is_some() => {
+                let Some(winner) = collection.find_one(filter.clone()).await? else {
+                    continue;
+                };
+                winner
+            }
+            Err(error) => return Err(map_transaction_error(error)),
+        };
+        reconcile_grant_state_for_config(db, user_id, service_id, &cfg).await?;
+        return Ok(cfg);
+    }
     Err(AppError::Conflict(
-        "Per-service approval config update conflicted, please retry".to_string(),
+        "Per-service approval config update conflicted, please retry".into(),
     ))
+}
+
+#[derive(Debug)]
+struct ConfigCreationRace;
+
+async fn upsert_config(
+    db: &Database,
+    filter: &Document,
+    update: &Document,
+    session: &mut ClientSession,
+) -> mongodb::error::Result<ServiceApprovalConfig> {
+    let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
+    collection
+        .find_one_and_update(filter.clone(), update.clone())
+        .upsert(true)
+        .return_document(ReturnDocument::After)
+        .session(session)
+        .await
+        .map_err(|error| {
+            if is_duplicate_key_error(&error) {
+                mongodb::error::Error::custom(ConfigCreationRace)
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(|| {
+            super::api_key_mutation_service::abort_transaction(AppError::Internal(
+                "Upsert returned no document".into(),
+            ))
+        })
 }
 
 /// Delete a per-service approval config (revert to global default).
@@ -2284,15 +2582,42 @@ pub async fn set_service_approval_config(
 /// effectively switches the service to `per_request`. Active grants are
 /// revoked unconditionally so they don't linger (see #146). The revoke is
 /// idempotent, so retries after partial failure still clean up.
-pub async fn delete_service_approval_config(
+pub(crate) async fn delete_service_approval_config(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    audit: ConfigAudit,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .delete_one(doc! { "user_id": user_id, "service_id": service_id })
-        .await?;
+    let intent = audit.delete_intent(user_id, service_id)?;
+    let filter = doc! {"user_id":user_id,"service_id":service_id};
+    let deleted = {
+        let db = db.clone();
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .and_run2(async move |session| {
+                let count = db
+                    .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+                    .delete_one(filter.clone())
+                    .session(&mut *session)
+                    .await?
+                    .deleted_count;
+                if count == 1 {
+                    transaction_result(
+                        super::security_effect_service::enqueue_in_session(
+                            &db,
+                            session,
+                            std::slice::from_ref(&intent),
+                        )
+                        .await,
+                    )?;
+                }
+                Ok(count)
+            })
+            .await
+            .map_err(map_transaction_error)?
+    };
 
     // Always revoke grants and cancel pending grant-mode requests regardless
     // of deleted_count. If a previous attempt deleted the config but failed on
@@ -2301,7 +2626,7 @@ pub async fn delete_service_approval_config(
     revoke_grants_for_service(db, user_id, service_id, false).await?;
     cancel_pending_grant_requests(db, user_id, service_id, false).await?;
 
-    if result.deleted_count == 0 {
+    if deleted == 0 {
         return Err(AppError::NotFound(
             "Per-service approval config not found".to_string(),
         ));
@@ -2507,18 +2832,87 @@ pub(crate) fn revoke_grant_update(now: chrono::DateTime<Utc>) -> Vec<bson::Docum
 }
 
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
-    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
-        e.kind.as_ref()
-    {
-        return we.code == 11000;
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match e.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(write)) => write.code == 11000,
+        ErrorKind::Command(command) => command.code == 11000,
+        _ => false,
     }
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn approval_change_intent_bson_maxima() {
+        let raw = "x".repeat(4096);
+        let actor = AuditActor {
+            user_id: raw.clone(),
+            ip_address: Some(raw.clone()),
+            user_agent: Some(raw.clone()),
+            api_key_id: Some(raw.clone()),
+            api_key_name: Some(raw.clone()),
+        };
+        let audit = ConfigAudit {
+            actor: actor.clone(),
+            user_service_id: Some(raw.clone()),
+        };
+        let ctx = crate::turn_trace::TurnContext::for_turn(&Uuid::new_v4().to_string());
+        let intents = crate::turn_trace::scope(ctx, async {
+            [
+                DecisionSource::Web(actor)
+                    .intent(&raw, &raw, &raw, true)
+                    .unwrap(),
+                DecisionSource::Telegram
+                    .intent(&raw, &raw, &raw, true)
+                    .unwrap(),
+                audit
+                    .set_intent(
+                        &raw,
+                        &raw,
+                        &raw,
+                        true,
+                        &ApprovalMode::PerRequest,
+                        approval_policy::MAX_APPROVAL_RULES,
+                        Some(&ApprovalEffect::RequireApproval),
+                    )
+                    .unwrap(),
+                audit.delete_intent(&raw, &raw).unwrap(),
+            ]
+        })
+        .await;
+        for intent in intents {
+            let crate::models::security_effect_intent::SecurityEffect::Audit { ref event } =
+                intent.effect
+            else {
+                panic!("audit")
+            };
+            let data = event.event_data.as_ref().unwrap();
+            assert_eq!(data["service_id"].as_str().unwrap().len(), 256);
+            assert!(
+                data["service_id"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("...[truncated]")
+            );
+            if let Some(name) = data.get("service_name") {
+                assert_eq!(name.as_str().unwrap().len(), 512);
+            }
+            let total = bson::to_vec(&intent).unwrap().len();
+            assert!(total < 16 * 1024);
+            println!(
+                "APPROVAL_MAX type={} channel={} event_bson={} intent_bson={}",
+                event.event_type,
+                data.get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                bson::to_vec(event).unwrap().len(),
+                total
+            );
+        }
+    }
 
     #[tokio::test]
     async fn grant_revoke_audit_maximum_bson() {
@@ -4489,7 +4883,8 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
 
-        let mode = resolve_approval_mode(&db, &user_id, &service_id)
+        let mut session = db.client().start_session().await.unwrap();
+        let mode = resolve_approval_mode(&db, &user_id, &service_id, &mut session)
             .await
             .unwrap();
         assert_eq!(mode, ApprovalMode::default());
@@ -4507,7 +4902,8 @@ mod tests {
         let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &config).await;
 
-        let mode = resolve_approval_mode(&db, &user_id, &service_id)
+        let mut session = db.client().start_session().await.unwrap();
+        let mode = resolve_approval_mode(&db, &user_id, &service_id, &mut session)
             .await
             .unwrap();
         assert_eq!(mode, ApprovalMode::Grant);
@@ -5341,7 +5737,7 @@ mod tests {
         let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
         insert_config(&db, &config).await;
 
-        delete_service_approval_config(&db, &user_id, &service_id)
+        delete_service_approval_config(&db, &user_id, &service_id, test_config_audit(&user_id))
             .await
             .unwrap();
 
@@ -5357,7 +5753,13 @@ mod tests {
             return;
         };
 
-        let result = delete_service_approval_config(&db, "user-1", "nonexistent-svc").await;
+        let result = delete_service_approval_config(
+            &db,
+            "user-1",
+            "nonexistent-svc",
+            test_config_audit("user-1"),
+        )
+        .await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
     }
 
@@ -5376,7 +5778,7 @@ mod tests {
         let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
         insert_grant(&db, &grant).await;
 
-        delete_service_approval_config(&db, &user_id, &service_id)
+        delete_service_approval_config(&db, &user_id, &service_id, test_config_audit(&user_id))
             .await
             .unwrap();
 

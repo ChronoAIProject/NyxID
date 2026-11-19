@@ -1,8 +1,11 @@
 import { translateUi } from "@/i18n/use-ui-translation";
-import { Monitor, Smartphone, Globe } from "lucide-react";
+import { Monitor, Smartphone, Globe, Watch } from "lucide-react";
 
 export function getDeviceIcon(userAgent: string | null | undefined) {
   const ua = (userAgent ?? "").toLowerCase();
+  if (ua.startsWith("nyxidwatch/")) {
+    return <Watch className="h-4 w-4" aria-hidden="true" />;
+  }
   if (
     ua.includes("mobile") ||
     ua.includes("android") ||
@@ -34,6 +37,9 @@ export function humanizeUserAgent(
 ): string {
   const ua = userAgent?.trim();
   if (!ua) return translateUi("Unknown device");
+
+  // The NyxID Apple Watch app signs in with its own session.
+  if (/^NyxIDWatch\//i.test(ua)) return translateUi("NyxID on Apple Watch");
 
   // CLI / scripted clients first — usually the cleanest match.
   if (/^curl\//i.test(ua)) return `curl (${ua.split(" ")[0]})`;

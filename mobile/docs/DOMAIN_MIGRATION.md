@@ -84,7 +84,7 @@ pnpm typecheck
 pnpm check:native-sync
 ```
 
-Confirm `ios.associatedDomains` lists `applinks:nyx-api.chrono-ai.fun`, `applinks:api.nyxid.ai` and the existing universal-link host, and the Android intent filters keep their existing host and path. Build as usual with `pnpm build:ios` and `pnpm build:android`; the logs show both domain sets. For direct Xcode or Gradle builds, keep the URLs in `.env.prod` so prebuild, native compilation and JavaScript bundling resolve the same values.
+Confirm `ios.associatedDomains` lists `applinks:nyx-api.chrono-ai.fun`, `applinks:api.nyxid.ai` and the existing universal-link host. Android retains the existing OneLink filter; only the profile-local `*_ANDROID_HTTPS_APP_LINKS=true` opt-in adds selected-host filters for `shared/native-app-links.json` paths after all hosts are associated. Build as usual with `pnpm build:ios` and `pnpm build:android`; the logs show both domain sets. For direct Xcode or Gradle builds, keep the URLs in `.env.prod` so prebuild, native compilation and JavaScript bundling resolve the same values.
 
 ## Login and existing sessions
 
@@ -113,4 +113,4 @@ QR login approval uses the selected API for previews and decisions. Both API dom
 
 To roll back, turn the flag off; apps return to the original domains on their next launch. Keep both domain sets available while any installed app may use them. Builds released before this change have only the original domains and ignore the flag.
 
-The backend's `FRONTEND_URL` still selects the web QR origin. Builds with both sets accept either frontend; older builds accept only the original one, so keep `FRONTEND_URL` on the original frontend until older builds are no longer in use.
+The backend's HTTPS `BASE_URL` selects the native login QR origin. `FRONTEND_URL` selects the browser fallback and older QR responses. Both origins must be embedded in supported mobile builds; keep them on the original domains until older builds are no longer in use.

@@ -853,8 +853,8 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
     const key = group.owner?.type === "org" ? group.owner.id : "personal";
     sections.set(key, [...(sections.get(key) ?? []), group]);
   }
-  // With no crews yet, the personal section still offers the first one.
-  if (!sections.size) sections.set("personal", []);
+  // Crew creation remains available in the create menu and on the home page.
+  if (!sections.size) return null;
   return (
     <div className="shell-nav-stack">
       {[...sections.entries()].map(([owner, groups]) => {
@@ -897,17 +897,6 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 </button>
               );
             })}
-            {owner === "personal" && model.loading && !model.groups.length ? (
-              <p className="px-3 py-1.5 text-13 text-text-tertiary">{translateUi("Loading crews...")}</p>
-            ) : null}
-            {owner === "personal" && !model.loading && !model.groups.length ? (
-              <button
-                type="button"
-                onClick={model.onNewGroup}
-                data-keep-drawer-open=""
-                className="w-full rounded-lg px-3 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-              >{translateUi("Chat with several agents at once")}</button>
-            ) : null}
           </section>
         );
       })}

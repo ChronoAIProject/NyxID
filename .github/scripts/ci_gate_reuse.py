@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import quote
 
 
 WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -671,15 +672,21 @@ def _release_test_tree(
     # Local reusable workflows run from the caller's commit. Actions records
     # their resolved refs and SHAs even when the merged run has no PR array.
     ref = f"refs/pull/{number}/merge"
-    path = f"{repository}/.github/workflows/backend-tests.yml@{ref}"
-    commits = {
-        item.get("sha") for item in run.get("referenced_workflows") or []
-        if item.get("path") == path and item.get("ref", ref) == ref
-    }
-    if len(commits) != 1:
+    prefix = f"{repository}/.github/workflows/backend-tests.yml@"
+    matches = [
+        item for item in run.get("referenced_workflows") or []
+        if item.get("ref") == ref and isinstance(item.get("path"), str)
+        and item["path"].startswith(prefix)
+    ]
+    if len(matches) != 1:
         raise WorkflowIdentityError("release_test_commit_unavailable")
-    commit = commits.pop()
-    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+    entry = matches[0]
+    suffix = entry["path"][len(prefix):]
+    commit = entry.get("sha")
+    if not suffix or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise WorkflowIdentityError("release_test_commit_unavailable")
+    commit = commit.lower()
+    if re.fullmatch(r"[0-9a-fA-F]{40}", suffix) and suffix.lower() != commit:
         raise WorkflowIdentityError("release_test_commit_unavailable")
     try:
         return git_tree(commit)
@@ -768,11 +775,13 @@ def decide_from_api(
             return _fallback("pull_request_head_missing", "main", current_tree=current_tree)
         head_sha = head["sha"]
         number_m, head_repository = _validated_merged_main_pr(pr_m, repository, sha, head_sha)
-        release = head_repository == repository and head.get("ref") == "dev"
+        head_branch = head.get("ref")
+        release = (head_repository == repository and isinstance(head_branch, str)
+                   and (head_branch == "dev" or head_branch.startswith("release/")))
         runs_response = api(
             f"repos/{repository}/actions/workflows/ci.yml/runs"
             f"?event=pull_request&head_sha={head_sha}&per_page=100"
-            + ("&branch=dev" if release else "")
+            + (f"&branch={quote(head_branch, safe='')}" if release else "")
         )
         runs = runs_response.get("workflow_runs", []) if isinstance(runs_response, Mapping) else runs_response
         runs = [run for run in (runs or []) if run.get("event") == "pull_request"]
@@ -800,9 +809,8 @@ def decide_from_api(
                     or run_head.get("sha") != head_sha):
                 return _fallback("run_pull_request_mismatch", "main", current_tree=current_tree,
                                  head_sha=head_sha)
-        tested_tree = None
         if release:
-            if run.get("head_branch") != "dev":
+            if run.get("head_branch") != head_branch:
                 return _fallback("release_head_branch_mismatch", "main", current_tree=current_tree)
             # The dev tip can also introduce a feature PR, and the previous
             # main release merge need not be in dev's history. Identify the
@@ -812,9 +820,8 @@ def decide_from_api(
                                   f"/attempts/{int(run['run_attempt'])}")
             else:
                 run_details = run
-            if run_details.get("referenced_workflows"):
-                tested_tree = _release_test_tree(run_details, repository, number_m, git_tree, api)
-        if tested_tree is None:
+            tested_tree = _release_test_tree(run_details, repository, number_m, git_tree, api)
+        else:
             pr_h = _exactly_one_pr(
                 api(f"repos/{repository}/commits/{head_sha}/pulls"), "head_commit_pr_ambiguous"
             )

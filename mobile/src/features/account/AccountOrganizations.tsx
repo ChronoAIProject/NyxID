@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
 import { Alert } from "react-native";
 import * as WebBrowser from "expo-web-browser";
@@ -27,6 +30,7 @@ export function AccountOrganizations({
   accountId: string;
   email: string;
 }) {
+  useAppLanguage();
   const client = useQueryClient();
   const { isConnected } = useNetworkStatus();
   const key = ["account", "organizations", accountId];
@@ -39,7 +43,7 @@ export function AccountOrganizations({
   const [nonce, setNonce] = useState("");
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [message, setMessage] = useState<{
+  const [message, setMessage] = useLocalizedState<{
     message: string;
     tone: "info" | "success" | "error";
   } | null>(null);
@@ -92,19 +96,14 @@ export function AccountOrganizations({
       setSelectedId(id);
       const listed = await refresh();
       if (ticket.isCurrent())
-        setMessage({
-          message: `${
-            kind === "create" ? "Organization created." : "Invitation accepted."
-          } ${
-            listed
-              ? "Membership reloaded from NyxID."
-              : "Membership could not reload yet; pull to refresh."
-          }`,
+        setMessage(() => ({
+          message: (kind === "create" ? (listed
+              ? translateApp("Organization created. Membership reloaded from NyxID.") : translateApp("Organization created. Membership could not reload yet; pull to refresh.")) : (listed ? translateApp("Invitation accepted. Membership reloaded from NyxID.") : translateApp("Invitation accepted. Membership could not reload yet; pull to refresh."))),
           tone: "success",
-        });
+        }));
     } catch (error) {
       if (ticket.isCurrent())
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -126,16 +125,20 @@ export function AccountOrganizations({
       if (current()) {
         const listed = await refresh();
         if (current())
-          setMessage({
+          setMessage(() => ({
             message: listed
-              ? "Returned from the website. Membership refreshed; no browser action is assumed completed."
-              : "Returned from the website. Membership could not reload; pull to refresh.",
+              ? translateApp(
+                  "Returned from the website. Membership refreshed; no browser action is assumed completed.",
+                )
+              : translateApp(
+                  "Returned from the website. Membership could not reload; pull to refresh.",
+                ),
             tone: listed ? "info" : "error",
-          });
+          }));
       }
     } catch (error) {
       if (current())
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -145,11 +148,14 @@ export function AccountOrganizations({
   const joinWithCode = () => {
     const ticket = current.capture();
     Alert.alert(
-      "Join organization?",
-      `Accept this invitation as ${email}? The server will verify its validity and assigned role.`,
+      translateApp("Join organization?"),
+      translateApp(
+        "Accept this invitation as {{email}}? The server will verify its validity and assigned role.",
+        { email: email },
+      ),
       [
-        { text: "Cancel", style: "cancel" },
-        { text: "Join", onPress: () => void mutate("join", ticket) },
+        { text: translateApp("Cancel"), style: "cancel" },
+        { text: translateApp("Join"), onPress: () => void mutate("join", ticket) },
       ],
     );
   };
@@ -161,21 +167,27 @@ export function AccountOrganizations({
           rows={2}
           icon={false}
           title
-          accessibilityLabel="Loading memberships"
+          accessibilityLabel={translateApp("Loading memberships")}
         />
       ) : (
         <SettingsGroup
-          title="Organizations"
+          title={translateApp("Organizations")}
           inset={false}
-          footer={`Signed in as ${email}. Your personal account stays the acting identity; tap an organization to manage its resources.`}
+          footer={translateApp(
+            "Signed in as {{email}}. Your personal account stays the acting identity; tap an organization to manage its resources.",
+            { email: email },
+          )}
         >
           {orgs.isError ? (
             <SettingsRow
-              label="Couldn't verify memberships"
-              detail="Organization actions are unavailable until refresh succeeds."
+              label={translateApp("Couldn't verify memberships")}
+              detail={translateApp(
+                "Organization actions are unavailable until refresh succeeds.",
+              )}
             />
           ) : orgs.data?.length === 0 ? (
-            <SettingsRow label="Not a member of any organization" />
+            <SettingsRow label={translateApp("Not a member of any organization")}
+            />
           ) : (
             orgs.data?.map((org) => (
               <SettingsCheckRow
@@ -190,16 +202,18 @@ export function AccountOrganizations({
           )}
           <SettingsRow
             tone="action"
-            label={orgs.isFetching ? "Refreshing…" : "Refresh Memberships"}
+            label={orgs.isFetching ? translateApp("Refreshing…")
+                : translateApp("Refresh Memberships")
+            }
             disabled={busy || !isConnected}
             onPress={() => {
               const ticket = current.capture();
               void refresh().catch((error) => {
                 if (ticket.isCurrent())
-                  setMessage({
+                  setMessage(() => ({
                     message: resolveErrorMessage(error),
                     tone: "error",
-                  });
+                  }));
               });
             }}
           />
@@ -207,33 +221,36 @@ export function AccountOrganizations({
       )}
       {selected ? (
         <SettingsGroup
-          title={`Manage ${selected.display_name ?? selected.slug}`}
+          title={translateApp("Manage {{slug}}", {
+            slug: selected.display_name ?? selected.slug,
+          })}
           inset={false}
-          footer={`These open on the website. Sign in there as ${email}; access is verified by the server.${
-            admin
-              ? ""
-              : " Only owners and admins can manage invitations, roles, approvals and settings."
-          }`}
+          footer={(admin
+              ? translateApp("These open on the website. Sign in there as {{email}}; access is verified by the server.", { email: email }) : translateApp("These open on the website. Sign in there as {{email}}; access is verified by the server. Only owners and admins can manage invitations, roles, approvals and settings.", { email: email }))}
         >
-          <SettingsRow label="Your role" value={selected.your_role} />
+          <SettingsRow label={translateApp("Your role")}
+            value={selected.your_role} />
           {ORGANIZATION_WEB_ACTIONS.filter(
             (action) => !action.adminOnly || admin,
           ).map((action) => (
             <SettingsRow
               key={action.tab}
               label={action.label}
-              value="Website"
+              value={translateApp("Website")}
               disabled={disabled}
-              accessibilityHint={`Opens ${action.label} on the website`}
+              accessibilityHint={translateApp(
+                "Opens {{label}} on the website",
+                { label: action.label },
+              )}
               onPress={() => void openOrganization(action.tab)}
             />
           ))}
         </SettingsGroup>
       ) : null}
-      <SettingsGroup title="Create organization" inset={false}>
+      <SettingsGroup title={translateApp("Create organization")} inset={false}>
         <SettingsTextField
-          accessibilityLabel="New organization name"
-          placeholder="Organization name"
+          accessibilityLabel={translateApp("New organization name")}
+          placeholder={translateApp("Organization name")}
           value={name}
           onChangeText={setName}
           editable={!disabled}
@@ -242,19 +259,21 @@ export function AccountOrganizations({
         />
         <SettingsRow
           tone="action"
-          label="Create Organization"
+          label={translateApp("Create Organization")}
           disabled={disabled || !name.trim()}
           onPress={() => void mutate("create")}
         />
       </SettingsGroup>
       <SettingsGroup
-        title="Join an organization"
+        title={translateApp("Join an organization")}
         inset={false}
-        footer="Paste the invitation code an organization admin sent you."
+        footer={translateApp(
+          "Paste the invitation code an organization admin sent you.",
+        )}
       >
         <SettingsTextField
-          accessibilityLabel="Organization invitation code"
-          placeholder="Invitation code"
+          accessibilityLabel={translateApp("Organization invitation code")}
+          placeholder={translateApp("Invitation code")}
           value={nonce}
           onChangeText={setNonce}
           editable={!disabled}
@@ -264,7 +283,7 @@ export function AccountOrganizations({
         />
         <SettingsRow
           tone="action"
-          label="Accept Invitation"
+          label={translateApp("Accept Invitation")}
           disabled={disabled || !nonce.trim()}
           onPress={joinWithCode}
         />

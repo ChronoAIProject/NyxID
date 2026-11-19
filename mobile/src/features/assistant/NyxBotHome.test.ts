@@ -27,7 +27,7 @@ const request = (id: string) => ({
   summary: `Approve ${id}`,
 });
 
-function setup() {
+function setup(widePanel = false, panel = false, cornerWindow = false) {
   const state = {
     agents: [
       agent("nyxbot", { kind: "nyxbot" }),
@@ -78,6 +78,9 @@ function setup() {
   const calls: unknown[][] = [];
   const queries = new Map<string, Record<string, any>>();
   const harness = hookHarness<Element>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: cornerWindow },
+    },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -177,10 +180,14 @@ function setup() {
     "./assistantAgentContext": { chatAgentLabel },
     "./nyxBotHomeModel": model,
   });
-  const Home = harness.load(
+  const module = harness.load(
     fileURLToPath(new URL("./NyxBotHome.tsx", import.meta.url)),
-  ).NyxBotHome as (props: unknown) => Element;
+  );
+  const Home = (panel ? module.NyxBotHomePanel : module.NyxBotHome) as (
+    props: unknown,
+  ) => Element;
   const props = {
+    widePanel,
     onChat: (...args: unknown[]) => calls.push(["chat", ...args]),
     onOpenCrew: (id: string) => calls.push(["crew", id]),
     onNewAgent: () => calls.push(["new-agent"]),
@@ -387,14 +394,86 @@ test("onboarding is disabled on mobile: no request, intro, replay, retry or sugg
   f.onboarding.data = {
     show_intro: true,
     suggestions_hidden: false,
-    recommendations: [{ id: "step", title: "Step", description: "", prompt: "Do it", icon: "star" }],
+    recommendations: [
+      {
+        id: "step",
+        title: "Step",
+        description: "",
+        prompt: "Do it",
+        icon: "star",
+      },
+    ],
   };
   f.harness.render();
   f.harness.flush();
-  assert.equal(f.calls.some((call) => call[0] === "onboarding-query"), false);
+  assert.equal(
+    f.calls.some((call) => call[0] === "onboarding-query"),
+    false,
+  );
   for (const label of ["Retry intro", "Replay intro", "Hide"])
-    assert.equal(f.all().some((n) => n.props.label === label), false, label);
-  assert.equal(f.all().some((n) => n.type === "FirstRunIntro" || n.type === "NextStepList"), false);
+    assert.equal(
+      f.all().some((n) => n.props.label === label),
+      false,
+      label,
+    );
+  assert.equal(
+    f
+      .all()
+      .some((n) => n.type === "FirstRunIntro" || n.type === "NextStepList"),
+    false,
+  );
   assert.equal(f.text().includes("Suggested for you"), false);
   f.harness.unmount();
+});
+
+test("wide home moves updates and agents into its opt-in panel without duplicate groups", () => {
+  const inline = setup();
+  assert.match(inline.text(), /While you were away/);
+  assert.match(inline.text(), /Your agents/);
+  const scroll = inline.all().find((node) => node.type === "ScrollView");
+  assert.ok(scroll);
+  assert.deepEqual(JSON.parse(JSON.stringify(scroll.props.style[0])), {
+    flex: 1,
+    minHeight: 0,
+  });
+  inline.harness.unmount();
+  const wide = setup(true);
+  assert.doesNotMatch(
+    wide.text(),
+    /While you were away|Your agents|Approve decision-1/,
+  );
+  wide.harness.unmount();
+  const panel = setup(true, true);
+  assert.equal(panel.text().split("While you were away").length - 1, 1);
+  assert.equal(panel.text().split("Your agents").length - 1, 1);
+  assert.match(panel.text(), /Pending approvals/);
+  assert.match(panel.text(), /Approve decision-1/);
+  panel.harness.unmount();
+});
+
+test("the Duo Home greeting is a capped large title: it never breaks a word at the largest text size", () => {
+  const x = setup(false, false, true);
+  const greeting = x
+    .all()
+    .find(
+      (n: any) => n.type === "Label" && n.props.accessibilityRole === "header",
+    )!;
+  assert.ok(greeting, "greeting header");
+  // The same cap as the header bar and every page's large title.
+  assert.equal(greeting.props.maxFontSizeMultiplier, 1.25);
+  assert.equal(greeting.props.numberOfLines, 2);
+  assert.equal(greeting.props.ellipsizeMode, "tail");
+  x.harness.unmount();
+});
+
+test("P9 ordinary Home greeting retains base uncapped scaling and wrapping", () => {
+  const x = setup();
+  const greeting = x
+    .all()
+    .find(
+      (n: any) => n.type === "Label" && n.props.accessibilityRole === "header",
+    )!;
+  assert.equal(greeting.props.maxFontSizeMultiplier, undefined);
+  assert.equal(greeting.props.numberOfLines, undefined);
+  x.harness.unmount();
 });

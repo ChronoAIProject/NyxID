@@ -680,6 +680,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let user_routes = Router::new()
         .route(
+            "/me/crash-reports",
+            post(handlers::crash_reports::ingest)
+                .layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
             "/me/analytics/events",
             post(handlers::users::capture_analytics).layer(handlers::users::analytics_body_limit()),
         )
@@ -702,6 +707,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/me/preferences/service-views",
             put(handlers::users::save_service_views),
+        )
+        .route(
+            "/me/quick-access",
+            get(handlers::users::get_quick_access)
+                .put(handlers::users::save_quick_access)
+                .delete(handlers::users::reset_quick_access),
         )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
@@ -1190,6 +1201,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_feature_flags::list_feature_flags)
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
+        .route(
+            "/crash-reports/summary",
+            get(handlers::crash_reports::summary),
+        )
+        .route("/crash-reports", get(handlers::crash_reports::list))
+        .route(
+            "/crash-reports/releases",
+            post(handlers::crash_reports::register_release),
+        )
+        .route("/crash-reports/{id}", get(handlers::crash_reports::detail))
         .route(
             "/security-readiness",
             get(handlers::health::security_readiness),
@@ -3853,6 +3874,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/catalog-icons/{id}", get(handlers::catalog_icons::serve))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
+        .route("/login/device", get(handlers::mobile_app_links::device_login))
         .route(
             "/nodes/{node_id}/credentials/pending/{pending_id}/accept",
             get(handlers::credential_accept::accept_page),
@@ -4114,3 +4136,6 @@ mod machine_external_runtime_tests;
 
 #[cfg(test)]
 mod refusal_throttle_tests;
+
+#[cfg(test)]
+mod quick_access_tests;

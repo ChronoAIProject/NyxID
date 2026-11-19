@@ -110,7 +110,7 @@ pub async fn resolve(
             "admin_cma_sandbox_reservation_resolved",
             Some(serde_json::json!({
                 "reservation_id":row.id,"owner_id":row.user_id,"cma_service_id":row.cma_service_id,
-                "action":if body.action==reservations::ResolveAction::Associate {"associate"} else {"release"},
+                "action":body.action.as_str(),
                 "result":"refused","reason":match error { AppError::Conflict(_)=>"state_or_evidence_conflict",AppError::Forbidden(_)=>"authority_refused",_=>"resolution_unavailable" },
             })),
         );

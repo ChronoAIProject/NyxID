@@ -50,6 +50,7 @@ pub struct CreateFanOutPendingCredentialInput {
 
 #[derive(Clone, Debug)]
 pub struct PendingCredentialAuthorizationState {
+    pub delivery_unknown: bool,
     pub id: String,
     pub node_id: String,
     pub owner_user_id: String,
@@ -364,6 +365,7 @@ pub struct FanOutTargetStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FanOutDeliveryStatus {
+    Unknown,
     Sent,
     Queued,
 }
@@ -371,6 +373,7 @@ pub enum FanOutDeliveryStatus {
 impl FanOutDeliveryStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::Sent => "sent",
             Self::Queued => "queued",
         }
@@ -392,6 +395,7 @@ pub struct StoreFanOutCiphertextsOutcome {
 #[derive(Clone)]
 pub enum StorePendingCiphertextOutcome {
     StoredForOnlineNode(NodePendingCredential),
+    AlreadySubmitted(NodePendingCredential),
     QueuedOffline(NodePendingCredential),
     QueueFull(PendingCredentialAuditSummary),
 }
@@ -399,6 +403,10 @@ pub enum StorePendingCiphertextOutcome {
 impl fmt::Debug for StorePendingCiphertextOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AlreadySubmitted(pending) => f
+                .debug_tuple("AlreadySubmitted")
+                .field(&pending.id)
+                .finish(),
             Self::StoredForOnlineNode(pending) => f
                 .debug_struct("StoredForOnlineNode")
                 .field("pending_id", &pending.id)
@@ -518,6 +526,8 @@ pub async fn create_pending_credential_with_id(
         ciphertext_queued_at: None,
         ciphertext_expires_at: None,
         is_active: true,
+        unconfirmed_nodes: Vec::new(),
+        unknown_delivery_nodes: Vec::new(),
         fan_out_nodes: Vec::new(),
         fan_out_revision: 0,
     };
@@ -546,6 +556,7 @@ pub async fn get_pending_credential_authorization_state(
         .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))?;
     ensure_actor_can_manage_pending_owner(db, actor_user_id, &pending).await?;
     Ok(PendingCredentialAuthorizationState {
+        delivery_unknown: delivery_unknown(&pending),
         id: pending.id,
         node_id: pending.node_id,
         owner_user_id: pending.owner_user_id,
@@ -689,6 +700,8 @@ pub async fn create_fan_out_pending_credential(
         ciphertext_queued_at: None,
         ciphertext_expires_at: None,
         is_active: true,
+        unconfirmed_nodes: Vec::new(),
+        unknown_delivery_nodes: Vec::new(),
         fan_out_nodes,
         fan_out_revision: 1,
     };
@@ -878,8 +891,13 @@ pub async fn get_fan_out_pending_credential_for_admin(
     db: &mongodb::Database,
     actor_user_id: &str,
     pending_id: &str,
+    include_history: bool,
 ) -> AppResult<NodePendingCredential> {
-    let pending = load_active_unexpired_pending_by_id(db, pending_id, Utc::now()).await?;
+    let pending = if include_history {
+        status_after_submit(db, pending_id).await?
+    } else {
+        load_active_unexpired_pending_by_id(db, pending_id, Utc::now()).await?
+    };
     if pending.fan_out_nodes.is_empty() {
         return Err(AppError::NotFound(
             "Fan-out pending credential not found".to_string(),
@@ -958,7 +976,9 @@ pub async fn store_fan_out_ciphertexts_revision_guard(
     }
     pending.remote_state = aggregate_fan_out_remote_state(&pending.fan_out_nodes);
 
-    let updated = update_fan_out_nodes_with_revision(db, pending, revision, true, now).await?;
+    let new_sends = input.online_node_ids.into_iter().collect::<Vec<_>>();
+    let updated =
+        update_fan_out_nodes_with_revision(db, pending, revision, &new_sends, now).await?;
     Ok(StoreFanOutCiphertextsOutcome {
         targets: fan_out_statuses(&updated),
         pending: updated,
@@ -1018,7 +1038,7 @@ pub async fn retry_failed_fan_out_nodes(
     pending.declined_at = None;
 
     let revision = pending.fan_out_revision;
-    let updated = update_fan_out_nodes_with_revision(db, pending, revision, true, now).await?;
+    let updated = update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await?;
     Ok(FanOutPendingCredentialResult {
         targets: fan_out_statuses(&updated),
         pending: updated,
@@ -1169,6 +1189,7 @@ pub async fn store_pending_ciphertext_first_writer_wins(
 
     let now_bson = bson::DateTime::from_chrono(now);
     let mut set_doc = doc! {
+        "unconfirmed_nodes": if node_connected { vec![node_id] } else { Vec::new() },
         "crypto.admin_pubkey": input.admin_pubkey.as_str(),
         "crypto.nonce": input.nonce.as_str(),
         "crypto.ciphertext": Bson::Binary(bson::Binary {
@@ -1329,7 +1350,7 @@ pub async fn expire_queued_ciphertexts_with_summaries(
                 pending.is_active = false;
             }
             if let Ok(_updated) =
-                update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+                update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await
             {
                 summaries.extend(local_summaries);
             }
@@ -1471,20 +1492,93 @@ async fn mark_fan_out_queued_ciphertext_too_large_after_replay(
         Some(crate::errors::PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE),
         now,
     )?;
-    update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+    update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await
+}
+
+/// A late forward response cannot change a settled target or a different attempt.
+fn forwarding_attempt_filter(pending: &NodePendingCredential, node_id: &str) -> bson::Document {
+    let mut filter = if let Some(target) = fan_out_target(pending, node_id) {
+        doc! {"_id": &pending.id, "fan_out_nodes": {"$elemMatch": {
+            "node_id": node_id, "generation": target.generation, "remote_state": "ciphertext_received",
+            "crypto.nonce": &target.crypto.nonce
+        }}}
+    } else {
+        doc! {"_id": &pending.id, "node_id": node_id, "remote_state": "ciphertext_received"}
+    };
+    filter.insert("unconfirmed_nodes", node_id);
+    filter
+}
+
+pub async fn confirm_ciphertext_forwarded(
+    db: &mongodb::Database,
+    pending: &NodePendingCredential,
+    node_id: &str,
+) -> AppResult<()> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .update_one(
+            forwarding_attempt_filter(pending, node_id),
+            doc! {"$pull": {"unconfirmed_nodes": node_id, "unknown_delivery_nodes": node_id}},
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn record_unknown_forward(
+    db: &mongodb::Database,
+    pending: &NodePendingCredential,
+    node_id: &str,
+) -> AppResult<bool> {
+    let result = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .update_one(
+            forwarding_attempt_filter(pending, node_id),
+            doc! {"$addToSet": {"unknown_delivery_nodes": node_id}},
+        )
+        .await?;
+    Ok(result.matched_count == 1)
+}
+
+pub fn target_delivery_unknown(pending: &NodePendingCredential, node_id: &str) -> bool {
+    let state = fan_out_target(pending, node_id)
+        .and_then(|t| t.remote_state.as_ref())
+        .or(pending.remote_state.as_ref());
+    matches!(
+        state,
+        Some(RemoteCryptoState::CiphertextReceived | RemoteCryptoState::Expired)
+    ) && pending.unconfirmed_nodes.iter().any(|id| id == node_id)
+        && (pending.expires_at <= Utc::now()
+            || matches!(state, Some(RemoteCryptoState::Expired))
+            || pending
+                .unknown_delivery_nodes
+                .iter()
+                .any(|id| id == node_id))
+}
+
+pub const DELIVERY_UNKNOWN: &str = "The credential may or may not have been installed. Check the service credential on the node. To send it again, start a new credential injection.";
+
+pub fn delivery_unknown(pending: &NodePendingCredential) -> bool {
+    pending
+        .unconfirmed_nodes
+        .iter()
+        .any(|id| target_delivery_unknown(pending, id))
 }
 
 pub async fn mark_pending_ciphertext_queued_after_send_failure(
     db: &mongodb::Database,
     node_id: &str,
-    pending_id: &str,
+    attempt: &NodePendingCredential,
     now: DateTime<Utc>,
 ) -> AppResult<NodePendingCredential> {
+    if !attempt.fan_out_nodes.is_empty() {
+        return mark_fan_out_ciphertext_queued_after_send_failure(db, node_id, attempt, now).await;
+    }
     let updated = db
         .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
         .find_one_and_update(
             doc! {
-                "_id": pending_id,
+                "_id": &attempt.id,
+                "remote_state":"ciphertext_received",
+                "unconfirmed_nodes": node_id,
                 "node_id": node_id,
                 "fan_out_nodes.0": { "$exists": false },
                 "is_active": true,
@@ -1496,6 +1590,7 @@ pub async fn mark_pending_ciphertext_queued_after_send_failure(
             doc! {
                 "$set": {
                     "remote_state": remote_state_bson(RemoteCryptoState::CiphertextQueued)?,
+                    "unconfirmed_nodes": [],
                     "ciphertext_queued_at": bson::DateTime::from_chrono(now),
                     "ciphertext_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(OFFLINE_CIPHERTEXT_QUEUE_TTL_SECS)),
                 },
@@ -1504,25 +1599,25 @@ pub async fn mark_pending_ciphertext_queued_after_send_failure(
         .return_document(ReturnDocument::After)
         .await?;
 
-    match updated {
-        Some(updated) => Ok(updated),
-        None => {
-            mark_fan_out_ciphertext_queued_after_send_failure(db, node_id, pending_id, now).await
-        }
-    }
+    updated.ok_or_else(|| AppError::Conflict("Pending credential delivery already settled".into()))
 }
 
 pub async fn mark_fan_out_ciphertext_queued_after_send_failure(
     db: &mongodb::Database,
     node_id: &str,
-    pending_id: &str,
+    attempt: &NodePendingCredential,
     now: DateTime<Utc>,
 ) -> AppResult<NodePendingCredential> {
     let mut pending =
-        load_active_unexpired_fan_out_pending_credential(db, node_id, pending_id, now).await?;
+        load_active_unexpired_fan_out_pending_credential(db, node_id, &attempt.id, now).await?;
     let revision = pending.fan_out_revision;
     let target = fan_out_target_mut(&mut pending, node_id)?;
-    if target.crypto.admin_pubkey.is_none()
+    let previous = fan_out_target(attempt, node_id)
+        .ok_or_else(|| AppError::NotFound("Pending credential target".into()))?;
+    if previous.generation != target.generation
+        || previous.crypto.nonce != target.crypto.nonce
+        || target.remote_state != Some(RemoteCryptoState::CiphertextReceived)
+        || target.crypto.admin_pubkey.is_none()
         || target.crypto.nonce.is_none()
         || target.crypto.ciphertext.is_none()
     {
@@ -1535,10 +1630,10 @@ pub async fn mark_fan_out_ciphertext_queued_after_send_failure(
     target.ciphertext_expires_at = Some(now + Duration::seconds(OFFLINE_CIPHERTEXT_QUEUE_TTL_SECS));
     target.updated_at = now;
     pending.remote_state = aggregate_fan_out_remote_state(&pending.fan_out_nodes);
-    update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+    update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await
 }
 
-pub async fn mark_queued_ciphertext_sent(
+pub async fn claim_queued_ciphertext(
     db: &mongodb::Database,
     node_id: &str,
     pending_id: &str,
@@ -1562,6 +1657,7 @@ pub async fn mark_queued_ciphertext_sent(
             doc! {
                 "$set": {
                     "remote_state": remote_state_bson(RemoteCryptoState::CiphertextReceived)?,
+                    "unconfirmed_nodes": [node_id],
                 },
                 "$unset": {
                     "ciphertext_queued_at": "",
@@ -1574,11 +1670,11 @@ pub async fn mark_queued_ciphertext_sent(
 
     match updated {
         Some(updated) => Ok(updated),
-        None => mark_fan_out_queued_ciphertext_sent(db, node_id, pending_id, now).await,
+        None => claim_fan_out_queued_ciphertext(db, node_id, pending_id, now).await,
     }
 }
 
-pub async fn mark_fan_out_queued_ciphertext_sent(
+pub async fn claim_fan_out_queued_ciphertext(
     db: &mongodb::Database,
     node_id: &str,
     pending_id: &str,
@@ -1607,7 +1703,7 @@ pub async fn mark_fan_out_queued_ciphertext_sent(
     target.ciphertext_expires_at = None;
     target.updated_at = now;
     pending.remote_state = aggregate_fan_out_remote_state(&pending.fan_out_nodes);
-    update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+    update_fan_out_nodes_with_revision(db, pending, revision, &[node_id.to_owned()], now).await
 }
 
 pub async fn list_deliverable_queued_ciphertexts_for_node(
@@ -1687,6 +1783,8 @@ pub async fn record_pending_credential_decrypt_result(
             doc! {
                 "$set": set_doc,
                 "$unset": {
+                    "unconfirmed_nodes": "",
+                    "unknown_delivery_nodes": "",
                     "crypto.admin_pubkey": "",
                     "crypto.nonce": "",
                     "crypto.ciphertext": "",
@@ -1712,7 +1810,7 @@ pub async fn record_fan_out_decrypt_result(
         load_active_unexpired_fan_out_pending_credential(db, node_id, pending_id, now).await?;
     let revision = pending.fan_out_revision;
     apply_fan_out_decrypt_result(&mut pending, node_id, outcome, error_code, now)?;
-    update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+    update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await
 }
 
 pub async fn cancel_pending_credential(
@@ -1840,7 +1938,7 @@ async fn complete_fan_out_pending_credential_for_node(
             recompute_fan_out_completion(&mut pending, now);
         }
     }
-    update_fan_out_nodes_with_revision(db, pending, revision, true, now).await
+    update_fan_out_nodes_with_revision(db, pending, revision, &[], now).await
 }
 
 async fn load_active_unexpired_pending_credential(
@@ -2074,7 +2172,7 @@ async fn update_fan_out_nodes_with_revision(
     db: &mongodb::Database,
     pending: NodePendingCredential,
     expected_revision: i64,
-    increment_revision: bool,
+    new_sends: &[String],
     now: DateTime<Utc>,
 ) -> AppResult<NodePendingCredential> {
     let fan_out_nodes = bson::to_bson(&pending.fan_out_nodes)
@@ -2099,8 +2197,28 @@ async fn update_fan_out_nodes_with_revision(
     }
 
     let mut update_doc = doc! { "$set": set_doc };
-    if increment_revision {
-        update_doc.insert("$inc", doc! { "fan_out_revision": 1 });
+    update_doc.insert("$inc", doc! { "fan_out_revision": 1 });
+    if !new_sends.is_empty() {
+        update_doc.insert(
+            "$addToSet",
+            doc! {"unconfirmed_nodes": {"$each": new_sends.to_vec()}},
+        );
+    }
+    if new_sends.is_empty() {
+        let settled: Vec<_> = pending
+            .fan_out_nodes
+            .iter()
+            .filter(|target| {
+                !matches!(
+                    target.remote_state,
+                    Some(RemoteCryptoState::CiphertextReceived | RemoteCryptoState::Expired)
+                )
+            })
+            .map(|target| target.node_id.as_str())
+            .collect();
+        if !settled.is_empty() {
+            update_doc.insert("$pull", doc! {"unconfirmed_nodes":{"$in":&settled}, "unknown_delivery_nodes":{"$in":&settled}});
+        }
     }
     if !unset_doc.is_empty() {
         update_doc.insert("$unset", unset_doc);
@@ -2351,7 +2469,17 @@ fn fan_out_error_kind_name(code: u32) -> Option<&'static str> {
     }
 }
 
-fn fan_out_statuses(pending: &NodePendingCredential) -> Vec<FanOutTargetStatus> {
+pub async fn status_after_submit(
+    db: &mongodb::Database,
+    pending_id: &str,
+) -> AppResult<NodePendingCredential> {
+    db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one(doc! {"_id":pending_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".into()))
+}
+
+pub fn fan_out_statuses(pending: &NodePendingCredential) -> Vec<FanOutTargetStatus> {
     pending
         .fan_out_nodes
         .iter()
@@ -2362,6 +2490,9 @@ fn fan_out_statuses(pending: &NodePendingCredential) -> Vec<FanOutTargetStatus> 
             error_code: target.error_code,
             error_kind: target.error_kind.clone(),
             delivery_status: match target.remote_state {
+                _ if target_delivery_unknown(pending, &target.node_id) => {
+                    Some(FanOutDeliveryStatus::Unknown)
+                }
                 Some(RemoteCryptoState::CiphertextReceived) => Some(FanOutDeliveryStatus::Sent),
                 Some(RemoteCryptoState::CiphertextQueued) => Some(FanOutDeliveryStatus::Queued),
                 _ => None,
@@ -2394,7 +2525,7 @@ fn stored_ciphertext_outcome(
     ) {
         Ok(StorePendingCiphertextOutcome::QueuedOffline(pending))
     } else {
-        Ok(StorePendingCiphertextOutcome::StoredForOnlineNode(pending))
+        Ok(StorePendingCiphertextOutcome::AlreadySubmitted(pending))
     }
 }
 
@@ -2728,6 +2859,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: node_ids
                 .iter()
                 .map(|node_id| FanOutNodeState {
@@ -2949,6 +3082,8 @@ mod tests {
             ciphertext_queued_at: Some(now),
             ciphertext_expires_at: Some(now + Duration::minutes(15)),
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -3436,6 +3571,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -3609,7 +3746,8 @@ mod tests {
         .await
         .expect("second writer observes existing ciphertext");
         match second {
-            StorePendingCiphertextOutcome::StoredForOnlineNode(stored) => {
+            StorePendingCiphertextOutcome::AlreadySubmitted(stored) => {
+                assert!(!delivery_unknown(&stored));
                 assert_eq!(
                     stored.crypto.and_then(|crypto| crypto.ciphertext),
                     Some(vec![1, 2, 3])
@@ -3619,6 +3757,23 @@ mod tests {
         }
 
         let stored = load_pending(&db, &pending.id).await;
+        assert!(
+            list_deliverable_queued_ciphertexts_for_node(&db, &node.id, 10, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let settled = record_pending_credential_decrypt_result(
+            &db,
+            &node.id,
+            &pending.id,
+            PendingCredentialDecryptOutcome::Ok,
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(settled.remote_state, Some(RemoteCryptoState::Consumed));
+        assert!(!delivery_unknown(&settled));
         let crypto = stored.crypto.expect("crypto bundle");
         assert_eq!(crypto.admin_pubkey.as_deref(), Some("admin-pubkey-1"));
         assert_eq!(crypto.nonce.as_deref(), Some("nonce-1"));
@@ -3765,8 +3920,11 @@ mod tests {
             StorePendingCiphertextOutcome::StoredForOnlineNode(_)
         ));
 
+        let StorePendingCiphertextOutcome::StoredForOnlineNode(attempt) = stored else {
+            unreachable!()
+        };
         let queued =
-            mark_pending_ciphertext_queued_after_send_failure(&db, &node.id, &pending.id, now)
+            mark_pending_ciphertext_queued_after_send_failure(&db, &node.id, &attempt, now)
                 .await
                 .expect("mark queued");
         assert_eq!(
@@ -3781,13 +3939,29 @@ mod tests {
         assert_eq!(deliverable.len(), 1);
         assert_eq!(deliverable[0].id, pending.id);
 
-        let sent = mark_queued_ciphertext_sent(&db, &node.id, &pending.id, now)
+        let sent = claim_queued_ciphertext(&db, &node.id, &pending.id, now)
             .await
             .expect("mark sent");
         assert_eq!(
             sent.remote_state,
             Some(RemoteCryptoState::CiphertextReceived)
         );
+        assert!(!delivery_unknown(&sent));
+        assert!(
+            claim_queued_ciphertext(&db, &node.id, &pending.id, now)
+                .await
+                .is_err()
+        );
+        assert!(
+            list_deliverable_queued_ciphertexts_for_node(&db, &node.id, 10, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        confirm_ciphertext_forwarded(&db, &sent, &node.id)
+            .await
+            .unwrap();
+        assert!(!delivery_unknown(&load_pending(&db, &pending.id).await));
         assert!(sent.ciphertext_queued_at.is_none());
         assert!(sent.ciphertext_expires_at.is_none());
     }
@@ -4637,6 +4811,8 @@ mod tests {
                 ciphertext_queued_at: Some(now),
                 ciphertext_expires_at: Some(now + Duration::minutes(15)),
                 is_active: true,
+                unconfirmed_nodes: Vec::new(),
+                unknown_delivery_nodes: Vec::new(),
                 fan_out_nodes: Vec::new(),
                 fan_out_revision: 0,
             };

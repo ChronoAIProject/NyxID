@@ -363,13 +363,16 @@ Include:
 
 Open feature and fix PRs against `dev`. Two required checks protect both branches.
 **CI Pipeline** collects the correctness jobs. **Main Merge Guard** accepts any
-head into `dev` and requires this repository's `dev` branch for PRs into `main`.
+head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch
+or a dated release branch whose head commit is in `dev`'s history.
+GitHub runs the guard from the repository's default branch on `pull_request_target`,
+including when a PR changes its base branch.
 
 | Gate | Checks |
 | --- | --- |
 | PR into `dev` | CI helper tests and workflow permissions. Changed paths select Rust formatting and library/binary Clippy, Google Permissions, CLI tests, wizard freshness, frontend lint/build and all frontend tests in five shards, Mobile, SDK, plugin validators and Oracle Worker Test. The Claude repository-size check runs on every PR. CI configuration changes select every fast check. |
-| Push to `dev` | Full suite across all paths, including all-targets Clippy, backend tests, coverage thresholds, KMS feature builds, Machine Container E2E, backend image inputs and the release image build. The frontend also builds its Docker inputs. |
-| Release PR from `dev` into `main` | Full suite across all paths, including PR coverage comparisons. Wait for the required checks and choose **Create a merge commit**. A push to `main` starts Publish Images. |
+| Push to `dev` | Full suite across all paths, including all-targets Clippy, backend tests, coverage thresholds, KMS feature builds, Machine Container E2E, backend image inputs and the release image build. The frontend also builds its Docker inputs. Publish Dev Images finishes the running image pair and keeps one pending pair. After both images succeed, it advances staging in Git ancestry order, backend first, and verifies both commits. |
+| Release PR into `main` | Full suite across all paths, including PR coverage comparisons. Wait for the required checks and choose **Create a merge commit**. A push to `main` starts Publish Images. |
 
 A test-only Rust compile error or Clippy lint can first surface on the full
 `dev` push. Check that run on the commit in Actions when preparing a release.
@@ -445,7 +448,7 @@ check evidence:
 
 ### Review Process
 
-- Feature and fix PRs target `dev`. Release PRs promote `dev` into `main`.
+- Feature and fix PRs target `dev`. Release PRs promote the reviewed snapshot into `main`.
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
@@ -471,7 +474,19 @@ check evidence:
 
 ## Releases
 
-Releases are triggered by pushing a semver tag to `main`:
+To promote staging to production, run `scripts/cut-release.sh --dry-run` from
+your checkout with your own `gh` login. The preview shows the commit reported
+by both staging services, the UTC branch name and the PR contents. Run
+`scripts/cut-release.sh` to create the branch and open the PR into `main`.
+Later merges into `dev` leave the snapshot fixed while reviewers and CI check it.
+
+Use `--commit <sha>` to select a different commit on `dev` that has yet to reach
+`main`. To replace an open release, use `--supersede`. The script opens the new
+PR before closing the previous one with a link. Cuts on the same UTC date use
+`release/YYYY-MM-DD`, then `-2`, `-3` and so on. Land any release fixes on
+`dev` and cut a new snapshot so the release head stays on `dev`'s history.
+
+Pushing a semver tag to `main` triggers the tagged release workflow.
 
 ```bash
 git tag v0.2.0

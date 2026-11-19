@@ -5,8 +5,8 @@
 | Event | CI selection |
 | --- | --- |
 | PR into `dev` | Changed paths select fast jobs. Rust Clippy checks the workspace's libraries and binaries with two Cargo jobs and its own incremental cache. The frontend runs lint and the production build alongside five Vitest shards. |
-| Push to `dev` | Full correctness suite, independent of changed paths. A running build finishes. GitHub keeps only the newest pending push. The commit shows the full CI result in Actions. |
-| PR into `main` | Full suite across all paths, including coverage comparisons and the release image. `Main Merge Guard` admits only the same repository's `dev` branch. Merge a passing release PR with a merge commit. |
+| Push to `dev` | Full correctness suite, independent of changed paths. A running build finishes. GitHub keeps only the newest pending push. The commit shows the full CI result in Actions. Publish Dev Images finishes the running image pair and keeps one pending pair. After both images succeed, it advances staging in Git ancestry order, backend first, and verifies both commits. |
+| PR into `main` | Full suite across all paths, including coverage comparisons and the release image. `Main Merge Guard` admits this repository's `dev` or a dated release branch at a commit on `dev`'s history. Merge a passing release PR with a merge commit. |
 | Production publish | Publish Images calls the full gate. A release PR's successful jobs can count when Actions identifies the tested PR merge commit and its Git tree matches the published tree. |
 | Rollup and Oracle-retirement branches | Existing path selection. |
 
@@ -15,7 +15,12 @@ plugin checks, Google Permissions, SDK, Mobile, CLI tests, wizard freshness and
 Oracle worker tests. Backend tests, workspace test-target compilation and lints,
 KMS feature builds, coverage, Machine Container E2E and Docker validation wait
 for the full run. PR updates cancel superseded runs. Branch protection requires
-`CI Pipeline` and the independent `Main Merge Guard`.
+`CI Pipeline` and the independent `Main Merge Guard`. The latter runs
+`.github/workflows/main-merge-guard.yml` from the default branch on
+`pull_request_target`. For a snapshot it checks the PR head SHA against `dev`
+with one read-only GitHub comparison. Run `scripts/cut-release.sh` with your own
+`gh` login to open the PR at the commit staging runs. Keeping that branch fixed
+lets later merges into `dev` proceed without restarting the release PR's CI.
 
 Initial local measurements were taken on 2026-11-12–13 at
 `31f3d8969e051e1fe6ed2f42a5594ded90606fe5`. Hosted validation below uses

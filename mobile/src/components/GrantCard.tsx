@@ -1,6 +1,8 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../i18n/appTranslation";
 import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Text,  Pressable, StyleSheet, View } from "react-native";
 import { TOUCH_TARGET, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
@@ -20,7 +22,7 @@ type GrantCardProps = {
 
 function formatDate(dateStr: string): string {
   const d = new Date(dateStr);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  return d.toLocaleDateString(appLocale(), { month: "short", day: "numeric" });
 }
 
 function daysUntilExpiry(expiresAt: string): number {
@@ -31,10 +33,10 @@ function daysUntilExpiry(expiresAt: string): number {
 
 function formatExpiry(expiresAt: string): string {
   const days = daysUntilExpiry(expiresAt);
-  if (days < 0) return "Expired";
-  if (days === 0) return "Today";
-  if (days === 1) return "Tomorrow";
-  return `${days}d left`;
+  if (days < 0) return translateApp("Expired");
+  if (days === 0) return translateApp("Today");
+  if (days === 1) return translateApp("Tomorrow");
+  return translateApp("{{days}}d left", { days: days});
 }
 
 /** An active grant: an inset-group row with its expiry and a red Revoke action. */
@@ -47,19 +49,24 @@ export function GrantCard({
   onRevoke,
   isMutating = false,
 }: GrantCardProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const urgent = daysUntilExpiry(grant.expires_at) < 3;
   const expiryLabel = formatExpiry(grant.expires_at);
-  const grantedLabel = `Approved ${formatDate(grant.granted_at)}`;
-  const expiresLabel = `Expires ${formatDate(grant.expires_at)}`;
+  const grantedLabel = translateApp("Approved {{date}}", {
+    date: formatDate(grant.granted_at),
+  });
+  const expiresLabel = translateApp("Expires {{date}}", {
+    date: formatDate(grant.expires_at),
+  });
   const requesterLabel = grant.requester_label ?? grant.requester_type;
   const orgLabel =
     grant.org_scoped === true
       ? grant.org_name
-        ? `Org · ${grant.org_name}`
-        : "Org"
+        ? translateApp("Org · {{organization}}", { organization: grant.org_name})
+        : translateApp("Org")
       : undefined;
 
   return (
@@ -89,7 +96,9 @@ export function GrantCard({
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Revoke ${grant.service_name}`}
+          accessibilityLabel={translateApp("Revoke {{service}}", {
+            service: grant.service_name,
+          })}
           accessibilityState={{ disabled: isMutating }}
           style={({ pressed }) => [
             styles.revoke,
@@ -104,7 +113,7 @@ export function GrantCard({
               { color: isMutating ? colors.textMuted : colors.danger },
             ]}
           >
-            Revoke
+            {translateApp("Revoke")}
           </Text>
         </Pressable>
       </View>

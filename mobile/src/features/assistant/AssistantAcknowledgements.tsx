@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
@@ -34,6 +36,7 @@ export function AssistantAcknowledgements({
   scope?: string;
   onReveal?: RevealReviewTarget;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const selected = acknowledgements.find((row) => row.id === selectedId);
   const [open, setOpen] = useState(false);
@@ -47,7 +50,11 @@ export function AssistantAcknowledgements({
     }
   }, [selectedId, selected?.id]);
   const records = acknowledgements.filter((row) => row.status !== "pending");
-  const count = `${records.length} confirmation ${records.length === 1 ? "record" : "records"}`;
+  const count = translateApp(
+    records.length === 1 ? "{{count}} confirmation record"
+      : "{{count}} confirmation records",
+    { count: records.length },
+  );
   const Chevron = open ? ChevronDown : ChevronRight;
   return (
     <>
@@ -75,7 +82,8 @@ export function AssistantAcknowledgements({
             accessibilityRole="button"
             accessibilityLabel={count}
             accessibilityHint={
-              open ? "Hide confirmation history" : "Show confirmation history"
+              open ? translateApp("Hide confirmation history")
+                : translateApp("Show confirmation history")
             }
             accessibilityState={{ expanded: open }}
             onPress={() => {
@@ -112,8 +120,8 @@ export function AssistantAcknowledgements({
                       accessibilityLabel={`${label} · ${row.summary}`}
                       accessibilityHint={
                         expanded
-                          ? "Hide confirmation details"
-                          : "Show confirmation details"
+                          ? translateApp("Hide confirmation details")
+                          : translateApp("Show confirmation details")
                       }
                       accessibilityState={{ expanded }}
                       onPress={() => {
@@ -149,8 +157,9 @@ export function AssistantAcknowledgements({
                       <View style={styles.details}>
                         {row.status === "used" ? (
                           <Label muted style={styles.recordText}>
-                            This one-time confirmation has been used. Check the
-                            assistant’s response for the action’s result.
+                            {translateApp(
+                              "This one-time confirmation has been used. Check the assistant’s response for the action’s result.",
+                            )}
                           </Label>
                         ) : null}
                         {row.service_name || row.service_slug ? (
@@ -168,59 +177,48 @@ export function AssistantAcknowledgements({
                             <Label
                               muted
                               style={[styles.recordText, { flex: 1 }]}
-                            >
-                              Service: {row.service_name ?? row.service_slug}
-                              {row.service_name && row.service_slug
-                                ? ` (${row.service_slug})`
-                                : ""}
+                            >{(row.service_name && row.service_slug ? translateApp("Service: {{service}} ({{slug}})", { service: row.service_name ?? row.service_slug, slug: row.service_slug }) : translateApp("Service: {{service}}", { service: row.service_name ?? row.service_slug}))}
                             </Label>
                           </View>
                         ) : null}
                         {row.tool_name ? (
-                          <Label muted mono style={styles.recordText}>
-                            Tool: {row.tool_name}
+                          <Label muted mono style={styles.recordText}>{translateApp("Tool: {{name}}", { name: row.tool_name })}
                           </Label>
                         ) : null}
                         {row.confirmation ? (
-                          <Label muted style={styles.recordText}>
-                            Risk: {row.confirmation.risk}
+                          <Label muted style={styles.recordText}>{translateApp("Risk: {{risk}}", { risk: row.confirmation.risk })}
                           </Label>
                         ) : null}
                         {row.decided_by ? (
-                          <Label muted style={styles.recordText}>
-                            Decided by{" "}
-                            {row.decided_by === "user"
-                              ? "you"
-                              : row.decided_by === "orchestrator"
-                                ? "NyxBot"
-                                : row.decided_by === "access_mode"
-                                  ? "Full access"
-                                  : row.decided_by}
+                          <Label muted style={styles.recordText}>{(row.decided_by === "user"
+                              ? translateApp("Decided by you") : (row.decided_by === "orchestrator"
+                                ? translateApp("Decided by NyxBot") : (row.decided_by === "access_mode"
+                                  ? translateApp("Decided by Full access") : translateApp("Decided by {{decidedBy}}", { decidedBy: row.decided_by }))))}
                           </Label>
                         ) : null}
                         {row.reason ? (
-                          <Label muted style={styles.recordText}>
-                            Decision reason: {row.reason}
+                          <Label muted style={styles.recordText}>{translateApp("Decision reason: {{reason}}", { reason: row.reason })}
                           </Label>
                         ) : null}
-                        <Label muted style={styles.recordText}>
-                          Requested: {formatDate(row.created_at)}
+                        <Label muted style={styles.recordText}>{translateApp("Requested: {{time}}", { time: formatDate(row.created_at) })}
                         </Label>
-                        <Label muted style={styles.recordText}>
-                          Expiry: {formatDate(row.expires_at)}
+                        <Label muted style={styles.recordText}>{translateApp("Expiry: {{time}}", { time: formatDate(row.expires_at) })}
                         </Label>
-                        <Label muted mono style={styles.recordText}>
-                          Confirmation: {row.id}
+                        <Label muted mono style={styles.recordText}>{translateApp("Confirmation: {{id}}", { id: row.id })}
                         </Label>
                         {row.authored_skill ? renderAuthoredReview(row) : null}
                         {row.link && onOpenLink ? (
                           <Pressable
                             accessibilityRole="link"
-                            accessibilityLabel="Inspect or discard proposal"
+                            accessibilityLabel={translateApp(
+                              "Inspect or discard proposal",
+                            )}
                             onPress={() => onOpenLink(row.link!)}
                             style={styles.record}
                           >
-                            <Label muted>Inspect or discard proposal</Label>
+                            <Label muted>
+                              {translateApp("Inspect or discard proposal")}
+                            </Label>
                           </Pressable>
                         ) : null}
                       </View>
@@ -238,7 +236,8 @@ export function AssistantAcknowledgements({
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Unavailable" : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? translateApp("Unavailable")
+    : date.toLocaleString(appLocale());
 }
 
 const styles = StyleSheet.create({

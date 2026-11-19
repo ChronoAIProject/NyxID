@@ -1,3 +1,4 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
@@ -94,8 +95,8 @@ export function SshTerminalScreen({
   const [principalPickerOpen, setPrincipalPickerOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const [state, setState] = useState("Connecting…");
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [waiting, setWaiting] = useState(false);
   const waitingRef = useRef(false);
   const sessionEndedRef = useRef(false);
@@ -301,7 +302,7 @@ export function SshTerminalScreen({
         if (!session?.accessToken) {
           stopWaiting();
           endSession();
-          setError(terminalUpgradeError(401));
+          setError(() => (terminalUpgradeError(401)));
           setState("Disconnected");
           return;
         }
@@ -340,7 +341,7 @@ export function SshTerminalScreen({
             void connect(true);
             return;
           }
-          setError(terminalUpgradeError(status, waitingForApproval));
+          setError(() => (terminalUpgradeError(status, waitingForApproval)));
           setState("Disconnected");
         };
         ws.onmessage = (event) => {
@@ -360,7 +361,7 @@ export function SshTerminalScreen({
               terminalSettled = true;
               stopWaiting();
               endSession(message.message);
-              setError(message.message);
+              setError(() => (message.message));
               setState("Disconnected");
               socket.current = null;
               output.clear();
@@ -381,7 +382,7 @@ export function SshTerminalScreen({
             terminalSettled = true;
             stopWaiting();
             endSession();
-            setError("The terminal server sent an invalid message.");
+            setError(() => ("The terminal server sent an invalid message."));
             setState("Disconnected");
             socket.current = null;
             output.clear();
@@ -417,7 +418,7 @@ export function SshTerminalScreen({
         if (current()) {
           stopWaiting();
           endSession();
-          setError(terminalUpgradeError());
+          setError(() => (terminalUpgradeError()));
           setState("Disconnected");
         }
       }
@@ -558,11 +559,11 @@ export function SshTerminalScreen({
       if (sent) {
         send({ type: "paste", text: pasted.text });
         if (pasted.truncated)
-          setNotice("Only the first 65,536 characters were pasted.");
+          setNotice(() => ("Only the first 65,536 characters were pasted."));
       }
     } catch {
       if (epoch === generation.current)
-        setError("Couldn't read the clipboard. Try again.");
+        setError(() => ("Couldn't read the clipboard. Try again."));
     }
   };
   const handleRendererTerminated = () => {
@@ -580,7 +581,7 @@ export function SshTerminalScreen({
     setState("Disconnected");
     setReady(false);
     setConnectRequested(false);
-    setNotice("The terminal display stopped. Connect again to continue.");
+    setNotice(() => ("The terminal display stopped. Connect again to continue."));
     setDocumentVersion((value) => value + 1);
   };
   const principals = connection?.ssh_allowed_principals ?? [];

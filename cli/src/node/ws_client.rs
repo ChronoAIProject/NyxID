@@ -825,6 +825,63 @@ pub(super) fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
         .to_string()
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetirementProof {
+    connection_id: String,
+    secret: Zeroizing<String>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct RetiredSockets {
+    predecessor: Option<RetirementProof>,
+    candidate: Option<RetirementProof>,
+}
+
+impl RetiredSockets {
+    fn offer(&mut self, mut value: serde_json::Value) -> Result<String> {
+        let id = value["connection_id"]
+            .as_str()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| Error::AuthFailed("Invalid retirement offer".into()))?
+            .to_owned();
+        let serde_json::Value::String(secret) = value["secret"].take() else {
+            return Err(Error::AuthFailed("Invalid retirement offer".into()));
+        };
+        let secret = Zeroizing::new(secret);
+        if secret.len() != 64 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::AuthFailed("Invalid retirement offer".into()));
+        }
+        // The offering server fenced every earlier in-progress handshake in
+        // MongoDB. Only its observed predecessor or this candidate can win.
+        let previous = value["predecessor_id"].as_str();
+        self.predecessor = [self.predecessor.take(), self.candidate.take()]
+            .into_iter()
+            .flatten()
+            .find(|proof| Some(proof.connection_id.as_str()) == previous);
+        self.candidate = Some(RetirementProof {
+            connection_id: id.clone(),
+            secret,
+        });
+        Ok(id)
+    }
+
+    fn authenticated(&mut self, reply: &serde_json::Value) -> Result<()> {
+        if reply["capabilities"]["retirement_v1"] == true {
+            let candidate = self
+                .candidate
+                .take()
+                .filter(|proof| {
+                    Some(proof.connection_id.as_str()) == reply["connection_id"].as_str()
+                })
+                .ok_or_else(|| Error::AuthFailed("Retirement offer was not acknowledged".into()))?;
+            self.predecessor = Some(candidate);
+        } else {
+            *self = Self::default();
+        }
+        Ok(())
+    }
+}
+
 /// Main connection loop with exponential backoff reconnection.
 #[allow(clippy::too_many_arguments)]
 async fn run_connection_loop(
@@ -840,6 +897,7 @@ async fn run_connection_loop(
     shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = ReconnectBackoff::new();
+    let mut retired = RetiredSockets::default();
     let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
     // Replay protection spans WebSocket reconnects. A request can be delivered
     // again while the caller is recovering a lost response; the machine
@@ -884,6 +942,7 @@ async fn run_connection_loop(
             &mut machine,
             proxy_uploads.clone(),
             replay_guard.clone(),
+            &mut retired,
         )
         .await;
         proxy_uploads.disconnect().await;
@@ -929,6 +988,7 @@ async fn connect_and_serve(
     machine_state: &mut Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+    retired: &mut RetiredSockets,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
@@ -951,20 +1011,30 @@ async fn connect_and_serve(
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    // 2. Authenticate
-    let mut auth_msg = serde_json::json!({
-        "type": "auth",
-        "node_id": config.node.id,
-        "token": auth_token,
-    });
+    #[derive(serde::Serialize)]
+    struct Auth<'a> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        node_id: &'a str,
+        token: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        managed_runtime: Option<&'a nyxid_machine::managed::Binding>,
+        retirement_v1: &'a RetiredSockets,
+    }
     if let Some(binding) = &config.managed_runtime {
         binding
             .validate()
             .map_err(|reason| Error::Config(reason.into()))?;
-        auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
     }
+    let auth_msg = serde_json::to_string(&Auth {
+        kind: "auth",
+        node_id: &config.node.id,
+        token: auth_token,
+        managed_runtime: config.managed_runtime.as_ref(),
+        retirement_v1: retired,
+    })?;
     tokio::select! {
-        result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
+        result = ws_sink.send(Message::Text(auth_msg.into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
         }
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
@@ -993,6 +1063,12 @@ async fn connect_and_serve(
                     continue;
                 };
                 match value["type"].as_str() {
+                    Some("retirement_offer_v1") => {
+                        let id = retired.offer(value)?;
+                        let confirm = serde_json::json!({ "type":"retirement_confirm_v1", "connection_id":id });
+                        ws_sink.send(Message::Text(confirm.to_string().into())).await
+                            .map_err(|_| Error::WebSocket("Retirement confirmation failed".into()))?;
+                    }
                     Some("auth_ok" | "auth_error") => return Ok(value),
                     _ => tracing::debug!("Ignoring non-auth control frame during node authentication"),
                 }
@@ -1005,6 +1081,7 @@ async fn connect_and_serve(
         .unwrap_or(false);
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
+            retired.authenticated(&parsed)?;
             if let Some(binding) = &config.managed_runtime {
                 let accepted = parsed.get("managed_runtime").cloned().and_then(|value| {
                     serde_json::from_value::<nyxid_machine::managed::Binding>(value).ok()
@@ -1226,6 +1303,7 @@ async fn connect_and_serve(
     let serving_started = tokio::time::Instant::now();
 
     // 5. Reader loop: process incoming messages from the server
+    let mut writer_finished = false;
     let shutting_down = loop {
         // Wrap ws_stream.next() with an idle timeout when the server
         // advertised its heartbeat interval. If it did not (older backend),
@@ -1237,7 +1315,7 @@ async fn connect_and_serve(
                 match tokio::select! {
                     result = tokio::time::timeout(Duration::from_secs(secs), ws_stream.next()) => result,
                     _ = wait_for_shutdown(&mut shutdown) => break true,
-                    _ = &mut writer_task => break false,
+                    _ = &mut writer_task => { writer_finished = true; break false; },
                 } {
                     Ok(msg) => msg,
                     Err(_) => {
@@ -1257,7 +1335,7 @@ async fn connect_and_serve(
             None => tokio::select! {
                 msg = ws_stream.next() => msg,
                 _ = wait_for_shutdown(&mut shutdown) => break true,
-                _ = &mut writer_task => break false,
+                _ = &mut writer_task => { writer_finished = true; break false; },
             },
         };
         let Some(msg) = read_result else {
@@ -1721,7 +1799,11 @@ async fn connect_and_serve(
     if let Some(task) = usage_task {
         task.abort();
     }
-    writer_task.abort();
+    if !writer_finished {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
+    drop(ws_stream);
     Ok(Some(served_for))
 }
 
@@ -5160,6 +5242,7 @@ mod tests {
                     &mut machine,
                     Arc::new(super::super::proxy_upload::Uploads::default()),
                     replay_guard(),
+                    &mut RetiredSockets::default(),
                 ),
             )
             .await
@@ -5943,6 +6026,37 @@ mod tests {
 
         relay.await.expect("relay task completes");
         drop(control_tx);
+    }
+
+    #[test]
+    fn interrupted_retirement_handshakes_keep_only_possible_owners() {
+        let mut proofs = RetiredSockets::default();
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let c = uuid::Uuid::new_v4().to_string();
+        let offer = |id: &str, previous: Option<&str>| {
+            serde_json::json!({
+                "connection_id":id, "secret":"a".repeat(64), "predecessor_id":previous
+            })
+        };
+        proofs.offer(offer(&a, None)).unwrap();
+        proofs
+            .authenticated(
+                &serde_json::json!({"capabilities":{"retirement_v1":true},"connection_id":a}),
+            )
+            .unwrap();
+        proofs.offer(offer(&b, Some(&a))).unwrap();
+        assert_eq!(proofs.predecessor.as_ref().unwrap().connection_id, a);
+        assert_eq!(proofs.candidate.as_ref().unwrap().connection_id, b);
+        // The B CAS won, but its auth_ok was lost.
+        proofs.offer(offer(&c, Some(&b))).unwrap();
+        assert_eq!(proofs.predecessor.as_ref().unwrap().connection_id, b);
+        assert_eq!(proofs.candidate.as_ref().unwrap().connection_id, c);
+        // Legacy auth_ok, including a timed-out offer.
+        proofs
+            .authenticated(&serde_json::json!({"type":"auth_ok"}))
+            .unwrap();
+        assert!(proofs.predecessor.is_none() && proofs.candidate.is_none());
     }
 
     #[test]

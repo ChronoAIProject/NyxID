@@ -274,7 +274,7 @@ pub(super) async fn settle_admission(
     let stored = current.as_ref().unwrap_or(stored);
     let (text, failed) = match result {
         Ok(Inbound::Turn(_)) | Ok(Inbound::Queued) => return,
-        Ok(Inbound::Reply(text)) => (Some(text.as_str()), false),
+        Ok(Inbound::Reply(text)) => (Some(text.text.as_str()), false),
         Ok(Inbound::Silent(_)) => (None, false),
         Ok(Inbound::Busy) => (
             Some("NyxBot is busy. This message was not started. Please try again shortly."),
@@ -364,18 +364,11 @@ impl Drop for Observer {
         let id = self.response.clone();
         crate::services::shutdown::process().spawn_cleanup(async move {
             if let Ok(Some(stored)) = recovery::load(&state.db, &row, &id).await {
-                // Also fence admission which has not created delivery metadata yet.
-                let _ = state
-                    .db
-                    .collection::<NyxbotEvent>(EVENTS)
-                    .update_one(
-                        doc! {"_id":&stored.event_key},
-                        doc! {"$set":{"gateway_observer_detached":true}},
-                    )
-                    .await;
-                let _ =
-                    crate::services::channel_turn_delivery::detach(&state.db, &stored.event_key)
-                        .await;
+                let _ = crate::services::channel_turn_delivery::detach_observer(
+                    &state.db,
+                    &stored.event_key,
+                )
+                .await;
                 if !state.shutdown.is_stopped() {
                     late_delivery::process(&state, &stored.event_key).await;
                 }

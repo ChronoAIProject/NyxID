@@ -29,6 +29,7 @@ pub async fn begin(
         .as_ref()
         .and_then(|facts| facts.discord_gateway.as_ref());
     let diagnostic = NyxbotAdmission {
+        requires_org_notice: false,
         disposition: "received".into(),
         bot_mentioned: discord.map(|d| d.bot_mentioned),
         managed_role_mentioned: discord.is_some_and(|d| d.managed_role_mentioned),
@@ -77,7 +78,7 @@ pub async fn finish(
     row: &NyxbotChannel,
     source: &str,
     disposition: &'static str,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     // A committed turn is stronger evidence than a later response/cleanup error.
     let updated = db
         .collection::<Document>(COLLECTION_NAME)
@@ -96,7 +97,7 @@ pub async fn finish(
         )
         .await;
     }
-    Ok(())
+    Ok(updated.modified_count == 1)
 }
 
 /// Called in the existing turn-binding transaction, including queued work.

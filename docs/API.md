@@ -11,6 +11,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
   - [Health](#health)
+  - [Public Configuration](#public-configuration)
   - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
   - [Social Auth](#social-auth)
@@ -204,6 +205,25 @@ curl http://localhost:3001/health
 ```
 
 ---
+
+### Public Configuration
+
+#### GET /api/v1/public/config
+
+Returns public deployment configuration without authentication: frontend, MCP and
+node URLs, version, configured social providers, registration/email gates,
+`mobile_new_domains`, and optional telemetry configuration.
+
+The optional boolean `crash_diagnostics_offered` is included only as `true` when
+the diagnostics rollout is Global or Cohort; Off or Killed omits the field. It is
+a process-local discovery hint with no per-person data and adds no database reads
+to this endpoint. It starts false until the first successful startup evaluation.
+A tracked worker refreshes it every 60 seconds; local admin flag writes refresh
+it immediately through cache invalidation with a 200 ms read bound. Other replicas
+converge on the next successful refresh; failures keep the previous value. The
+manifest refresh remains a separate 15-minute task. Clients may use the hint to
+ask for preferences; actual offer and consent authority remain in the authenticated
+`/users/me/preferences/analytics` response.
 
 ### Interactive Documentation
 
@@ -531,12 +551,15 @@ grant. This route remains compatible with existing account-only clients.
   "user_code": "7KM2RQ9D",
   "verification_uri": "https://app.nyxid.dev/login/device",
   "verification_uri_complete": "https://app.nyxid.dev/login/device?user_code=7KM2RQ9D",
+  "app_verification_uri": "https://api.nyxid.dev/login/device?user_code=7KM2RQ9D",
   "expires_in": 600,
   "interval": 5
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. `app_verification_uri` is optional: it requires an origin-only HTTPS `BASE_URL`, a different `FRONTEND_URL` origin, and a configured Apple (nonblank `APNS_TEAM_ID` + `APNS_TOPIC`) or Android app-link identity. This includes selectable v2 and request-bound app-login responses; configuration does not establish live OS association. Only `/login` (including its MFA app option) opts into native QR payloads. On coarse-pointer mobile web, tapping the ready, live QR button opens “Open NyxID app?” confirmation; only the affirmative link opens a new tab with `noopener noreferrer` and no referrer, preserving the original poll. The dialog binds the exact request/URL, rechecks original expiry on tap and confirmation, and retires on close, expiry, terminal state, replacement or eligibility loss. No automatic opening occurs on Continue, generation, mount, polling or resume. Fine-pointer `/login` uses a plain native QR for external scanning. Other consumers, including request-bound identity verification and onboarding, use plain `verification_uri_complete` QR payloads with no handoff UI. Older responses and HTTP development also use that web fallback. Configuration does not detect installation or guarantee OS handoff. Verified native links load the public mobile preview without scanning; approval remains a separate authenticated action. Without native opening, `GET /login/device` on the API origin redirects to the configured frontend with only the validated, hyphenated public code. Missing, invalid or duplicate codes return 400; a same-origin fallback returns 404. The original browser must collect an approved delivery within the existing 60-second window; resuming prompts a poll while respecting the minimum interval and server backoff. See the [app-link runbook](../mobile/docs/APP_LINKS.md).
+
+Older clients may continue using `verification_uri_complete`. The web page validates before formatting, retains validated codes in the URL, and loads a non-mutating public preview on mount. Manual entry previews after Continue; malformed codes show an explanation. Review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -1096,6 +1119,79 @@ Possible error keys in the redirect:
 ---
 
 ### Users
+
+#### GET /api/v1/users/me/quick-access
+
+Returns the ordered account preference used by the Duo quick-access rail.
+All three quick-access methods require a first-party **person** session cookie
+or access JWT. API keys, delegated tokens (including `account:read`), service
+accounts, relay tokens, OAuth-client tokens and organization subjects are refused
+with 401 or 403. GET deliberately follows the human-only device-preference
+policy of `/users/me/analytics-consent`; it is not a delegated profile read.
+
+**Response (200):**
+
+```json
+{
+  "items": [
+    { "kind": "destination", "id": "new_chat" },
+    { "kind": "destination", "id": "notifications" },
+    { "kind": "destination", "id": "scan_qr" },
+    { "kind": "destination", "id": "recent_chats" },
+    { "kind": "destination", "id": "settings" }
+  ],
+  "customized": false,
+  "has_unsupported_entries": false
+}
+```
+
+The additive `has_unsupported_entries` boolean reports whether this server
+omitted stored kinds/destinations it cannot parse. Clients must also detect any
+entries they omit locally. A partial list remains visible but read-only; only
+explicit Reset may replace it. Older clients may ignore this response field;
+server-side PUT protection still prevents them erasing unsupported entries.
+
+#### PUT /api/v1/users/me/quick-access
+
+Saves the ordered list. The JSON body is `{ "items": [...] }`, with zero to
+12 unique entries. Each entry has a `kind` and `id`:
+
+| Kind | Accepted ID |
+|------|-------------|
+| `destination` | `new_chat`, `notifications`, `scan_qr`, `terminal_login_code`, `recent_chats`, `settings`, `automations`, `machines`, `plugins`, `activity`, `create_agent`, `agents`, `crews` |
+| `agent` | UUID, stored in canonical lowercase form |
+| `crew` | Valid `nyxg-` crew ID; `group` is accepted as an alias |
+
+Unknown kinds/destinations, malformed IDs, duplicates and oversized lists return
+400. Shape-valid agent/crew IDs are accepted without checking roster access:
+these inert preferences confer no access, and clients resolve them only against
+the authenticated person's authorized roster. Unavailable entries are not shown.
+The response has the GET shape with `customized: true`; an empty saved list is
+different from the default list. If the raw stored list contains entries this
+server cannot parse, PUT returns 409 `conflict` (existing code 1004) without
+changing storage. Replacement also compares the complete raw preference so a
+concurrent newer-version edit returns 409 rather than being overwritten. Reload
+before retrying a concurrent edit; unsupported lists require a newer compatible
+client/server or intentional Reset.
+
+#### DELETE /api/v1/users/me/quick-access
+
+Removes the saved preference and returns the current default list with
+`customized: false`. All methods operate only on the authenticated person; there
+is no owner override. Storage is the existing users row at
+`profile_config.quick_access`, included in account export and removed with the
+person during erasure; no collection is added. These users preference routes,
+like their adjacent preference endpoints, are documented here rather than
+registered as utoipa paths.
+
+Rolling deployments are compatible: older binaries ignore this optional field.
+All current profile preference writers (service-view filters/named views,
+analytics consent, security policy and onboarding completion) update their own
+`profile_config.*` path; they do not replace the profile object. Quick-access
+save/reset likewise changes only `profile_config.quick_access`. This preserves
+sibling and unknown future settings. Older binaries cannot read the new route;
+clients must retain the default rail if that route returns 404. No migration or
+new personal-data collection is required.
 
 #### GET /api/v1/users/me
 
@@ -9759,6 +9855,9 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 - `unknown`: a closed `reason`, such as `resource_not_found_without_creation_proof`,
   `idempotency_window_passed`, `creation_dispatch_time_unknown`, `operation_without_resource`,
   `creation_identity_not_observable_without_replay`, or `gateway_unavailable`.
+  Lifecycle operations without a resource also distinguish `operation_in_progress_without_resource`,
+  `operation_waiting_for_connection` and `operation_failed_without_resource`. None proves absence;
+  `next_step` explains automatic observation, owner connection completion, or the missing CMA evidence.
   `owner_retry_will_recover` means the dispatched generic Sandbox creation is
   inside the 23-hour replay window: the owner's next allocating create or retry
   of the original request automatically attempts the existing recovery. If CMA
@@ -9767,12 +9866,14 @@ contains owner-retry guidance when applicable), where `outcome.kind` is:
 ### POST `/api/v1/admin/cma-sandbox-reservations/{id}/resolve`
 
 Use the latest inspection's three fences (`creation_revision` is null for a legacy
-row with no matching creation; such a row cannot authorize settlement). Example
+row with no matching creation; it can authorize only exact bound-resource retirement). Example
 association body:
 
 ```json
 {"generation":1,"revision":2,"creation_revision":3,"action":"associate","remote_sandbox_id":"sandbox-id"}
 ```
+
+For an already bound sandbox, `"action":"confirm_retirement"` freshly reads its exact identity and requires CMA state `retired`. It completes local retirement and clears recovery material with the same transaction and fences, including for legacy bound rows without a journal. A 404, timeout, live state or retirement acknowledgment cannot authorize it. This action never sends a retirement command.
 
 For release use `"action":"release"` and omit `remote_sandbox_id`. Caller-supplied
 proof is not accepted. `associate` requires a saved creation receipt or exact

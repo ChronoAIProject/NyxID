@@ -2077,6 +2077,10 @@ delayed send failures appear in existing bot Health with metadata-only audit;
 replay and transient preflight errors do not. Failed sends preserve the existing
 provider reason and add a separate bounded thread reason. Health describes the
 missing reply without asking the owner to inspect internal delivery logs.
+A fixed refusal before a turn starts can still reach the original followed
+thread when a guest wallet is suspended or out of credit. Removing the member,
+switching off guests, closing the follow or retiring the binding prevents that
+delivery.
 Expired delayed references report
 expiry without an owner action. Confirmed bot outbound clears the thread error.
 Queued questions enter that transcript atomically with source acceptance; queue

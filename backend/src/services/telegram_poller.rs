@@ -151,7 +151,7 @@ async fn handle_callback_query(
         }
     };
 
-    let request = match approval_service::get_request(&state.db, &request_id).await {
+    let decision = match approval_service::read_decision_request(&state.db, &request_id).await {
         Ok(r) => r,
         Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
@@ -174,6 +174,7 @@ async fn handle_callback_query(
         .map(|m| m.chat.id)
         .unwrap_or(callback.from.id);
 
+    let request = &decision.request;
     if !callback_can_decide(
         request.telegram_chat_id,
         chat_id,
@@ -194,18 +195,19 @@ async fn handle_callback_query(
     let decision_idempotency_key = format!("tg:{}:{}", callback.id, request_id);
 
     // Process the decision
-    match approval_service::process_decision(
+    match Box::pin(approval_service::process_decision_with_access(
         &state.db,
         &state.config,
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        &request_id,
+        decision,
         approved,
         None,
         Some(decision_idempotency_key.as_str()),
-        "telegram",
-    )
+        approval_service::DecisionSource::Telegram,
+        None,
+    ))
     .await
     {
         Ok(updated) => {
@@ -215,22 +217,6 @@ async fn handle_callback_query(
                 format!("Rejected access to {}", updated.service_name)
             };
             answer_callback(state, &callback.id, &text).await;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(updated.user_id.clone()),
-                "approval_decision".to_string(),
-                Some(serde_json::json!({
-                    "request_id": request_id,
-                    "service_id": updated.service_id,
-                    "approved": approved,
-                    "channel": "telegram",
-                })),
-                None,
-                None,
-                None,
-                None,
-            );
         }
         Err(e) => {
             let callback_message = decision_callback_message(&e);

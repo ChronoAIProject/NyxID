@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../i18n/useLocalizedState";
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -29,6 +32,7 @@ const POLL_TIMEOUT_MS = 60000;
 
 // Telegram remains a custom brand-icon SVG — lucide doesn't ship brand logos.
 function TelegramIcon() {
+  useAppLanguage();
   return (
     <Svg width={18} height={18} viewBox="0 0 24 24" fill="#FFFFFF">
       <Path d="M11.944 0A12 12 0 1 0 24 12.056A12.014 12.014 0 0 0 11.944 0Zm5.654 8.22l-1.69 7.955c-.128.574-.462.713-.937.444l-2.586-1.906l-1.248 1.2a.65.65 0 0 1-.52.254l.186-2.632l4.789-4.326c.208-.186-.045-.29-.324-.103L9.3 13.264l-2.548-.795c-.554-.174-.565-.554.116-.82l9.952-3.836c.462-.166.866.113.716.82Z" />
@@ -37,11 +41,12 @@ function TelegramIcon() {
 }
 
 export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramLinkModalProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [linkInfo, setLinkInfo] = useState<TelegramLinkInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [connected, setConnected] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -75,7 +80,8 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
       const info = await mobileApi.telegramLink();
       setLinkInfo(info);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to generate link code");
+      setError(() => (e instanceof Error ? e.message : translateApp("Failed to generate link code")),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -135,7 +141,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
       try {
         await Linking.openURL(webUrl);
       } catch {
-        setError("Could not open Telegram");
+        setError(() => (translateApp("Could not open Telegram")));
       }
     }
   }, [linkInfo]);
@@ -152,9 +158,11 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
       <View style={styles.backdrop}>
         <View style={styles.card}>
           {/* Header */}
-          <Text style={styles.title}>Connect Telegram</Text>
+          <Text style={styles.title}>{translateApp("Connect Telegram")}</Text>
           <Text style={styles.subtitle}>
-            Receive approval notifications directly in Telegram.
+            {translateApp(
+              "Receive approval notifications directly in Telegram.",
+            )}
           </Text>
 
           {/* First load: the link button and code row, as a skeleton */}
@@ -163,7 +171,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
               rows={2}
               icon={false}
               detail={false}
-              accessibilityLabel="Generating link code"
+              accessibilityLabel={translateApp("Generating link code")}
             />
           )}
 
@@ -172,7 +180,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
             <View style={styles.centerWrap}>
               <Text style={styles.errorText}>{error}</Text>
               <Pressable style={styles.retryBtn} onPress={() => void fetchLink()}>
-                <Text style={styles.retryText}>Retry</Text>
+                <Text style={styles.retryText}>{translateApp("Retry")}</Text>
               </Pressable>
             </View>
           )}
@@ -181,16 +189,22 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
           {connected && (
             <View style={styles.centerWrap}>
               <Check size={18} color={colors.successTone.text} strokeWidth={2.5} />
-              <Text style={styles.successText}>Telegram connected!</Text>
+              <Text style={styles.successText}>
+                {translateApp("Telegram connected!")}
+              </Text>
             </View>
           )}
 
           {/* Expired state */}
           {expired && !connected && (
             <View style={styles.centerWrap}>
-              <Text style={styles.errorText}>Link code expired</Text>
+              <Text style={styles.errorText}>
+                {translateApp("Link code expired")}
+              </Text>
               <Pressable style={styles.retryBtn} onPress={() => void fetchLink()}>
-                <Text style={styles.retryText}>Generate New Code</Text>
+                <Text style={styles.retryText}>
+                  {translateApp("Generate New Code")}
+                </Text>
               </Pressable>
             </View>
           )}
@@ -201,32 +215,42 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
               {/* Open in Telegram button */}
               <Pressable style={styles.telegramBtn} onPress={handleOpenTelegram}>
                 <TelegramIcon />
-                <Text style={styles.telegramBtnText}>Open in Telegram</Text>
+                <Text style={styles.telegramBtnText}>
+                  {translateApp("Open in Telegram")}
+                </Text>
               </Pressable>
 
               {/* Divider */}
               <View style={styles.divider}>
                 <View style={styles.dividerLine} />
-                <Text style={styles.dividerText}>or copy the code</Text>
+                <Text style={styles.dividerText}>
+                  {translateApp("or copy the code")}
+                </Text>
                 <View style={styles.dividerLine} />
               </View>
 
               {/* Code display + copy */}
               <View style={styles.codeRow}>
-                <Text style={styles.codeText} selectable>/start {linkInfo.link_code}</Text>
+                <Text style={styles.codeText} selectable>
+                  {"/start"}
+                  {linkInfo.link_code}</Text>
                 <Pressable style={styles.copyBtn} onPress={() => void handleCopy()}>
-                  {copied ? <Check size={14} color={colors.successTone.text} strokeWidth={2.5} /> : <Copy size={14} color={colors.textSecondary} strokeWidth={2} />}
+                  {copied ? (
+                    <Check size={14} color={colors.successTone.text} strokeWidth={2.5} />
+                  ) : (
+                    <Copy size={14} color={colors.textSecondary} strokeWidth={2} />
+                  )}
                 </Pressable>
               </View>
 
-              <Text style={styles.instructionText}>
-                Send this to @{linkInfo.bot_username} on Telegram
-              </Text>
+              <Text style={styles.instructionText}>{translateApp("Send this to @{{name}} on Telegram", { name: linkInfo.bot_username})}</Text>
 
               {/* Polling indicator */}
               <View style={styles.waitingRow}>
                 <ActivityIndicator size="small" color={colors.textMuted} />
-                <Text style={styles.waitingText}>Waiting for connection...</Text>
+                <Text style={styles.waitingText}>
+                  {translateApp("Waiting for connection...")}
+                </Text>
               </View>
             </>
           )}
@@ -234,7 +258,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
           {/* Cancel button */}
           {!connected && (
             <Pressable style={styles.cancelBtn} onPress={onDismiss}>
-              <Text style={styles.cancelText}>Cancel</Text>
+              <Text style={styles.cancelText}>{translateApp("Cancel")}</Text>
             </Pressable>
           )}
         </View>

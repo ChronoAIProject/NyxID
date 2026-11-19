@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -52,14 +55,13 @@ import { PluginConnectionHistory } from "../plugins/PluginConnectionHistory";
 
 import { useServiceOAuth } from "./useServiceOAuth";
 import { oauthOutcomeCopy } from "./serviceOAuthModel";
-import { useAppLanguage } from "../../i18n/LanguageProvider";
 
 const ROOT = ["workspace", "services"] as const;
 const MANAGEMENT_TABS = ["overview", "advanced", "history"] as const;
 const messageOf = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
-    : "Could not complete this action. Try again.";
+    : translateApp("Could not complete this action. Try again.");
 
 export function ServicesScreen({
   initialConnectionId,
@@ -70,6 +72,7 @@ export function ServicesScreen({
   initialCatalogSlug?: string;
   onClose?: () => void;
 } = {}) {
+  const appLanguage = useAppLanguage().language;
   const { colors } = useTheme();
   const { t } = useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
@@ -86,8 +89,8 @@ export function ServicesScreen({
   const [adding, setAdding] = useState<CatalogEntry>();
   const [busy, setBusy] = useState(false);
   const [writing, setWriting] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [flowComplete, setFlowComplete] = useState(false);
   const [tokenOnlyRemoval, setTokenOnlyRemoval] = useState(false);
   const [replacement, setReplacement] = useState("");
@@ -122,14 +125,14 @@ export function ServicesScreen({
   useEffect(() => {
     navigation.setOptions({
       title: selectedId
-        ? "Manage connection"
+        ? translateApp("Manage connection")
         : adding
-          ? `Connect ${adding.name}`
+          ? translateApp("Connect {{name}}", { name: adding.name})
           : initialCatalogSlug
-            ? "Connect service"
-            : "Services",
+            ? translateApp("Connect service")
+            : translateApp("Services"),
     });
-  }, [navigation, selectedId, adding, initialCatalogSlug]);
+  }, [navigation, selectedId, adding, initialCatalogSlug, appLanguage]);
   useEffect(() => {
     setManagementTab("overview");
     setPermissionsOpen(false);
@@ -188,11 +191,14 @@ export function ServicesScreen({
     discardOnClose:
       formDirty || Boolean(replacement)
         ? {
-            title: "Discard connection changes?",
-            message: "Your unsaved connection changes will be lost.",
+            title: translateApp("Discard connection changes?"),
+            message: translateApp(
+              "Your unsaved connection changes will be lost.",
+            ),
           }
         : undefined,
-    label: onClose ? "Back to plugins" : "Back to services",
+    label: onClose ? translateApp("Back to plugins")
+      : translateApp("Back to services"),
     onBack: () => {
       if (!actionLock.current) closeDetail();
     },
@@ -208,7 +214,7 @@ export function ServicesScreen({
     try {
       await action();
     } catch (cause) {
-      setError(t(messageOf(cause)));
+      setError(() => (translateApp(messageOf(cause))));
     } finally {
       actionLock.current = false;
       setBusy(false);
@@ -258,23 +264,28 @@ export function ServicesScreen({
     try {
       const result = await servicesApi.remove(connection.id, tokenOnlyRemoval);
       if (!result.deleted)
-        throw new Error(result.message || "The connection was not removed.");
+        throw new Error(result.message || translateApp("The connection was not removed."),
+        );
       // Removal completes this flow; the action lock only guards user taps.
       setSelectedId(undefined);
       setTokenOnlyRemoval(false);
       setReplacement("");
       await reload();
       setNotice(
-        result.upstream_revocation_scheduled
-          ? "Connection removed. Provider authorization revocation was scheduled."
-          : "Connection removed.",
+        () => (result.upstream_revocation_scheduled
+          ? translateApp(
+              "Connection removed. Provider authorization revocation was scheduled.",
+            )
+          : translateApp("Connection removed.")),
       );
       if (onClose) setFlowComplete(true);
     } catch (cause) {
       if (cause instanceof ApiError && cause.errorCode === 11500) {
         setTokenOnlyRemoval(true);
         setError(
-          "Other connections share this provider authorization. You can remove only this service below; the provider authorization and other connections will be kept.",
+          () => (translateApp(
+            "Other connections share this provider authorization. You can remove only this service below; the provider authorization and other connections will be kept.",
+          )),
         );
       } else {
         throw cause;
@@ -284,8 +295,9 @@ export function ServicesScreen({
 
   if (flowComplete)
     return (
-      <WorkspacePage showHeading={false} title="Connection removed">
-        <Notice message={notice ?? "Connection removed."} tone="success" />
+      <WorkspacePage showHeading={false} title={translateApp("Connection removed")}
+      >
+        <Notice message={notice ?? translateApp("Connection removed.")} tone="success" />
       </WorkspacePage>
     );
 
@@ -309,7 +321,11 @@ export function ServicesScreen({
             if (!values.platform && supportsManagedOAuth(adding))
               await authorize(connection, adding);
             else
-              setNotice("Connection added. Its status below comes from NyxID.");
+              setNotice(
+                () => (translateApp(
+                  "Connection added. Its status below comes from NyxID.",
+                )),
+              );
           })
         }
       />
@@ -329,7 +345,8 @@ export function ServicesScreen({
       connection?.credential_source?.type === "org" &&
       !connection.credential_source.allowed;
     const providerName =
-      entry?.name ?? connection?.catalog_service_name ?? "the provider";
+      entry?.name ?? connection?.catalog_service_name ??
+      translateApp("the provider");
     const scopes = [...new Set(connection?.granted_scopes ?? [])];
     const showPermissions = Boolean(oauth || scopes.length);
     const canEditPermissions =
@@ -369,14 +386,16 @@ export function ServicesScreen({
     const confirmRemoval = (target: ServiceConnection) =>
       Alert.alert(
         tokenOnlyRemoval
-          ? "Remove only this service?"
-          : `Remove “${target.label}”?`,
+          ? translateApp("Remove only this service?")
+          : translateApp("Remove “{{label}}”?", { label: target.label }),
         tokenOnlyRemoval
-          ? "Only this connection will be removed. Provider authorization and other connections will be kept."
-          : "Agents using it will lose access.",
+          ? translateApp(
+              "Only this connection will be removed. Provider authorization and other connections will be kept.",
+            )
+          : translateApp("Agents using it will lose access."),
         [
           {
-            text: "Cancel",
+            text: translateApp("Cancel"),
             style: "cancel",
             onPress: () => {
               setTokenOnlyRemoval(false);
@@ -384,7 +403,8 @@ export function ServicesScreen({
             },
           },
           {
-            text: tokenOnlyRemoval ? "Remove only this service" : "Remove",
+            text: tokenOnlyRemoval ? translateApp("Remove only this service")
+              : translateApp("Remove"),
             style: "destructive",
             onPress: () => void run(() => remove(target)),
           },
@@ -393,9 +413,9 @@ export function ServicesScreen({
     const statusText =
       connection && health
         ? !connection.is_active
-          ? "Paused"
+          ? translateApp("Paused")
           : health.tone === "success" && !isSavedCredential(connection)
-            ? "Connected"
+            ? translateApp("Connected")
             : health.label
         : undefined;
     const healthText =
@@ -407,20 +427,33 @@ export function ServicesScreen({
     const chatGuidance = !connection
       ? undefined
       : restricted
-        ? "You can view this organization connection, but you cannot use it yet. Ask an organization admin to grant you access."
+        ? translateApp(
+            "You can view this organization connection, but you cannot use it yet. Ask an organization admin to grant you access.",
+          )
         : !connection.is_active
           ? editable
-            ? "This connection is paused. Turn on Connection enabled above before using it in Chat."
-            : "This connection is paused. Ask its administrator to enable it before using it in Chat."
+            ? translateApp(
+                "This connection is paused. Turn on Connection enabled above before using it in Chat.",
+              )
+            : translateApp(
+                "This connection is paused. Ask its administrator to enable it before using it in Chat.",
+              )
           : isSavedCredential(connection) && connection.status === "active" && !connection.credential_missing
               && connection.credential_verification?.state !== "verified" && connection.credential_verification?.state !== "rejected"
-            ? "You can try this saved connection in Chat. Provider authentication has not been verified, and the agent still needs permission to use it."
-          : health?.tone === "error" || health?.tone === "warning"
-            ? "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection."
-            : `Ask your agent to use ${providerName}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.`;
+            ? translateApp(
+                "You can try this saved connection in Chat. Provider authentication has not been verified, and the agent still needs permission to use it.",
+              )
+            : health?.tone === "error" || health?.tone === "warning"
+            ? translateApp(
+                  "Resolve the connection issue above before using it in Chat. The agent must also have permission to use this connection.",
+                )
+              : translateApp(
+                  "Ask your agent to use {{providerName}}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.",
+                  { providerName: providerName },
+                );
     return (
       <WorkspacePage
-        title="Manage connection"
+        title={translateApp("Manage connection")}
         showHeading={false}
         contentStyle={styles.grouped}
       >
@@ -464,7 +497,7 @@ export function ServicesScreen({
             rows={4}
             icon={false}
             title
-            accessibilityLabel="Loading connection"
+            accessibilityLabel={translateApp("Loading connection")}
           />
         )}
         {managementTab !== "history" && detail.isError && (
@@ -472,7 +505,7 @@ export function ServicesScreen({
             <Notice message={messageOf(detail.error)} tone="error" />
             <SettingsGroup inset={false}>
               <SettingsRow
-                label="Retry"
+                label={translateApp("Retry")}
                 tone="action"
                 onPress={() => void detail.refetch()}
               />
@@ -482,12 +515,14 @@ export function ServicesScreen({
         {connection && detailCatalog.isError && managementTab !== "history" && (
           <>
             <Notice
-              message="Service setup details could not be loaded. Reload them to check available authorization and credential actions."
+              message={translateApp(
+                "Service setup details could not be loaded. Reload them to check available authorization and credential actions.",
+              )}
               tone="error"
             />
             <SettingsGroup inset={false}>
               <SettingsRow
-                label="Reload service details"
+                label={translateApp("Reload service details")}
                 tone="action"
                 onPress={() => void detailCatalog.refetch()}
               />
@@ -500,16 +535,19 @@ export function ServicesScreen({
         {connection && health && managementTab === "overview" && (
           <>
             <SettingsGroup
-              title="Status"
+              title={translateApp("Status")}
               inset={false}
               footer={
                 canRecover
-                  ? `${healthText} Continue in your browser, then return here to check the result.`
+                  ? translateApp(
+                      "{{details}} Continue in your browser, then return here to check the result.",
+                      { details: healthText },
+                    )
                   : healthText
               }
             >
               <SettingsRow
-                label="Status"
+                label={translateApp("Status")}
                 value={statusText}
                 valueTone={health.tone === "error" ? "danger" : "default"}
               />
@@ -517,8 +555,8 @@ export function ServicesScreen({
                 <SettingsRow
                   label={
                     health.recovery === "continue"
-                      ? "Continue authentication"
-                      : "Reconnect"
+                      ? translateApp("Continue authentication")
+                      : translateApp("Reconnect")
                   }
                   tone="action"
                   disabled={busy}
@@ -536,7 +574,7 @@ export function ServicesScreen({
               !oauth &&
               connection.credential_binding !== "platform" ? (
                 <SettingsRow
-                  label="Repair connection in Web"
+                  label={translateApp("Repair connection in Web")}
                   tone="action"
                   disabled={busy}
                   onPress={() => void openWeb("overview")}
@@ -582,30 +620,40 @@ export function ServicesScreen({
               </SettingsGroup>
             )}
             <SettingsGroup
-              title="Use in Chat"
+              title={translateApp("Use in Chat")}
               inset={false}
               footer={[
                 chatGuidance,
-                "Turning this off keeps your saved credential. Turn it on again to resume use.",
+                translateApp(
+                  "Turning this off keeps your saved credential. Turn it on again to resume use.",
+                ),
                 !editable
                   ? connection.auto_connected
-                    ? "This connection is managed by the platform."
-                    : "An organization admin manages this connection. Your role has read-only access."
+                    ? translateApp(
+                        "This connection is managed by the platform.",
+                      )
+                    : translateApp(
+                        "An organization admin manages this connection. Your role has read-only access.",
+                      )
                   : undefined,
               ]
                 .filter(Boolean)
                 .join("\n\n")}
             >
               <SettingsRow
-                label="Connection enabled"
+                label={translateApp("Connection enabled")}
                 detail={
                   connection.is_active
-                    ? "On — NyxID may use this connection within the agent’s permissions."
-                    : "Off — requests through this connection are paused."
+                    ? translateApp(
+                        "On — NyxID may use this connection within the agent’s permissions.",
+                      )
+                    : translateApp(
+                        "Off — requests through this connection are paused.",
+                      )
                 }
                 accessory={
                   <Switch
-                    accessibilityLabel="Connection enabled"
+                    accessibilityLabel={translateApp("Connection enabled")}
                     value={connection.is_active}
                     disabled={
                       !editable ||
@@ -619,9 +667,11 @@ export function ServicesScreen({
                         await servicesApi.setActive(connection.id, active);
                         await reload();
                         setNotice(
-                          active
-                            ? "Connection enabled."
-                            : "Connection paused. Your credential is kept.",
+                          () => (active
+                            ? translateApp("Connection enabled.")
+                            : translateApp(
+                                "Connection paused. Your credential is kept.",
+                              )),
                         );
                       })
                     }
@@ -631,19 +681,24 @@ export function ServicesScreen({
             </SettingsGroup>
             {showPermissions && (
               <SettingsGroup
-                title="Provider permissions"
+                title={translateApp("Provider permissions")}
                 inset={false}
-                footer={`What ${providerName} allows NyxID to access. This does not decide which agents may use the connection.`}
+                footer={translateApp(
+                  "What {{providerName}} allows NyxID to access. This does not decide which agents may use the connection.",
+                  { providerName: providerName },
+                )}
               >
                 <SettingsRow
-                  label="Granted permissions"
+                  label={translateApp("Granted permissions")}
                   value={
                     scopes.length
-                      ? `${scopes.length} granted permission${scopes.length === 1 ? "" : "s"}`
-                      : "None listed"
+                      ? (scopes.length === 1 ? translateApp("{{count}} granted permission", { count: scopes.length }) : translateApp("{{count}} granted permissions", { count: scopes.length }))
+                      : translateApp("None listed")
                   }
-                  accessibilityLabel="Provider permissions"
-                  accessibilityHint="Review the access granted by the provider, separate from agent service permissions."
+                  accessibilityLabel={translateApp("Provider permissions")}
+                  accessibilityHint={translateApp(
+                    "Review the access granted by the provider, separate from agent service permissions.",
+                  )}
                   accessibilityState={{ expanded: permissionsOpen }}
                   accessory={
                     permissionsOpen ? (
@@ -656,8 +711,10 @@ export function ServicesScreen({
                 />
                 {permissionsOpen && !scopes.length ? (
                   <SettingsRow
-                    label="No saved permission list"
-                    detail="NyxID has no saved permission list for this connection. This alone does not mean authorization failed."
+                    label={translateApp("No saved permission list")}
+                    detail={translateApp(
+                      "NyxID has no saved permission list for this connection. This alone does not mean authorization failed.",
+                    )}
                   />
                 ) : null}
                 {permissionsOpen
@@ -686,44 +743,50 @@ export function ServicesScreen({
                   : null}
                 {permissionsOpen && canEditPermissions ? (
                   <SettingsRow
-                    label="Manage permissions in Web"
+                    label={translateApp("Manage permissions in Web")}
                     tone="action"
-                    accessibilityHint="Review or change these permissions in NyxID Web, then return here."
+                    accessibilityHint={translateApp(
+                      "Review or change these permissions in NyxID Web, then return here.",
+                    )}
                     disabled={busy}
                     onPress={() => void openWeb("overview")}
                   />
                 ) : null}
               </SettingsGroup>
             )}
-            <SettingsGroup title="Details" inset={false}>
+            <SettingsGroup title={translateApp("Details")} inset={false}>
               <SettingsRow
-                label="Last used"
-                value={connectionTime(connection.last_used_at, "Never")}
+                label={translateApp("Last used")}
+                value={connectionTime(connection.last_used_at,
+                  translateApp("Never"),
+                )}
               />
               {oauth ? (
                 <SettingsRow
-                  label="Last authorized"
+                  label={translateApp("Last authorized")}
                   value={connectionTime(
                     connection.last_authorized_at,
-                    "Not recorded",
+                    translateApp("Not recorded"),
                   )}
                 />
               ) : null}
               {connection.expires_at ? (
                 <SettingsRow
-                  label="Credential expires"
-                  value={connectionTime(connection.expires_at, "Not recorded")}
+                  label={translateApp("Credential expires")}
+                  value={connectionTime(connection.expires_at,
+                    translateApp("Not recorded"),
+                  )}
                 />
               ) : null}
               {isSavedCredential(connection) &&
               connection.credential_verification?.reason_code ? (
                 <SettingsRow
-                  label="Check result"
+                  label={translateApp("Check result")}
                   value={connection.credential_verification.reason_code}
                 />
               ) : null}
               <SettingsRow
-                label="Refresh status"
+                label={translateApp("Refresh status")}
                 tone="action"
                 disabled={busy || detail.isFetching}
                 onPress={() =>
@@ -747,7 +810,7 @@ export function ServicesScreen({
               />
               {(entry?.documentation_url ?? connection.docs_url) ? (
                 <SettingsRow
-                  label="Read provider documentation"
+                  label={translateApp("Read provider documentation")}
                   tone="action"
                   disabled={busy}
                   onPress={() =>
@@ -767,41 +830,47 @@ export function ServicesScreen({
         {connection && managementTab === "advanced" && (
           <>
             <SettingsGroup
-              title="Developer access"
+              title={translateApp("Developer access")}
               inset={false}
-              footer="Use the NyxID proxy address when connecting an external app or client. Requests also need a NyxID Agent Key with access to this service."
+              footer={translateApp(
+                "Use the NyxID proxy address when connecting an external app or client. Requests also need a NyxID Agent Key with access to this service.",
+              )}
             >
               {connection.proxy_url ? (
                 <SettingsRow
                   label={connection.proxy_url}
-                  detail="Proxy address"
+                  detail={translateApp("Proxy address")}
                   mono
                   selectable
                 />
               ) : (
-                <SettingsRow label="Proxy address" value="Not returned" />
+                <SettingsRow label={translateApp("Proxy address")}
+                  value={translateApp("Not returned")}
+                />
               )}
               {connection.proxy_url ? (
                 <SettingsRow
-                  label="Copy proxy address"
+                  label={translateApp("Copy proxy address")}
                   tone="action"
                   disabled={busy}
                   onPress={() =>
                     void run(async () => {
                       await Clipboard.setStringAsync(connection.proxy_url!);
-                      setNotice("Proxy address copied.");
+                      setNotice(() => (translateApp("Proxy address copied.")));
                     }, false)
                   }
                 />
               ) : null}
             </SettingsGroup>
             <SettingsGroup
-              title="More settings"
+              title={translateApp("More settings")}
               inset={false}
-              footer="Configure routing, endpoints, request headers and other service settings in NyxID Web. These settings are not edited in the mobile app yet."
+              footer={translateApp(
+                "Configure routing, endpoints, request headers and other service settings in NyxID Web. These settings are not edited in the mobile app yet.",
+              )}
             >
               <SettingsRow
-                label="Open advanced settings in Web"
+                label={translateApp("Open advanced settings in Web")}
                 tone="action"
                 disabled={busy}
                 onPress={() => void openWeb("advanced")}
@@ -809,13 +878,17 @@ export function ServicesScreen({
             </SettingsGroup>
             {replaceable && (
               <SettingsGroup
-                title="Credential"
+                title={translateApp("Credential")}
                 inset={false}
-                footer="Update the saved API key if it was rotated or stopped working."
+                footer={translateApp(
+                  "Update the saved API key if it was rotated or stopped working.",
+                )}
               >
                 <SettingsRow
-                  label="Replace credential"
-                  accessibilityLabel="Replace API key or credential"
+                  label={translateApp("Replace credential")}
+                  accessibilityLabel={translateApp(
+                    "Replace API key or credential",
+                  )}
                   accessibilityState={{ expanded: credentialEditorOpen }}
                   disabled={busy}
                   accessory={
@@ -832,19 +905,19 @@ export function ServicesScreen({
                 />
                 {credentialEditorOpen ? (
                   <SettingsTextField
-                    accessibilityLabel="New credential"
+                    accessibilityLabel={translateApp("New credential")}
                     value={focused && foreground ? replacement : ""}
                     onChangeText={setReplacement}
                     secureTextEntry
                     autoCapitalize="none"
                     autoCorrect={false}
                     editable={!busy}
-                    placeholder="Enter a new credential"
+                    placeholder={translateApp("Enter a new credential")}
                   />
                 ) : null}
                 {credentialEditorOpen ? (
                   <SettingsRow
-                    label="Save new credential"
+                    label={translateApp("Save new credential")}
                     tone="action"
                     disabled={busy || !replacement.trim()}
                     onPress={() =>
@@ -856,7 +929,7 @@ export function ServicesScreen({
                         setReplacement("");
                         setCredentialEditorOpen(false);
                         await reload();
-                        setNotice("Credential replaced.");
+                        setNotice(() => (translateApp("Credential replaced.")));
                       })
                     }
                   />
@@ -868,19 +941,18 @@ export function ServicesScreen({
                 inset={false}
                 footer={
                   tokenOnlyRemoval
-                    ? "Only this connection will be removed. Provider authorization and other connections will be kept."
-                    : `Agents using this connection will lose access. To pause use temporarily, turn off Connection enabled in Overview instead.\n\n${
-                        revokesGrant
-                          ? "Removal may also revoke the provider authorization. If it is shared, you can keep it and remove only this connection."
-                          : "This removes the saved connection from NyxID. Where supported, NyxID also revokes its saved token at the provider."
-                      }`
+                    ? translateApp(
+                        "Only this connection will be removed. Provider authorization and other connections will be kept.",
+                      )
+                    : (revokesGrant
+                          ? translateApp("Agents using this connection will lose access. To pause use temporarily, turn off Connection enabled in Overview instead.\n\nRemoval may also revoke the provider authorization. If it is shared, you can keep it and remove only this connection.") : translateApp("Agents using this connection will lose access. To pause use temporarily, turn off Connection enabled in Overview instead.\n\nThis removes the saved connection from NyxID. Where supported, NyxID also revokes its saved token at the provider."))
                 }
               >
                 <SettingsRow
                   label={
                     tokenOnlyRemoval
-                      ? "Remove only this service"
-                      : "Remove connection"
+                      ? translateApp("Remove only this service")
+                      : translateApp("Remove connection")
                   }
                   centered
                   destructive
@@ -899,24 +971,27 @@ export function ServicesScreen({
     return (
       <WorkspacePage
         showHeading={false}
-        title="Connect service"
+        title={translateApp("Connect service")}
         contentStyle={styles.grouped}
       >
         {catalog.isPending ? (
-          <SkeletonRows rows={1} accessibilityLabel="Loading service" />
+          <SkeletonRows rows={1} accessibilityLabel={translateApp("Loading service")}
+          />
         ) : (
           <Notice
             message={
               catalog.isError
                 ? messageOf(catalog.error)
-                : "This service is no longer available in the catalog."
+                : translateApp(
+                    "This service is no longer available in the catalog.",
+                  )
             }
             tone="error"
           />
         )}
         <SettingsGroup inset={false}>
           <SettingsRow
-            label="Retry"
+            label={translateApp("Retry")}
             tone="action"
             onPress={() => void catalog.refetch()}
             disabled={catalog.isFetching}
@@ -942,7 +1017,7 @@ export function ServicesScreen({
     tab === "connected" ? filteredConnections.length : filteredCatalog.length;
   return (
     <WorkspacePage
-      title="Services"
+      title={translateApp("Services")}
       showHeading={false}
       contentStyle={styles.grouped}
     >
@@ -951,10 +1026,10 @@ export function ServicesScreen({
       {error && <Notice message={error} tone="error" />}
       <View style={[styles.search, { backgroundColor: colors.card }]}>
         <TextInput
-          accessibilityLabel="Search services"
+          accessibilityLabel={translateApp("Search services")}
           value={search}
           onChangeText={setSearch}
-          placeholder="Search services"
+          placeholder={translateApp("Search services")}
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
           autoCapitalize="none"
@@ -966,7 +1041,7 @@ export function ServicesScreen({
         />
       </View>
       <SegmentControl
-        segments={[{ label: "Connected" }, { label: "Explore catalog" }]}
+        segments={[{ label: translateApp("Connected") }, { label: translateApp("Explore catalog") }]}
         activeIndex={tab === "connected" ? 0 : 1}
         onPress={(index) => {
           setTab(index === 0 ? "connected" : "catalog");
@@ -975,14 +1050,15 @@ export function ServicesScreen({
         style={styles.tabs}
       />
       {current.isPending && (
-        <SkeletonRows rows={5} title accessibilityLabel="Loading services" />
+        <SkeletonRows rows={5} title accessibilityLabel={translateApp("Loading services")}
+        />
       )}
       {current.isError && (
         <>
           <Notice message={messageOf(current.error)} tone="error" />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label="Retry loading"
+              label={translateApp("Retry loading")}
               tone="action"
               onPress={() => void current.refetch()}
             />
@@ -991,7 +1067,9 @@ export function ServicesScreen({
       )}
       {listed ? (
         <SettingsGroup
-          title={tab === "connected" ? "Connected services" : "Available to add"}
+          title={tab === "connected" ? translateApp("Connected services")
+              : translateApp("Available to add")
+          }
         >
           {tab === "connected"
             ? filteredConnections.map((connection) => (
@@ -1011,9 +1089,11 @@ export function ServicesScreen({
                   value={
                     connection.is_active
                       ? sentence(connection.status.replaceAll("_", " "))
-                      : "Disabled"
+                      : translateApp("Disabled")
                   }
-                  accessibilityLabel={`Manage ${connection.label}`}
+                  accessibilityLabel={translateApp("Manage {{slug}}", {
+                    slug: connection.label,
+                  })}
                   onPress={() => {
                     navigation.push("ServiceSetup", {
                       connectionId: connection.id,
@@ -1035,9 +1115,12 @@ export function ServicesScreen({
                   detail={entry.description ?? entry.slug}
                   detailLines={2}
                   value={
-                    entry.platform_key?.available ? "Platform key" : undefined
+                    entry.platform_key?.available ? translateApp("Platform key")
+                      : undefined
                   }
-                  accessibilityLabel={`Connect ${entry.name}`}
+                  accessibilityLabel={translateApp("Connect {{name}}", {
+                    name: entry.name,
+                  })}
                   onPress={() => {
                     navigation.push("ServiceSetup", { catalogSlug: entry.slug });
                   }}
@@ -1051,20 +1134,20 @@ export function ServicesScreen({
             inset={false}
             title={
               search
-                ? "No matching services"
+                ? translateApp("No matching services")
                 : tab === "connected"
-                  ? "Connect your first service"
-                  : "No services available"
+                  ? translateApp("Connect your first service")
+                  : translateApp("No services available")
             }
             footer={
               search
-                ? "Try another name or clear your search."
-                : "Explore the catalog to add a connection."
+                ? translateApp("Try another name or clear your search.")
+                : translateApp("Explore the catalog to add a connection.")
             }
           >
             {tab === "connected" ? (
               <SettingsRow
-                label="Explore catalog"
+                label={translateApp("Explore catalog")}
                 tone="action"
                 onPress={() => {
                   setTab("catalog");
@@ -1072,14 +1155,14 @@ export function ServicesScreen({
                 }}
               />
             ) : (
-              <SettingsRow label="Nothing to show" />
+              <SettingsRow label={translateApp("Nothing to show")} />
             )}
           </SettingsGroup>
         )
       )}
       <SettingsGroup inset={false}>
         <SettingsRow
-          label="Refresh services"
+          label={translateApp("Refresh services")}
           tone="action"
           disabled={current.isFetching}
           onPress={() => void reload()}
@@ -1110,6 +1193,7 @@ function ConnectForm({
     platform: boolean;
   }) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [label, setLabel] = useState(entry.name);
   const [credential, setCredential] = useState("");
@@ -1124,7 +1208,7 @@ function ConnectForm({
     onDirty(dirty);
     return () => onDirty(false);
   }, [dirty, onDirty]);
-  const [linkError, setLinkError] = useState<string>();
+  const [linkError, setLinkError] = useLocalizedState<string>();
   const [linkBusy, setLinkBusy] = useState(false);
   const linkLock = useRef(false);
   const focused = useIsFocused();
@@ -1171,7 +1255,7 @@ function ConnectForm({
       await WebBrowser.openBrowserAsync(url.href);
       await onRefresh();
     } catch (cause) {
-      setLinkError(messageOf(cause));
+      setLinkError(() => (messageOf(cause)));
     } finally {
       linkLock.current = false;
       setLinkBusy(false);
@@ -1179,20 +1263,20 @@ function ConnectForm({
   }
   const getCredential = entry.api_key_url ? (
     <SettingsRow
-      label="Get a credential"
+      label={translateApp("Get a credential")}
       tone="action"
       disabled={busy}
       onPress={() => {
         setLinkError(undefined);
         void Promise.resolve()
           .then(() => Linking.openURL(validateBrowserUrl(entry.api_key_url!)))
-          .catch((cause) => setLinkError(messageOf(cause)));
+          .catch((cause) => setLinkError(() => (messageOf(cause))));
       }}
     />
   ) : null;
   return (
     <WorkspacePage
-      title={`Connect ${entry.name}`}
+      title={translateApp("Connect {{name}}", { name: entry.name })}
       showHeading={false}
       contentStyle={styles.grouped}
     >
@@ -1208,13 +1292,17 @@ function ConnectForm({
       </SettingsGroup>
       <SettingsGroup
         inset={false}
-        footer="This connection will be available within your personal account."
+        footer={translateApp(
+          "This connection will be available within your personal account.",
+        )}
       >
-        <SettingsRow label="Owner" value="Personal" />
+        <SettingsRow label={translateApp("Owner")}
+          value={translateApp("Personal")}
+        />
       </SettingsGroup>
-      <SettingsGroup title="Connection name" inset={false}>
+      <SettingsGroup title={translateApp("Connection name")} inset={false}>
         <SettingsTextField
-          accessibilityLabel="Connection name"
+          accessibilityLabel={translateApp("Connection name")}
           value={label}
           onChangeText={setLabel}
           editable={!busy}
@@ -1225,13 +1313,15 @@ function ConnectForm({
       {entry.platform_key?.available && (
         <SettingsGroup
           inset={false}
-          footer="Charges and service access follow the current platform policy."
+          footer={translateApp(
+            "Charges and service access follow the current platform policy.",
+          )}
         >
           <SettingsRow
-            label="Use platform key"
+            label={translateApp("Use platform key")}
             accessory={
               <Switch
-                accessibilityLabel="Use platform key"
+                accessibilityLabel={translateApp("Use platform key")}
                 value={platform}
                 onValueChange={(value) => {
                   setPlatform(value);
@@ -1248,9 +1338,9 @@ function ConnectForm({
         </SettingsGroup>
       )}
       {!platform && entry.requires_gateway_url && (
-        <SettingsGroup title="Gateway URL" inset={false}>
+        <SettingsGroup title={translateApp("Gateway URL")} inset={false}>
           <SettingsTextField
-            accessibilityLabel="Gateway URL"
+            accessibilityLabel={translateApp("Gateway URL")}
             value={endpointUrl}
             onChangeText={setEndpointUrl}
             editable={!busy}
@@ -1289,19 +1379,19 @@ function ConnectForm({
       ))}
       {singleCredential && (
         <SettingsGroup
-          title="API key / credential"
+          title={translateApp("API key / credential")}
           inset={false}
           footer={instructions ?? undefined}
         >
           <SettingsTextField
-            accessibilityLabel="API key / credential"
+            accessibilityLabel={translateApp("API key / credential")}
             value={focused && foreground ? credential : ""}
             onChangeText={setCredential}
             secureTextEntry
             editable={!busy}
             autoCapitalize="none"
             autoCorrect={false}
-            placeholder="Paste your service credential"
+            placeholder={translateApp("Paste your service credential")}
           />
           {getCredential}
         </SettingsGroup>
@@ -1311,26 +1401,32 @@ function ConnectForm({
         (instructions || getCredential) && (
           <SettingsGroup inset={false} footer={instructions ?? undefined}>
             {getCredential ?? (
-              <SettingsRow label="Credential" value="Not required here" />
+              <SettingsRow label={translateApp("Credential")}
+                value={translateApp("Not required here")}
+              />
             )}
           </SettingsGroup>
         )}
       {!supported ? (
         <SettingsGroup
           inset={false}
-          footer="Continue in Web to complete this service's connection setup. Return here to refresh your connections."
+          footer={translateApp(
+            "Continue in Web to complete this service's connection setup. Return here to refresh your connections.",
+          )}
         >
           <SettingsRow
-            label="Open Web setup"
+            label={translateApp("Open Web setup")}
             tone="action"
             disabled={busy || linkBusy || !focused || !foreground}
             accessory={
-              linkBusy ? <ActivityIndicator color={colors.primary} /> : undefined
+              linkBusy ? (
+                <ActivityIndicator color={colors.primary} />
+              ) : undefined
             }
             onPress={() => void openWebSetup()}
           />
           <SettingsRow
-            label="Refresh connections"
+            label={translateApp("Refresh connections")}
             tone="action"
             disabled={busy || linkBusy}
             onPress={() => {
@@ -1339,7 +1435,7 @@ function ConnectForm({
               setLinkBusy(true);
               setLinkError(undefined);
               void onRefresh()
-                .catch((cause) => setLinkError(messageOf(cause)))
+                .catch((cause) => setLinkError(() => (messageOf(cause))))
                 .finally(() => {
                   linkLock.current = false;
                   setLinkBusy(false);
@@ -1352,12 +1448,16 @@ function ConnectForm({
           inset={false}
           footer={
             oauth
-              ? "Continue in your browser to authorize this connection. Return here to check its status."
+              ? translateApp(
+                  "Continue in your browser to authorize this connection. Return here to check its status.",
+                )
               : undefined
           }
         >
           <SettingsRow
-            label={oauth ? "Continue to authorization" : "Add connection"}
+            label={oauth ? translateApp("Continue to authorization")
+                : translateApp("Add connection")
+            }
             tone="action"
             disabled={
               busy || !supported || !label.trim() || !focused || !foreground
@@ -1378,7 +1478,7 @@ function ConnectForm({
 function connectionTime(value: string | null | undefined, fallback: string) {
   if (!value) return fallback;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString(appLocale());
 }
 
 const sentence = (value: string) =>
@@ -1386,9 +1486,9 @@ const sentence = (value: string) =>
 
 function credentialKind(connection: ServiceConnection) {
   return connection.credential_binding === "platform"
-    ? "Platform key"
+    ? translateApp("Platform key")
     : connection.credential_type === "none"
-      ? "No authentication"
+      ? translateApp("No authentication")
       : connection.credential_type === "oauth2"
         ? "OAuth"
         : connection.credential_type.replaceAll("_", " ");

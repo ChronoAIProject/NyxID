@@ -22,6 +22,48 @@ impl std::fmt::Debug for Resume {
     }
 }
 impl Resume {
+    pub(in crate::services::execution_permission_dispatch) async fn node_not_sent(
+        &self,
+        db: &Database,
+    ) -> AppResult<()> {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        let filter = v3::rebase(
+            doc! {
+                "_id": &self.request_id,
+                "execution_proposal.version": self.version as i32,
+                "execution_proposal.v1.claim_id": &self.claim_id,
+                "execution_proposal.v1.grant_id": &self.grant_id,
+                "execution_proposal.v1.delivery_abandoned": {"$ne": true},
+                "execution_proposal.v1.state": "dispatched",
+            },
+            self.version,
+        );
+        let update = v3::rebase(
+            doc! {
+                "$set": {
+                    "execution_proposal.v1.state": "not_sent",
+                    "execution_proposal.v1.failure_code": "operation_not_sent",
+                },
+                "$unset": { "execution_proposal.v1.payload": "" }
+            },
+            self.version,
+        );
+        if db
+            .collection::<Document>(REQUESTS)
+            .update_one(filter, update)
+            .session(&mut session)
+            .await?
+            .matched_count
+            == 1
+        {
+            lifecycle::retire_operations(db, &mut session, std::slice::from_ref(&self.request_id))
+                .await?;
+        }
+        session.commit_transaction().await?;
+        Ok(())
+    }
+
     pub(in crate::services::execution_permission_dispatch) async fn fence(
         &self,
         db: &Database,
@@ -204,6 +246,12 @@ pub(crate) async fn resume_turn(
             .find_one(version.selector(doc! {"_id":id,"execution_proposal.v1.claim_id":&claim_id}))
             .await?
             .ok_or_else(conflict)?;
+        if proposal(&current)?.state == "not_sent"
+            && proposal(&current)?.failure_code.as_deref() == Some("operation_not_sent")
+        {
+            notes.push("The node was unavailable. Nothing was sent.".into());
+            continue;
+        }
         let sent = proposal(&current)?.state == "dispatched";
         let mut independent_request = None;
         let mut independent_card = None;

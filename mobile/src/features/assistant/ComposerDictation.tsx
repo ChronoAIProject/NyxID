@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -24,6 +25,7 @@ import { DictationWaveform } from "./DictationWaveform";
 import { composerInputMinHeight } from "./composerGeometry";
 import { ChatComposerFrame } from "./ChatComposer";
 import { useComposerHeight } from "../display/ChatLayoutContext";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 export function ComposerDictationFrame({
   dictation,
@@ -32,6 +34,7 @@ export function ComposerDictationFrame({
   dictation: ComposerDictationState;
   children: ReactNode;
 }) {
+  useAppLanguage();
   return (
     <>
       <ComposerDictationNotice dictation={dictation} />
@@ -113,6 +116,7 @@ export function ComposerDictationReview({
   dictation: ComposerDictationState;
   draft?: string;
 }) {
+  useAppLanguage();
   if (dictation.active)
     return <DictationInline dictation={dictation} draft={draft} />;
   return null;
@@ -184,6 +188,7 @@ function DictationInline({
   dictation: ComposerDictationState;
   draft: string;
 }) {
+  const railIndicator = useRailScrollIndicator();
   const { t } = useAppLanguage();
   const { colors } = useTheme();
   const language = useDictationLanguage(true);
@@ -208,9 +213,9 @@ function DictationInline({
   const spoken = !!dictation.text;
   const status =
     phase === "permission"
-      ? "Waiting for microphone…"
+      ? translateApp("Waiting for microphone…")
       : phase === "connecting"
-        ? "Starting…"
+        ? translateApp("Starting…")
         : undefined;
   return (
     <View testID="dictation-inline">
@@ -222,6 +227,7 @@ function DictationInline({
         onContentSizeChange={() =>
           scroller.current?.scrollToEnd?.({ animated: true })
         }
+        {...railIndicator}
       >
         <Text
           accessibilityLiveRegion="polite"
@@ -304,7 +310,9 @@ function DictationInline({
             )}
           </View>
           <Text
-            accessibilityLabel={`Recorded ${formatElapsed(startedAt === undefined ? 0 : now - startedAt)}`}
+            accessibilityLabel={translateApp("Recorded {{duration}}", {
+              duration: formatElapsed(startedAt === undefined ? 0 : now - startedAt),
+            })}
             style={[styles.elapsed, { color: colors.textTertiary }]}
           >
             {formatElapsed(startedAt === undefined ? 0 : now - startedAt)}

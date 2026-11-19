@@ -451,14 +451,23 @@ navigator and updates subscribed controls without replacing the navigator or
 chat drafts. Writes are ordered so rapid changes persist the latest selection.
 A failed save leaves the current session usable and exposes a retry in Language.
 
-This native pass translates Settings navigation, account/security controls,
-Display, Privacy, Voice and dictation settings, workspace navigation labels,
-and dictation controls. Other native feature pages and unrecognized error
-messages currently retain English fallback. It does not claim complete native
-translation parity with the web. Messages, names, provider voice labels, URLs,
+Native catalogs cover workspace pages, Settings and its subpages, auth,
+approvals, empty states and app-owned error messages. Persistent messages retain
+a formatter with their source phrase and captured values (`useLocalizedState`);
+queued toasts retain their own formatter, and app-owned Errors expose their
+message through `localizedError`. Rendering subscribes to `useAppLanguage`, so
+changing language updates an existing notice without repeating its action.
+Unknown server diagnostics retain the server text. Messages, names, provider voice labels, URLs,
 credentials and protocol values are preserved. Legal content stays in its
 authored language. App language does not change dictation recognition or the
 model's response language.
+
+iOS permission rationales are also bundled in `zh-Hans` and `zh-Hant`
+`InfoPlist.strings`, configured through Expo `locales` and the committed Xcode
+project. iOS chooses these OS prompts using the device/app language in system
+Settings; the in-app language switch cannot change an OS permission dialog.
+Recognition-language selection remains independent of app language; the
+recognition-language labels use the selected app language.
 
 Native catalogs reuse the web app's matching phrases and include native-specific
 copy. They are small bundled catalogs and import no browser runtime. Mark

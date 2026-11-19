@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -27,9 +31,21 @@ import {
 } from "./machineContracts";
 
 const CONFIRMATION_OPTIONS = [
-  { value: "none", label: "No machine confirmation" },
-  { value: "changes", label: "Confirm changes" },
-  { value: "all", label: "Confirm every operation" },
+  { value: "none",
+    get label() {
+      return translateApp("No machine confirmation");
+    },
+  },
+  { value: "changes",
+    get label() {
+      return translateApp("Confirm changes");
+    },
+  },
+  { value: "all",
+    get label() {
+      return translateApp("Confirm every operation");
+    },
+  },
 ] as const satisfies readonly {
   value: MachineNode["machine_confirm"];
   label: string;
@@ -39,6 +55,7 @@ export function MachinePolicyScreen({
   navigation,
   route,
 }: NativeStackScreenProps<WorkspaceContentParamList, "MachinePolicy">) {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const query = useQuery({
     queryKey: [...machineKeys(runtime.epoch), "policy", route.params.machineId],
@@ -53,7 +70,7 @@ export function MachinePolicyScreen({
   });
   return (
     <WorkspacePage
-      title="Owner policy and updates"
+      title={translateApp("Owner policy and updates")}
       showHeading={false}
       contentStyle={machinePageContent}
     >
@@ -62,7 +79,7 @@ export function MachinePolicyScreen({
           rows={3}
           icon={false}
           title
-          accessibilityLabel="Loading machine authority"
+          accessibilityLabel={translateApp("Loading machine authority")}
         />
       )}
       {query.error && (
@@ -71,7 +88,7 @@ export function MachinePolicyScreen({
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"
-              label="Refresh Machine Authority"
+              label={translateApp("Refresh Machine Authority")}
               onPress={() => void query.refetch()}
             />
           </SettingsGroup>
@@ -88,7 +105,7 @@ export function MachinePolicyScreen({
           onRefresh={async () => {
             const result = await query.refetch();
             if (result.error) throw result.error;
-            if (!result.data) throw new Error("Machine unavailable");
+            if (!result.data) throw localizedError("Machine unavailable");
             return result.data.node;
           }}
         />
@@ -108,6 +125,7 @@ export function PolicyEditor({
   onBack: () => void;
   onRefresh: () => Promise<MachineNode>;
 }) {
+  useAppLanguage();
   const write = useMachineWrite();
   const client = useQueryClient();
   const [baseline, setBaseline] = useState(node);
@@ -116,8 +134,8 @@ export function PolicyEditor({
   const [ack, setAck] = useState(false);
   const [automaticDraft, setAutomaticDraft] = useState<boolean>();
   const [confirmUpdate, setConfirmUpdate] = useState(false);
-  const [notice, setNotice] = useState<string>();
-  const [refreshError, setRefreshError] = useState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
+  const [refreshError, setRefreshError] = useLocalizedState<string>();
   const automatic = automaticDraft ?? update?.automatic ?? false;
   const policyDirty =
     confirm !== baseline.machine_confirm ||
@@ -137,9 +155,10 @@ export function PolicyEditor({
     discardOnClose:
       dirty || confirmUpdate
         ? {
-            title: "Discard machine changes?",
-            message:
+            title: translateApp("Discard machine changes?"),
+            message: translateApp(
               "Unsaved policy changes and pending update confirmation will be closed.",
+            ),
           }
         : undefined,
   });
@@ -156,7 +175,7 @@ export function PolicyEditor({
       write.reviewed();
       setRefreshError(undefined);
     } catch (cause) {
-      if (write.current()) setRefreshError(machineError(cause));
+      if (write.current()) setRefreshError(() => (machineError(cause)));
     }
   }
   async function settled() {
@@ -181,7 +200,9 @@ export function PolicyEditor({
       });
       setAck(false);
       setNotice(
-        "Owner policy saved. Automatic-update policy is saved separately.",
+        () => (translateApp(
+          "Owner policy saved. Automatic-update policy is saved separately.",
+        )),
       );
       await settled();
     });
@@ -189,26 +210,31 @@ export function PolicyEditor({
     <>
       <SettingsGroup
         inset={false}
-        footer="Owner policy does not change the local capability ceiling or any agent's grant."
+        footer={translateApp(
+          "Owner policy does not change the local capability ceiling or any agent's grant.",
+        )}
       >
-        <SettingsRow label="Machine" value={node.name} />
-        <SettingsRow label="Owner" value={node.owner.display_name} />
+        <SettingsRow label={translateApp("Machine")} value={node.name} />
+        <SettingsRow label={translateApp("Owner")}
+          value={node.owner.display_name} />
       </SettingsGroup>
       {write.error && <Notice tone="error" message={write.error} />}
       {refreshError && <Notice tone="error" message={refreshError} />}
       {notice && <Notice message={notice} />}
-      <SettingsGroup title="Owner policy" inset={false}>
+      <SettingsGroup title={translateApp("Owner policy")} inset={false}>
         <SettingsMenuRow
-          label="Machine confirmation"
+          label={translateApp("Machine confirmation")}
           value={confirm}
           options={CONFIRMATION_OPTIONS}
           disabled={blocked}
           onChange={setConfirm}
         />
         <MachineSwitch
-          label="Saved-login typing"
-          detail="Allow on a single-user browser"
-          accessibilityLabel="Allow saved-login typing on a single-user browser"
+          label={translateApp("Saved-login typing")}
+          detail={translateApp("Allow on a single-user browser")}
+          accessibilityLabel={translateApp(
+            "Allow saved-login typing on a single-user browser",
+          )}
           value={allow}
           disabled={blocked}
           onChange={(value) => {
@@ -219,12 +245,17 @@ export function PolicyEditor({
       </SettingsGroup>
       {needsAck && (
         <>
-          <Notice message="Commands run as the browser user. A misbehaving or prompt-injected agent could read typed values. Prefer a machine container or a VM with separate browser and agent users." />
+          <Notice message={translateApp(
+              "Commands run as the browser user. A misbehaving or prompt-injected agent could read typed values. Prefer a machine container or a VM with separate browser and agent users.",
+            )}
+          />
           <SettingsGroup inset={false}>
             <MachineSwitch
-              label="I acknowledge the risk"
-              detail="Typed saved-login values could be read"
-              accessibilityLabel="I acknowledge the risk of typed saved-login values being read"
+              label={translateApp("I acknowledge the risk")}
+              detail={translateApp("Typed saved-login values could be read")}
+              accessibilityLabel={translateApp(
+                "I acknowledge the risk of typed saved-login values being read",
+              )}
               value={ack}
               disabled={blocked}
               onChange={setAck}
@@ -235,8 +266,10 @@ export function PolicyEditor({
       <SettingsGroup inset={false}>
         <SettingsRow
           tone="action"
-          label={write.busy ? "Saving…" : "Save Owner Policy"}
-          accessibilityLabel="Save owner policy"
+          label={write.busy ? translateApp("Saving…")
+              : translateApp("Save Owner Policy")
+          }
+          accessibilityLabel={translateApp("Save owner policy")}
           disabled={blocked || !policyDirty || (needsAck && !ack)}
           onPress={savePolicy}
         />
@@ -244,7 +277,7 @@ export function PolicyEditor({
       {update ? (
         <>
           <SettingsGroup
-            title="Updates"
+            title={translateApp("Updates")}
             inset={false}
             footer={
               [update.guidance, update.updater_guidance]
@@ -253,16 +286,17 @@ export function PolicyEditor({
             }
           >
             <SettingsRow
-              label="Current version"
+              label={translateApp("Current version")}
               value={update.current_version}
             />
-            <SettingsRow label="Target version" value={update.target_version} />
+            <SettingsRow label={translateApp("Target version")}
+              value={update.target_version} />
             <SettingsRow
-              label="Phase"
+              label={translateApp("Phase")}
               value={`${update.phase}${update.code ? ` · ${update.code}` : ""}`}
             />
             <MachineSwitch
-              label="Automatic machine updates"
+              label={translateApp("Automatic machine updates")}
               value={automatic}
               disabled={blocked}
               onChange={setAutomaticDraft}
@@ -271,8 +305,8 @@ export function PolicyEditor({
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"
-              label="Save Automatic-Update Policy"
-              accessibilityLabel="Save automatic-update policy"
+              label={translateApp("Save Automatic-Update Policy")}
+              accessibilityLabel={translateApp("Save automatic-update policy")}
               disabled={blocked || !automaticDirty}
               onPress={() =>
                 void write.run(async (current) => {
@@ -285,7 +319,9 @@ export function PolicyEditor({
                   if (!current()) return;
                   setAutomaticDraft(undefined);
                   setNotice(
-                    "Automatic-update policy saved. Owner policy is saved separately.",
+                    () => (translateApp(
+                      "Automatic-update policy saved. Owner policy is saved separately.",
+                    )),
                   );
                   await settled();
                 })
@@ -293,19 +329,29 @@ export function PolicyEditor({
             />
           </SettingsGroup>
           {!update.updater_ready && (
-            <Notice message="This updater needs manual host steps. Open this machine on the web for verified instructions. Queuing guided update does not perform those steps." />
+            <Notice message={translateApp(
+                "This updater needs manual host steps. Open this machine on the web for verified instructions. Queuing guided update does not perform those steps.",
+              )}
+            />
           )}
           {confirmUpdate ? (
             <>
               <Notice
-                message={`Update ${node.name} owned by ${node.owner.display_name} to ${update.target_version}? The machine may restart and interrupt current agent work. A manual step or failure can still be returned.`}
+                message={translateApp(
+                  "Update {{name}} owned by {{organization}} to {{version}}? The machine may restart and interrupt current agent work. A manual step or failure can still be returned.",
+                  {
+                    name: node.name,
+                    organization: node.owner.display_name,
+                    version: update.target_version,
+                  },
+                )}
               />
               <SettingsGroup inset={false}>
                 <SettingsRow
                   centered
                   destructive
-                  label="Confirm Machine Update"
-                  accessibilityLabel="Confirm machine update"
+                  label={translateApp("Confirm Machine Update")}
+                  accessibilityLabel={translateApp("Confirm machine update")}
                   disabled={blocked}
                   onPress={() =>
                     void write.run(async (current) => {
@@ -316,7 +362,7 @@ export function PolicyEditor({
                       );
                       if (!current()) return;
                       setConfirmUpdate(false);
-                      setNotice(updateResultMessage(result));
+                      setNotice(() => (updateResultMessage(result)));
                       await settled();
                     })
                   }
@@ -326,8 +372,8 @@ export function PolicyEditor({
                 <SettingsRow
                   centered
                   tone="action"
-                  label="Cancel Update"
-                  accessibilityLabel="Cancel update"
+                  label={translateApp("Cancel Update")}
+                  accessibilityLabel={translateApp("Cancel update")}
                   disabled={write.busy}
                   onPress={() => setConfirmUpdate(false)}
                 />
@@ -337,8 +383,8 @@ export function PolicyEditor({
             <SettingsGroup inset={false}>
               <SettingsRow
                 tone="action"
-                label="Review Machine Update"
-                accessibilityLabel="Review machine update"
+                label={translateApp("Review Machine Update")}
+                accessibilityLabel={translateApp("Review machine update")}
                 disabled={
                   blocked ||
                   !node.is_connected ||
@@ -351,13 +397,16 @@ export function PolicyEditor({
           )}
         </>
       ) : (
-        <Notice message="Update status is unavailable. Owner policy can still be reviewed." />
+        <Notice message={translateApp(
+            "Update status is unavailable. Owner policy can still be reviewed.",
+          )}
+        />
       )}
       <SettingsGroup inset={false}>
         <SettingsRow
           tone="action"
-          label="Reload Policy and Update Status"
-          accessibilityLabel="Reload policy and update status"
+          label={translateApp("Reload Policy and Update Status")}
+          accessibilityLabel={translateApp("Reload policy and update status")}
           disabled={write.busy || !write.active}
           onPress={() => confirmDiscard(dirty, () => void refresh())}
         />
