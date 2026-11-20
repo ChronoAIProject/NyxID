@@ -499,6 +499,25 @@ fn compile_resource_pattern(
         .build()
 }
 
+/// Key-limited Ask is an explicit protection even in assistant Full access.
+/// The live turn's stateless model-call exemption remains separately documented.
+pub(crate) fn key_requires_fresh_decision(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+    key: Option<&str>,
+) -> bool {
+    !config.disabled
+        && config
+            .rules
+            .iter()
+            .find(|rule| rule_matches(rule, descriptor, key))
+            .is_some_and(|rule| {
+                !rule.api_key_ids.is_empty()
+                    && rule.effect == ApprovalEffect::RequireApproval
+                    && rule.mode == ApprovalMode::PerRequest
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,7 +762,7 @@ mod tests {
             ),
             &["key-a"],
         );
-        assert!(validate_rules(&[ok.clone()]).is_ok());
+        assert!(validate_rules(std::slice::from_ref(&ok)).is_ok());
 
         let remembers = keyed(
             rule(
@@ -1205,23 +1224,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Key-limited Ask is an explicit protection even in assistant Full access.
-/// The live turn's stateless model-call exemption remains separately documented.
-pub(crate) fn key_requires_fresh_decision(
-    config: &ServiceApprovalConfig,
-    descriptor: &OperationDescriptor,
-    key: Option<&str>,
-) -> bool {
-    !config.disabled
-        && config
-            .rules
-            .iter()
-            .find(|rule| rule_matches(rule, descriptor, key))
-            .is_some_and(|rule| {
-                !rule.api_key_ids.is_empty()
-                    && rule.effect == ApprovalEffect::RequireApproval
-                    && rule.mode == ApprovalMode::PerRequest
-            })
 }
