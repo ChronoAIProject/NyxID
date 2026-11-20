@@ -14,6 +14,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 
 const response = z.object({
+  can_publish: z.boolean().default(false),
   service: z
     .object({
       id: z.string().uuid(),
@@ -34,7 +35,7 @@ export function AgentVoiceService({
   if (
     !enabled ||
     !owner ||
-    agent.owner_kind === "org" ||
+    agent.can_maintain === false ||
     agent.share_role ||
     agent.status === "destroyed"
   )
@@ -76,6 +77,7 @@ function VoiceConnection({
     },
   });
   const error = query.error || publish.error;
+  if (query.isPending || query.data?.can_publish === false) return null;
   return (
     <section aria-label={translateUi("Device voice")} className="space-y-3">
       <h3 className="type-group-heading text-foreground">{translateUi("Device voice")}</h3>

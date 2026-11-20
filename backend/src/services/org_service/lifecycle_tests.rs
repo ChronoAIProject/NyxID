@@ -314,7 +314,8 @@ async fn org_lifecycle_request_command_counts() {
         let expected = match action {
             Action::Create => 24,
             Action::Profile => 15,
-            Action::Set | Action::Clear => 5,
+            // Role-scope writers also update the shared organization authority fence.
+            Action::Set | Action::Clear => 6,
         };
         assert_eq!(commands.len(), expected, "{action:?}");
         f.state.db.drop().await.unwrap();

@@ -503,7 +503,9 @@ pub async fn agents(
         None => team::agents(&state.db, &user, false).await?,
     };
     for agent in agents {
-        if agent.user_id != user || selected_bot.is_some_and(|id| id != agent.id) {
+        if (connections.is_none() && agent.user_id != user)
+            || selected_bot.is_some_and(|id| id != agent.id)
+        {
             continue;
         }
         let mut service_id = None;
@@ -534,7 +536,13 @@ pub async fn agents(
                 Err(error) => return Err(error),
             }
         }
-        let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
+        let thread = Box::pin(team::home_thread_for(
+            &state.db,
+            &state.encryption_keys,
+            &user,
+            &agent,
+        ))
+        .await?;
         rows.push(json!({"agent_id":agent.id,"name":agent.name,
             "display_name":agent.display_name,"description":agent.description,
             "service_id":service_id,"conversation_id":thread.id}));
@@ -585,7 +593,9 @@ pub async fn service_start(
             })?,
         )
         .await?;
-        if agent.user_id != user || agent.destroyed_at.is_some() {
+        if (auth.auth_method != crate::mw::auth::AuthMethod::ApiKey && agent.user_id != user)
+            || agent.destroyed_at.is_some()
+        {
             return Err(crate::errors::AppError::Forbidden(
                 "Select a personal Bot you own".into(),
             ));
@@ -600,7 +610,13 @@ pub async fn service_start(
             agent
         }
     };
-    let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
+    let thread = Box::pin(team::home_thread_for(
+        &state.db,
+        &state.encryption_keys,
+        &user,
+        &agent,
+    ))
+    .await?;
     start_for_caller(
         state,
         &caller,

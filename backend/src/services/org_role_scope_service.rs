@@ -198,7 +198,17 @@ pub async fn remove_service_from_all_scopes(
 mod tests {
     use super::*;
     use crate::models::org_role_scope::COLLECTION_NAME as ORG_ROLE_SCOPES;
-    use crate::test_utils::{connect_test_database, test_membership};
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{connect_test_database, test_membership, test_user};
+
+    async fn create_org(db: &mongodb::Database) -> String {
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        org
+    }
 
     #[test]
     fn scope_allows_cases() {
@@ -214,7 +224,7 @@ mod tests {
             eprintln!("skipping org role scope service test: no local MongoDB available");
             return;
         };
-        let org_id = Uuid::new_v4().to_string();
+        let org_id = create_org(&db).await;
         let actor_id = Uuid::new_v4().to_string();
 
         let stored = set_scope(
@@ -266,7 +276,7 @@ mod tests {
             eprintln!("skipping org role scope service test: no local MongoDB available");
             return;
         };
-        let org_id = Uuid::new_v4().to_string();
+        let org_id = create_org(&db).await;
         let member_id = Uuid::new_v4().to_string();
         let actor_id = Uuid::new_v4().to_string();
 
@@ -319,8 +329,8 @@ mod tests {
             eprintln!("skipping org role scope service test: no local MongoDB available");
             return;
         };
-        let org_id = Uuid::new_v4().to_string();
-        let other_org_id = Uuid::new_v4().to_string();
+        let org_id = create_org(&db).await;
+        let other_org_id = create_org(&db).await;
         let actor_id = Uuid::new_v4().to_string();
 
         set_scope(
@@ -385,8 +395,8 @@ mod tests {
             eprintln!("skipping org role scope service test: no local MongoDB available");
             return;
         };
-        let org_id = Uuid::new_v4().to_string();
-        let other_org_id = Uuid::new_v4().to_string();
+        let org_id = create_org(&db).await;
+        let other_org_id = create_org(&db).await;
         let missing_scope_org_id = Uuid::new_v4().to_string();
         let actor_id = Uuid::new_v4().to_string();
         let new_actor_id = Uuid::new_v4().to_string();

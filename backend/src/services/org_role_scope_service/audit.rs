@@ -74,6 +74,9 @@ async fn set_in_session(
     actor: &AuditActor,
     tx: &mut ClientSession,
 ) -> AppResult<OrgRoleScope> {
+    // An absent role-scope row grants full access. Serialize its first insert
+    // with Voice authorization on the organization row as well as later edits.
+    org_membership_authority::fence_org(db, &row.org_user_id, tx).await?;
     let allowed = match &row.allowed_service_ids {
         None => Bson::Null,
         Some(ids) => {
@@ -129,6 +132,7 @@ async fn clear_in_session(
     actor: &AuditActor,
     tx: &mut ClientSession,
 ) -> AppResult<()> {
+    org_membership_authority::fence_org(db, org, tx).await?;
     let deleted = db
         .collection::<OrgRoleScope>(COLLECTION_NAME)
         .delete_one(doc! {"org_user_id":org,"role":role.as_str()})

@@ -24,6 +24,8 @@ pub(crate) mod links;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;
+#[cfg(test)]
+mod org_device_tests;
 pub mod progress;
 pub mod receipt;
 mod responses;

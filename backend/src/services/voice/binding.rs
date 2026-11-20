@@ -24,19 +24,57 @@ pub async fn get(db: &Database, owner: &str, agent: &str) -> AppResult<Option<Us
         .map_err(Into::into)
 }
 
+pub struct Publication {
+    pub agent: AssistantAgent,
+    pub service: Option<UserService>,
+    pub can_publish: bool,
+}
+
+/// Project the same live publication authority for the UI and the write path.
+/// A visible Bot does not grant access to its voice connection metadata.
+pub async fn publication(db: &Database, actor: &str, agent_id: &str) -> AppResult<Publication> {
+    super::access::active_owner(db, actor).await?;
+    let agent = team::agent(db, actor, agent_id).await?;
+    let access = crate::services::org_agent_service::access(db, actor, &agent.user_id).await?;
+    let mut service = None;
+    let can_publish = if agent.destroyed_at.is_none() && access.can_write() {
+        service = get(db, &agent.user_id, agent_id).await?;
+        service.as_ref().map_or_else(
+            || access.allows_any_resource(&[]),
+            |service| access.allows_resource(&service.id),
+        )
+    } else {
+        false
+    };
+    Ok(Publication {
+        agent,
+        service: service.filter(|_| can_publish),
+        can_publish,
+    })
+}
+
+pub async fn managed_agent(
+    db: &Database,
+    actor: &str,
+    agent_id: &str,
+) -> AppResult<AssistantAgent> {
+    let publication = publication(db, actor, agent_id).await?;
+    if !publication.can_publish {
+        return Err(AppError::Forbidden(
+            "Bot voice publication requires owner or organization service administration access"
+                .into(),
+        ));
+    }
+    Ok(publication.agent)
+}
+
 pub async fn publish(
     db: &Database,
-    owner: &str,
+    actor: &str,
     agent_id: &str,
     base_url: &str,
 ) -> AppResult<UserService> {
-    super::access::personal_owner(db, owner).await?;
-    let agent = team::agent(db, owner, agent_id).await?;
-    if agent.user_id != owner || agent.destroyed_at.is_some() {
-        return Err(AppError::Forbidden(
-            "Only an active personal Bot's owner can publish voice access".into(),
-        ));
-    }
+    let agent = managed_agent(db, actor, agent_id).await?;
     let catalog = db
         .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .find_one(doc! {"slug":SERVICE_SLUG,"is_active":true})
@@ -45,10 +83,17 @@ pub async fn publish(
             AppError::NotFound("NyxBot Voice has not been published in the service catalog".into())
         })?;
     let db = db.clone();
-    let owner = owner.to_owned();
+    let owner = agent.user_id.clone();
+    let actor = actor.to_owned();
     let base_url = base_url.to_owned();
     service_history::transaction::run(&db.clone(), async move |tx| {
         let result: AppResult<UserService> = async {
+            if actor != owner {
+                crate::services::org_membership_authority::fence_live_member(&db, &actor, tx)
+                    .await?;
+                crate::services::org_membership_authority::fence_org(&db, &owner, tx).await?;
+                managed_agent(&db, &actor, &agent.id).await?;
+            }
             // Serialize concurrent publication and destruction on the existing Bot row.
             if db
                 .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
@@ -63,19 +108,35 @@ pub async fn publish(
             {
                 return Err(AppError::Forbidden("Bot is no longer available".into()));
             }
-            if let Some(existing) = db
+            let existing = db
                 .collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
                 .find_one(
                     doc! {"user_id":&owner,"source":BOUND_SOURCE,"source_id":&agent.id,
                     "catalog_service_id":&catalog.id,"deleted_at":bson::Bson::Null},
                 )
                 .session(&mut **tx)
-                .await?
-            {
+                .await?;
+            let id = uuid::Uuid::new_v4();
+            if actor != owner {
+                let new_service_id = id.to_string();
+                crate::services::api_key_scope_service::validate_owner_service_write_with_session(
+                    &db,
+                    &owner,
+                    existing
+                        .as_ref()
+                        .map(|service| service.id.as_str())
+                        .unwrap_or(&new_service_id),
+                    crate::services::api_key_scope_service::ScopeAuthorization::ActorPermissions {
+                        actor_user_id: &actor,
+                    },
+                    tx,
+                )
+                .await?;
+            }
+            if let Some(existing) = existing {
                 return Ok(existing);
             }
             let now = chrono::Utc::now();
-            let id = uuid::Uuid::new_v4();
             let endpoint = UserEndpoint {
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner.clone(),

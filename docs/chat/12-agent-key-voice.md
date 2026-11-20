@@ -7,7 +7,7 @@ session routes and authentication.
 
 ## Binding and authorization
 
-The owner publishes one connection for a personal Bot through **Agent details →
+The owner publishes one connection for a Bot through **Agent details →
 Access → Device voice**. Its existing `UserService.source = nyxbot_voice` and
 `source_id = Bot UUID` fix the selected Bot. Publication grants no Key access.
 The owner then grants that exact connection to the board Key through ordinary
@@ -16,7 +16,29 @@ service scope. No new token type, permission table or hardcoded Bot is used.
 A catalog ID, display name, generic catalog connection or `llm-nyx` grant cannot
 select a Bot. A request cannot substitute another `agent_id` or `service_id`.
 All-services Keys retain their ordinary semantics; use selected-service access
-for a dedicated board. Organization and shared Bots are outside this service.
+for a dedicated board. Shared personal Bots are outside this service.
+
+An organization administrator can also publish a connection for an organization
+Bot through the same API. The connection and endpoint belong to the organization;
+publication requires the administrator's current service scope. A personal board
+Key can receive that exact organization connection through the existing service
+scope workflow. The acting person must remain an active Admin or Member with
+access to that service; Viewer access is insufficient. Discovery, call startup
+and ongoing call authorization recheck membership, role and effective service
+scope. The call and conversation belong to that acting person, while the Bot
+retains its organization identity and tool grants. Members never share each
+other's private calls or conversation history.
+
+Organization-owned Keys use the same authentication and service scope checks:
+their `user_id` is the organization, so calls, history, settings, provider access
+and billing belong to that organization. They do not act as the person who
+created the Key, and that person's later membership changes do not revoke the
+organization's Key. Keys with the same owner reuse the Bot's home conversation
+and the existing single live call slot per account. Key and child credential
+checks still prevent another credential from taking over a live call. Revoke
+the organization Key or its service grant to withdraw device access; disabling
+the organization also invalidates its calls. No additional Key type, device
+identity, membership role or conversation isolation scheme is introduced.
 
 The two grant directions are independent:
 
@@ -32,11 +54,12 @@ separate hardware identity. The human owner retains ordinary call control.
 
 Every service operation checks current Key/service scope, the fixed Bot binding,
 operation policy and explicit Deny rules. Voice access creates no service-operation
-approval. Bot tools keep their existing grants and owner action confirmations;
-a board service Key cannot decide an owner action card from speech. Device-key
-voice is an external source: even if its owner is enrolled in execution
-permissions, its sessions and delegated tasks retain legacy confirmations and
-cannot inherit that enrollment or an execution-permission task root.
+approval. Bot tools use the Bot's existing grants. A voice task that needs a new
+human approval returns `approval_unsupported` before creating a card. This also
+applies to organization-owned Keys. Queued tasks run with the specialist already
+bound to the thread. A device Key cannot approve an existing owner card by speech.
+Device sessions and delegated tasks use their external caller identity even when
+the Key owner is enrolled in execution permissions.
 
 ## Service URL and operations
 
@@ -149,13 +172,21 @@ a role with `nyxid:feature_flags:admin` can enable these built-in flags; an
 ordinary person, org admin or feature-flag creator role alone cannot. Admin
 Feature Flags supports global, organization-cohort and individual-person
 overrides. A person override takes precedence over the cohort/global result.
-An org cohort enables eligible people, not org-owned Bots: this service is
-still limited to personal owned Bots. The seed changes none of these checks.
+An org cohort enables eligible people. Organization Bot connections additionally
+require the live organization authorization described above. The seed changes
+none of these checks.
 
-**Owner publication and device grant.** In the first-party app, the owner opens
+**Owner publication and device grant.** In the first-party app, the personal
+owner or an authorized organization administrator opens
 **Agent details → Access → Device voice** and publishes the desired Bot's
 connection. Then grant that exact connection to the device Agent Key with
 selected-service access and `proxy` scope (`read` too for `/keys` discovery).
+The connection query returns `can_publish`, computed from current owner/service
+authority and effective scope. The UI uses that capability instead of organization
+role names. A visible Bot without publication authority returns
+`can_publish: false, service: null`; connection metadata remains private. Publishing
+always rechecks authority, including inside the write transaction. A UI connected
+to an older backend that omits the capability hides the publication control.
 Publication itself grants no access. An allow-all Key keeps ordinary all-service
 semantics, so selected-service scope is the way to restrict a device to one Bot.
 The Bot's grant to the board's own panel service is the opposite direction and
@@ -166,7 +197,7 @@ or catalog ID substitutes for the published connection's `service_id`.
 `BASE_URL` has no trailing slash, `OWNER_TOKEN` is the owner's first-party session
 access token, `ADMIN_TOKEN` is an authorized flag reader's token, and `DEVICE_KEY`
 is the device's ordinary Agent Key or login child credential. Keep credentials
-out of logs. `BOT_ID` is the personal Bot UUID.
+out of logs. `BOT_ID` is the personal or organization Bot UUID.
 
 ```sh
 # Deployment created the active catalog row; default /catalog stays unchanged.

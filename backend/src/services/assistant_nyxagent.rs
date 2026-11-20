@@ -3990,8 +3990,8 @@ pub(crate) async fn claim_turn(
     };
     // Every thread belongs to an agent: the requested one for a new thread,
     // otherwise the owner's NyxBot (which also adopts legacy rows).
-    let new_agent = match start.agent_id.as_deref() {
-        Some(agent_id) if start.conversation_id.is_none() => {
+    let new_agent = match (start.conversation_id.as_deref(), start.agent_id.as_deref()) {
+        (None, Some(agent_id)) => {
             let agent = super::assistant_team_service::agent(db, user_id, agent_id).await?;
             if agent.destroyed_at.is_some() {
                 return Err(AppError::Conflict(
@@ -4000,25 +4000,16 @@ pub(crate) async fn claim_turn(
             }
             agent
         }
-        _ if start.conversation_id.is_some()
-            && start
-                .org_access
-                .as_ref()
-                .and_then(|a| a.channel())
-                .is_some_and(|a| a.execution().guest) =>
+        (Some(id), _)
+            if voice_request_id.is_some()
+                || start
+                    .org_access
+                    .as_ref()
+                    .and_then(|a| a.channel())
+                    .is_some_and(|a| a.execution().guest) =>
         {
-            let row = get(
-                db,
-                user_id,
-                start
-                    .conversation_id
-                    .as_deref()
-                    .expect("existing conversation"),
-            )
-            .await?;
-            // An org-paid guest has no personal NyxBot to use as the legacy
-            // default. Other lanes keep their request-local authority snapshot;
-            // the transaction resolves the existing thread's actual agent.
+            // These turns resume an existing thread, whose owner may have no personal NyxBot.
+            let row = get(db, user_id, id).await?;
             super::assistant_team_service::agent_for_conversation(db, &row).await?
         }
         _ => super::assistant_team_service::ensure_nyxbot(db, user_id).await?,

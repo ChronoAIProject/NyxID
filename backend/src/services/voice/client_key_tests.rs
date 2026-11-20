@@ -172,6 +172,16 @@ async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
         )
         .await
         .unwrap();
+        let available = voice_service(
+            State(f.state.clone()),
+            human.clone(),
+            Path(agent.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(available["can_publish"], true);
+        assert!(available["service"].is_null());
         let published = publish_voice_service(
             State(f.state.clone()),
             human.clone(),
@@ -185,6 +195,7 @@ async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
             .unwrap()
             .0;
         assert_eq!(published, read);
+        assert_eq!(read["can_publish"], true);
         assert_eq!(read["service"]["agent_id"], agent.id);
         assert_eq!(read["service"]["is_active"], true);
         let service_id = read["service"]["id"].as_str().unwrap().to_string();

@@ -2281,13 +2281,16 @@ control paths reject dictation sessions. No audio recording is stored. See the
 
 ## Agent Key voice service
 
-A human owner publishes an ordinary UserService bound to one personal Bot through
+A human owner or organization administrator publishes an ordinary UserService bound to one Bot through
 server-owned `source=nyxbot_voice` and `source_id=Bot UUID`. The board Key receives
 that exact connection through existing service scope. The explicit service route
 `/api/v1/proxy/nyxbot-voice/{service_id}` authenticates that Key, checks the binding
 and invokes the existing Voice application. Browser routes keep their original
 first-party human authentication. No generic proxy target execution kind,
 MCP/Exact Service branch or device-source execution framework is introduced.
+Organization connections retain organization ownership and use the existing
+membership, role and service scope checks. Device callers remain personal Key
+owners; each uses their own private member thread for an organization Bot.
 
 VoiceSession binds the parent Key, actual login child, Bot and connection.
 Admission and runtime revalidate current permissions; revoked devices cannot

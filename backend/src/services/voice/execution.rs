@@ -27,6 +27,7 @@ pub fn service_url(base_url: &str, service_id: &str) -> AppResult<String> {
 }
 
 pub struct Identity {
+    pub actor: String,
     pub service: UserService,
     pub agent: crate::models::assistant_agent::AssistantAgent,
 }
@@ -50,12 +51,14 @@ pub(crate) async fn resolve_for_caller(
         row.source_id.as_deref().unwrap_or_default(),
     )
     .await?;
-    if agent.user_id != owner || agent.destroyed_at.is_some() {
+    if agent.user_id != row.user_id {
         return Err(AppError::ApiKeyScopeForbidden(
             "Voice Bot is unavailable".into(),
         ));
     }
+    super::access::agent_access(db, &owner, &agent).await?;
     Ok(Identity {
+        actor: owner,
         service: row,
         agent,
     })
@@ -63,8 +66,7 @@ pub(crate) async fn resolve_for_caller(
 
 pub async fn conversation(db: &Database, identity: &Identity, conversation: &str) -> AppResult<()> {
     let thread =
-        crate::services::assistant_voice::thread(db, &identity.service.user_id, conversation)
-            .await?;
+        crate::services::assistant_voice::thread(db, &identity.actor, conversation).await?;
     let agent =
         crate::services::assistant_team_service::agent_for_conversation(db, &thread).await?;
     if agent.id != identity.agent.id || thread.shared_agent_thread {
@@ -84,7 +86,7 @@ pub async fn call(
         .collection::<crate::models::assistant_voice_session::VoiceSession>(
             crate::models::assistant_voice_session::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":sid,"user_id":&identity.service.user_id})
+        .find_one(doc! {"_id":sid,"user_id":&identity.actor})
         .await?
         .ok_or_else(|| AppError::NotFound("Voice session not found".into()))?;
     conversation(db, identity, &call.conversation_id).await?;

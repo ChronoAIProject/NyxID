@@ -156,7 +156,8 @@ every browser turn.
 
 Browser voice uses first-party human authentication and the effective
 NyxAgent/voice flags. Opt-in ordinary Agent Key voice uses a separately authorized
-connection bound to each selected personal Bot; see [Agent Key voice](12-agent-key-voice.md).
+connection bound to each selected personal or authorized organization Bot;
+see [Agent Key voice](12-agent-key-voice.md).
 Internal assistant keys, service accounts, OAuth-client tokens, delegated tokens,
 relay tokens and guests cannot start or attach through these voice routes.
 Ownership is checked before rate admission, credential resolution or provider

@@ -121,11 +121,12 @@ pub(crate) async fn dispatch(
                     id
                 }
                 None => {
-                    crate::services::assistant_team_service::home_thread(
+                    Box::pin(crate::services::assistant_team_service::home_thread_for(
                         &state.db,
                         &state.encryption_keys,
+                        &auth.user_id.to_string(),
                         &identity.agent,
-                    )
+                    ))
                     .await?
                     .id
                 }

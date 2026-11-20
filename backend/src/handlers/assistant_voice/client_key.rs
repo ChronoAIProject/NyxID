@@ -1,5 +1,4 @@
 //! Bounded discovery for devices using an ordinary Agent Key.
-use crate::services::assistant_team_service as team;
 use crate::{AppState, errors::AppResult, mw::auth::AuthUser};
 use axum::{Json, extract::State};
 use serde_json::json;
@@ -9,13 +8,15 @@ pub async fn voice_service(
     auth: AuthUser,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    voice_service_owner(&state, &auth, &agent_id).await?;
-    let service =
-        crate::services::voice::binding::get(&state.db, &auth.user_id.to_string(), &agent_id)
-            .await?;
-    Ok(Json(
-        json!({"service":service.map(|s| json!({"id":s.id,"slug":s.slug,"agent_id":agent_id,"is_active":s.is_active}))}),
-    ))
+    require_voice_service(&state, &auth).await?;
+    let publication = crate::services::voice::binding::publication(
+        &state.db,
+        &auth.user_id.to_string(),
+        &agent_id,
+    )
+    .await?;
+    Ok(Json(json!({"can_publish":publication.can_publish,
+            "service":publication.service.map(|s| json!({"id":s.id,"slug":s.slug,"agent_id":agent_id,"is_active":s.is_active}))})))
 }
 
 pub async fn publish_voice_service(
@@ -23,7 +24,7 @@ pub async fn publish_voice_service(
     auth: AuthUser,
     axum::extract::Path(agent_id): axum::extract::Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    voice_service_owner(&state, &auth, &agent_id).await?;
+    require_voice_service(&state, &auth).await?;
     let service = crate::services::voice::binding::publish(
         &state.db,
         &auth.user_id.to_string(),
@@ -32,11 +33,11 @@ pub async fn publish_voice_service(
     )
     .await?;
     Ok(Json(
-        json!({"service":{"id":service.id,"slug":service.slug,"agent_id":agent_id,"is_active":service.is_active}}),
+        json!({"can_publish":true,"service":{"id":service.id,"slug":service.slug,"agent_id":agent_id,"is_active":service.is_active}}),
     ))
 }
 
-async fn voice_service_owner(state: &AppState, auth: &AuthUser, agent_id: &str) -> AppResult<()> {
+async fn require_voice_service(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     crate::handlers::login_client_context::require_first_party_human(auth)?;
     let owner = auth.user_id.to_string();
     crate::services::assistant_voice::require_enabled(&state.db, &owner).await?;
@@ -49,12 +50,6 @@ async fn voice_service_owner(state: &AppState, auth: &AuthUser, agent_id: &str) 
     {
         return Err(crate::errors::AppError::Forbidden(
             "Agent Key voice is not enabled".into(),
-        ));
-    }
-    let agent = team::agent(&state.db, &owner, agent_id).await?;
-    if agent.user_id != owner || agent.destroyed_at.is_some() {
-        return Err(crate::errors::AppError::Forbidden(
-            "Select an active personal Bot you own".into(),
         ));
     }
     Ok(())

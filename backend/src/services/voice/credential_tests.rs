@@ -28,7 +28,7 @@ pub(super) async fn fixture(name: &str) -> (Fixture, DownstreamService) {
     (f, service)
 }
 
-async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamService {
+pub(super) async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamService {
     let db = &state.db;
     assistant_voice::ensure_indexes(db).await.unwrap();
     super::session::ensure_indexes(db).await.unwrap();
