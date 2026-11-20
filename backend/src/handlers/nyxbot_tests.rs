@@ -103,6 +103,23 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
     }
 }
 
+const GATEWAY_LINK_REPLY: &str = concat!(
+    "([chrono-ai.fun](https://chrono-ai.fun/zh/?utm_source=openai))\n",
+    "https://booking.example/test-link?a=b#share=_yNR5\n",
+    r"Literal _ * [ ] and C:\notes\a_b",
+);
+
+fn assert_gateway_link_frames(frames: &[Value]) {
+    let done = frames
+        .iter()
+        .find(|frame| frame["type"] == "response.output_item.done")
+        .unwrap();
+    assert_eq!(done["item"]["content"][0]["text"], GATEWAY_LINK_REPLY);
+    let terminal = frames.last().unwrap();
+    assert_eq!(terminal["type"], "response.completed");
+    assert_eq!(terminal["response"]["output"][0], done["item"]);
+}
+
 fn setup<'a>(
     name: &'a str,
 ) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
