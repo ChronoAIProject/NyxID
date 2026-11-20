@@ -93,6 +93,18 @@ class NginxReadiness(unittest.TestCase):
         self.assertNotIn("Location", headers)
         self.assertEqual(json.loads(data), body)
 
+    def loopback_probe(self, status, body):
+        response = json.loads(docker("exec", self.name, "python3", "-c", """from http.client import HTTPConnection
+import json
+connection = HTTPConnection('127.0.0.1', 8080, timeout=4)
+connection.request('GET', '/frontend/ready')
+response = connection.getresponse()
+print(json.dumps([response.status, response.getheader('Content-Type'),
+                  response.getheader('Cache-Control'), json.loads(response.read())]))
+connection.close()
+"""))
+        self.assertEqual(response, [status, "application/json", "no-store", body])
+
     def healthy(self):
         self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
         self.probe("/frontend/ready", 200, {"status": "ok", "component": "frontend"})
@@ -215,15 +227,23 @@ HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
         process = self.checker_pid()
         docker("exec", self.name, "kill", "-STOP", process)
         barrier = threading.Barrier(12)
+        overloaded = threading.Event()
 
         def request_ready(_):
             barrier.wait(timeout=5)
-            return self.request("/frontend/ready")
+            response = self.request("/frontend/ready")
+            if json.loads(response[2]).get("failing") == ["overloaded"]:
+                overloaded.set()
+            return response
 
         try:
             with ThreadPoolExecutor(max_workers=12) as executor:
                 pending = [executor.submit(request_ready, index) for index in range(12)]
                 self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
+                self.assertTrue(overloaded.wait(timeout=1.5), "external concurrency must be saturated")
+                # Local healthchecks still reach the stalled checker while the
+                # external connection budget is full, instead of reporting overload.
+                self.loopback_probe(503, {"status": "unavailable", "component": "frontend", "failing": ["checker"]})
                 responses = [future.result(timeout=5) for future in pending]
             reasons = []
             for status, headers, body in responses:
@@ -260,6 +280,47 @@ HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
         finally:
             docker("exec", "--user", "0", self.name, "mv", target + ".saved", target)
         self.healthy()
+
+    def test_09_external_rate_exhaustion_does_not_mask_loopback_readiness(self):
+        # Use the container's non-loopback address to exhaust the public bucket
+        # without Docker exec latency between requests. Forwarded IP headers
+        # must not let a public caller impersonate a local healthcheck.
+        source = """from http.client import HTTPConnection
+import json
+import socket
+address = socket.gethostbyname(socket.gethostname())
+assert not address.startswith('127.'), address
+for _ in range(100):
+ connection = HTTPConnection(address, 8080, timeout=4)
+ connection.request('GET', '/frontend/ready', headers={'X-Forwarded-For': '127.0.0.1', 'X-Real-IP': '::1'})
+ response = connection.getresponse()
+ status, body = response.status, json.loads(response.read())
+ connection.close()
+ assert status in (200, 503), (status, body)
+assert (status, body.get('failing')) == (503, ['overloaded']), (status, body)
+connection = HTTPConnection('127.0.0.1', 8080, timeout=4)
+connection.request('GET', '/frontend/ready')
+response = connection.getresponse()
+print(json.dumps([response.status, response.getheader('Content-Type'),
+                  response.getheader('Cache-Control'), json.loads(response.read())]))
+connection.close()
+"""
+        target = "/usr/share/nginx/html/index.html"
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                if missing:
+                    docker("exec", "--user", "0", self.name, "mv", target, target + ".saved")
+                try:
+                    response = json.loads(docker("exec", self.name, "python3", "-c", source))
+                    body = {"status": "unavailable" if missing else "ok", "component": "frontend"}
+                    if missing:
+                        body["failing"] = ["entry_html"]
+                    self.assertEqual(response, [503 if missing else 200, "application/json", "no-store", body])
+                    self.probe("/frontend/health", 200, {"status": "ok", "component": "frontend"})
+                finally:
+                    if missing:
+                        docker("exec", "--user", "0", self.name, "mv", target + ".saved", target)
+        self.loopback_probe(200, {"status": "ok", "component": "frontend"})
 
 
 if __name__ == "__main__":

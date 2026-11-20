@@ -219,7 +219,10 @@ chrono-probe can use `/ready` with HTTP 200 and an empty body as its backend
 readiness assertion. These probes do not check MongoDB or other dependencies.
 
 The frontend serves `/frontend/health` and `/frontend/ready` independently and
-preserves backend `/health` and `/ready` proxies. See
+preserves backend `/health` and `/ready` proxies. Frontend orchestrators/load
+balancers must use `/frontend/health` for liveness and routing. `/frontend/ready`
+is for chrono-probe diagnostics and loopback container healthchecks only;
+loopback bypasses its public rate/concurrency limits. See
 [health/readiness contract](HEALTH_READINESS.md) for exact assertions, rate limits,
 public targets, staging chrono-cd compatibility and rollout.
 

@@ -35,10 +35,16 @@ map $upstream_http_permissions_policy $nyxid_proxy_permissions {
 
 include @@LEGAL_CACHE@@;
 
-# Bound anonymous readiness work across all callers of this frontend instance.
-# Shared keys keep multiple source IPs from multiplying the checker queue.
-limit_req_zone $server_name zone=nyxid_frontend_ready_rate:1m rate=10r/s;
-limit_conn_zone $server_name zone=nyxid_frontend_ready_active:1m;
+# Bound public readiness work across this instance. Local container healthchecks
+# bypass both zones, so external overload cannot consume their admission budget.
+# Use the connection peer, never client-supplied forwarding headers.
+map $remote_addr $nyxid_ready_limit_key {
+    127.0.0.1 "";
+    ::1 "";
+    default $server_name;
+}
+limit_req_zone $nyxid_ready_limit_key zone=nyxid_frontend_ready_rate:1m rate=10r/s;
+limit_conn_zone $nyxid_ready_limit_key zone=nyxid_frontend_ready_active:1m;
 
 server {
     listen @@PORT@@;

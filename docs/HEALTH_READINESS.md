@@ -25,8 +25,8 @@ invalid or expired credentials do not change their probe result.
 | --- | --- | --- | --- | --- |
 | Backend liveness | `/health` | 200, JSON `status == "ok"`; existing `version`, `commit`, `encryption` retained | transport/HTTP/body mismatch | 3 s |
 | Backend orchestration | `/ready` | 200, **empty body** | 503, **empty body**, only while draining | 3 s |
-| Frontend liveness | `/frontend/health` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | transport/HTTP/body mismatch | 3 s |
-| Frontend static readiness | `/frontend/ready` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | 503, JSON `status == "unavailable"`, `component == "frontend"`, nonempty `failing` | 4 s |
+| Frontend liveness and routing | `/frontend/health` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | transport/HTTP/body mismatch | 3 s |
+| Frontend static diagnostic / local container health | `/frontend/ready` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | 503, JSON `status == "unavailable"`, `component == "frontend"`, nonempty `failing` | 4 s |
 
 All responses send `Cache-Control: no-store`, including failures. JSON endpoints
 require `Content-Type: application/json`. Reject redirects, HTML/login pages,
@@ -77,13 +77,25 @@ backoff. Nginx caps checker reads at two seconds and returns JSON 503 while it
 is unavailable. No successful marker is persisted. `/frontend/health` is answered
 by nginx independently of the checker and remains available during recovery.
 
-To bound public probe work, `/frontend/ready` has an instance-wide nginx budget
-of **10 requests/second, burst 20, at most two active requests**. Excess requests
-receive uncached JSON 503 `failing:["overloaded"]` instead of queuing unbounded
-file scans. `/frontend/health` is cheap and has no such limiter. Ordinary 10–30
-second monitoring remains well within this budget. A stopped nginx fails both
-probes at transport level. Custom deployments must package the inventory,
-checker, supervisor and nginx limits together.
+To bound public probe work, non-loopback `/frontend/ready` requests share an
+instance-wide nginx budget of **10 requests/second, burst 20, at most two active
+requests**. Excess requests receive uncached JSON 503 `failing:["overloaded"]`
+instead of queuing unbounded file scans. The actual connection peers `127.0.0.1`
+and `::1` use empty keys in both limiter zones, so local container healthchecks
+bypass rate and concurrency accounting even when public limits are exhausted.
+Forwarded-IP headers do not grant this exemption. `/frontend/health` is cheap
+and has no such limiter. Ordinary 10–30 second monitoring remains well within
+the public budget. A stopped nginx fails both probes at transport level.
+Custom deployments must package the inventory, checker, supervisor and nginx
+limits together.
+
+**Orchestrators and load balancers must use `/frontend/health` for frontend
+liveness and routing. Do not route or evict frontend replicas based on
+`/frontend/ready`.** That path is for chrono-probe diagnostics and loopback
+container healthchecks only. Public overload is an admission failure, not proof
+that static delivery is broken. Keep reverse proxies on non-loopback connections;
+a local proxy that forwards public traffic over loopback would also bypass the
+readiness limits. The production Compose healthcheck calls `127.0.0.1` directly.
 
 The older `frontend/scripts/production-policy-server.py` fixture overrides the
 image entrypoint for CSP/browser tests and does not launch this checker;
@@ -114,7 +126,9 @@ external readiness/load-balancer manifests, so this PR does not change them.
 2. Deploy the matching frontend image with its default supervised entrypoint.
    Route frontend probes to port 8080 with no auth, SPA rewrite, cache or redirect.
    Verify checker crash recovery, static fault/recovery and overload rejection.
-3. Enable the matching frontend Compose healthcheck only with that image.
+   Use `/frontend/health` for orchestrator/load-balancer liveness and routing.
+3. Enable the matching loopback frontend Compose healthcheck only with that image.
+   Verify it returns the checker's real result while public limits are exhausted.
    Existing orchestration `/ready` consumers keep their current path/body contract.
 4. Verify all four chrono-probe paths from its network, with redirects, caching
    and conditional headers disabled. Record image tag/digest and public
@@ -148,8 +162,10 @@ its Rust toolchain, replica-set setup and `RUST_MIN_STACK=8388608` settings.
 
 The exact nginx 1.27 production runtime suite covers static failures/recovery,
 backend independence, explicit routes, six credential variants, bounded checker
-failure, supervised restart/reaping and overload. Checker unit tests (11), nginx
-policy tests (6), and all eight runtime groups pass locally on 2026-11-20. A real
+failure, supervised restart/reaping, public overload, and loopback admission during
+rate/concurrency saturation (including real static/checker failures). Checker
+unit tests (11), nginx policy tests (6), and all nine runtime groups pass locally
+on 2026-11-20. A real
 Vite build (480 inventory files) was also checked through the packaged runtime.
 The PR records final backend/full-suite results and their exact commit scope.
 

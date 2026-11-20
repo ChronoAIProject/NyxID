@@ -942,7 +942,11 @@ production/staging base URLs, chrono-probe assertions and staged rollout, see
 its backend/version proxy; frontend-only probes are `/frontend/health` and
 `/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd and
 chrono-probe; neither backend probe accesses MongoDB.
-Production Compose keeps backend `/health` and checks frontend `/frontend/ready`.
+Production Compose keeps backend `/health` and checks frontend `/frontend/ready`
+over loopback, exempt from its public rate/concurrency limits. Frontend
+orchestrators and load balancers must use `/frontend/health` for liveness and
+routing; `/frontend/ready` is for chrono-probe and local container healthchecks
+only, and must not drive replica eviction.
 
 Publish Images may reuse successful CI jobs from an identical pull-request
 merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
