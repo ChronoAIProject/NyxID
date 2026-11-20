@@ -37,9 +37,9 @@ test("attachment sources form full-width growing rows and launch only after dism
     },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
   });
-  const { AttachmentSourcePicker: Picker } = h.load(
+  const Picker = h.load(
     fileURLToPath(new URL("./AttachmentSourcePicker.tsx", import.meta.url)),
-  );
+  ).AttachmentSourcePicker as (props: Parameters<typeof import("./AttachmentSourcePicker").AttachmentSourcePicker>[0]) => Element;
   h.mount(() => Picker({
     choices: ["Camera", "Photos", "Files"].map(label => ({
       label,
