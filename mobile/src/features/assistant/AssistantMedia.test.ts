@@ -271,6 +271,7 @@ function imageHarness(captionColor?: string, imageInputReason?: string) {
         Pressable: "Pressable",
         Image: "Image",
         Modal: "Modal",
+        useWindowDimensions: () => ({ width: 390, fontScale: 1 }),
         ActivityIndicator: "Spinner",
         StyleSheet: { create: (x: any) => x },
         AppState: {
