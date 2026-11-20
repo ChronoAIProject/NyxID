@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "kind": "usage",
+  "producer_namespace": "cma-example",
+  "stream_id": "00000000-0000-4000-8000-000000000001",
+  "event_id": "00000000-0000-4000-8000-00000000000b",
+  "sequence": "2",
+  "previous_event_digest": "fc5b9510e247bf3ee1ef3bbffc5ec3c2b874bf76dfd527a238896dac9a72443b",
+  "owner_ref": {
+    "issuer": "nyxid-example",
+    "subject": "owner-example",
+    "kind": "person"
+  },
+  "sandbox_id": "sbx_synthetic",
+  "source_epoch": "00000000-0000-4000-8000-000000000002",
+  "basis": "allocated",
+  "metric_definition_version": "allocated-v1",
+  "algorithm_version": "lifecycle-minute-split-v1",
+  "source_refs": [
+    {
+      "kind": "lifecycle",
+      "id": "synthetic-source-42",
+      "revision": "42",
+      "part": "0"
+    }
+  ],
+  "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observed_at_ms": "1795132860000",
+  "source_cutoff_ms": "1795132860000",
+  "produced_at_ms": "1795132861000",
+  "facts": [
+    {
+      "fact_id": "00000000-0000-4000-8000-000000000064",
+      "evidence_revision": "1",
+      "bucket_start_ms": "1795132800000",
+      "start_ms": "1795132800000",
+      "end_ms": "1795132860000",
+      "resource": {
+        "runtime_id": "runtime-example",
+        "runtime_generation": "7",
+        "home_id": "home-example",
+        "home_generation": "2"
+      },
+      "allocation": {
+        "cpu_millis": "2000",
+        "memory_mib": "1024",
+        "disk_gib": "10"
+      },
+      "quantities": {
+        "sandbox_cpu_millis_seconds": "120000",
+        "sandbox_memory_mib_seconds": "61440",
+        "sandbox_disk_gib_seconds": "600"
+      },
+      "audit_time": {
+        "compute_uptime_ms": "60000",
+        "retained_home_ms": "60000"
+      },
+      "coverage": {
+        "cpu": {
+          "covered_binding_ms": "60000",
+          "expected_binding_ms": "60000",
+          "quality": "observed",
+          "missing_reason": null
+        },
+        "memory": {
+          "covered_binding_ms": "60000",
+          "expected_binding_ms": "60000",
+          "quality": "observed",
+          "missing_reason": null
+        },
+        "disk": {
+          "covered_binding_ms": "60000",
+          "expected_binding_ms": "60000",
+          "quality": "observed",
+          "missing_reason": null
+        }
+      }
+    }
+  ]
+}

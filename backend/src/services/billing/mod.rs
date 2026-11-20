@@ -34,6 +34,11 @@ pub mod sandbox_rates;
 pub mod sandbox_runtime;
 mod sandbox_runtime_math;
 pub mod sandbox_settings;
+#[allow(
+    dead_code,
+    reason = "The usage contract precedes its separately reviewed inbox"
+)]
+pub mod sandbox_usage;
 pub mod schedules;
 pub(crate) mod stuck_requests;
 mod targets;
