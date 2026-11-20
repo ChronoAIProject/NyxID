@@ -141,6 +141,20 @@ pub(super) fn event(header: &Header, payload: &Payload, clock: Clock) -> Check {
 }
 
 fn fact(header: &Header, fact: &Fact, clock: Clock) -> Check {
+    let resource = &fact.resource;
+    require(
+        resource.runtime_id.is_some() == resource.runtime_generation.is_some()
+            && resource.home_id.is_some() == resource.home_generation.is_some(),
+        "partial_resource_binding",
+    )?;
+    require(
+        !has_compute(fact) || resource.runtime_id.is_some(),
+        "compute_binding_required",
+    )?;
+    require(
+        !has_home(fact) || resource.home_id.is_some(),
+        "home_binding_required",
+    )?;
     let start = fact.start_ms.get();
     let end = fact.end_ms.get();
     let bucket = fact.bucket_start_ms.get();
@@ -156,14 +170,6 @@ fn fact(header: &Header, fact: &Fact, clock: Clock) -> Check {
     require(
         audit.compute_uptime_ms.get() <= end - start && audit.retained_home_ms.get() <= end - start,
         "invalid_audit_time",
-    )?;
-    let resource = &fact.resource;
-    require(
-        (!has_compute(fact)
-            || (resource.runtime_id.is_some() && resource.runtime_generation.is_some()))
-            && (!has_home(fact)
-                || (resource.home_id.is_some() && resource.home_generation.is_some())),
-        "usage_resource_binding_required",
     )?;
     let metrics = match header.basis {
         Basis::Allocated => [

@@ -3,7 +3,7 @@
   "kind": "usage",
   "producer_namespace": "cma-example",
   "stream_id": "00000000-0000-4000-8000-000000000001",
-  "event_id": "00000000-0000-4000-8000-000000000029",
+  "event_id": "00000000-0000-4000-8000-00000000000b",
   "sequence": "2",
   "previous_event_digest": "fc5b9510e247bf3ee1ef3bbffc5ec3c2b874bf76dfd527a238896dac9a72443b",
   "owner_ref": {
@@ -36,14 +36,14 @@
       "start_ms": "1795132800000",
       "end_ms": "1795132860000",
       "resource": {
-        "runtime_id": "retained-legacy-runtime",
+        "runtime_id": null,
         "runtime_generation": null,
         "home_id": "home-example",
         "home_generation": "opaque-home-generation"
       },
       "allocation": {
-        "cpu_millis": "2000",
-        "memory_mib": "1024",
+        "cpu_millis": "0",
+        "memory_mib": "0",
         "disk_gib": "10"
       },
       "quantities": {

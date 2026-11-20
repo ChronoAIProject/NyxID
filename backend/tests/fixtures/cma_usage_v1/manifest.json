@@ -59,38 +59,29 @@
       "canonical_sha256": "e4bce507b1e0827d6fa893028528e1e0f1ee30112fe25656436f08bd5d57254d"
     },
     {
-      "name": "allocated-no-home",
+      "name": "allocated-compute-only",
       "kind": "event",
-      "file": "allocated-no-home.json",
-      "canonical_file": "allocated-no-home.canonical.json",
-      "canonical_sha256": "111168cd7e634edbeb843bd710983cb766ae378e219d8c096121b6d536c53a9f"
+      "file": "allocated-compute-only.json",
+      "canonical_file": "allocated-compute-only.canonical.json",
+      "canonical_sha256": "558d3dfc35ca6d5b8705c95f77f20883729d9084c4a10f66dfffbba8cb493a69"
     },
     {
       "name": "allocated-retained-home",
       "kind": "event",
       "file": "allocated-retained-home.json",
       "canonical_file": "allocated-retained-home.canonical.json",
-      "canonical_sha256": "da2755d0ba354dc923ae51825675a8a178b57fb199e3a936c460869399e63e14"
-    },
-    {
-      "name": "empty-transition",
-      "kind": "event",
-      "file": "empty-transition.json",
-      "canonical_file": "empty-transition.canonical.json",
-      "canonical_sha256": "7610e17933e21ace3eeae363cae1b04ffd5742eaede1fdd825938394c8128ff5"
+      "canonical_sha256": "b59517980c8851be354571e4947e206b5a4c8bc7d620e20a533a2a3ef11a959f"
     }
   ],
   "files": {
-    "allocated-no-home.canonical.json": "111168cd7e634edbeb843bd710983cb766ae378e219d8c096121b6d536c53a9f",
-    "allocated-no-home.json": "de12c3feeae706d34cf162866ecefc6c8f36ce90e10d3cb71c5814058fc0e5cf",
-    "allocated-retained-home.canonical.json": "da2755d0ba354dc923ae51825675a8a178b57fb199e3a936c460869399e63e14",
-    "allocated-retained-home.json": "2f26a408a2f14ac3ce518bdb2deaf9b5bdd438e01056936b5bc4b1f015b74cc2",
+    "allocated-compute-only.canonical.json": "558d3dfc35ca6d5b8705c95f77f20883729d9084c4a10f66dfffbba8cb493a69",
+    "allocated-compute-only.json": "227ac674e2392387feac9b52d95640657d5f8e9f1cd85ba45d10a8167c8fb757",
+    "allocated-retained-home.canonical.json": "b59517980c8851be354571e4947e206b5a4c8bc7d620e20a533a2a3ef11a959f",
+    "allocated-retained-home.json": "bc81a6b52925f12817332b2dc5ab46d8fb01a911d464672408e362458e1f5b4c",
     "allocated.canonical.json": "b3691743810bb83914112fb161e82502a23acea41498fe57d3782723de1f574a",
     "allocated.json": "4099531cd5106d903565b172f4d24c824568eede00dd0197d92e0e73965f7d3c",
     "correction.canonical.json": "026120297096627e03909470bb5fa306b1417d2f2f780226bb47be05fb43a995",
     "correction.json": "da80943f42f284aabb2aa84c40af24f1821b841c00a33af244421d0d8e6b9e43",
-    "empty-transition.canonical.json": "7610e17933e21ace3eeae363cae1b04ffd5742eaede1fdd825938394c8128ff5",
-    "empty-transition.json": "438f378470d58af5c582694bfa4abdb0a3c31382c9caf49523837783cb8408fb",
     "measured-correction.canonical.json": "0bb2e142b6a14abefb867d6a89bb6829c12d0a0c2f78d2b9cf7cdcd49978d58e",
     "measured-correction.json": "9ff8258aa9d8acc2fdcfcf02611c32c25ec99986de0251e9bd9220fef1759ea7",
     "measured-stream-open.canonical.json": "8a64055dc3dac9b3b3c0aa57bc8fb60668ab59f33247c57ed1df17cd56c05a24",
@@ -99,11 +90,11 @@
     "measured.json": "18983ddd8581cecf05b9bc4987cbbb85173e645cb9db3fbc7cd7aa0db6fee6a3",
     "receipt.canonical.json": "e4bce507b1e0827d6fa893028528e1e0f1ee30112fe25656436f08bd5d57254d",
     "receipt.json": "ce9cd30397fb681064b7e31cc6774117775e5e2faec62c19ee492372ffe115b1",
-    "schema.json": "341edfbcb983dc1aa841463c4513ca17db2415f63b7582f9081d5e4c5cc74e41",
+    "schema.json": "0efa3791b295df35ab325086f7aca460bbdd77d93eb248964134dd470811e020",
     "stream-open.canonical.json": "fc5b9510e247bf3ee1ef3bbffc5ec3c2b874bf76dfd527a238896dac9a72443b",
     "stream-open.json": "4e52303755efa0c9561fc86cebd6c9b86134fb6b80068a5660b56bca64e953b6",
     "stream-seal.canonical.json": "ae7c4624604edb082b4842365b9d2bdf9ce03f7011f14f35a9d03b7bb56e054e",
     "stream-seal.json": "273134ff342264477b75ba2299fc9e6e9f8553152e91f8eee1851147ce91c419"
   },
-  "bundle_sha256": "493e288de11579c68aec1aa53c1d3c6123a5dfaafa94fd0f3e26d092cc49591e"
+  "bundle_sha256": "2a4d4945ac9bf4f6361a659e6171e0e3a64bf3c42afdaa95f54df95496254076"
 }
