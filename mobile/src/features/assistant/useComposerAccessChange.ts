@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantApi } from "../../lib/api/assistantApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useGroupAvailability } from "../groups/useGroupRuntime";
-import type { ComposerAccessMode } from "./composerSettings";
+import { composerSettingsRecoveryInterval, type ComposerAccessMode } from "./composerSettings";
 
 export const COMPOSER_ACCESS_MODES = [
   "autopilot",
@@ -34,6 +34,7 @@ export function useComposerAccessChange(props: {
     queryFn: ({ signal }) => assistantApi.settings(signal),
     enabled: availability.active,
     retry: false,
+    refetchInterval: composerSettingsRecoveryInterval,
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useLocalizedState<string>();

@@ -1,11 +1,25 @@
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
+import type { QueryState } from "@tanstack/react-query";
+import { ApiError } from "../../lib/api/ApiError";
 import { accessModeSchema } from "../agents/agentContracts";
 
 export type ComposerAccessMode = z.infer<typeof accessModeSchema>;
 export const composerSettingsSchema = z.object({
   access_mode: accessModeSchema.default("nyxmode"),
 });
+
+/** NetInfo can report a connected Android transport before the API is reachable. */
+export function composerSettingsRecoveryInterval(query: {
+  state: Pick<QueryState, "status" | "error" | "errorUpdateCount">;
+}): number | false {
+  const { status, error, errorUpdateCount } = query.state;
+  if (status !== "error" || !(error instanceof ApiError)) return false;
+  if (error.statusCode !== 0 && error.statusCode !== 408 && error.statusCode < 500)
+    return false;
+  return Math.min(5_000 * Math.max(1, errorUpdateCount), 30_000);
+}
+
 export const COMPOSER_ACCESS_LABEL = {
   get autopilot() {
     return translateApp("Full access");
