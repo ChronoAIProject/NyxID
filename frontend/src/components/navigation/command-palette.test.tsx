@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
@@ -111,6 +111,34 @@ describe("CommandPalette", () => {
     await user.click(dashboard);
 
     expect(navigate).toHaveBeenCalledExactlyOnceWith({ to: "/dashboard", search: {} });
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Action hint readable when its row is selected by pointer or keyboard", async () => {
+    const user = userEvent.setup();
+    render(<Palette />);
+    await user.type(screen.getByRole("textbox"), "key");
+    const createKey = screen.getByRole("button", { name: "Create API key Action" });
+    const actionHint = within(createKey).getByText("Action");
+
+    await user.hover(createKey);
+    expect(createKey).toHaveClass("bg-overlay-strong");
+    // Tertiary text falls below 4.5:1 on the dark selected-row overlay.
+    expect(actionHint).toHaveClass("text-muted-foreground");
+    expect(actionHint).not.toHaveClass("text-text-tertiary");
+
+    await user.keyboard("{ArrowUp}");
+    expect(createKey).not.toHaveClass("bg-overlay-strong");
+    expect(actionHint).toHaveClass("text-muted-foreground");
+    await user.keyboard("{ArrowDown}");
+    expect(createKey).toHaveClass("bg-overlay-strong");
+    expect(actionHint).toHaveClass("text-muted-foreground");
+    await user.keyboard("{Enter}");
+
+    expect(navigate).toHaveBeenCalledExactlyOnceWith({
+      to: "/keys",
+      search: { tab: "nyxid", action: "create-key" },
+    });
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 

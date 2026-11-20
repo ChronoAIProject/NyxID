@@ -247,7 +247,7 @@ export function CommandPalette({
                 />
                 <span className="flex-1">{translateUi(item.label)}</span>
                 {item.group === "action" && (
-                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
+                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-muted-foreground">{translateUi("Action")}</span>
                 )}
               </button>
             ))}
