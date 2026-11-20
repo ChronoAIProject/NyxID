@@ -306,6 +306,11 @@ test("the stationary base and full-width translated slab retain the actual navig
     x.find("workspace-sidebar-close-sliver").props.accessibilityLabel,
     "Close navigation",
   );
+  assert.equal(x.find("workspace-sidebar-close-sliver").props.focusable, true);
+  assert.equal(
+    x.find("workspace-sidebar-close-sliver").props.importantForAccessibility,
+    "yes",
+  );
   assert.ok(x.all().includes(x.child));
   x.harness.unmount();
 });
@@ -315,6 +320,11 @@ test("edge pan follows the finger, clamps travel and settles at the projected th
   assert.equal(x.settings.activeOffsetX, 18);
   assert.deepEqual([...x.settings.failOffsetY], [-10, 10]);
   assert.equal(x.find("workspace-sidebar-reveal-edge").props.style.width, 24);
+  const edge = x.find("workspace-sidebar-reveal-edge");
+  assert.equal(edge.props.accessible, false);
+  assert.equal(edge.props.focusable, false);
+  assert.equal(edge.props.accessibilityElementsHidden, true);
+  assert.equal(edge.props.importantForAccessibility, "no-hide-descendants");
   const detector = x.all().find((node) => node.type === "GestureDetector")!;
   assert.equal(
     detector.props.children.props.testID,
@@ -815,6 +825,8 @@ test("wide nested guarded Back uses only the content edge and never closes the s
   x.set({ onEdgeBack: () => backs++ });
   const edge = x.find("workspace-sidebar-reveal-edge");
   assert.equal(edge.props.accessible, false);
+  assert.equal(edge.props.focusable, false);
+  assert.equal(edge.props.importantForAccessibility, "no-hide-descendants");
   assert.equal(edge.props.style.width, 24);
   x.handlers().onStart();
   x.handlers().onUpdate({ translationX: 160 });

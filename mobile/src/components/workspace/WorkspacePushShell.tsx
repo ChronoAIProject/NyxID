@@ -606,6 +606,9 @@ export function WorkspacePushShell(props: Props) {
                   : "workspace-sidebar-reveal-edge"
               }
               accessible={active}
+              focusable={active}
+              accessibilityElementsHidden={!active}
+              importantForAccessibility={active ? "yes" : "no-hide-descendants"}
               accessibilityRole={active ? "button" : undefined}
               accessibilityLabel={
                 active ? translateApp("Close navigation") : undefined
