@@ -370,7 +370,7 @@ function DictationInline({
           accessibilityLiveRegion="polite"
           style={styles.languageNotice}
         >
-          {t("Next recording: {{language}}", { language: language.label })}
+          {t("For the next recording: {{language}}", { language: language.label })}
         </Label>
       )}
       {picker && phase === "listening" && (

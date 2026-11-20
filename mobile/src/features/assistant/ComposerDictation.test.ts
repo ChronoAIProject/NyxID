@@ -342,7 +342,7 @@ test("a queued language keeps the listening chip and transcript bound to this re
     )!;
   assert.equal(chip().props.accessibilityValue.text, "name:zh-CN");
   assert.ok(
-    nodes().some((node) => node.props.children === "Next recording: English"),
+    nodes().some((node) => node.props.children === "For the next recording: English"),
   );
   chip().props.onPress();
   x.h.flush();
