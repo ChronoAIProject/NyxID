@@ -8,6 +8,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 
 - [Prerequisites](#prerequisites)
 - [Local Development](#local-development)
+- [Releasing to production](#releasing-to-production)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
 - [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
@@ -96,6 +97,72 @@ The frontend starts on `http://localhost:3000`.
 curl http://localhost:3001/health
 # {"status":"ok","version":"0.5.0"}
 ```
+
+---
+
+## Releasing to production
+
+Feature PRs target `dev`. Pushes there trigger the staging build and deploy
+workflow for the backend and frontend. To promote the commit running on both, preview the rollup with
+`scripts/cut-release.sh --dry-run`, then run `scripts/cut-release.sh` to open
+the snapshot PR. The snapshot stays fixed while work continues on `dev`.
+
+**Main Merge Guard** accepts three sources from this repository for a PR into
+`main`. Each PR needs one approval, full **CI Pipeline**, a passing guard and
+**Create a merge commit**.
+
+| Source | What the guard checks |
+| --- | --- |
+| `dev` | The source is the integration branch. |
+| `release/YYYY-MM-DD` | The date is valid and the head is already in `dev` history. An optional numeric suffix starts at `-2`. |
+| `hotfix/<name>` | The head contains the current `main` tip and every commit it adds is absent from `dev`. The name has 1–64 ASCII characters, starts with a lowercase letter or digit, and may also contain `.`, `_` and `-`. |
+
+For an urgent production fix, branch from current `main` and open the hotfix
+PR back into `main`. If `main` advances during review, update the hotfix and
+rerun its checks. After it lands, open a PR **from `main` into `dev`** and
+choose **Create a merge commit** so the hotfix keeps its commit ancestry.
+The next rollup must use a snapshot containing that sync. Its notes follow
+the first parent of `dev` and list the sync PR once.
+
+### Automatic production deploys
+
+In GitHub, create the `production` environment with a deployment branch rule
+for `main` only. Store `NYXID_PRODUCTION_DEPLOY_CLIENT_ID` and
+`NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET` as environment secrets for the
+NyxID service account authorized to deploy the two production apps through
+the chrono-cd proxy (OAuth scope `proxy`).
+
+Open **Actions → Publish Images → the main run → deploy-production** for
+progress. A push to `main` or **Run workflow** on `main` deploys once the
+CI gate and multi-architecture manifests succeed. Version tags only publish
+images. Production deploy jobs serialize. Each compares the live versions
+to the candidate before updating either app and checks the app again before
+its PATCH. A newer observed commit stops the run. A divergent or unknown
+commit fails it.
+
+The job deploys the backend first. It requires three consecutive ready
+samples, ten seconds apart, with the candidate commit and backend health
+status `ok`. It then checks both apps together as the frontend rolls out.
+For a failed or partial rollout, use **Re-run failed jobs** on that run.
+An app already serving the candidate is checked for readiness and skipped
+for update.
+
+### Rolling back a production release
+
+Coordinate the rollback with any active or queued Publish Images deploys.
+In chrono-cd, select the production namespace `chrono-nyxid`, project
+`nyxid`, and the seven-character SHA of a known-good, rollback-compatible
+`main` build. Use these image references in order.
+
+| App | Service | Image |
+| --- | --- | --- |
+| `prod-api` | `nyxid-backend-production-api-svc` | `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>` |
+| `prod` | `nyxid-frontend` | `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>` |
+
+Wait for `prod-api` to report ready and for `https://api.nyxid.ai/health` to
+return `status: ok` and the expected 12-character commit before updating
+`prod`. Verify the same commit at `https://nyxid.ai/build-version.json`.
+Land the revert or fix on `main` so the next automatic deployment carries it.
 
 ---
 

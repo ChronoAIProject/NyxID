@@ -744,6 +744,8 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - Every push to `dev` requests full CI, including backend tests, all-targets Clippy, coverage, feature builds, container E2E and image checks.
 - Run `scripts/cut-release.sh` with your own `gh` login to open a PR from a fixed staging commit into `main`. Its `release/YYYY-MM-DD` branch must stay on `dev`'s history. Further merges into `dev` can continue during review.
 - Wait for approval, full `CI Pipeline` and `Main Merge Guard`, then select **Create a merge commit**. The guard also accepts this repository's `dev` branch.
+- Cut urgent fixes from `main` on `hotfix/<name>`. Target `main` with full CI and review.
+- After a hotfix lands, merge `main` back into `dev` using **Create a merge commit** before cutting the next rollup.
 - GitHub runs `Main Merge Guard` from the default branch on `pull_request_target`. Retargeting a PR reruns the guard against its new base.
 
 

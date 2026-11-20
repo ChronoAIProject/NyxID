@@ -388,6 +388,31 @@ jobs:
           docker buildx imagetools inspect \
             ${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}
 
+  deploy-production:
+    needs: merge
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    environment:
+      name: production
+      url: https://nyxid.ai
+    concurrency:
+      group: deploy-nyxid-production
+      queue: max
+    timeout-minutes: 32
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Roll out backend and frontend
+        env:
+          NYXID_PRODUCTION_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_ID }}
+          NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET }}
+        run: python3 .github/scripts/deploy_images.py production
+
   # ---------------------------------------------------------------------------
   # Flip new packages to public visibility. Idempotent: a no-op once public.
   # Runs only on push events (not workflow_dispatch) to avoid surprises.
