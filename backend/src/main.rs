@@ -2014,7 +2014,8 @@ async fn server_run(cli: Cli) {
         .layer(axum_mw::from_fn_with_state(
             shutdown_state.shutdown.clone(),
             mw::shutdown::track,
-        ));
+        ))
+        .layer(axum_mw::map_request(handlers::proxy::ingress::stamp));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

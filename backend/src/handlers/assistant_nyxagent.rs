@@ -1142,8 +1142,26 @@ pub async fn history(
         )
         .await?;
     }
-    let mut approvals =
-        engine::approval_history(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+    let approval_ids: Vec<_> = rows
+        .iter()
+        .flat_map(|row| &row.activities)
+        .chain(
+            conversation
+                .active_turn
+                .iter()
+                .flat_map(|turn| &turn.activities),
+        )
+        .filter_map(|activity| activity.decision.as_ref())
+        .filter(|decision| decision.kind == "approval")
+        .map(|decision| decision.id.as_str())
+        .collect();
+    let mut approvals = engine::approval_history(
+        &state.db,
+        &user_id,
+        &conversation.credential_api_key_id,
+        &approval_ids,
+    )
+    .await?;
     if let Some(card) = query.card {
         engine::include_execution_card(
             &state.db,
