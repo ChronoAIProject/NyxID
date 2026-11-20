@@ -1180,6 +1180,19 @@ function GroupChat({
               </OverflowScrollView>
               <AssistantPendingUploads
                 files={uploads.files}
+                reselect={uploads.session.reselect}
+                choose={() => void uploads.pick("files")}
+                dismiss={() => uploads.session.dismissReselection()}
+                resume={() => uploads.session.resume()}
+                canResume={
+                  canParticipate &&
+                  chat.online &&
+                  !chat.isError &&
+                  !chat.recoveryRequired &&
+                  liveMembers.length > 0 &&
+                  !uploads.picking &&
+                  !uploads.session.sending
+                }
                 remove={removeAttachment}
                 disabled={chat.sending || uploads.session.sending}
               />

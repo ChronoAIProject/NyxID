@@ -1,3 +1,5 @@
+import { discardUploadDraft } from "../assistant/assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { localizedError } from "../../i18n/localizedError";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
@@ -112,8 +114,10 @@ export function CollaborationGroupControls({
         if (
           !result.group &&
           (change.action === "leave" || change.action === "delete")
-        )
+        ) {
+          void discardUploadDraft(getAuthAccountId(), `crew:${group.id}`).catch(() => {});
           onRemoved();
+        }
       },
       {
         feature:

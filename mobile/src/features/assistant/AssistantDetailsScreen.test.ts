@@ -108,6 +108,12 @@ function setup(page: "details" | "context" | "title" = "details") {
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => "owner-a" },
+    "./assistantDraftStore": {
+      discardUploadDraft: async (owner: string, key: string) => {
+        writes.push(["clear", owner, key]);
+      },
+    },
     "../groups/useGroupRuntime": { useGroupAvailability: runtime },
     "./useComposerAccessChange": {
       COMPOSER_ACCESS_MODES: ["autopilot", "nyxmode", "ask_every_time"],
@@ -252,7 +258,10 @@ test("Delete Chat is a solid destructive row behind confirmation, and returns to
   assert.equal(x.guard().disabled, true);
   x.remove.resolve();
   await x.h.settle();
-  assert.deepEqual(x.writes, [["delete", "nyxa-thread"]]);
+  assert.deepEqual(x.writes, [
+    ["delete", "nyxa-thread"],
+    ["clear", "owner-a", JSON.stringify(["private", "nyxa-thread"])],
+  ]);
   assert.equal(x.actions.length, 1);
   assert.equal(x.actions[0][1].target.kind, "agent");
   assert.equal(x.actions[0][1].target.agentId, "specialist");
