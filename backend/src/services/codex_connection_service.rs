@@ -132,6 +132,7 @@ pub async fn import_api_key(
     }
     let provider = provider(db).await?;
     let (catalog, _) = llm_gateway_service::resolve_llm_service_by_slug(db, "openai").await?;
+    super::catalog_service::require_connection_access(db, user, &catalog).await?;
     let id = Uuid::new_v4().to_string();
     let service_id = Uuid::new_v4().to_string();
     let db = db.clone();

@@ -188,8 +188,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             };
             if row.active_turn.as_ref().is_some_and(|active| {
                 active.turn_id == *turn
-                    && active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
-                        > Utc::now()
+                    && (active.restart_admission.is_some()
+                        || active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
+                            > Utc::now())
             }) {
                 return schedules::reschedule(&state.db, job, Some(recheck_at(&run, job))).await;
             }
@@ -520,6 +521,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -1442,6 +1444,14 @@ pub(crate) async fn cancel_transports(
 ) -> AppResult<()> {
     for row in targets {
         if let Some(turn) = &row.active_turn {
+            if turn.stop_requested && turn.restart_admission.is_some() {
+                engine::force_stop(&state.db, &row.user_id, &row.id, &turn.turn_id).await?;
+                let state = state.clone();
+                let stopped = row.clone();
+                state.shutdown.clone().spawn(async move {
+                    super::assistant_nyxagent::survivor::cancel(&state, &stopped).await;
+                });
+            }
             crate::services::machine_service::cancel_turn(state, &row.user_id, &row.id, turn)
                 .await?;
         }

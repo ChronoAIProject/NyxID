@@ -268,7 +268,9 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     .find_one(doc! {"_id": thread, "user_id": &group.user_id, "active_turn.turn_id": turn})
                     .await?
                     .as_ref()
-                    .is_none_or(|row| super::super::assistant_nyxagent::live_turn(row, Utc::now()).is_none())
+                    .is_none_or(|row| {
+                        !super::super::assistant_turn_restart::awaiting_reply(row, turn)
+                    })
             } else {
                 false
             };
@@ -305,7 +307,7 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                         let active = doc! {"_id": thread, "user_id": owner, "active_turn.turn_id": turn};
                         let current = threads.find_one(active.clone()).session(&mut *session).await?;
                         if current.as_ref().is_some_and(|row| {
-                            super::super::assistant_nyxagent::live_turn(row, Utc::now()).is_some()
+                            super::super::assistant_turn_restart::awaiting_reply(row, turn)
                         }) {
                             return Ok(());
                         }

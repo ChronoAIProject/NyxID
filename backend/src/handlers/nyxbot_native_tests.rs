@@ -1176,6 +1176,14 @@ async fn native_queued_response_recovers_without_reposting_after_observers_disco
     assert_eq!(event.status, "queued");
     assert!(event.turn_id.is_none());
     assert!(stored.conversation_id.is_some());
+    let deletion = deletion(&row, "702", "7");
+    let response = respond(&state, &key, &deletion, "delete-queued").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let notification = frames(&body_text(response).await);
+    assert_eq!(
+        notification.last().unwrap()["response"]["output"],
+        json!([])
+    );
     recovery::refresh(
         &state.db,
         &state.encryption_keys,
@@ -1371,6 +1379,15 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
         .await
         .unwrap();
     state.db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":&row.id},doc! {"$set":{"event_ref_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:newer}}}).await.unwrap();
+    let mut invalid = deletion(&row, "704", "7");
+    invalid["metadata"]["cmaeg.event"] = json!("mismatch");
+    assert_eq!(
+        respond(&state, &key, &invalid, "invalid-deletion")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(intake_refusal_recommended(&state, &row).await);
     native_responses::send_update(
         &state,
         &row,
@@ -1381,6 +1398,15 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
     .await
     .unwrap();
     assert_eq!(http.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_native_delivery
+            .as_deref(),
+        Some("reply_confirmed")
+    );
+    assert!(!intake_refusal_recommended(&state, &row).await);
     let chat = state
         .db
         .collection::<NyxbotThread>(THREADS)
@@ -2017,4 +2043,410 @@ async fn supplemental_native_progress_leaves_primary_replay_intact() {
         assert_eq!(audit.get_document("event_data").unwrap().get_str("egress"),Ok("gateway_event"));
         state.db.drop().await.unwrap();
     }).await;
+}
+
+/// A Discord deletion uses the original partition even though Discord omits the deleting actor.
+pub(super) fn deletion(row: &NyxbotChannel, message: &str, author: &str) -> Value {
+    let mut request = native_event(row, message, "rendered input");
+    let original = format!("discord:100:{message}");
+    let id = format!("{original}:delete");
+    let activity = &mut request["event_context"]["activity"];
+    activity["event_id"] = json!(id);
+    activity["occurred_at"] = json!("2026-11-19T03:23:17Z");
+    activity["actor"] = json!({"kind":"unknown","id":"unknown"});
+    activity["kind"] = json!({"type":"event","ce":{"specversion":"1.0","type":"cma.message.deleted.v1",
+        "id":id,"source":"urn:cmaeg:discord:100","subject":message,"datacontenttype":"application/json",
+        "data":{"message_id":message,"original_event_id":original,"original_author":{"kind":"human","id":author}}}});
+    request["stream"] = json!(true);
+    request["input"][0]["role"] = json!("user");
+    request["metadata"]["cmaeg.event"] = json!(id);
+    request["metadata"]["cmaeg.actor"] = json!("unknown");
+    request
+}
+
+#[tokio::test]
+async fn native_discord_notification_completes_and_replays_without_a_turn() {
+    let (state, calls, server) = setup("native_discord_notification").await;
+    let (row, key) = native_channel(&state).await;
+    let original = respond(
+        &state,
+        &key,
+        &native_event(&row, "501", "First question"),
+        "first",
+    )
+    .await;
+    assert!(body_text(original).await.contains("Here is your answer"));
+    let command = deletion(&row, "501", "7");
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let lookup = || async {
+        let mut headers = bearer(&key);
+        headers.insert("idempotency-key", "delete-command".parse().unwrap());
+        let response = dispatches::get(
+            State(state.clone()),
+            headers,
+            axum::extract::Query(dispatches::Query {
+                dispatched_at: None,
+            }),
+        )
+        .await;
+        serde_json::from_str::<Value>(&body_text(response).await).unwrap()
+    };
+    assert_eq!(lookup().await["state"], "not_received");
+    let response = respond(&state, &key, &command, "delete-command").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let id = response.headers()["x-cma-response-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let all = frames(&body_text(response).await);
+    assert_eq!(all[0]["sequence_number"], 0);
+    assert_eq!(all[0]["response"]["status"], "queued");
+    let found = lookup().await;
+    assert_eq!(found["state"], "finished");
+    assert_eq!(found["outcome"], "completed");
+    assert_eq!(found["response_id"], id);
+    assert_eq!(found["provider_delivery"], "none");
+    let complete = all.last().unwrap();
+    assert_eq!(complete["type"], "response.completed");
+    assert_eq!(complete["response"]["output"], json!([]));
+    assert_eq!(complete["response"]["metadata"], command["metadata"]);
+    let snapshot =
+        native_responses::snapshot(State(state.clone()), Path(id.clone()), bearer(&key)).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&body_text(snapshot).await).unwrap(),
+        complete["response"]
+    );
+    let replay = native_responses::events(
+        State(state.clone()),
+        Path(id),
+        axum::extract::Query(native_responses::Cursor {
+            starting_after: Some("0".into()),
+        }),
+        bearer(&key),
+    )
+    .await;
+    assert_eq!(frames(&body_text(replay).await), all[1..]);
+    assert_eq!(
+        frames(&body_text(respond(&state, &key, &command, "delete-command").await).await),
+        all
+    );
+    assert_eq!(calls.lock().await.len(), 1);
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"event_id":"discord:100:501:delete"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(event.turn_id.is_none() && event.conversation_id.is_none());
+    let next = respond(
+        &state,
+        &key,
+        &native_event(&row, "503", "Next question"),
+        "next",
+    )
+    .await;
+    assert!(body_text(next).await.contains("Here is your answer"));
+    assert_eq!(calls.lock().await.len(), 2);
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_discord_notification_edits_reactions_and_controls_are_silent() {
+    let (state, calls, server) = setup("discord_non_message").await;
+    let (row, key) = native_channel(&state).await;
+    for (revision, event_type, actor) in [
+        (
+            "501:edit:1795060000000000000",
+            "cma.message.updated.v1",
+            "human",
+        ),
+        (
+            "reaction:ac040955-3609-4dcb-8310-6a1ccfe1799e",
+            "cma.message.reaction.updated.v1",
+            "unknown",
+        ),
+        (
+            "reaction:ac040955-3609-4dcb-8310-6a1ccfe1799f",
+            "cma.message.reaction.updated.v1",
+            "human",
+        ),
+        ("interaction:508", "interaction", "human"),
+    ] {
+        let mut command = deletion(&row, "501", "7");
+        let id = format!("discord:100:{revision}");
+        let activity = &mut command["event_context"]["activity"];
+        activity["event_id"] = json!(id);
+        if actor == "human" {
+            activity["actor"] = json!({"kind":"human","id":"7"});
+        }
+        if event_type == "interaction" {
+            activity["kind"] =
+                json!({"type":"interaction","action_id":"confirm","block_id":"test","values":{}});
+        } else {
+            let ce = &mut activity["kind"]["ce"];
+            ce["id"] = json!(id);
+            ce["type"] = json!(event_type);
+            if event_type == "cma.message.updated.v1" {
+                ce["data"]["patch"] = json!({"text":"Edited text"});
+            } else {
+                ce["data"]["operation"] = json!(if actor == "human" { "add" } else { "clear_all" });
+                ce["data"]["target_kind"] = json!("inbound");
+                ce["data"]["target_author"] = json!({"kind":"human","id":"7"});
+                ce["data"]["representation"] = json!("delta");
+                if actor == "human" {
+                    ce["data"]["emoji"] = json!({"id":null,"name":"👍"});
+                    ce["data"]["reaction_type"] = json!(0);
+                    ce["data"]["burst"] = json!(false);
+                }
+            }
+        }
+        command["metadata"]["cmaeg.event"] = json!(id);
+        command["metadata"]["cmaeg.actor"] = json!(if actor == "human" { "7" } else { "unknown" });
+        if event_type == "cma.message.reaction.updated.v1" {
+            let mut changed = command.clone();
+            let data = &mut changed["event_context"]["activity"]["kind"]["ce"]["data"];
+            data["original_event_id"] = json!("discord:100:499");
+            assert_eq!(
+                respond(&state, &key, &changed, revision).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+            if actor == "human" {
+                let data = &mut changed["event_context"]["activity"]["kind"]["ce"]["data"];
+                data["target_kind"] = json!("outbound");
+                assert_eq!(
+                    respond(&state, &key, &changed, revision).await.status(),
+                    StatusCode::BAD_REQUEST
+                );
+                changed["event_context"]["activity"]["kind"]["ce"]["data"]["target_author"] =
+                    json!({"kind":"bot","id":"100"});
+                let mut other_bot = changed.clone();
+                other_bot["event_context"]["activity"]["kind"]["ce"]["data"]["original_event_id"] =
+                    json!("discord:101:499");
+                assert_eq!(
+                    respond(&state, &key, &other_bot, revision).await.status(),
+                    StatusCode::BAD_REQUEST
+                );
+                command = changed;
+            }
+        }
+        let response = respond(&state, &key, &command, revision).await;
+        assert_eq!(response.status(), StatusCode::OK, "{revision}");
+        let all = frames(&body_text(response).await);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2]["type"], "response.completed");
+        assert_eq!(all[2]["response"]["output"], json!([]));
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+async fn intake_refusal_recommended(state: &AppState, row: &NyxbotChannel) -> bool {
+    crate::services::nyxbot_gateway_release_service::ensure_indexes(&state.db)
+        .await
+        .unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    crate::handlers::channel_bots::health_loaded(state, &bot, true, true)
+        .await
+        .unwrap()
+        .recommended_action_text
+        .contains("nyxbot_provider_refused")
+}
+
+#[tokio::test]
+async fn native_discord_notification_checks_source_before_acceptance_and_reports_refusal() {
+    let (state, calls, server) = setup("discord_notification_health").await;
+    let (row, key) = native_channel(&state).await;
+    let command = deletion(&row, "501", "8");
+    for (pointer, value) in [
+        ("/event_context/activity/source/bot_id", json!("101")),
+        (
+            "/event_context/activity/kind/ce/source",
+            json!("urn:cmaeg:discord:101"),
+        ),
+        ("/event_context/activity/kind/ce/subject", json!("502")),
+        (
+            "/event_context/activity/kind/ce/type",
+            json!("future.unknown.v1"),
+        ),
+        (
+            "/event_context/activity/kind/ce/id",
+            json!("discord:100:502:delete"),
+        ),
+        (
+            "/event_context/activity/actor",
+            json!({"kind":"human","id":"8"}),
+        ),
+        ("/metadata/cmaeg.actor", json!("8")),
+    ] {
+        let mut invalid = command.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        assert_eq!(
+            respond(&state, &key, &invalid, "refusal").await.status(),
+            StatusCode::BAD_REQUEST,
+            "{pointer}"
+        );
+    }
+    assert!(intake_refusal_recommended(&state, &row).await);
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
+    for (status, phase) in [("paused", "ready"), ("active", "preparing")] {
+        channels
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"status":status,"gateway_native_phase":phase}},
+            )
+            .await
+            .unwrap();
+        assert!(!intake_refusal_recommended(&state, &row).await);
+    }
+    channels
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"status":"active","gateway_native_phase":"ready"}},
+        )
+        .await
+        .unwrap();
+    assert!(intake_refusal_recommended(&state, &row).await);
+    let good = respond(&state, &key, &command, "refusal").await;
+    assert_eq!(good.status(), StatusCode::OK);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_native_delivery
+            .as_deref(),
+        Some("response_ready")
+    );
+    assert!(!intake_refusal_recommended(&state, &row).await);
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_discord_notification_health_ignores_legacy_and_concurrent_message_refusals() {
+    use crate::services::coordination_service::{EventDedupClaimResult, EventDedupStore};
+    let (state, calls, server) = setup("discord_admission_conflict_health").await;
+    let (row, key) = native_channel(&state).await;
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
+    channels
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"gateway_native_delivery":"intake_refused"}},
+        )
+        .await
+        .unwrap();
+    assert!(!intake_refusal_recommended(&state, &row).await);
+    let scope = serde_json::to_string(&(Some(&row.channel_bot_id), OWNER)).unwrap();
+    assert!(matches!(
+        EventDedupStore::claim(
+            &state.db,
+            "discord-inbound",
+            &scope,
+            "501",
+            Duration::from_secs(30)
+        )
+        .await
+        .unwrap(),
+        EventDedupClaimResult::Claimed(_)
+    ));
+    let conflict = respond(
+        &state,
+        &key,
+        &native_event(&row, "501", "Hello"),
+        "duplicate",
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert!(!intake_refusal_recommended(&state, &row).await);
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_turn() {
+    use crate::models::channel_whatsapp_native as wa;
+    let (state, calls, server) = setup("whatsapp_notifications").await;
+    let (mut row, key) = native_channel(&state).await;
+    row.platform = "whatsapp".into();
+    row.gateway_source = Some(GatewaySource::WhatsApp {
+        app_id: "111".into(),
+        waba_id: "222".into(),
+        phone_number_id: "333".into(),
+    });
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    let bots = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    bots.update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"platform":"whatsapp","platform_bot_id":"333","app_id":"222","app_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]}}}).await.unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let configs = state.db.collection::<bson::Document>(wa::COLLECTION_NAME);
+    configs.insert_one(doc!{"_id":&bot.id,"owner_id":&bot.user_id,"ownership_version":bot.ownership_version,
+        "meta_app_id":"111","waba_id":"222","phone_number_id":"333","dedicated_app":true,"updated_at":bson::DateTime::now(),
+        "callback":{"phase":"gateway","gateway_channel_id":&row.gateway_channel_id,"gateway_verified_at":bson::DateTime::now()}}).await.unwrap();
+    for kind in [
+        "cma.message.updated.v1",
+        "cma.message.deleted.v1",
+        "cma.message.reaction.updated.v1",
+        "interaction",
+        "flow",
+    ] {
+        let mut request = native_event(&row, "501", "");
+        let prefix = if kind == "flow" {
+            "native-whatsapp-flow"
+        } else {
+            "whatsapp"
+        };
+        let id = format!("{prefix}:{}", sha256_hex(kind));
+        request["metadata"]["cmaeg.event"] = json!(id);
+        request["metadata"]["cmaeg.actor"] = json!("155501");
+        let a = &mut request["event_context"]["activity"];
+        a["event_id"] = json!(id);
+        a["source"] =
+            json!({"type":"whatsapp","app_id":"111","waba_id":"222","phone_number_id":"333"});
+        a["actor"] = json!({"kind":"unknown","id":"155501"});
+        a["conversation"] = json!({"kind":"private","id":"155501"});
+        a["kind"] = if matches!(kind, "interaction" | "flow") {
+            json!({"type":"interaction","block_id":"card","action_id":"button","values":{}})
+        } else {
+            json!({"type":"event","ce":{"specversion":"1.0","id":id,"type":kind,"source":"urn:cma:whatsapp:111:222:333",
+                "subject":"wamid.original","data":{"message_id":"wamid.original","original_event_id":"original"}}})
+        };
+        let response = respond(&state, &key, &request, kind).await;
+        assert_eq!(response.status(), StatusCode::OK, "{kind}");
+        let all = frames(&body_text(response).await);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2]["type"], "response.completed");
+        assert_eq!(all[2]["response"]["output"], json!([]));
+        if kind == "flow" {
+            configs
+                .update_one(
+                    doc! {"_id":&bot.id},
+                    doc! {"$set":{"callback.phase":"relay"}},
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                respond(&state, &key, &request, "new-command")
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
 }

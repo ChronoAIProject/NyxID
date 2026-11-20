@@ -51,6 +51,7 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
             let sink = sink.clone();
             let reply = reply.clone();
             async move {
+                let background = body["background"] == true;
                 sink.lock().await.push(Call {
                     authorization: headers["authorization"].to_str().unwrap().into(),
                     body,
@@ -58,6 +59,11 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
+                    if background {
+                        let created = json!({"type":"response.created", "sequence_number":0,
+                            "response":{"id":response,"conversation":{"id":session}}});
+                        yield Ok::<_, Infallible>(Event::default().data(created.to_string()));
+                    }
                     let completed = json!({
                         "type": "response.completed",
                         "sequence_number": 1,
@@ -251,6 +257,7 @@ async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
         turn_id: Uuid::new_v4().to_string(),
         window_key: Uuid::new_v4().to_string(),
         credential_id: old.api_key_id.clone(),
+        destination_hash: None,
     };
     let updated = state
         .db

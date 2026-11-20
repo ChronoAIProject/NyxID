@@ -14,6 +14,7 @@ import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
+import { announceAssistantAccount } from "./lib/assistant/account-session";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
 import { shouldRetryQuery } from "./lib/query-retry";
@@ -49,10 +50,11 @@ const queryClient = new QueryClient({
 });
 subscribeCrashPermission(queryClient);
 
-subscribeAssistantIdentity(() => {
-  queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
+subscribeAssistantIdentity((userId) => {
+  queryClient.removeQueries({ queryKey: ["assistant"] });
   queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
   queryClient.removeQueries({ queryKey: ["cma-session"] });
+  announceAssistantAccount(userId);
 });
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on

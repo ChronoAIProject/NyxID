@@ -1434,6 +1434,7 @@ pub async fn resolve_proxy_target(
 
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1663,6 +1664,7 @@ pub async fn resolve_proxy_target_lenient(
 
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -3702,6 +3704,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
         .await?;
     let service =
         service.ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
+    super::catalog_service::require_connection_access(db, &user_service.user_id, &service).await?;
     super::destination_routing::validate_credential_source(&service)?;
     super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;

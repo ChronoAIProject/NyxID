@@ -8475,6 +8475,7 @@ pub async fn connect_service_with_binding(
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    super::catalog_service::require_connection_access(db, user_id, &catalog).await?;
     let created = crate::services::unified_key_service::create_platform_key(
         db,
         user_id,
@@ -8512,6 +8513,7 @@ pub async fn connect_service(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     let has_credential = credential.is_some_and(|value| !value.trim().is_empty());
     if !scopes.is_empty() && has_credential {
         return Err(AppError::ValidationError(

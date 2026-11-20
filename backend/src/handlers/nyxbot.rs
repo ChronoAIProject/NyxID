@@ -4352,6 +4352,7 @@ async fn start_chat_turn(
             ),
         execution_parent: None,
         channel_context: Some(source_context.clone()),
+        capacity: None,
         owner_instruction_source: (!guest && private)
             .then_some(engine::OwnerInstructionSource::VerifiedPrivateChannel),
         media_event_ids: media_event_ids.clone(),

@@ -684,6 +684,7 @@ export class NyxAgentTransport {
         voice: message.voice,
         via: message.via ?? (message.platform_origin ? "telegram" : null),
         activityTotal: message.activity_total,
+        continuedAfterRestart: message.continued_after_restart,
         steering: message.steering,
         continuation_of: message.continuation_of,
         origin: message.origin,
@@ -700,7 +701,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total, continuedAfterRestart: polledTurn.continued_after_restart }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),

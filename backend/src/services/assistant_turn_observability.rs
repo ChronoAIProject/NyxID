@@ -46,6 +46,10 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (accepted - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        continued_after_restart: turn
+            .restart_admission
+            .as_ref()
+            .is_some_and(|source| source.continued_after_restart),
         voice_link_publication: None,
         links_in_chat: None,
         artifact_recovery_target: None,
@@ -75,8 +79,12 @@ pub async fn attempt(
         && let Some(deployment) = &admission.reattach
     {
         let window = crate::models::assistant_conversation::ReattachWindow {
+            refusal: None,
+            accepted: false,
+            next_continuation: None,
             input,
             key: request_key.to_owned(),
+            terminal: false,
             capacity_deadline,
             absence_retry_before: super::assistant_turn_restart::absence_retry_before(
                 turn.started_at,
@@ -85,6 +93,17 @@ pub async fn attempt(
             ),
         };
         filter.insert("credential_api_key_id", &admission.credential_id);
+        filter.insert(
+            "$or",
+            vec![
+                doc! {"active_turn.restart_admission.window": bson::Bson::Null},
+                doc! {"active_turn.restart_admission.window.key": request_key,
+                "active_turn.restart_admission.window.accepted": {"$ne":true},
+                "active_turn.restart_admission.window.terminal": {"$ne":true}},
+                doc! {"active_turn.restart_admission.window.key": {"$ne":request_key},
+                "active_turn.restart_admission.window.terminal": true},
+            ],
+        );
         filter.insert(
             "active_turn.restart_admission.credential_ended",
             doc! {"$ne":true},
@@ -130,11 +149,21 @@ pub fn accepted<'a>(
         let accepted_at = bson::DateTime::now();
         // The common acceptance path needs no audit or transaction. Read the
         // persisted wait flag: the executor's conversation snapshot is stale.
-        let accepted = doc! {"$set": {
+        let mut accepted = doc! {"$set": {
             "active_turn.waiting_for_capacity": false,
             "active_turn.capacity_accepted_at": {"$ifNull": ["$active_turn.capacity_accepted_at", accepted_at]},
             "active_turn.capacity_wait_note_origin": bson::Bson::Null,
         }};
+        if row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.restart_admission.is_some())
+        {
+            accepted
+                .get_document_mut("$set")
+                .expect("acceptance fields")
+                .insert("active_turn.restart_admission.window.accepted", true);
+        }
         if db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(

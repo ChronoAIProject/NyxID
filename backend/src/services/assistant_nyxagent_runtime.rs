@@ -397,7 +397,19 @@ pub(crate) async fn continue_turn(
         return Ok(false);
     }
     let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
-    let update = doc! {"$set":{"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}};
+    let mut fields = doc! {"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)};
+    if active
+        .restart_admission
+        .as_ref()
+        .is_some_and(|admission| admission.window.is_some())
+    {
+        fields.insert(
+            "active_turn.restart_admission.window.next_continuation",
+            mongodb::bson::to_bson(continuations)
+                .map_err(|_| TurnError::internal("assistant_unavailable", "continuation"))?,
+        );
+    }
+    let update = doc! {"$set":fields};
     if active.platform_origin.is_some() {
         super::platform_personal_turn_service::update_platform_turn(&state.db, row, update)
             .await
@@ -930,10 +942,11 @@ async fn drive_owner_turn(
         }
     }));
     let started_at = row.active_turn.as_ref().expect("claimed turn").started_at;
+    let active = row.active_turn.as_ref().expect("claimed turn");
     let queue_deadline = permit.is_queued().then(|| {
-        let since = Utc::now();
+        let since = active.queued_at.unwrap_or(started_at);
         let wait = chrono::Duration::seconds(engine::TURN_QUEUE_WAIT_SECS as i64);
-        (since, since + wait)
+        (since, active.queue_deadline.unwrap_or(since + wait))
     });
     if let Some((since, deadline)) = queue_deadline {
         // `waiting` with the capacity fields keeps older clients' waiting display.
@@ -963,13 +976,16 @@ async fn drive_owner_turn(
             "block": {"type": "text", "block_id": block_id, "text": ""},
         }),
     );
-    let queued = match queue_deadline {
-        Some((since, deadline)) => {
+    let queued = if let Some(error) = expired_handoff(&row) {
+        Err(error)
+    } else if !permit.can_execute() {
+        Err(TurnError::internal("assistant_unavailable", "permit"))
+    } else if let Some((since, deadline)) = queue_deadline {
             let queued =
                 tokio::select! {
                     biased;
                     () = state.shutdown.interrupted() => Err(TurnError::internal("turn_lost", "shutdown")),
-                    result = wait_for_running_slot(&state, &row, &turn_id, &mut permit, since, deadline) => result,
+                    result = wait_for_running_slot(&state, &mut row, &turn_id, &mut permit, since, deadline) => result,
                 };
             if queued.is_ok() {
                 events.emit(
@@ -979,15 +995,15 @@ async fn drive_owner_turn(
                 );
             }
             queued
-        }
-        None => Ok(()),
+    } else {
+        Ok(())
     };
     let mut partial = row.active_turn.as_ref().filter(|turn|turn.restart_offer.is_some()).and_then(|turn|turn.reply.as_ref()).map(|reply|reply.text.clone()).unwrap_or_default();
     let mut instruction_context = None;
     let mut recovered_binding = None;
     let mut result = match queued {
         Err(error) => TurnResult {
-            text: String::new(),
+            text: partial.clone(),
             session_id: None,
             response_id: None,
             error: Some(error),
@@ -1001,8 +1017,12 @@ async fn drive_owner_turn(
             if let Some(active) = row.active_turn.as_ref().filter(|turn| turn.restart_offer.is_some())
                 && let Some(admission) = active.restart_admission.as_deref()
                 && let Some(window) = &admission.window {
-                return Box::pin(subscriber::recover(&state, egress.as_ref(), &authority, &row, &credential, policy,
+                let outcome = Box::pin(subscriber::recover(&state, egress.as_ref(), &authority, &row, &credential, policy,
                     admission, window, &mut events, &block_id, &mut partial, &mut recovered_binding)).await;
+                if let Some(fallback) = model_card_fallback(&state, &admission.reply_id, &row, &outcome, &mut partial).await? {
+                    return Ok(fallback);
+                }
+                return outcome;
             }
             let setup_deadline = super::assistant_guest_model_setup::guest_deadline(&state.db, &row).await
                 .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
@@ -1062,7 +1082,7 @@ async fn drive_owner_turn(
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::internal("assistant_unavailable", "permit")),
             error = watch_stop(&state, &row, &turn_id) => Err(error),
-            () = tokio::time::sleep(stream_bounds().turn_cap) => {
+            () = tokio::time::sleep(turn_remaining(&row)) => {
                 Err(TurnError::internal("turn_timeout", "turn_deadline"))
             }
         }
@@ -1075,17 +1095,11 @@ async fn drive_owner_turn(
         error: Some(error),
     }),
     };
-    let mut unconfirmed_window = None;
-    if row.active_turn.as_ref().is_some_and(|turn|turn.restart_admission.is_some()) && result.error.is_some() && result.response_id.is_none() {
+    if row.active_turn.as_ref().is_some_and(|turn|turn.restart_admission.is_some()) && (result.response_id.is_none() || executor_lost(&result)) {
         let current = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME).find_one(engine::WorkerFence::capture(&row).ok()?.filter()).await.ok()?;
         let current = current?;
         let confirmation = cancel_background(&state,egress.as_ref(),&current,&credential,policy).await;
-        if confirmation.is_none() {
-            unconfirmed_window = current.active_turn.as_ref()
-                .and_then(|turn| turn.restart_admission.as_deref())
-                .and_then(|source| source.window.as_ref()).map(|window| window.key.clone());
-        }
-        if let Some(mut terminal) = confirmation.and_then(|confirmed| confirmed.terminal) {
+        if result.error.is_some() && !executor_lost(&result) && let Some(mut terminal) = confirmation.and_then(|confirmed| confirmed.terminal) {
             if let Some(prepared) = &instruction_context { terminal.text = prepared.redact(&terminal.text); }
             if terminal.error.is_none() || result.text.is_empty() { result = terminal; }
         }
@@ -1140,7 +1154,7 @@ async fn drive_owner_turn(
                 &message_id,
                 &result,
                 instruction_context.as_ref().map(|context| &context.binding).or(recovered_binding.as_ref()),
-                unconfirmed_window.clone().map_or(engine::SettlementCondition::Worker, engine::SettlementCondition::CancelUnconfirmed),
+                engine::SettlementCondition::Worker,
             )
         },
     )
@@ -1165,13 +1179,47 @@ async fn drive_owner_turn(
 /// Bound on the queue's own writes: a stalled write must not hold capacity.
 const QUEUE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
+pub(crate) fn turn_remaining(row: &AssistantConversation) -> Duration {
+    let cap = stream_bounds().turn_cap;
+    let Some(active) = row
+        .active_turn
+        .as_ref()
+        .filter(|active| active.restart_admission.is_some())
+    else {
+        return cap;
+    };
+    cap.saturating_sub(
+        (Utc::now() - active.started_at)
+            .to_std()
+            .unwrap_or_default()
+            .saturating_sub(Duration::from_millis(active.timing.queue_wait_ms)),
+    )
+}
+
+pub(crate) fn expired_handoff(row: &AssistantConversation) -> Option<TurnError> {
+    let active = row
+        .active_turn
+        .as_ref()
+        .filter(|active| active.restart_offer.is_some())?;
+    if active
+        .queue_deadline
+        .is_some_and(|deadline| deadline <= Utc::now())
+    {
+        Some(TurnError::internal("queue_timeout", "queue"))
+    } else if turn_remaining(row).is_zero() {
+        Some(TurnError::internal("turn_timeout", "turn_deadline"))
+    } else {
+        None
+    }
+}
+
 /// A turn admitted while its owner's running replies were at their limit
 /// waits here, inside its claimed turn, so Stop, deletion and orphan
 /// recovery already apply to it, until one of them finishes. On failure the
 /// permit's capacity is given back at once, before the turn settles.
 pub(crate) async fn wait_for_running_slot(
     state: &AppState,
-    row: &AssistantConversation,
+    row: &mut AssistantConversation,
     turn_id: &str,
     permit: &mut DirectChatPermit,
     since: DateTime<Utc>,
@@ -1181,6 +1229,21 @@ pub(crate) async fn wait_for_running_slot(
     if let Err(error) = wait_queued(state, row, turn_id, permit, deadline, marked).await {
         permit.release();
         return Err(error);
+    }
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.restart_admission.is_some())
+        && let Some(token) = permit.token()
+    {
+        let wait = engine::mark_dequeued_with_capacity(&state.db, row, Some(token))
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "queue"))?;
+        let turn = row.active_turn.as_mut().expect("claimed turn");
+        turn.timing.queue_wait_ms = wait;
+        turn.queued_at = None;
+        turn.queue_deadline = None;
+        return Ok(());
     }
     // Display only, for the moments before the engine request starts, which
     // clears the markers durably; the lease set on queuing covers execution.
@@ -1328,6 +1391,21 @@ pub(crate) fn upstream_error_code(status: u16, envelope: &Value) -> &str {
     ""
 }
 
+fn post_refusal(status: u16, code: &str, request_id: Option<String>) -> TurnError {
+    let category = if engine::admission_refusal(status, code) {
+        "capacity_exceeded"
+    } else if matches!(status, 401 | 403) && code != "model_unavailable" {
+        "agent_key_required"
+    } else {
+        code
+    };
+    let mut error = TurnError::new(category).at_stage("upstream_response");
+    error.upstream_code = TurnError::new(code).upstream_code;
+    error.http_status = Some(status);
+    error.upstream_request_id = request_id.map(String::into_boxed_str);
+    error
+}
+
 async fn clear_session(
     state: &AppState,
     row: &AssistantConversation,
@@ -1414,7 +1492,7 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let mut tool_images = images::ToolImages::default();
-    let mut outcome = Box::pin(execute_turn_inner(
+    let outcome = Box::pin(execute_turn_inner(
         state,
         egress,
         authority,
@@ -1429,45 +1507,22 @@ pub(crate) async fn execute_owner_turn(
         &mut tool_images,
     ))
     .await;
-    let model_refusal =
-        super::assistant_service_execution::finish_model_attempt(&state.db, &attempt)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    if let Some(fallback) = model_card_fallback(state, &attempt, row, &outcome, partial).await? {
+        return Ok(fallback);
+    }
     // A current callback refusal can precede any reply. Cancellation in either
     // result shape wins, and an unrelated pending action cannot mask a failure.
-    let cancelled = outcome
-        .as_ref()
-        .is_err_and(|error| error.code == "cancelled")
-        || outcome.as_ref().is_ok_and(|result| {
-            result
-                .error
-                .as_ref()
-                .is_some_and(|error| error.code == "cancelled")
-        });
-    if !cancelled
-        && (outcome.is_err() || outcome.as_ref().is_ok_and(|result| result.error.is_some()))
-        && let Some(summary) = model_refusal
-    {
-        let text = format!(
-            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
-        );
-        *partial = text.clone();
-        outcome = Ok(TurnResult {
-            text,
-            session_id: None,
-            response_id: None,
-            error: None,
-        });
+    let fallback_allowed = match &outcome {
+        Err(error) => Some(error),
+        Ok(result) => result.error.as_ref(),
     }
+    .is_some_and(allows_fallback);
     if outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|r| r.error.is_some()) {
         tool_images.failed(state, row).await;
     }
     if tool_images.rounds > 0
         && let Some(mut fallback) = tool_images.fallback.take()
-        && (outcome.as_ref().is_err_and(|e| e.code != "cancelled")
-            || outcome
-                .as_ref()
-                .is_ok_and(|r| r.error.as_ref().is_some_and(|e| e.code != "cancelled")))
+        && fallback_allowed
     {
         events.emit("turn.notice", json!({"code":"image_input_unavailable", "message":"Tool images could not be viewed; the completed answer was preserved."}));
         clear_session(state, row, "image_input_unavailable")
@@ -1480,6 +1535,48 @@ pub(crate) async fn execute_owner_turn(
         return Ok(fallback);
     }
     outcome
+}
+
+fn allows_fallback(error: &TurnError) -> bool {
+    error.code != "cancelled" && error.upstream_code.as_deref() != Some("executor_lost")
+}
+
+async fn model_card_fallback(
+    state: &AppState,
+    attempt: &str,
+    row: &AssistantConversation,
+    outcome: &Result<TurnResult, TurnError>,
+    partial: &mut String,
+) -> Result<Option<TurnResult>, TurnError> {
+    let refusal = super::assistant_service_execution::finish_model_attempt(&state.db, attempt, row)
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
+    let failure = match outcome {
+        Err(error) => Some(error),
+        Ok(result) => result.error.as_ref(),
+    };
+    if failure.is_some_and(allows_fallback)
+        && let Some(summary) = refusal
+    {
+        let text = format!(
+            "Please review the confirmation card: {summary}. I’ll continue after you allow it."
+        );
+        partial.clone_from(&text);
+        return Ok(Some(TurnResult {
+            text,
+            session_id: None,
+            response_id: None,
+            error: None,
+        }));
+    }
+    Ok(None)
+}
+
+fn executor_lost(result: &TurnResult) -> bool {
+    result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.upstream_code.as_deref() == Some("executor_lost"))
 }
 
 struct EngineAttempt<'a> {
@@ -2261,6 +2358,21 @@ async fn execute_turn_inner(
                     &request_body,
                     &completed,
                     &context.binding,
+                    Some(subscriber::FollowUp::capture(
+                        &continuations,
+                        tool_images,
+                        context,
+                        &listing,
+                        attachments
+                            .iter()
+                            .filter(|item| {
+                                item.origin == "user_upload"
+                                    && item.content_type.starts_with("image/")
+                                    && !omitted.contains(&item.id)
+                            })
+                            .map(|item| item.id.clone())
+                            .collect(),
+                    )),
                 )
                 .await?,
             )
@@ -2438,8 +2550,25 @@ async fn execute_turn_inner(
             if tool_images.fallback.is_none()
                 && matches!(code, "tool_budget_exhausted" | "turn_timeout")
             {
-                let mut error = TurnError::new(code).at_stage("upstream_response");
-                error.http_status = Some(status);
+                let error = post_refusal(status, code, upstream_request_id);
+                if turn.restart_admission.is_some() {
+                    subscriber::save_refusal(state, row, &request_key, &error, None).await?;
+                }
+                if turn.restart_admission.is_some()
+                    && binding.is_some()
+                    && continuations.count < continuations.maximum
+                {
+                    subscriber::resolve_budget_window(
+                        state,
+                        egress,
+                        authority,
+                        row,
+                        credential,
+                        policy,
+                        &request_key,
+                    )
+                    .await?;
+                }
                 match continue_turn(
                     state,
                     row,
@@ -2514,11 +2643,13 @@ async fn execute_turn_inner(
                     events.notice();
                 }
                 RecoveryAction::Backoff => {
-                    let mut error =
-                        TurnError::new("capacity_exceeded").at_stage("upstream_response");
-                    error.upstream_code = TurnError::new(code).upstream_code;
-                    error.http_status = Some(status);
-                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    let error = post_refusal(status, code, upstream_request_id);
+                    let delay =
+                        engine::capacity_delay(recovery.retries, retry_after, rand::random());
+                    if turn.restart_admission.is_some() {
+                        subscriber::save_refusal(state, row, &request_key, &error, Some(delay))
+                            .await?;
+                    }
                     capacity_error = Some(error);
                     let started = *wait_started.get_or_insert_with(Utc::now);
                     engine::waiting_for_capacity(&state.db, row, started, capacity_deadline_at)
@@ -2533,8 +2664,6 @@ async fn execute_turn_inner(
                         "capacity_wait_started_at": started, "capacity_wait_deadline": capacity_deadline_at}),
                     );
                     attempt.log("backoff");
-                    let delay =
-                        engine::capacity_delay(recovery.retries, retry_after, rand::random());
                     acknowledgement
                         .wait(
                             tokio::time::sleep_until(
@@ -2548,16 +2677,10 @@ async fn execute_turn_inner(
                         .await;
                 }
                 RecoveryAction::Fail => {
-                    let mut error = TurnError::new(if status == 401 || status == 403 {
-                        "agent_key_required"
-                    } else {
-                        code
-                    })
-                    .at_stage("upstream_response");
-                    // Keep the upstream's own (sanitized) code, never NyxID's mapping.
-                    error.upstream_code = TurnError::new(code).upstream_code;
-                    error.http_status = Some(status);
-                    error.upstream_request_id = upstream_request_id.map(String::into_boxed_str);
+                    let error = post_refusal(status, code, upstream_request_id);
+                    if turn.restart_admission.is_some() {
+                        subscriber::save_refusal(state, row, &request_key, &error, None).await?;
+                    }
                     return Err(error);
                 }
             }
@@ -2711,9 +2834,16 @@ async fn execute_turn_inner(
             }
             return Err(error);
         }
-        crate::services::assistant_steering::set_running_response(&state.db, row, None)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "stream"))?;
+        let cleared = if background && decoder.terminal.as_ref().is_some_and(executor_lost) {
+            Ok(true)
+        } else if background {
+            super::assistant_turn_restart::confirm_window(&state.db, row, &request_key).await
+        } else {
+            super::assistant_steering::set_running_response(&state.db, row, None).await
+        };
+        if !cleared.map_err(|_| TurnError::internal("assistant_unavailable", "stream"))? {
+            return Err(TurnError::new("cancelled"));
+        }
         if decoder.image_input_unsupported {
             for item in attachments.iter().filter(|a| {
                 a.origin == "user_upload"

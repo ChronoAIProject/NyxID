@@ -171,6 +171,8 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued_after_restart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_link_publication: Option<VoiceLinkPublication>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
