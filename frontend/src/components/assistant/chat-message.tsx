@@ -338,11 +338,11 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   }
   const counts = countDecisions(decisions, tools.flatMap((tool) => tool.decision ? [tool.decision] : []));
   const parts = [
-    activitySummary(message, translateUi),
-    total ? translateUi("{{count}} actions", { count: total }) : "",
+    { label: activitySummary(message, translateUi), warning: false },
+    ...(total ? [{ label: translateUi("{{count}} actions", { count: total }), warning: false }] : []),
     ...decisionSummary(counts, translateUi),
-    capacityWaitMs > 0 && waited ? translateUi("waited ") + formatCapacityWait(capacityWaitMs) : "",
-  ].filter(Boolean);
+    ...(capacityWaitMs > 0 && waited ? [{ label: translateUi("waited ") + formatCapacityWait(capacityWaitMs), warning: false }] : []),
+  ];
   const deliveryFailed = delivery?.status === "failed";
   return (
     <div className={cn("mb-2", ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
@@ -350,20 +350,20 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
         type="button"
         onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
-        aria-label={translateUi("Turn details: {{value1}}", { value1: [...parts, failed ? translateUi("{{count}} failed", { count: failed }) : "", deliveryFailed ? translateUi("delivery failed") : ""].filter(Boolean).join(", ") })}
+        aria-label={translateUi("Turn details: {{value1}}", { value1: [...parts.map(part => part.label), failed ? translateUi("{{count}} failed", { count: failed }) : "", deliveryFailed ? translateUi("delivery failed") : ""].filter(Boolean).join(", ") })}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
       >
         <ActivitySummaryIcon status={message.status} />
         <span className="min-w-0 flex-1 truncate">
           {parts.map((part, index) => (
             <span
-              key={part}
+              key={part.label}
               className={cn(
                 index > 0 && "before:mx-1 before:content-['·']",
-                counts.denied && part === translateUi("{{count}} denied", { count: counts.denied }) && "text-warning",
+                part.warning && "text-warning",
               )}
             >
-              {part}
+              {part.label}
             </span>
           ))}
           {message.activityTotal && message.activityTotal > count ? (

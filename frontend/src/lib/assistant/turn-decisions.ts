@@ -71,16 +71,20 @@ export function countDecisions(rows: readonly Decision[], links: readonly Activi
 }
 
 /** Header fragments for a turn's decisions, most important first. */
-export function decisionSummary(counts: DecisionCounts, t = translateUi): string[] {
-  return [
-    counts.waiting ? t("{{count}} waiting", { count: counts.waiting }) : "",
-    counts.cancelled ? t("{{count}} cancelled", { count: counts.cancelled }) : "",
-    counts.unavailable ? t("{{count}} outcome unavailable", { count: counts.unavailable }) : "",
-    counts.denied ? t("{{count}} denied", { count: counts.denied }) : "",
-    counts.allowed ? t("{{count}} allowed", { count: counts.allowed }) : "",
-    counts.automatic ? t("{{count}} allowed by Full access", { count: counts.automatic }) : "",
-    counts.expired ? t("{{count}} expired", { count: counts.expired }) : "",
-  ].filter(Boolean);
+export function decisionSummary(counts: DecisionCounts, t = translateUi) {
+  const labels = {
+    waiting: "{{count}} waiting",
+    cancelled: "{{count}} cancelled",
+    unavailable: "{{count}} outcome unavailable",
+    denied: "{{count}} denied",
+    allowed: "{{count}} allowed",
+    automatic: "{{count}} allowed by Full access",
+    expired: "{{count}} expired",
+  } satisfies Record<keyof DecisionCounts, string>;
+  return (Object.keys(labels) as (keyof DecisionCounts)[]).flatMap(kind => {
+    const count = counts[kind];
+    return count ? [{ label: t(labels[kind], { count }), warning: kind === "denied" }] : [];
+  });
 }
 
 /** Identical decisions (same verdict, same action) collapse into one line. */
