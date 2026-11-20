@@ -13,9 +13,9 @@ import { WorkspaceRailMotionContext } from "./workspaceFloatingInset";
 export const MotionView = Animated.View;
 
 /** Icons that swap inside a floating control fade in and out. */
-export const HEADER_ACTION_ENTERING = FadeIn.duration(SLAB_MOTION_DURATION).reduceMotion(
-  ReduceMotion.System,
-);
+export const HEADER_ACTION_ENTERING = FadeIn.duration(
+  SLAB_MOTION_DURATION,
+).reduceMotion(ReduceMotion.System);
 export const HEADER_ACTION_EXITING = FadeOut.duration(150).reduceMotion(
   ReduceMotion.System,
 );
