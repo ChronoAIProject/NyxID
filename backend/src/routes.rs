@@ -2018,6 +2018,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(axum::extract::DefaultBodyLimit::max(
             crate::services::service_preference_service::MAX_REQUEST_BYTES,
         ))
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens))
@@ -2025,6 +2026,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let key_update_routes = Router::new()
         .route("/keys/{key_id}", put(handlers::key_updates::update_key))
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
@@ -3810,6 +3812,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/integrations/openclaw/mappings",
             post(handlers::openclaw_channel::create_mapping),
         )
+        .route_layer(axum::Extension(crate::mw::auth::AccountManagementRoute))
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_api_key_tokens))
@@ -4056,6 +4059,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )),
     )
 }
+
+#[cfg(test)]
+mod app_management_tests;
 
 #[cfg(test)]
 mod org_membership_tests;

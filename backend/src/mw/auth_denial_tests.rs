@@ -198,6 +198,7 @@ async fn channel_routes_keep_human_success_and_agent_denial() {
         delegation_scopes: String::new(),
         default_service_catalog_slugs: vec![],
         broker_capability_enabled: false,
+        first_party_management: false,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,

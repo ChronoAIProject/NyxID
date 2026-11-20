@@ -671,7 +671,7 @@ async fn run_billing_route_coverage_smoke() {
     .await;
     let (node_tx, node_rx) = mpsc::channel(256);
     crate::test_utils::register_test_node_connection(&state, &node.id, node_tx).await;
-    let node_responder = spawn_node_http_responder(&state, &node.id, node_rx, 3);
+    let node_responder = spawn_node_http_responder(&state, &node.id, node_rx, 5);
 
     call_mounted_route(
         &app,
@@ -695,6 +695,36 @@ async fn run_billing_route_coverage_smoke() {
     )
     .await;
     assert_route_settled_count(&db, &node_proxy.slug, BillingMetric::Requests, 2).await;
+
+    let node_model = insert_route_service(
+        &db,
+        &owner_id,
+        "llm-node-json",
+        "https://node-route.invalid",
+        None,
+        Some(&node.id),
+    )
+    .await;
+    for path in ["json", "chunked-json"] {
+        call_mounted_route(
+            &app,
+            route_request(
+                Method::GET,
+                &format!("/api/v1/proxy/s/{}/{path}", node_model.slug),
+                &token,
+                Body::empty(),
+            ),
+        )
+        .await;
+    }
+    assert_route_settled_count(&db, &node_model.slug, BillingMetric::Tokens, 2).await;
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {"service_slug": &node_model.slug, "quantity": 15})
+            .await
+            .unwrap(),
+        2
+    );
 
     for (path, stream, mounted_route) in [
         (
@@ -2069,6 +2099,15 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
                 "output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"OK\n"}]}],
                 "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})).into_response();
         }
+        if path == "/buffered" {
+            assert_eq!(request.headers()["accept-encoding"], "gzip");
+        }
+        if matches!(
+            path.as_str(),
+            "/v1/chat/completions" | "/v1/stream" | "/chat/completions" | "/mcp-query"
+        ) {
+            assert_eq!(request.headers()["accept-encoding"], "identity");
+        }
         if path == "/mcp-query" {
             assert_eq!(
                 request.uri().query(),
@@ -2395,6 +2434,7 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
         .method(method)
         .uri(uri)
         .header("authorization", format!("Bearer {token}"))
+        .header("accept-encoding", "gzip")
         .header("content-type", "application/json")
         .body(body)
         .expect("build mounted route request")
@@ -2576,16 +2616,41 @@ fn spawn_node_http_responder(
             let request_id = parsed["request_id"]
                 .as_str()
                 .expect("node proxy request id");
-            let path = parsed["path"].as_str().unwrap_or_default();
+            let path = parsed["path"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_start_matches('/');
 
             if path == "mcp-query" {
+                assert_eq!(parsed["headers"]["accept-encoding"], "identity");
                 assert_eq!(
                     parsed["query"].as_str(),
                     Some("tag=a&tag=b&name=Nyx%20ID&empty=")
                 );
             }
 
-            if path.contains("stream") {
+            if matches!(path, "json" | "chunked-json") {
+                assert_eq!(parsed["headers"]["accept-encoding"], "identity");
+                let headers = vec![("content-type".into(), "application/json".into())];
+                let body = br#"{"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}"#;
+                if path == "json" {
+                    manager.deliver_proxy_response(
+                        &node_id,
+                        NodeProxyResponse {
+                            request_id: request_id.to_string(),
+                            status: 200,
+                            headers,
+                            body: body.to_vec(),
+                        },
+                    );
+                } else {
+                    assert!(manager.deliver_stream_start(&node_id, request_id, 200, headers));
+                    for chunk in body.chunks(23) {
+                        manager.deliver_stream_chunk(&node_id, request_id, chunk.to_vec());
+                    }
+                    manager.deliver_stream_end(&node_id, request_id);
+                }
+            } else if path.contains("stream") {
                 assert!(manager.deliver_stream_start(
                     &node_id,
                     request_id,

@@ -132,7 +132,9 @@ impl Responses {
         super::tools::validate_call(state, call).await?;
         let (delegation, response_id) = self.current.iter().next().expect("one native response");
         let delegation = delegation.clone();
-        let response = provider.response(response_id).await?;
+        let response = provider
+            .response(&call.preferences.service_id, response_id)
+            .await?;
         if response["id"].as_str() != Some(response_id) {
             return Err(invalid());
         }
