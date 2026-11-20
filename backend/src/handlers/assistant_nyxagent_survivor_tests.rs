@@ -94,20 +94,19 @@ async fn transferring_capacity_preserves_running_slots_and_fifo_while_saturated(
         let old = guard.token().unwrap().clone();
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let transferred = next
+        let grant = next
             .direct_chat_limiter
             .transfer_capacity(&mut session, &old, OWNER, limit)
             .await
             .unwrap()
             .unwrap();
         session.commit_transaction().await.unwrap();
+        let transferred = grant.token.clone();
         assert_eq!(old.id, transferred.id);
         assert_eq!(old.acquired_at, transferred.acquired_at);
         assert_eq!(old.order_id, transferred.order_id);
         assert_ne!(old.lease_id, transferred.lease_id);
-        let moved = next
-            .direct_chat_limiter
-            .transferred_permit(OWNER, transferred.clone());
+        let moved = next.direct_chat_limiter.transferred_permit(OWNER, grant);
         assert!(!SlotStore::release(&db, &old).await.unwrap());
         drop(guard);
         if old.namespace == DIRECT_CHAT_QUEUE_NAMESPACE {

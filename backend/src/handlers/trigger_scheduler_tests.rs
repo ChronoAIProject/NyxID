@@ -3583,6 +3583,26 @@ async fn scheduler_terminal_paths_reset_admitted_failure_streaks() {
             .unwrap();
         assert_eq!(saved_run.outcome, RunOutcome::Failed, "{reason}");
         assert_eq!(saved_run.reason.as_deref(), Some(reason));
+        if reason == "credential_invalid" {
+            assert!(
+                saved_run.failure_reason.is_none(),
+                "legacy reply had no attribution"
+            );
+            assert!(
+                crate::handlers::triggers::run_response(saved_run.clone())
+                    .failure_reason
+                    .is_none()
+            );
+        } else {
+            let failure = saved_run
+                .failure_reason
+                .as_ref()
+                .expect("scheduler failure reason");
+            assert_eq!(
+                (&*failure.source, &*failure.stage, &*failure.code),
+                ("nyxid", "scheduler", reason)
+            );
+        }
         assert!(saved_run.terminal_result_recorded);
         let saved = state
             .db

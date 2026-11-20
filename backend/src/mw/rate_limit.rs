@@ -607,7 +607,7 @@ impl DirectChatRateLimiter {
         token: &crate::models::coordination::SlotToken,
         owner: &str,
         team_limit: Option<u32>,
-    ) -> Result<Option<crate::models::coordination::SlotToken>, AppError> {
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
         let (namespace, limit) = match team_limit {
             Some(limit) => ("assistant_team", limit.max(1)),
             None if token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE => {
@@ -625,14 +625,14 @@ impl DirectChatRateLimiter {
     pub(crate) fn transferred_permit(
         &self,
         owner: &str,
-        token: crate::models::coordination::SlotToken,
+        grant: crate::services::coordination_service::SlotGrant,
     ) -> DirectChatPermit {
         let manager = self
             .slot_manager
             .as_ref()
             .expect("transferred database slot");
-        let queued = token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
-        let place = manager.guard(token);
+        let queued = grant.token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
+        let place = manager.guard(grant);
         if !queued {
             return DirectChatPermit::running(place);
         }

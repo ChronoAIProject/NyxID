@@ -313,7 +313,7 @@ pub(in crate::handlers) async fn take_one(
                         db,
                         offered,
                         worker,
-                        transferred.as_ref(),
+                        transferred.as_ref().map(|grant| &grant.token),
                         session,
                     )
                     .await?
@@ -329,7 +329,7 @@ pub(in crate::handlers) async fn take_one(
             Err(error) => return Err(error),
         };
         let permit = match transferred {
-            Some(token) => limiter.transferred_permit(owner, token),
+            Some(grant) => limiter.transferred_permit(owner, grant),
             None => DirectChatPermit::settlement_only(),
         };
         (row, permit)

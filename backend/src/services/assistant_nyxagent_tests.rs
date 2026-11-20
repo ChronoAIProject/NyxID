@@ -431,7 +431,13 @@ fn guest_1995_failure_reason_requires_recent_unambiguous_evidence() {
     turn.model_refusal = Some(bson::from_document(old).unwrap());
     fallback(turn, now);
     assert!(failure_reason(&TurnError::internal("cancelled", "stop"), turn, now).is_none());
-    assert!(failure_reason(&TurnError::new("SECRET unsafe arbitrary prose"), turn, now).is_none());
+    let error = TurnError::new("SECRET unsafe arbitrary prose").at_stage("upstream_response");
+    let reason = failure_reason(&error, turn, now).unwrap();
+    assert_eq!(
+        (&*reason.source, &*reason.stage, &*reason.code),
+        ("nyxagent", "upstream_response", "unrecognized_failure")
+    );
+    assert!(!serde_json::to_string(&reason).unwrap().contains("SECRET"));
 }
 
 #[test]
@@ -1835,6 +1841,200 @@ async fn expire_turn(db: &Database, row: &AssistantConversation) {
 }
 
 #[tokio::test]
+async fn internal_failure_reason_reaches_reply_audit_and_trigger_run() {
+    let db = connect_transaction_test_database("turn_local_failure").await;
+    let state = test_app_state(db.clone());
+    for (code, stage) in [
+        ("assistant_unavailable", "permit"),
+        ("turn_lost", "shutdown"),
+    ] {
+        let row = begin_turn(&db, "owner", &request(None, "work"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        let runs = db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME);
+        runs.insert_one(doc! {"_id": stage, "user_id": "owner", "turn_id": &turn.turn_id})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(doc! {"_id": &row.id}, doc! {"$set": {"active_turn.trigger_run_id": stage, "active_turn.origin":"trigger"}})
+            .await.unwrap();
+        let error = finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &TurnResult {
+                text: "partial".into(),
+                session_id: None,
+                response_id: None,
+                error: Some(TurnError::internal(code, stage)),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = messages(&db, "owner", &row.id, 10, None)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reply.status, "failed");
+        assert_eq!(reply.error_code.as_deref(), Some(code));
+        assert!(reply.upstream_error_code.is_none());
+        let reason = reply
+            .turn_metadata
+            .unwrap()
+            .failure_reason
+            .expect("saved failure reason");
+        assert_eq!(
+            (&*reason.source, &*reason.stage, &*reason.code),
+            ("nyxid", stage, code)
+        );
+        let expected = bson::to_document(&reason).unwrap();
+        assert_eq!(
+            bson::to_document(&error.metadata.unwrap().failure_reason.unwrap()).unwrap(),
+            expected
+        );
+        let run = runs.find_one(doc! {"_id": stage}).await.unwrap().unwrap();
+        assert_eq!(run.get_document("failure_reason").unwrap(), &expected);
+        let audit = db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(
+                doc! {"event_type":"assistant_turn_failed", "event_data.turn_id": &turn.turn_id},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get_document("failure_reason")
+                .unwrap(),
+            &expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn scheduler_finalization_before_matching_turn_preserves_both_diagnoses_and_stop() {
+    use crate::models::trigger_run::{RunOutcome, TriggerRun};
+    use crate::services::trigger_schedule as schedules;
+
+    let db = connect_transaction_test_database("turn_run_precedence").await;
+    let state = test_app_state(db.clone());
+    let runs = db.collection::<TriggerRun>(crate::models::trigger_run::COLLECTION_NAME);
+    for reason in ["coordinator_protocol_unsupported", "cancelled"] {
+        let mut row = begin_turn(&db, "owner", &request(None, "work"), &state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.origin = TurnOrigin::Trigger;
+        turn.trigger_run_id = Some(reason.into());
+        let turn_id = turn.turn_id.clone();
+        let stopped = reason == "cancelled";
+        if stopped {
+            row.automation_v2 = true;
+            turn.automation_work = Some(crate::models::trigger_run::AutomationWork {
+                run_id: reason.into(),
+                work_id: turn_id.clone(),
+                coordinator_thread_id: row.id.clone(),
+                role: "coordinator".into(),
+                confirmation_policy: None,
+            });
+        }
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .replace_one(doc! {"_id": &row.id}, &row)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        let run: TriggerRun = bson::from_document(doc! {
+            "_id": reason, "trigger_id": "trigger", "user_id": "owner",
+            "scheduled_at": now, "deadline": now, "outcome": "started",
+            "turn_id": &turn_id, "thread_id": &row.id, "fence": "fence", "lease_until": now, "expires_at": now,
+            "coordinator": {"protocol": if stopped { 2 } else { 3 }, "deadline": now,
+                "continuations": 0, "dispatches": 0, "closed": false, "version": 0},
+        }).unwrap();
+        runs.insert_one(run).await.unwrap();
+        if stopped {
+            request_stop(&db, "owner", &row.id).await.unwrap();
+        } else {
+            schedules::finish(&db, reason, RunOutcome::Failed, Some(reason), "")
+                .await
+                .unwrap();
+        }
+        let first = runs.find_one(doc! {"_id": reason}).await.unwrap().unwrap();
+        assert_eq!(first.outcome, RunOutcome::Failed);
+        assert_eq!(first.reason.as_deref(), Some(reason));
+        assert_eq!(
+            first.failure_reason.as_ref().map(|r| (
+                r.source.as_str(),
+                r.stage.as_str(),
+                r.code.as_str()
+            )),
+            (!stopped).then_some(("nyxid", "scheduler", reason))
+        );
+        let message_id = Uuid::new_v4().to_string();
+        let error = finish_turn(
+            &db,
+            &row,
+            &row.credential_api_key_id,
+            &message_id,
+            &TurnResult {
+                text: String::new(),
+                session_id: None,
+                response_id: None,
+                error: Some(TurnError::new("turn_interrupted")),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let reply = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(doc! {"_id": &message_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let diagnosis = reply.turn_metadata.unwrap().failure_reason;
+        assert_eq!(
+            diagnosis
+                .as_ref()
+                .map(|r| (r.source.as_str(), r.stage.as_str(), r.code.as_str())),
+            (!stopped).then_some(("nyxagent", "stream", "turn_interrupted"))
+        );
+        if stopped {
+            assert_eq!(reply.error_code.as_deref(), Some("cancelled"));
+        }
+        assert_eq!(
+            bson::to_bson(&error.metadata.unwrap().failure_reason).unwrap(),
+            bson::to_bson(&diagnosis).unwrap()
+        );
+        let audit = db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {"event_type": "assistant_turn_failed", "event_data.turn_id": &turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get("failure_reason"),
+            Some(&bson::to_bson(&diagnosis).unwrap())
+        );
+        let last = runs.find_one(doc! {"_id": reason}).await.unwrap().unwrap();
+        assert_eq!(last.reason, first.reason);
+        assert_eq!(
+            bson::to_bson(&last.failure_reason).unwrap(),
+            bson::to_bson(&first.failure_reason).unwrap()
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop() {
     let db = connect_transaction_test_database("nyxa_reclaim").await;
     ensure_indexes(&db).await.unwrap();
@@ -1919,6 +2119,13 @@ async fn stale_fence_is_reclaimed_with_lost_reply_and_late_settlement_is_a_noop(
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        run.get_document("failure_reason")
+            .unwrap()
+            .get_str("stage")
+            .unwrap(),
+        "lease_expiry"
+    );
     assert_eq!(run.get_i64("attempts").unwrap(), 2);
     assert!(run.get_i64("capacity_wait_ms").unwrap() >= 20_000);
     assert_eq!(
