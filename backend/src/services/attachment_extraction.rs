@@ -47,6 +47,12 @@ fn malformed() -> AppError {
     bad("Malformed or unsupported attachment. Use PDF, DOCX, UTF-8 text, PNG, JPEG, GIF or WebP.")
 }
 
+/// PDFs can consist entirely of UTF-8 bytes; recognize their structure before
+/// treating a tool download as generic text.
+pub(crate) fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
+}
+
 /// Filename is only a hint for text dialects; every hinted structure is validated.
 fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES {
@@ -77,7 +83,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             sections: vec![],
         });
     }
-    if bytes.starts_with(b"%PDF-") {
+    if is_pdf(bytes) {
         let document = lopdf::Document::load_mem(bytes).map_err(|_| malformed())?;
         if document.is_encrypted() {
             return Err(bad(

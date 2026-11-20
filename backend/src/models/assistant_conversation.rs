@@ -565,7 +565,8 @@ pub struct ActiveTurn {
     /// Bounded, oldest first; the newest entries are retained.
     #[serde(default)]
     pub activities: Vec<TurnActivity>,
-    /// Bounded; see `MAX_TURN_ATTACHMENTS`.
+    /// Bounded metadata: up to eight tool images and eight tool files can
+    /// coexist; other attachment origins retain their own admission limits.
     #[serde(default)]
     pub attachments: Vec<TurnAttachment>,
     /// Wake-up events drained into this turn (rendered into its instructions).

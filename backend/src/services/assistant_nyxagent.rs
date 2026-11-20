@@ -5541,6 +5541,48 @@ pub(crate) async fn include_execution_card(
 }
 
 pub const MAX_TURN_ATTACHMENTS: usize = 8;
+/// Tool files have a separate eight-entry budget so they cannot consume the
+/// eight image entries available to a turn.
+pub const MAX_TURN_FILES: usize = 8;
+
+pub(crate) fn is_tool_file(
+    attachment: &crate::models::assistant_conversation::TurnAttachment,
+) -> bool {
+    attachment.origin == "tool" && !attachment.content_type.starts_with("image/")
+}
+
+fn attachment_count_expr(files: bool) -> bson::Document {
+    let file_condition = doc! {"$and":[
+        {"$eq":["$$attachment.origin","tool"]},
+        {"$not":[{"$regexMatch":{"input":{"$ifNull":["$$attachment.content_type",""]},"regex":"^image/"}}]},
+    ]};
+    // Only new tool files are excluded from the legacy capacity. With no files,
+    // uploads, screenshots and other existing origins count exactly as before.
+    let condition = if files {
+        file_condition
+    } else {
+        doc! {"$not":[file_condition]}
+    };
+    doc! {"$size":{"$filter":{
+        "input":{"$ifNull":["$active_turn.attachments", bson::Bson::Array(Vec::new())]},
+        "as":"attachment",
+        "cond":condition
+    }}}
+}
+
+pub(crate) fn image_attachment_capacity_filter(filter: &mut bson::Document) {
+    filter.insert(
+        "$expr",
+        doc! {"$lt":[attachment_count_expr(false), MAX_TURN_ATTACHMENTS as i32]},
+    );
+}
+
+pub(crate) fn file_attachment_capacity_filter(filter: &mut bson::Document) {
+    filter.insert(
+        "$expr",
+        doc! {"$lt":[attachment_count_expr(true), MAX_TURN_FILES as i32]},
+    );
+}
 
 pub fn chat_tool_image(attachment: &crate::models::assistant_conversation::TurnAttachment) -> bool {
     attachment.origin == "tool"
@@ -5697,11 +5739,8 @@ pub async fn attach_routed_image(
         "active_turn.turn_id": {"$exists": true},
         "active_turn.stop_requested": false,
     };
-    // The last permitted index must still be free.
-    filter.insert(
-        format!("active_turn.attachments.{}", MAX_TURN_ATTACHMENTS - 1),
-        doc! {"$exists": false},
-    );
+    // Preserve the legacy image budget independently of retained tool files.
+    image_attachment_capacity_filter(&mut filter);
     // Claim a slot first so nothing is encrypted or stored without a live turn.
     let claimed = db
         .collection::<ImageRouteSnapshot>(CONVERSATIONS)
@@ -5892,10 +5931,7 @@ pub(crate) async fn attach_resource_image(
                     };
                     doc! {"$set": {format!("active_turn.attachments.$[image].{field}"): true}}
                 } else {
-                    filter.insert(
-                        format!("active_turn.attachments.{}", MAX_TURN_ATTACHMENTS - 1),
-                        doc! {"$exists": false},
-                    );
+                    image_attachment_capacity_filter(&mut filter);
                     filter.insert(
                         "active_turn.attachments.id",
                         doc! {"$ne": &resource.attachment_id},
