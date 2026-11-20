@@ -1523,10 +1523,124 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
                     captured
                 );
                 assert!(message.media_bound.unwrap().failed.is_empty());
+                assert_eq!(message.attachments[0].label, "attachment.png");
+                assert_eq!(message.attachments[0].content_type, "image/png");
+                let stored = state
+                    .db
+                    .collection::<crate::models::assistant_upload::AssistantUpload>(
+                        crate::models::assistant_upload::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id":&message.attachments[0].id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.label, "attachment.png");
+                assert_eq!(stored.content_type, "image/png");
+                assert!(stored.source.is_some());
                 assert!(captured.to_string().contains("input_image"), "{captured}");
                 assert!(message.media_pending.is_none());
             }
         }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn channel_lark_pdf_names_survive_fetch_and_misleading_types_wait_for_validation() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    for (header, expected) in [
+        (None, "attachment.pdf"),
+        (
+            Some("attachment; filename*=UTF-8''%E6%94%B6%E6%8D%AE.pdf"),
+            "收据.pdf",
+        ),
+        (Some("attachment; filename=Receipt"), "Receipt"),
+    ] {
+        let (state, row, _, _, server) = media_fixture("lark_pdf_filename", "direct").await;
+        enable_media(&state).await;
+        let bytes = crate::test_utils::test_pdf();
+        assert!(bytes.len() > 42);
+        let provider = ingestion_provider(&state, &row, bytes.clone()).await;
+        // This deliberately disagrees with the bytes. The download must not
+        // manufacture attachment.txt before extraction discovers the PDF.
+        let mut reply = ResponseTemplate::new(200)
+            .set_body_bytes(bytes.clone())
+            .insert_header("content-type", "text/plain");
+        if let Some(header) = header {
+            reply = reply.insert_header("content-disposition", header);
+        }
+        Mock::given(method("GET"))
+            .and(path_regex(".*/resources/.*"))
+            .respond_with(reply)
+            .with_priority(1)
+            // The source advertises 42 bytes. Serve the same metadata when
+            // the bounded first GET is rejected and collection retries.
+            .expect(2)
+            .mount(&provider)
+            .await;
+        let mut source = media_source(
+            &state,
+            &row,
+            "pdf-source",
+            "pdf-native",
+            "Read this receipt",
+        )
+        .await;
+        source.content_type = "file".into();
+        source.attachments[0].content_type = "file".into();
+        source.attachments[0].size_bytes = Some(42);
+        source.attachments[0].file_key = source.attachments[0].image_key.take();
+        source.attachments[0].provider_ref = source.attachments[0]
+            .provider_ref
+            .replace("type=image", "type=file");
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .replace_one(doc! {"_id":&source.id}, &source)
+            .await
+            .unwrap();
+        let (_guard, done) = watch_relay_callback(&row.id, &source.id);
+        assert_eq!(
+            direct_private(&state, &row, &source.id, "human", "Read this receipt").await,
+            StatusCode::ACCEPTED
+        );
+        tokio::time::timeout(Duration::from_secs(30), done)
+            .await
+            .unwrap()
+            .unwrap();
+        let written = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":&source.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let message = state.db.collection::<crate::models::assistant_message::AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"conversation_id":&written.conversation_id,"turn_id":&written.turn_id,"role":"user"}).await.unwrap().unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        let upload = state
+            .db
+            .collection::<crate::models::assistant_upload::AssistantUpload>(
+                crate::models::assistant_upload::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&message.attachments[0].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upload.label, expected);
+        assert_eq!(upload.content_type, "application/pdf");
+        let expected_egress = if header.is_none() {
+            "attachment.pdf"
+        } else {
+            expected
+        };
+        assert_eq!(
+            crate::services::assistant_upload_service::EgressAttachment::User(Box::new(upload))
+                .filename(),
+            expected_egress
+        );
+        assert_eq!(message.attachments[0].content_type, "application/pdf");
+        provider.verify().await;
         server.abort();
     }
 }

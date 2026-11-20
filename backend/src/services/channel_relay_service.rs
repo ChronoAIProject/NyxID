@@ -221,7 +221,27 @@ pub(crate) fn inbound_metadata(
     let attachments = telegram_attachments
         .as_deref()
         .unwrap_or(&inbound.attachments);
+    let is_lark_file = matches!(platform, "lark" | "feishu")
+        && matches!(inbound.content_type.as_str(), "file" | "audio" | "video");
+    let effective_file_name = is_lark_file
+        .then(|| super::channel_adapters::lark::effective_file_name(&inbound.raw_data))
+        .flatten();
     ChannelMessage {
+        effective_attachment_filenames: if is_lark_file {
+            attachments
+                .iter()
+                .map(|a| {
+                    effective_file_name.clone().or_else(|| {
+                        super::attachment_filename::original_name(
+                            a.filename.as_deref(),
+                            super::assistant_upload_service::MAX_FILENAME_CHARS,
+                        )
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         embedded_attachments: inbound.embedded_attachments.clone(),
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
@@ -289,6 +309,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -364,6 +385,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -1528,6 +1550,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

@@ -296,6 +296,7 @@ pub struct MaterializedAttachment {
 pub struct FetchedMedia {
     pub bytes: bytes::Bytes,
     pub mime_type: Option<String>,
+    /// An original source/provider name, never a synthesized download fallback.
     pub filename: Option<String>,
 }
 
