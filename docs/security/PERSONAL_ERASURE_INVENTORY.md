@@ -451,6 +451,7 @@ backend/src/models/assistant_invocation.rs: COLLECTION_NAME=assistant_invocation
 backend/src/models/assistant_message.rs: COLLECTION_NAME=assistant_messages | user_id
 backend/src/models/assistant_message_feedback.rs: COLLECTION_NAME=assistant_message_feedback | user_id
 backend/src/models/assistant_settings.rs: COLLECTION_NAME=assistant_settings | user_id
+backend/src/models/assistant_system_skills.rs: COLLECTION_NAME=assistant_system_skills | updated_by (retained platform administrator attribution)
 backend/src/models/assistant_skill_draft_attempt.rs: COLLECTION_NAME=assistant_skill_draft_attempts | user_id
 backend/src/models/assistant_voice.rs: REQUESTS=assistant_voice_requests | user_id
 backend/src/models/assistant_voice_session.rs: COLLECTION_NAME=assistant_voice_sessions | user_id

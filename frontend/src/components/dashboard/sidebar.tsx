@@ -93,6 +93,7 @@ export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
+  { to: "/admin/assistant/system-skills", icon: Bot, label: "Built-in skills" },
   { to: "/admin/upload-retention", icon: HardDrive, label: "Upload retention" },
   {
     to: "/admin/platform-credentials",
@@ -150,6 +151,7 @@ export function getVisibleAdminNav(
         "/admin/ownership",
         "/admin/tools",
         "/admin/upload-retention",
+        "/admin/assistant/system-skills",
       ].includes(item.to) ||
       canAdminWrite(user) ||
       (item.to === "/admin/tools" && canManageTools(user)),

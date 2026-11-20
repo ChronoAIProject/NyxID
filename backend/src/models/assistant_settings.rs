@@ -31,6 +31,14 @@ pub enum SpecialistAccessRequests {
     RoutedToNyxbot,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemSkillsForSpecialists {
+    #[default]
+    Default,
+    Override,
+}
+
 pub const DEFAULT_SCHEDULE_MINIMUM_MINUTES: i32 = 5;
 pub const SCHEDULE_MINIMUM_MINUTES_LIMIT: i32 = 1440;
 pub const DEFAULT_TRIGGER_RUNS_PER_HOUR: i32 = 30;
@@ -102,6 +110,8 @@ pub struct AssistantSettings {
     /// NyxBot Notifications preferences; additive, old readers ignore it.
     #[serde(default)]
     pub notifications: NotificationPreferences,
+    #[serde(default)]
+    pub system_skills_for_specialists: SystemSkillsForSpecialists,
 }
 
 fn default_schedule_minimum() -> i32 {
@@ -150,6 +160,7 @@ impl AssistantSettings {
             trigger_runs_per_day: DEFAULT_TRIGGER_RUNS_PER_DAY,
             specialist_access_requests: SpecialistAccessRequests::Denied,
             notifications: NotificationPreferences::default(),
+            system_skills_for_specialists: SystemSkillsForSpecialists::Default,
         }
     }
 }

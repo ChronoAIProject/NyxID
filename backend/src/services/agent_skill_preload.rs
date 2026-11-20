@@ -184,7 +184,7 @@ pub async fn set(
     let mut current_paths = current.preload_paths.clone();
     current_paths.sort();
     if paths == current_paths {
-        return Ok(agent.into());
+        return super::assistant_system_skills_service::response(db, actor, agent).await;
     }
     let other_bytes = agent
         .skill_metadata
@@ -236,7 +236,7 @@ pub async fn set(
         Some(json!({"owner_id":agent.user_id,"agent_id":agent_id,"skill_id":skill_id,"revision":revision,"file_count":selection.paths.len(),"bytes":size})),
     ).await.ok();
     agent.skills_revision = revision;
-    Ok(agent.into())
+    super::assistant_system_skills_service::response(db, actor, agent).await
 }
 
 #[cfg(test)]

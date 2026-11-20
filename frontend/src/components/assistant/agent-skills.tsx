@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -23,6 +24,7 @@ import {
 import { GroupedDetail } from "@/components/ui/grouped-detail";
 import {
   useAgentSkills,
+  useToggleSystemSkill,
   useSetAgentSkills,
   useSkillSearch,
   useSkillVersions,
@@ -39,10 +41,12 @@ import type {
 import { ProposalDraftEditor } from "./learning-draft-editor";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
+import { useAccountPanel } from "@/hooks/use-account-panel";
 import { SkillPreloadSettings } from "./skill-preload-settings";
 import { SkillTemplateCard } from "./skill-template-card";
 
 const HISTORY_LABELS: Record<string, string> = {
+  get assistant_system_skill_toggled() { return translateUi("Built-in skill changed"); },
   get assistant_skills_updated() { return translateUi("Attached skills changed"); },
   assistant_skill_preload_updated: "Skill preload settings changed",
   get assistant_learning_proposal_edited() { return translateUi("Skill draft edited"); },
@@ -78,6 +82,11 @@ function SkillHistory({
                       ? translateUi(" · Revision {{value1}}", { value1: item.revision })
                       : ""}
                   </p>
+                  {item.event_type === "assistant_system_skill_toggled" && item.skill_id ? (
+                    <p className="type-secondary text-text-tertiary">
+                      {item.skill_id} · {item.enabled == null ? translateUi("inherited") : item.enabled ? translateUi("enabled") : translateUi("disabled")}
+                    </p>
+                  ) : null}
                   {item.skills.length ? (
                     <p className="type-secondary text-text-tertiary">
                       {item.skills
@@ -94,6 +103,19 @@ function SkillHistory({
           ))}
       </ol>
     </GroupedList>
+  );
+}
+
+function NyxBotSkillSettingsButton() {
+  const { open } = useAccountPanel();
+  return (
+    <button
+      type="button"
+      onClick={(event) => void open("nyxbot", {}, event.currentTarget)}
+      aria-haspopup="dialog"
+      className="text-primary underline"
+    >
+      {translateUi("NyxBot settings")} </button>
   );
 }
 
@@ -280,9 +302,11 @@ function AttachedSkill({
 export function AgentSkills({
   agentId,
   readOnly = false,
+  kind = "specialist",
   id,
 }: {
   readonly agentId: string;
+  readonly kind?: "nyxbot" | "specialist";
   readonly readOnly?: boolean;
   readonly id?: string;
 }) {
@@ -299,6 +323,10 @@ export function AgentSkills({
   const tested = useAttachedSkillPreview(agentId, testing ?? "");
   const history = useAgentSkillHistory(agentId);
   const write = useSetAgentSkills(agentId);
+  const systemToggle = useToggleSystemSkill(agentId);
+  const systemSkillsLocked =
+    kind === "specialist" &&
+    current.data?.system_skills_for_specialists === "override";
   const improve = useImproveAgentSkill(agentId);
   const [improving, setImproving] = useState<{
     readonly skillId: string;
@@ -362,6 +390,7 @@ export function AgentSkills({
   const errors = [
     current.error,
     write.error,
+    systemToggle.error,
     improve.error,
     search.error,
     versions.error,
@@ -374,6 +403,92 @@ export function AgentSkills({
       aria-label={translateUi("Skills")}
       className="space-y-6 outline-none"
     >
+      {current.data?.system_skills && current.data.system_skills.length > 0 && (
+        <section aria-label={translateUi("Built-in skills")} className="space-y-3">
+          <h4 className="type-section-heading">{translateUi("Built-in skills")}</h4>
+          <p className="text-12 text-muted-foreground">
+            {translateUi("Selected by NyxID. Changes apply on the next turn.")} </p>
+          {kind === "nyxbot" && (
+            <p className="text-12 text-muted-foreground">
+              {current.data.system_skills_for_specialists === "override"
+                ? translateUi("NyxBot’s choices apply to all your specialists.")
+                : translateUi("NyxBot’s choices are the default for your specialists.")}{" "}
+              <NyxBotSkillSettingsButton />
+            </p>
+          )}
+          {current.data.system_skills.map((skill) => (
+            <div
+              key={skill.skill_id}
+              className="space-y-2 rounded-lg border border-border/50 p-3"
+            >
+              <p className="type-row-title">
+                {skill.name}{" "}
+                <span className="font-mono text-text-tertiary">
+                  {skill.version}
+                </span>
+              </p>
+              <p className="text-12 text-muted-foreground">
+                {skill.description}
+              </p>
+              <Label className="flex items-center gap-2">
+                <Switch
+                  checked={skill.enabled}
+                  disabled={
+                    readOnly || systemSkillsLocked || systemToggle.isPending
+                  }
+                  aria-label={translateUi("Use built-in {{name}}", { name: skill.name })}
+                  onCheckedChange={(enabled) =>
+                    systemToggle.mutate({ skillId: skill.skill_id, enabled })
+                  }
+                />
+                {skill.enabled ? translateUi("Enabled") : translateUi("Disabled")}
+              </Label>
+              {kind === "specialist" && (
+                <div className="flex flex-wrap items-center gap-2 type-secondary text-text-tertiary">
+                  <span>
+                    {systemSkillsLocked
+                      ? translateUi("Set by NyxBot for all specialists")
+                      : skill.override === null
+                        ? translateUi("Inherited from NyxBot")
+                        : translateUi("Your choice for this agent")}
+                  </span>
+                  {!systemSkillsLocked && skill.override !== null && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={readOnly || systemToggle.isPending}
+                      onClick={() =>
+                        systemToggle.mutate({
+                          skillId: skill.skill_id,
+                          enabled: null,
+                        })
+                      }
+                    >
+                      {translateUi("Use NyxBot’s choice")} </Button>
+                  )}
+                </div>
+              )}
+              {skill.shadowed_by_pin ? (
+                <p className="type-secondary text-text-tertiary">
+                  {translateUi("Your attached pin takes precedence, including when that pin is disabled.")} </p>
+              ) : skill.effective ? (
+                <Button
+                  size="sm"
+                  aria-label={translateUi("Test built-in {{name}}", { name: skill.name })}
+                  disabled={tested.isFetching && testing === skill.skill_id}
+                  onClick={() => test(skill.skill_id)}
+                >
+                  {translateUi("Test")} </Button>
+              ) : null}
+              {testing === skill.skill_id &&
+              !skill.shadowed_by_pin &&
+              skill.enabled ? (
+                <TestResult result={tested} />
+              ) : null}
+            </div>
+          ))}
+        </section>
+      )}
       <GroupedList
         title={translateUi("Attached skills")}
         footer={

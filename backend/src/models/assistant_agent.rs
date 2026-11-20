@@ -137,6 +137,9 @@ pub struct AssistantAgent {
     pub skills: Vec<super::catalog_skill_revision::SkillReference>,
     #[serde(default)]
     pub skills_revision: i64,
+    /// Own choices for built-in skills; absent keys inherit.
+    #[serde(default)]
+    pub system_skill_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     pub skill_metadata: BTreeMap<String, AgentSkillMetadata>,
     /// Includes revisions for services returned to all operations.
