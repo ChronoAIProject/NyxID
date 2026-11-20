@@ -15,6 +15,7 @@ use crate::{
     crypto::jwt::{Claims, DelegationOrigin},
     errors::{AppError, AppResult},
     models::{
+        catalog_delegation_grant::{COLLECTION_NAME as CATALOG_GRANTS, CatalogDelegationGrant},
         consent::Consent,
         oauth_client::OauthClient,
         oauth_delegation_authority::{COLLECTION_NAME, ConsentBinding, OauthDelegationAuthority},
@@ -476,48 +477,99 @@ pub async fn persist(
         expires_at: chrono::DateTime::from_timestamp(claims.exp, 0).ok_or_else(denied)?,
         created_at: Utc::now(),
     };
-    bindings_live(&mut AuthorityReads::new(db), &row).await?;
+    let catalog_grant = super::catalog_delegation_service::scope_has_catalog_read(&row.scope)
+        .then(|| super::catalog_delegation_service::grant_from_claims(claims))
+        .transpose()?;
+    let mut reads = AuthorityReads::new(db);
+    let live = bindings_live(&mut reads, &row);
+    #[cfg(test)]
+    let live = tests::catalog_issuance::with_test_delay(live);
+    live.await?;
+    if let Some(grant) = catalog_grant {
+        let issuance = (db.clone(), row, grant);
+        return super::transaction_service::run_db_only(db, &issuance, |tx, (db, row, grant)| {
+            Box::pin(async move {
+                super::erasure_admission::fence_in_session(db, &row.user_id, tx).await?;
+                db.collection::<CatalogDelegationGrant>(CATALOG_GRANTS)
+                    .insert_one(grant)
+                    .session(&mut *tx)
+                    .await?;
+                insert_fenced_authority(db, row, tx).await
+            })
+        })
+        .await;
+    }
+
     let mut transaction = db.client().start_session().await?;
     transaction
         .start_transaction()
         .write_concern(WriteConcern::majority())
         .await?;
-    let result: AppResult<()> = async {
-        let live = db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-            .update_one(doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
-                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-            .session(&mut transaction).await?;
-        if live.matched_count != 1 { return Err(denied()); }
-        for binding in &row.consents {
-            let client = db.collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
-                .update_one(doc! {"_id":&binding.client_id,"is_active":true},
-                    doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if client.matched_count != 1 { return Err(denied()); }
-            let consent = db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
-                .update_one(doc! {"_id":&binding.reference.consent_id,"revision":&binding.reference.consent_revision,
-                    "user_id":&row.user_id,"client_id":&binding.client_id},
-                    doc! {"$set":{"issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if consent.matched_count != 1 { return Err(denied()); }
-        }
-        if let Some(session) = &row.source_session_id {
-            let live = db.collection::<Session>(crate::models::session::COLLECTION_NAME)
-                .update_one(super::session_authority::authenticated(doc! {"_id":session,"user_id":&row.user_id,
-                    "revoked":false,"expires_at":{"$gt":bson::DateTime::now()}}),
-                    doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if live.matched_count != 1 { return Err(denied()); }
-        }
-        db.collection::<OauthDelegationAuthority>(COLLECTION_NAME).insert_one(&row)
-            .session(&mut transaction).await?;
-        Ok(())
-    }.await;
-    if let Err(error) = result {
+    if let Err(error) = insert_fenced_authority(db, &row, &mut transaction).await {
         transaction.abort_transaction().await?;
         return Err(error);
     }
     super::transaction_service::commit(&mut transaction).await
+}
+
+async fn insert_fenced_authority(
+    db: &Database,
+    row: &OauthDelegationAuthority,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let live = db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
+            doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+        )
+        .session(&mut *tx)
+        .await?;
+    if live.matched_count != 1 {
+        return Err(denied());
+    }
+    for binding in &row.consents {
+        let client = db
+            .collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&binding.client_id,"is_active":true},
+                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if client.matched_count != 1 {
+            return Err(denied());
+        }
+        let consent = db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
+            .update_one(doc! {"_id":&binding.reference.consent_id,"revision":&binding.reference.consent_revision,
+                "user_id":&row.user_id,"client_id":&binding.client_id},
+                doc! {"$set":{"issuance_fence":uuid::Uuid::new_v4().to_string()}})
+            .session(&mut *tx).await?;
+        if consent.matched_count != 1 {
+            return Err(denied());
+        }
+    }
+    if let Some(session) = &row.source_session_id {
+        let live = db
+            .collection::<Session>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                super::session_authority::authenticated(
+                    doc! {"_id":session,"user_id":&row.user_id,
+                    "revoked":false,"expires_at":{"$gt":bson::DateTime::now()}},
+                ),
+                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if live.matched_count != 1 {
+            return Err(denied());
+        }
+    }
+    db.collection::<OauthDelegationAuthority>(COLLECTION_NAME)
+        .insert_one(row)
+        .session(&mut *tx)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
