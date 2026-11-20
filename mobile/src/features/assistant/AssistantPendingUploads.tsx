@@ -30,10 +30,14 @@ export function AssistantPendingUploads({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const { fontScale } = useWindowDimensions();
+  const { fontScale, height } = useWindowDimensions();
   const chipHeight = Math.max(
     56,
     12 + (showMentionHandles ? 62 : 48) * fontScale,
+  );
+  const maxListHeight = Math.max(
+    chipHeight + 8,
+    Math.min(height * 0.3, chipHeight * 2.5 + 16),
   );
   const [preview, setPreview] = useState<PendingAssistantUpload>();
   useEffect(() => {
@@ -44,11 +48,11 @@ export function AssistantPendingUploads({
       {files.length ? (
         <OverflowScrollView
           fadeColor={colors.card}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.list}
+          nestedScrollEnabled
+          persistentScrollbar
+          style={[styles.list, { maxHeight: maxListHeight }]}
           keyboardShouldPersistTaps="handled"
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[styles.content, styles.grid]}
         >
           {files.map((row) => {
             // Some native document providers omit MIME metadata. Preserve the
@@ -141,10 +145,13 @@ export function AssistantPendingUploads({
 }
 const styles = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 },
-  list: { flexGrow: 0 },
+  list: { flexGrow: 0, alignSelf: "stretch" },
+  grid: { flexDirection: "row", flexWrap: "wrap" },
   content: { gap: 8, padding: 4 },
   card: {
     width: 260,
+    maxWidth: "100%",
+    flexGrow: 1,
     overflow: "hidden",
     flexDirection: "row",
     alignItems: "center",
