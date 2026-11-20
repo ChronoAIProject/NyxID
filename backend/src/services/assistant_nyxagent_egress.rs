@@ -454,13 +454,29 @@ impl NyxAgentEgress for Egress {
                 "application/json"
             }),
         );
-        let outbound = vec![
+        let usage_context =
+            response_core::should_capture_llm_usage(&target.service, metric).then(|| {
+                llm_usage_service::UsageAuditContext {
+                    db: state.db.clone(),
+                    user_id: user_id.clone(),
+                    provider_slug: None,
+                    service_id: Some(service.id.clone()),
+                    model: None,
+                    path: request.relative_path.clone(),
+                    api_key_id: Some(key.id.clone()),
+                    api_key_name: Some(key.name.clone()),
+                }
+            });
+        let mut outbound = vec![
             (
                 "authorization".into(),
                 format!("Bearer {}", credential.raw_key.as_str()),
             ),
             ("idempotency-key".into(), request.idempotency_key),
         ];
+        if usage_context.is_some() {
+            outbound.push(llm_usage_service::identity_encoding_header());
+        }
         #[cfg(test)]
         if let Some(boundary) = &self.dispatch_boundary {
             boundary.entered.add_permits(1);
@@ -567,19 +583,6 @@ impl NyxAgentEgress for Egress {
                 builder = builder.header(name, value);
             }
         }
-        let usage_context =
-            response_core::should_capture_llm_usage(&target.service, metric).then(|| {
-                llm_usage_service::UsageAuditContext {
-                    db: state.db.clone(),
-                    user_id: user_id.clone(),
-                    provider_slug: None,
-                    service_id: Some(service.id.clone()),
-                    model: None,
-                    path: request.relative_path.clone(),
-                    api_key_id: Some(key.id.clone()),
-                    api_key_name: Some(key.name.clone()),
-                }
-            });
         let mut response = response_core::relay_response(
             state,
             HttpResponseContext {

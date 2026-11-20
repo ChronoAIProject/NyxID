@@ -304,6 +304,11 @@ async fn outbound_contract(protocol: InferenceWireProtocol) {
     );
     let requests = mock.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.headers["accept-encoding"] == "identity")
+    );
     let call = &requests[1];
     let body: Value = call.body_json().unwrap();
     assert_eq!(
