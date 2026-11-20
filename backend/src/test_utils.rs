@@ -3448,6 +3448,23 @@ pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, 
     );
 }
 
+/// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
+pub fn test_pdf() -> Vec<u8> {
+    use lopdf::{Document, Object, dictionary};
+    let mut pdf = Document::with_version("1.5");
+    let pages = pdf.new_object_id();
+    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
+    pdf.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
+    );
+    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4359,21 +4376,4 @@ mod tests {
             assert_eq!(options.direct_connection, expected);
         }
     }
-}
-
-/// A valid unencrypted one-page PDF shared by media ingestion and Base wire tests.
-pub fn test_pdf() -> Vec<u8> {
-    use lopdf::{Document, Object, dictionary};
-    let mut pdf = Document::with_version("1.5");
-    let pages = pdf.new_object_id();
-    let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
-    pdf.objects.insert(
-        pages,
-        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page.into()],"Count"=>1}),
-    );
-    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
-    pdf.trailer.set("Root", catalog);
-    let mut bytes = Vec::new();
-    pdf.save_to(&mut bytes).unwrap();
-    bytes
 }
