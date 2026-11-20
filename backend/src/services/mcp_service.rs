@@ -6712,7 +6712,7 @@ async fn execute_tool_resolved_inner(
             path,
             query,
             parameter_headers,
-            server_owned_headers,
+            mut server_owned_headers,
             mut body,
             mut body_content_type,
             is_generic_proxy_endpoint,
@@ -6958,6 +6958,9 @@ async fn execute_tool_resolved_inner(
                 _ => None,
             },
         };
+        let has_server_owned_headers = !server_owned_headers.is_empty();
+        server_owned_headers.push(super::llm_usage_service::identity_encoding_header());
+
         let dispatch_admission = {
             super::service_dispatch_registry::admit(db,encryption_keys,jwt_keys,config,&dispatch_caller,
                 exec_ctx.org_agent_access.is_none()
@@ -7036,7 +7039,7 @@ async fn execute_tool_resolved_inner(
         request_audit.assistant(assistant_chat.as_ref());
         request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
-            if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
+            if node_route.is_some() || !delegated.is_empty() || has_server_owned_headers {
                 return Err(AppError::BadRequest(
                     "This Telnyx platform operation requires direct managed execution".into(),
                 ));
@@ -7290,6 +7293,7 @@ async fn execute_tool_resolved_inner(
                 if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
                 match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {
+                        super::llm_usage_service::warn_node_usage_encoding(&target.service.id, resp.status, &resp.headers);
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 if exec_ctx.strict_response_utf8 {
@@ -7353,7 +7357,10 @@ async fn execute_tool_resolved_inner(
                         };
                         let NodeFileResponse { status, headers, body: body_buf, received,
                             reservation: file_reservation } = match collected {
-                            Ok(response) => response,
+                            Ok(response) => {
+                                super::llm_usage_service::warn_node_usage_encoding(&target.service.id, response.status, &response.headers);
+                                response
+                            },
                             Err(error) => return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error)),
                         };
                         box_mcp_forwarding(|| billing.settle(
@@ -7461,7 +7468,7 @@ async fn execute_tool_resolved_inner(
             query.as_deref(), exec_ctx.assistant_chat.is_some()
                 && assistant_admission.is_some() && node_route.is_none()
                 && body.as_ref().is_none_or(|bytes| bytes.is_empty())
-                && delegated.is_empty() && server_owned_headers.is_empty(),
+                && delegated.is_empty() && !has_server_owned_headers,
         ).await {
             Ok(proof) => proof,
             Err(error) => {
@@ -7567,6 +7574,7 @@ async fn execute_tool_resolved_inner(
             }
         };
 
+        super::llm_usage_service::warn_http_usage_encoding(&target.service.id, &response);
         let status = response.status().as_u16();
         if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
             admission.response(db, chat, status).await?;

@@ -1070,7 +1070,7 @@ async fn llm_proxy_request_inner(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -1092,6 +1092,7 @@ async fn llm_proxy_request_inner(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             let usage_context = llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
@@ -2022,7 +2023,7 @@ async fn gateway_provider_request(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -2044,6 +2045,7 @@ async fn gateway_provider_request(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             // If translator needs translation, parse and translate the response
             if translator.needs_translation() {

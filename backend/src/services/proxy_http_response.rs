@@ -89,6 +89,9 @@ async fn relay_response_inner(
         exchange_diagnostics,
     } = context;
     let service_id = service_id.as_str();
+    if usage_context.is_some() {
+        llm_usage_service::warn_http_usage_encoding(service_id, &downstream_response);
+    }
     let path = path.as_str();
     let setup_model = model_request
         .as_ref()

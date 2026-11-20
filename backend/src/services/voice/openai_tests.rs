@@ -230,12 +230,20 @@ async fn native_response_reconciliation_bounds_bodies_and_never_follows_redirect
             .expect(1)
             .mount(&upstream)
             .await;
-        assert!(provider.response("known-response").await.is_err());
+        assert!(
+            provider
+                .response("voice-service", "known-response")
+                .await
+                .is_err()
+        );
+        let requests = upstream.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers["accept-encoding"], "identity");
         assert!(destination.received_requests().await.unwrap().is_empty());
     }
     upstream.reset().await;
     for invalid in ["", ".", "..", "line\nbreak"] {
-        assert!(provider.response(invalid).await.is_err());
+        assert!(provider.response("voice-service", invalid).await.is_err());
     }
     assert!(upstream.received_requests().await.unwrap().is_empty());
 }
