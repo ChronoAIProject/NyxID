@@ -125,6 +125,8 @@ test("multiple selections upload serially into one durable draft", async () => {
   await until(() => started.length === 1);
   assert.deepEqual(started, ["one.txt"]);
   assert.deepEqual(h.reads, ["one.txt"]);
+  assert.deepEqual(h.stats, ["one.txt", "two.txt", "three.txt"]);
+  assert.ok([...h.session.entries.values()].every((row) => row.previewReady));
   assert.equal(h.drafts.length, 1);
   assert.equal(h.session.blocked, true);
   first.resolve(accepted("one.txt"));
@@ -137,7 +139,12 @@ test("multiple selections upload serially into one durable draft", async () => {
 test("dictation and attachments share the same in-flight durable draft", async () => {
   const draft = deferred<string>();
   let creates = 0;
-  const h = harness({ createDraft: () => { creates++; return draft.promise; } });
+  const h = harness({
+    createDraft: () => {
+      creates++;
+      return draft.promise;
+    },
+  });
   const dictation = h.session.ensureConversation();
   h.session.add([file()]);
   await until(() => creates === 1 && h.reads.length === 1);
@@ -156,6 +163,7 @@ test("unknown or stale picker size cannot trigger a giant native file read", asy
     h.session.add([file("huge.txt", pickerSize)]);
     await until(() => !!h.session.entries.get("1")?.error);
     assert.equal(h.session.entries.get("1")?.error, ATTACHMENT_SIZE_MESSAGE);
+    assert.notEqual(h.session.entries.get("1")?.previewReady, true);
     assert.deepEqual(h.reads, []);
     assert.equal(h.drafts.length, 0);
     assert.equal(h.uploads.length, 0);
@@ -184,6 +192,7 @@ test("an empty or changed read never creates a draft or uploads bytes", async ()
   h.session.add([file()]);
   await until(() => !!h.session.entries.get("1")?.error);
   assert.equal(h.session.entries.get("1")?.error, ATTACHMENT_SIZE_MESSAGE);
+  assert.equal(h.session.entries.get("1")?.previewReady, false);
   assert.equal(h.drafts.length, 0);
   assert.equal(h.uploads.length, 0);
   h.session.dispose();

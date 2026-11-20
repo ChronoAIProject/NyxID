@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["NyxPdfThumbnailModule"] },
+  "android": { "modules": ["dev.nyxid.pdf.NyxPdfThumbnailModule"] }
+}

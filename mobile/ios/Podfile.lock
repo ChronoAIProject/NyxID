@@ -308,6 +308,8 @@ PODS:
   - NyxCrashReporter (1.0.0):
     - ExpoModulesCore
     - PLCrashReporter (= 1.12.0)
+  - NyxPdfThumbnail (1.0.0):
+    - ExpoModulesCore
   - NyxWatch (1.0.0):
     - ExpoModulesCore
   - PLCrashReporter (1.12.0)
@@ -2539,6 +2541,7 @@ DEPENDENCIES:
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - NyxCrashReporter (from `../modules/nyx-crash-reporter/ios`)
+  - NyxPdfThumbnail (from `../modules/nyx-pdf-thumbnail/ios`)
   - NyxWatch (from `../modules/nyx-watch/ios`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../node_modules/react-native/Libraries/Required`)
@@ -2719,6 +2722,8 @@ EXTERNAL SOURCES:
     :tag: hermes-v0.14.1
   NyxCrashReporter:
     :path: "../modules/nyx-crash-reporter/ios"
+  NyxPdfThumbnail:
+    :path: "../modules/nyx-pdf-thumbnail/ios"
   NyxWatch:
     :path: "../modules/nyx-watch/ios"
   RCTDeprecation:
@@ -2930,6 +2935,7 @@ SPEC CHECKSUMS:
   JitsiWebRTC: a8ac2b2b54c523fb156016de4ab86b6666dc99d9
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
   NyxCrashReporter: 779adad086b3772feaf9a134b7006d680de23574
+  NyxPdfThumbnail: 9b38ca88c7b611ea73789c991e2db1fa43bf8b96
   NyxWatch: 0ed4c96aa7b2158879824be3f48c19b397291b23
   PLCrashReporter: db59ef96fa3d25f3650040d02ec2798cffee75f2
   RCTDeprecation: 5045f20b2cc1239bf422764004338c720684a22f
