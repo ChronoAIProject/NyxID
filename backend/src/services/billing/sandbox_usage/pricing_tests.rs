@@ -325,3 +325,37 @@ fn mongo_records_keep_exact_credits_dates_and_reject_future_schema() {
         .is_err()
     );
 }
+
+#[test]
+fn nullable_bindings_keep_observed_absence_at_zero_without_inventing_a_charge() {
+    let tariff = tariff();
+    let mut pin = pin(&tariff);
+    pin.dimensions = DimensionPolicy {
+        cpu: Selection::Allocated,
+        memory: Selection::Allocated,
+        disk: Selection::Allocated,
+    };
+    for (name, absent) in [
+        ("allocated-no-home", vec![Metric::AllocatedDisk]),
+        (
+            "allocated-retained-home",
+            vec![Metric::AllocatedCpu, Metric::AllocatedMemory],
+        ),
+    ] {
+        let event = decode(&fixture(name)).unwrap();
+        let plans = plan(&event, &pin, Some(&tariff));
+        for metric in absent {
+            assert_eq!(
+                plans
+                    .iter()
+                    .find(|p| p.metric == metric)
+                    .unwrap()
+                    .disposition,
+                Disposition::Candidate {
+                    numerator_pico: 0,
+                    divisor: metric.units_per_hour()
+                }
+            );
+        }
+    }
+}
