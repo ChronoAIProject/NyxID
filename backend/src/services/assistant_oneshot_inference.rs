@@ -1066,7 +1066,7 @@ async fn request_inner(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    let mut extra_headers = vec![];
+    let mut extra_headers = vec![llm_usage_service::identity_encoding_header()];
     if service.inference.as_ref().is_some_and(|inference| {
         inference.wire_protocol == InferenceWireProtocol::AnthropicMessages
     }) {
@@ -1102,6 +1102,7 @@ async fn request_inner(
     // Invalidate before reading the body: a 4xx still counts if that body is
     // malformed, oversized, or stalls. The next call rediscovers; never retry a
     // paid inference here, and never invalidate on transient 5xx/transport errors.
+    llm_usage_service::warn_http_usage_encoding(&service.id, &response);
     if response.status().is_client_error()
         && let Some(model) = model
         && let Ok(mut cache) = MODEL_CACHE.lock()

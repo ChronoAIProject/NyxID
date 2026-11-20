@@ -421,6 +421,12 @@ async fn mcp_proxy_node_provider_path_query_and_headers_match_rest() {
         );
         // REST creates its own ingress correlation ID; it is not credential state.
         sent.remove("x-request-id");
+        // Only MCP reads provider usage for this request-priced fixture.
+        let encoding = sent.remove("accept-encoding");
+        assert_eq!(
+            encoding.as_ref().map(|v| v.as_bytes()),
+            mcp.then_some(b"identity".as_slice())
+        );
         if let Some((path, headers)) = &rest {
             assert!(
                 &sent_path == path && &sent == headers,

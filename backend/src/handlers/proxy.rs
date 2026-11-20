@@ -4168,7 +4168,7 @@ async fn execute_resolved_proxy_inner<'a>(
     if is_pool_attempt {
         // The common owner observes native bytes for accounting (and may translate
         // them); reqwest/node transports do not automatically decode compression.
-        extra_outbound_headers.push(("accept-encoding".into(), "identity".into()));
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
         if catalog_service_slug.as_deref() == Some("llm-openai-codex")
             && pool_accounting
                 .as_ref()
@@ -5610,6 +5610,13 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
+    let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
+    let read_usage = capture_usage || model_request.is_some();
+    let mut has_operation_headers = !extra_outbound_headers.is_empty();
+    if read_usage && !is_pool_attempt && !is_ws && !shared_connect {
+        extra_outbound_headers.push(llm_usage_service::identity_encoding_header());
+    }
+
     let dispatch_admission = {
         let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
             actor_user_id: &user_id_str,
@@ -5664,7 +5671,7 @@ async fn execute_resolved_proxy_inner<'a>(
             || streaming_body.is_some()
             || node_route.is_some()
             || !delegated.is_empty()
-            || !extra_outbound_headers.is_empty()
+            || has_operation_headers
         {
             return Err(AppError::BadRequest(
                 "This Telnyx platform operation supports direct HTTP and MCP calls only".into(),
@@ -5831,6 +5838,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     })),
                 );
                 if reservation.replay_policy == DurableReplayPolicy::DownstreamIdempotencyKey {
+                    has_operation_headers = true;
                     extra_outbound_headers.push((
                         "Idempotency-Key".to_string(),
                         reservation.operation_id.clone(),
@@ -6442,17 +6450,16 @@ async fn execute_resolved_proxy_inner<'a>(
 
                             if let Some(accounting) = pool_accounting.clone() {
                                 let usage =
-                                    should_capture_llm_usage(&target.service, platform_metric)
-                                        .then(|| llm_usage_service::UsageAuditContext {
-                                            db: state.db.clone(),
-                                            user_id: user_id_str.clone(),
-                                            provider_slug: None,
-                                            service_id: Some(service_id.to_owned()),
-                                            model: None,
-                                            path: path.to_owned(),
-                                            api_key_id: auth_user.api_key_id.clone(),
-                                            api_key_name: auth_user.api_key_name.clone(),
-                                        });
+                                    capture_usage.then(|| llm_usage_service::UsageAuditContext {
+                                        db: state.db.clone(),
+                                        user_id: user_id_str.clone(),
+                                        provider_slug: None,
+                                        service_id: Some(service_id.to_owned()),
+                                        model: None,
+                                        path: path.to_owned(),
+                                        api_key_id: auth_user.api_key_id.clone(),
+                                        api_key_name: auth_user.api_key_name.clone(),
+                                    });
                                 let mut response = box_proxy_future(|| {
                                     pool_attempt::node_response(
                                         state,
@@ -6500,7 +6507,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             ProxyResponseType::Complete(node_response) => {
                                 let response_len = node_response.body.len() as i64;
                                 let request_len = request_body_len;
-                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, node_response.status, &node_response.headers);
+                                }
+                                let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && capture_usage)
                                     .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
                                 settle_meter_async(
                                     state.billing.clone(),
@@ -6567,6 +6577,9 @@ async fn execute_resolved_proxy_inner<'a>(
                                     }
                                 };
 
+                                if capture_usage {
+                                    llm_usage_service::warn_node_usage_encoding(service_id, status, &resp_headers);
+                                }
                                 let http_status =
                                     StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                                 let stream_diagnostics = ProxyExchangeDiagnostics::new(
@@ -6614,7 +6627,6 @@ async fn execute_resolved_proxy_inner<'a>(
                                 let stream_metered = metered.clone();
                                 let request_len = request_body_len;
                                 let usage_path = path.to_string();
-                                let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                                 // Convert the mpsc receiver into a streaming body.
                                 let mut exchange_diagnostics =
@@ -7436,7 +7448,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         && streaming_body.is_none()
                         && body.as_ref().is_none_or(|bytes| bytes.is_empty())
                         && delegated.is_empty()
-                        && extra_outbound_headers.is_empty(),
+                        && !has_operation_headers,
                 )
             })
             .await
@@ -7718,9 +7730,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 },
                 &all_headers,
             );
-            let usage_context = (should_capture_llm_usage(&target.service, platform_metric)
-                || model_request.is_some())
-            .then(|| llm_usage_service::UsageAuditContext {
+            let usage_context = read_usage.then(|| llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
                 user_id: user_id_str.clone(),
                 provider_slug: None,
