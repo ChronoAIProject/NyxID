@@ -525,7 +525,7 @@ impl Handshake {
         let runtime_task = tokio::spawn(async move {
             axum::serve(runtime_listener, runtime_app).await.unwrap();
         });
-        Mock::given(method("POST")).and(path("/v1/responses"))
+        Mock::given(method("POST")).and(path("/v1/responses")).and(wiremock::matchers::header("accept-encoding", "identity"))
             .respond_with(ResponseTemplate::new(provider_status).set_body_json(json!({"id":"resp_handshake_probe","object":"response","status":"completed","model":provider_model,
                 "output":[{"id":"msg_handshake_probe","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],
                 "usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23,"input_tokens_details":{"cached_tokens":4}}})))
@@ -1711,7 +1711,7 @@ async fn actual_upstream_discovery_readiness_and_four_call_default_budget_settle
         Credits::from_whole(10)
     );
     fixture.provider.reset().await;
-    Mock::given(method("POST")).and(path("/v1/responses")).respond_with(ResponseTemplate::new(200)
+    Mock::given(method("POST")).and(path("/v1/responses")).and(wiremock::matchers::header("accept-encoding", "identity")).respond_with(ResponseTemplate::new(200)
         .set_body_json(json!({"model":op.model_id,"output":[{"type":"message","content":[{"type":"output_text","text":"Bounded answer"}]}],
             "usage":{"input_tokens":8192,"output_tokens":512,"output_tokens_details":{"reasoning_tokens":128}}})))
         .mount(&fixture.provider).await;

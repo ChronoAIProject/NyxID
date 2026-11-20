@@ -1047,7 +1047,7 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
 
     let client = chatgpt_http_client()?;
 
-    let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
+    let mut request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
 
     if let Some(target) = execution_target {
         if let Some(context) = &target.execution_request {
@@ -1059,6 +1059,10 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
         }
     }
 
+    request.headers_mut().insert(
+        http::header::ACCEPT_ENCODING,
+        http::HeaderValue::from_static("identity"),
+    );
     let result =
         tokio::time::timeout(std::time::Duration::from_secs(30), client.execute(request)).await;
     if let Some(permit) = execution_target.and_then(|target| target.execution_permission.as_ref()) {
@@ -1074,6 +1078,10 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
             AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
         })?;
 
+    let service_id = execution_target
+        .map(|target| target.service.id.as_str())
+        .unwrap_or("openai-codex");
+    super::llm_usage_service::warn_http_usage_encoding(service_id, &response);
     let status = response.status();
     tracing::debug!("ChatGPT HTTP response status: {status}");
 
@@ -2155,6 +2163,12 @@ mod tests {
                 assert!(read > 0, "ChatGPT request closed before headers");
                 request.extend_from_slice(&chunk[..read]);
             }
+
+            assert!(
+                String::from_utf8_lossy(&request)
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case("accept-encoding: identity"))
+            );
 
             let event = "event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n";
             let response = format!(
