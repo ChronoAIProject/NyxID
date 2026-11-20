@@ -422,6 +422,9 @@ export function NyxBotHome({
       focusedVisibilityControl.current = active === restoreButton.current
         ? restoreButton.current
         : active === hideButton.current ? hideButton.current : null;
+      if (!focusedVisibilityControl.current && active && active !== document.body) {
+        focusSuggestions.current = false;
+      }
     };
     document.addEventListener("focusin", rememberFocus);
     return () => document.removeEventListener("focusin", rememberFocus);

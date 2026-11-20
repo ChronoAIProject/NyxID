@@ -55,7 +55,11 @@ async function expectPendingFocus(page: Page, control: Locator, writes: string[]
   await expect.poll(() => writes.length).toBe(count);
 }
 
-async function stubHome(page: Page, { initiallyHidden = false, failShowOnce = false } = {}) {
+async function stubHome(page: Page, { initiallyHidden = false, failShowOnce = false, holdWrite }: {
+  initiallyHidden?: boolean;
+  failShowOnce?: boolean;
+  holdWrite?: Promise<void>;
+} = {}) {
   // Test mode installs an in-memory assistant transport even without ?mock=1.
   // Keep these checks on the real HTTP client and page.route boundary instead.
   await page.addInitScript(() => {
@@ -101,7 +105,7 @@ async function stubHome(page: Page, { initiallyHidden = false, failShowOnce = fa
     if (request.method() === "POST") {
       expect([`${root}/suggestions/hide`, `${root}/suggestions/show`]).toContain(path);
       writes.push(path);
-      await new Promise(resolve => setTimeout(resolve, 600));
+      await (holdWrite ?? new Promise(resolve => setTimeout(resolve, 600)));
       if (failShowOnce && path.endsWith("/show")) {
         failShowOnce = false;
         return route.fulfill({ status: 500, json: { message: "Could not show suggestions" } });
@@ -211,4 +215,29 @@ test("failed Show keeps focus and retries once (390, dark, en)", async ({ page }
   await stopFocusWatch(page);
   expect(fixture.writes).toEqual([`${root}/suggestions/show`, `${root}/suggestions/show`]);
   expect(fixture.unexpected).toEqual([]);
+});
+
+test("a completed Hide keeps the keyboard user's new focus", async ({ page }) => {
+  let release!: () => void;
+  const holdWrite = new Promise<void>(resolve => { release = resolve; });
+  await stubHome(page, { holdWrite });
+  await page.goto("/assistant", { waitUntil: "domcontentloaded" });
+  const hide = page.getByRole("button", { name: "Hide", exact: true });
+  await tabTo(page, hide);
+  await page.keyboard.press("Enter");
+  const undo = page.getByRole("button", { name: "Undo", exact: true });
+  await expect(undo).toBeFocused();
+  await expect(undo).toHaveAttribute("aria-disabled", "true");
+  await page.keyboard.press("Tab");
+  await expect(undo).not.toBeFocused();
+  const nextControl = await page.evaluateHandle(() => document.activeElement);
+  try {
+    expect(await nextControl.evaluate(element => !!element && element !== document.body)).toBe(true);
+    release();
+    await expect(undo).toHaveAttribute("aria-disabled", "false");
+    expect(await nextControl.evaluate(element => element === document.activeElement)).toBe(true);
+  } finally {
+    release();
+    await nextControl.dispose();
+  }
 });

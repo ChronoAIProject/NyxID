@@ -234,6 +234,16 @@ it.each([false, true])("keeps the counterpart focused throughout a pending reque
   expect(screen.getByRole("status")).toHaveTextContent(hidden ? "Suggestions shown." : "Suggestions hidden.");
 });
 
+it.each([false, true])("preserves focus moved elsewhere while a suggestion request settles (failed: %s)", async (failed) => {
+  const { settle } = pendingHome(false);
+  await userEvent.click(screen.getByRole("button", { name: "Hide" }));
+  expect(screen.getByRole("button", { name: "Undo" })).toHaveFocus();
+  const elsewhere = screen.getByRole("button", { name: "New agent" });
+  elsewhere.focus();
+  settle(failed);
+  expect(elsewhere).toHaveFocus();
+});
+
 it.each([false, true])("returns focus to the original control after rollback (initially hidden: %s)", async (hidden) => {
   const user = userEvent.setup();
   const { base, settle } = pendingHome(hidden);
