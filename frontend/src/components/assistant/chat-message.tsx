@@ -784,7 +784,7 @@ export function ChatMessageBubble({
     >
       <div className="min-w-0 w-full pt-0.5">
         {message.continuedAfterRestart && (
-          <p role="note" className="text-xs text-muted-foreground">
+          <p role="note" className="mb-1 text-13 text-muted-foreground">
             {translateUi("Continued after a restart.")}
           </p>
         )}
