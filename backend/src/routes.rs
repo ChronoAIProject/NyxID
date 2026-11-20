@@ -1718,6 +1718,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 handlers::oauth_consent_response::complete_form_post,
             )),
         )
+        .route_layer(axum::Extension(crate::mw::auth::OAuthConsentRoute))
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
         .route(

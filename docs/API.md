@@ -69,7 +69,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 Most endpoints require authentication. NyxID supports three active authentication methods, checked in the following order:
 
-1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
+1. **Access token** -- `Authorization: Bearer <access_token>`. A token bound to a DPoP key also supports `Authorization: DPoP <access_token>` and requires a matching proof for the request method and public URL.
 2. **Session Cookie** -- `nyx_session` HttpOnly cookie for first-party browser sessions
 3. **API Key** -- `X-API-Key: <key>` header
 
@@ -4736,7 +4736,7 @@ NyxID implements the OpenID Connect Authorization Code flow with mandatory PKCE.
 
 #### GET /oauth/authorize
 
-Authorization endpoint. Validates the OAuth client and parameters, then issues an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
+Authorization endpoint. A first-party account session approves the grant for every scope. Browsers can start the flow before sign-in. NyxID validates the OAuth client and parameters before issuing an authorization code. Only `response_type=code` is supported. PKCE with `S256` method is required for all requests.
 
 **Auth:** Required (the user must be logged in)
 
