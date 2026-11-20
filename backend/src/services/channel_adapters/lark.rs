@@ -37,9 +37,26 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
 #[path = "lark_thread.rs"]
 mod thread;
 
+#[path = "lark_filename.rs"]
+mod filename;
 #[path = "lark_post.rs"]
 mod post;
 pub use post::{PostContent, parse_post};
+
+/// Retention may use a valid secondary name while the historical native file
+/// callback continues to expose its raw first field.
+pub(crate) fn effective_file_name(raw: &serde_json::Value) -> Option<String> {
+    let message = raw.pointer("/event/message")?;
+    if !matches!(
+        message.get("message_type")?.as_str()?,
+        "file" | "audio" | "media" | "video"
+    ) {
+        return None;
+    }
+    let content: serde_json::Value =
+        serde_json::from_str(message.get("content")?.as_str()?).ok()?;
+    filename::selector(&content)
+}
 
 /// Read only the authenticated native post; normalized callback content stays unchanged.
 pub fn post_from_raw(raw: &serde_json::Value, bot_open_id: Option<&str>) -> Option<PostContent> {
@@ -524,7 +541,7 @@ fn extract_attachments(
                     platform_message_id: Some(message_id.to_string()),
                     file_key: None,
                     image_key: Some(image_key.to_string()),
-                    filename: None,
+                    filename: filename::selector(content),
                     mime_type: None,
                     size_bytes: None,
                 }]
@@ -542,10 +559,12 @@ fn extract_attachments(
                     platform_message_id: Some(message_id.to_string()),
                     file_key: Some(file_key.to_string()),
                     image_key: None,
+                    // Preserve the existing raw callback metadata contract.
+                    // Effective download/upload names are sanitized later.
                     filename: content
                         .get("file_name")
                         .or_else(|| content.get("name"))
-                        .and_then(|v| v.as_str())
+                        .and_then(|value| value.as_str())
                         .map(String::from),
                     mime_type: None,
                     size_bytes: content.get("file_size").and_then(|v| v.as_u64()),
@@ -1162,7 +1181,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
         let token = self
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
-        media::download(
+        let response = media::download_response(
             &attachment.url,
             &[host],
             Some(&self.base_url),
@@ -1170,7 +1189,18 @@ impl PlatformAdapter for LarkFamilyAdapter {
             attachment,
             max_bytes,
         )
-        .await
+        .await?;
+        let provider_name = filename::from_headers(response.headers());
+        let mut fetched = media::bounded_response(response, max_bytes).await?;
+        let maximum = crate::services::assistant_upload_service::MAX_FILENAME_CHARS
+            .min(media::MAX_FILENAME_CHARS);
+        fetched.filename = crate::services::attachment_filename::original_name(
+            attachment.filename.as_deref(),
+            maximum,
+        )
+        .or(provider_name);
+        fetched.mime_type = fetched.mime_type.or_else(|| attachment.mime_type.clone());
+        Ok(fetched)
     }
 
     async fn send_reply(
@@ -2061,6 +2091,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lark_native_image_and_file_selectors_keep_usable_original_names() {
+        for kind in ["image", "file"] {
+            for key in ["file_name", "name", "filename"] {
+                if kind == "file" && key == "filename" {
+                    continue;
+                }
+                for name in ["Receipt", "收据.JPG", "original.pdf"] {
+                    let mut content = serde_json::json!({"image_key":"image", "file_key":"file"});
+                    content[key] = serde_json::json!(name);
+                    let items = extract_attachments(
+                        "https://open.larksuite.com",
+                        "message",
+                        kind,
+                        Some(&content),
+                    );
+                    assert_eq!(items[0].filename.as_deref(), Some(name));
+                }
+            }
+            let content = serde_json::json!({"image_key":"image", "file_key":"file", "file_name":"bad\nname", "name":"valid.pdf"});
+            assert_eq!(
+                extract_attachments(
+                    "https://open.larksuite.com",
+                    "message",
+                    kind,
+                    Some(&content)
+                )[0]
+                .filename
+                .as_deref(),
+                Some(if kind == "image" {
+                    "valid.pdf"
+                } else {
+                    "bad\nname"
+                })
+            );
+        }
+        let content =
+            serde_json::json!({"file_key":"file", "file_name":"Director's © receipt (final).PDF"});
+        assert_eq!(
+            extract_attachments(
+                "https://open.larksuite.com",
+                "message",
+                "file",
+                Some(&content)
+            )[0]
+            .filename
+            .as_deref(),
+            Some("Director's © receipt (final).PDF")
+        );
+    }
+
     #[tokio::test]
     async fn parse_file_message_preserves_file_key_attachment() {
         let adapter = LarkFamilyAdapter::feishu(test_cache());
@@ -2656,6 +2737,74 @@ mod callback_golden_tests {
                     std::fs::read_to_string(dir.join(format!("{platform}-{kind}-golden.json")))
                         .unwrap();
                 assert_eq!(actual, expected.trim_end(), "{platform} {kind}");
+                if kind == "file" {
+                    for (first, effective) in [
+                        (serde_json::Value::Null, "Original receipt.pdf"),
+                        (serde_json::json!("bad\rname"), "Original receipt.pdf"),
+                        (serde_json::json!("x".repeat(1025)), "Original receipt.pdf"),
+                        (
+                            serde_json::json!("Director's © receipt (final).PDF"),
+                            "Directors  receipt (final).PDF",
+                        ),
+                    ] {
+                        let mut raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let mut content: serde_json::Value = serde_json::from_str(
+                            raw["event"]["message"]["content"].as_str().unwrap(),
+                        )
+                        .unwrap();
+                        content["file_name"] = first.clone();
+                        content["name"] = serde_json::json!("Original receipt.pdf");
+                        raw["event"]["message"]["content"] = serde_json::json!(content.to_string());
+                        let inbound = adapter
+                            .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+                            .await
+                            .unwrap()
+                            .remove(0);
+                        assert_eq!(inbound.attachments[0].filename.as_deref(), first.as_str());
+                        let stored = channel_relay_service::inbound_metadata(
+                            "bot",
+                            "route",
+                            "owner",
+                            platform,
+                            &inbound,
+                            "route-key",
+                            "relay-receipt",
+                        );
+                        let restored: crate::models::channel_message::ChannelMessage =
+                            bson::from_document(bson::to_document(&stored).unwrap()).unwrap();
+                        assert_eq!(restored.attachments[0].filename.as_deref(), first.as_str());
+                        assert_eq!(
+                            crate::services::channel_media_fetch::selector(&restored, 0, false)
+                                .unwrap()
+                                .filename
+                                .as_deref(),
+                            Some(effective)
+                        );
+                        let history = crate::handlers::channel_relay::message_to_item(
+                            &restored,
+                            "https://nyxid.example",
+                        );
+                        let history = serde_json::to_value(history).unwrap();
+                        assert_eq!(
+                            history["attachments"][0]["filename"].as_str(),
+                            first.as_str()
+                        );
+                        assert!(history.get("effective_attachment_filenames").is_none());
+                        let callback = channel_relay_service::build_callback_payload(
+                            &restored,
+                            &route,
+                            "route-key",
+                            "route",
+                            &inbound,
+                            None,
+                            "https://nyxid.example",
+                        );
+                        assert_eq!(
+                            callback.content.attachments[0].filename.as_deref(),
+                            first.as_str()
+                        );
+                    }
+                }
                 if kind == "post" {
                     assert!(message.attachments.is_empty());
                     assert_eq!(message.embedded_attachments.len(), 1);

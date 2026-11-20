@@ -254,6 +254,36 @@ create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. The opt-in guest scope below is the only exception. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
 
+Lark/Feishu native file callbacks and public history retain the same existing
+raw `file_name`/`name` labels. A private per-message projection retains effective
+download names, including a usable secondary name when the raw primary is null
+or unusable; it is omitted from public response DTOs. Image and rich-post selectors additionally retain usable `file_name`,
+`name` or `filename` metadata. Effective names are sanitized at download/upload.
+When no usable selector name exists, the authenticated
+resource download honors bounded `Content-Disposition` names, preferring UTF-8
+`filename*` over `filename`. Named originals, including extensionless names and
+Unicode, retain their identity within the upload limit; long stems are shortened
+while keeping their suffix. Authenticated relay downloads provide an ASCII
+`filename` fallback and RFC 8187 `filename*` whenever that fallback differs from
+the sanitized original, including Unicode and ASCII parentheses. Canonical callbacks
+without names keep their existing shape; provider-response names are not written
+back to channel source metadata.
+
+Fetch results retain original names only. Authenticated relay responses can derive
+a nameless image's presentation suffix from a bounded PNG/JPEG/GIF/WebP signature.
+Retained names always wait for upload validation: a resource's declared
+MIME type cannot invent a name that masks the validated type. Base egress adds a
+known type's canonical suffix to missing or legacy generic names, including
+`attachment.pdf` for validated PDFs. Signature-derived download metadata never
+replaces full raster validation before assistant model input; opaque originals
+receive no invented extension. New human/Lark uploads distinguish missing names
+from original names, including the literal `attachment`, through optional stored
+provenance. Only ambiguous legacy placeholders receive legacy repair. Names whose
+stem is removed by sanitization (such as `🧾.PDF`) use a verified type fallback.
+Leading sanitized spaces/dots are removed before applying filename budgets,
+preserving a meaningful stem and suffix within the cap. Display suffixes are independent of the extractor's bounded format hint; long
+Unicode suffixes cannot prevent byte validation or become an empty text hint.
+
 ### Personal channel guest media
 
 The default-off `assistant:channel-guest-media` flag is evaluated for the linking

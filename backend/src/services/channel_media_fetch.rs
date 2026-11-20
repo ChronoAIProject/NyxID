@@ -1,10 +1,34 @@
 //! Shared bounded provider fetch. Callers resolve their own live authority first.
 use crate::{
     crypto::aes::EncryptionKeys,
-    errors::AppResult,
-    models::{channel_bot::ChannelBot, channel_message::StoredAttachment},
+    errors::{AppError, AppResult},
+    models::{
+        channel_bot::ChannelBot,
+        channel_message::{ChannelMessage, StoredAttachment},
+    },
     services::channel_platform::{FetchedMedia, PlatformAdapter},
 };
+
+/// All retained-message download readers use this private name projection.
+/// Legacy rows and embedded post selectors retain their existing behavior.
+pub(crate) fn selector(
+    message: &ChannelMessage,
+    index: usize,
+    embedded: bool,
+) -> AppResult<StoredAttachment> {
+    let mut attachment = if embedded {
+        &message.embedded_attachments
+    } else {
+        &message.attachments
+    }
+    .get(index)
+    .cloned()
+    .ok_or(AppError::ChannelAttachmentNotFound)?;
+    if !embedded && let Some(name) = message.effective_attachment_filenames.get(index) {
+        attachment.filename = name.clone();
+    }
+    Ok(attachment)
+}
 
 pub async fn fetch(
     db: &mongodb::Database,
