@@ -65,3 +65,9 @@ pnpm exec jest --findRelatedTests src/features/billing/billingMetric.ts src/feat
   `git diff --check` passed. There is no affected mobile typecheck target or lint
   script. Full frontend tests, typecheck and production build are delegated to
   GitHub CI under the personal local-validation policy.
+
+CI follow-up: the catalog coverage guard rejected two newly added phrase keys
+with leading spaces. The keys now contain no edge whitespace; sentence templates
+and joining own the visible separators. After the correction,
+`pnpm exec tsx --test src/i18n/i18nCoverage.test.ts` passed all 12 owning tests,
+including catalog interpolation, authored-key coverage and translation composition.

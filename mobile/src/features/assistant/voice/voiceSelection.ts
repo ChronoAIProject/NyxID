@@ -70,13 +70,13 @@ export function voiceTariff(option: VoiceOption) {
         )
       : [];
     const amount = tokens.map((price) =>
-      translateApp(" {{credits}} credits per {{metric}}.", {
+      translateApp("{{credits}} credits per {{metric}}.", {
         credits: price.credits_per_unit,
         metric: billingMetricName(price.metric),
       }),
-    ).join("");
+    ).join(" ");
     return translateApp(tokens.length
-      ? "No NyxID duration charge. Your provider’s charges still apply.{{amount}}"
+      ? "No NyxID duration charge. Your provider’s charges still apply. {{amount}}"
       : "No NyxID voice charge. Your provider’s charges still apply.{{amount}}",
       { amount });
   }
@@ -97,17 +97,19 @@ export function voiceTariff(option: VoiceOption) {
           price.metric.includes("tokens")) ||
         option.voice.billing_metrics.some((metric) => metric === price.metric)),
   );
-  return translateApp("{{credits}} credits per second{{totalCost}}.", {
+  return translateApp(extras.length
+    ? "{{credits}} credits per second {{totalCost}}."
+    : "{{credits}} credits per second.", {
     credits: duration.credits_per_unit,
     totalCost: extras
     .map(
       (price) =>
-        translateApp(" plus {{credits}} per {{metric}}", {
+        translateApp("plus {{credits}} per {{metric}}", {
           credits: price.credits_per_unit,
           metric: price.metric === "requests" ? translateApp("start") : billingMetricName(price.metric),
         }),
     )
-    .join(""),
+    .join(" "),
   });
 }
 
