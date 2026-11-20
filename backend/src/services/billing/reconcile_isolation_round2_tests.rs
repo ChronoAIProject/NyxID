@@ -346,7 +346,9 @@ async fn worker_log(reconciler: BillingReconciler) -> String {
         .with(PassLogged(logged.clone()));
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
-    let worker = spawn_reconcile_worker(reconciler, 300).unwrap();
+    let worker =
+        spawn_reconcile_worker(reconciler, 300, crate::services::job_health::Job::new(true))
+            .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), logged.notified())
         .await
         .unwrap();

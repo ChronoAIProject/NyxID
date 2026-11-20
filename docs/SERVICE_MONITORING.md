@@ -347,3 +347,36 @@ assessment labels. The same projection uses canonical
 gates. Actual probe attempts write `service_invocation_diagnostic` audit rows
 with actor, exact UserService UUID and the bounded projection. Raw check results,
 paths, handles and tokens are never written to audit or telemetry.
+
+## Background worker health
+
+chrono-probe can read `GET /internal/v1/health/jobs` on each NyxID replica's
+private `INTERNAL_BIND_ADDR` listener (loopback by default). Grant the monitor
+network access to this route through private networking or a path-restricted
+authenticated proxy. Keep dispatch credentials inside NyxID. Discover targets
+per replica so a healthy worker on one replica cannot mask a stopped peer.
+
+HTTP 200 with JSON and `Cache-Control: no-store` reports `draining` and a
+`jobs` object keyed by `turn_sweep`, `schedules`, `channel_polls`,
+`billing_reconcile`, and `chain_verify`. Each entry contains:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `starting` until the first heartbeat, `live` for fresh evidence, `failed` for a failed pass or substep, `stale` after 60 seconds without worker evidence, or `disabled` for a zero configured interval. |
+| `heartbeat_at` | UTC time of the latest worker observation. Scheduled waits pulse every 15 seconds. Active work uses progress checkpoints. An intentional, deadline-bounded delivery wait can pulse until its existing timeout. |
+| `last_success_at` | Latest completed successful pass, including a successful empty scan. Billing lease contention leaves this timestamp alone. |
+| `last_failure_at` | Latest observed failure, retained across recovery so a short failure is visible between scrapes. |
+
+Times are RFC 3339 or null until observed. The server measures staleness with a
+monotonic clock. All five entries live in process memory. Reads perform no I/O
+and never advance a timestamp. A restart starts a new observation history.
+A failure describes the worker or a substep. The response contains no account,
+bot, run, provider error or message details.
+
+Scrape every 10 seconds with a three-second timeout. Check the body as well as
+HTTP availability. Page on failed, stale, missing expected signals, or a new
+failure timestamp since the previous scrape. Suppress an intentional drain
+only for the terminating replica. Classify old-version 404s by trusted
+deployment inventory during a rolling upgrade. Continue independent API,
+MongoDB primary, NyxAgent, and CMA checks throughout the rollout. See
+[the public health and readiness contract](HEALTH_READINESS.md).

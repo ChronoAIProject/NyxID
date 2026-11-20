@@ -37,7 +37,9 @@ pub async fn run_once(
     ledger_key: &[u8],
 ) -> AppResult<ChainVerifyRunReport> {
     let audit = verify_audit_chunk(db, audit_key).await?;
+    crate::services::job_health::checkpoint(audit.outcome == ChainVerifyOutcome::Ok);
     let billing_ledger = verify_ledger_chunk(db, ledger_key, audit_key).await?;
+    crate::services::job_health::checkpoint(billing_ledger.outcome == ChainVerifyOutcome::Ok);
     Ok(ChainVerifyRunReport {
         audit,
         billing_ledger,
@@ -189,6 +191,9 @@ async fn persist_status(
     previous: Option<&ChainVerifyStatus>,
     status: ChainVerifyStatus,
 ) -> AppResult<ChainVerifyStatus> {
+    if status.outcome == ChainVerifyOutcome::Broken {
+        crate::services::job_health::checkpoint(false);
+    }
     escalate_if_broken(&status);
     #[cfg(test)]
     if status.id == CHAIN_BILLING_LEDGER
@@ -289,11 +294,12 @@ fn escalate_if_broken(status: &ChainVerifyStatus) {
     }
 }
 
-pub fn spawn_chain_verify_worker(
+pub(crate) fn spawn_chain_verify_worker(
     db: mongodb::Database,
     audit_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     ledger_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     interval_secs: u64,
+    job: crate::services::job_health::Job,
 ) {
     if interval_secs == 0 {
         return;
@@ -303,13 +309,16 @@ pub fn spawn_chain_verify_worker(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let Some(_work) = crate::services::shutdown::process()
-                .tick(&mut interval)
+            let Some(_work) = job
+                .tick(&crate::services::shutdown::process(), &mut interval)
                 .await
             else {
                 break;
             };
-            if let Err(error) = run_once(&db, audit_key.as_slice(), ledger_key.as_slice()).await {
+            let result = job
+                .observe(run_once(&db, audit_key.as_slice(), ledger_key.as_slice()))
+                .await;
+            if let Err(error) = result {
                 tracing::warn!(error = %error, "chain verification sweep failed");
             }
         }

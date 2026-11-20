@@ -381,7 +381,12 @@ async fn reconcile_worker_activates_grants_without_lago_or_billing() {
     let config = test_app_config();
     assert!(!config.billing_enabled);
     let reconciler = BillingReconciler::new(db.clone(), None, std::sync::Arc::new(config));
-    let worker = spawn_reconcile_worker(reconciler, 3_600).expect("reconcile worker enabled");
+    let worker = spawn_reconcile_worker(
+        reconciler,
+        3_600,
+        crate::services::job_health::Job::new(true),
+    )
+    .expect("reconcile worker enabled");
 
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {

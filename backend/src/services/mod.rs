@@ -152,6 +152,7 @@ pub mod ifttt_oauth_service;
 pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
+pub(crate) mod job_health;
 pub mod key_service;
 pub mod lark_attachment_tool;
 pub mod lark_im_tool;

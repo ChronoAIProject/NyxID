@@ -16,19 +16,21 @@ use crate::{
 use chrono::{Duration, Utc};
 use mongodb::bson::{Document, doc};
 
-pub fn spawn(state: AppState) {
+pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+            let job = &state.jobs.schedules;
+            let Some(_work) = job.tick(&state.shutdown, &mut interval).await else {
                 break;
             };
-            if let Err(error) = tick(&state).await {
+            let result = job.observe(tick(&state)).await;
+            if let Err(error) = result {
                 tracing::warn!(code = error.error_code(), "Trigger scheduler tick deferred");
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
@@ -37,6 +39,7 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
     };
     let due = schedules::due(&state.db, Utc::now()).await?;
     let count = due.len();
+    crate::services::job_health::checkpoint(true);
     // Bounded concurrency lets a slow recipient use its own lease without
     // delaying another owner's scheduled turn.
     use futures::{StreamExt, stream};
@@ -88,6 +91,7 @@ pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
                 Ok(())
             }
             .await;
+            crate::services::job_health::checkpoint(result.is_ok());
             if let Err(error) = result {
                 tracing::warn!(
                     code = error.error_code(),
@@ -1061,7 +1065,7 @@ async fn settle_notification_result(
                         - Utc::now())
                     .num_seconds()
                     .max(0) as u64;
-                    let result = tokio::time::timeout(
+                    let result = crate::services::job_health::bounded_wait(
                         std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
                         push::send(
                             &state.db,
@@ -1175,7 +1179,7 @@ async fn settle_chat_result(
     });
     let text = failure.as_deref().unwrap_or(text);
     let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
-    let result = tokio::time::timeout(
+    let result = crate::services::job_health::bounded_wait(
         std::time::Duration::from_secs(delivery::ATTEMPT_SECONDS),
         crate::services::channel_text_preparation::with_parent(
             crate::services::channel_text_preparation::Parent::Scheduled {
