@@ -20,6 +20,8 @@ export type PendingAssistantUpload = {
   file: PickedAssistantFile;
   progress: number;
   resumable?: boolean;
+  /** The local file passed metadata validation before rendering its preview. */
+  previewReady?: boolean;
   item?: AssistantAttachment;
   needsReupload?: boolean;
   removing?: boolean;
@@ -202,6 +204,7 @@ export class AssistantUploadSession {
         item,
         needsReupload,
         progress: ready ? 100 : 0,
+        previewReady: !!uri && !error,
         error: ready ? undefined : (error ?? undefined),
         resumable: !ready && !error,
         controller: new AbortController(),
@@ -390,18 +393,37 @@ export class AssistantUploadSession {
   }
   private enqueue(row: PendingAssistantUpload) {
     const file = row.file;
+    // Prepare previews independently; file bytes and server mutations remain serialized.
+    const prepared = Promise.resolve().then(async () => {
+      if (!this.usable(row)) return;
+      const size = await this.deps.fileSize(file);
+      const statError = attachmentFileError(file, size);
+      if (statError) throw new Error(statError);
+      if (!this.usable(row)) return;
+      row.previewReady = true;
+      this.notify();
+    }).catch((cause) => {
+      if (this.alive() && this.entries.get(row.key) === row && !row.error) {
+        row.previewReady = false;
+        row.error = attachmentUploadError(cause);
+        this.notify();
+      }
+    });
     this.queue = this.queue.then(async () => {
       let checkpointing = false;
       let releasingReceipt = false;
       try {
-        if (!this.usable(row)) return;
-        const size = await this.deps.fileSize(file);
-        const statError = attachmentFileError(file, size);
-        if (statError) throw new Error(statError);
-        if (!this.usable(row)) return;
-        const bytes = await this.deps.readBytes(file, row.controller.signal);
-        const byteError = attachmentFileError(file, bytes.byteLength);
-        if (byteError) throw new Error(byteError);
+        await prepared;
+        if (!this.usable(row) || row.error) return;
+        let bytes: Uint8Array;
+        try {
+          bytes = await this.deps.readBytes(file, row.controller.signal);
+          const byteError = attachmentFileError(file, bytes.byteLength);
+          if (byteError) throw new Error(byteError);
+        } catch (cause) {
+          row.previewReady = false;
+          throw cause;
+        }
         if (!this.usable(row)) return;
         checkpointing = true;
         if (this.draftCheckpointFailed)

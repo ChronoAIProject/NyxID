@@ -82,6 +82,7 @@
   "Attachment": "附件",
   "Attachment expired per retention policy. Upload it again to continue.": "附件已按保留策略過期。請重新上傳後繼續。",
   "Attachment unavailable. Please try again or upload it again.": "附件不可用。請重試或重新上傳。",
+  "Attachments {{start}}–{{end}} of {{count}}": "附件 {{start}}–{{end}}，共 {{count}} 個",
   "Attachments: {{attachments}}": "附件： {{attachments}}",
   "Authorization code: {{code}}": "授權碼：{{code}}",
   "Auto": "自動",
