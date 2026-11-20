@@ -129,9 +129,9 @@ Readiness checks the selected configuration, then existing async API probes
 exercise actual credentials/authorization; metadata mode never requires a token
 file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
 `nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
-restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
-`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
-API connectivity and CA must be verified in the deployment environment. See
+restrictions are not relaxed. The backend's Google service account is distinct from the
+Kubernetes `nyxid-machine-manager` ServiceAccount. Verify the Google principal,
+its target permissions, API connectivity and CA in the deployment environment. See
 [Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
