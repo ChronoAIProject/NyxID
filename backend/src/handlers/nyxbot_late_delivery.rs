@@ -218,7 +218,13 @@ fn provider_stream_inner(
                     for frame in message_frames(&response_id,None) {yield frame;}
                     return;
                 }
-                let outcome=if org_guest {outcome.map_err(|_|Box::new(engine::TurnError::new("org_channel_guest_unavailable")))} else {outcome};
+                let outcome = if org_guest {
+                    outcome.map_err(|error| {
+                        let mut notice = engine::TurnError::new("org_channel_guest_unavailable");
+                        notice.message = crate::services::org_channel_service::guest_failure_notice(Some(error.code)).into();
+                        Box::new(notice)
+                    })
+                } else { outcome };
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 // A completed empty result still owns a terminal delivery
                 // decision. Never acquire the stream/send barrier for silence.
@@ -1039,7 +1045,7 @@ pub(super) async fn dispatch_occurrence(
 fn settled_answer(message: &AssistantMessage, d: &ChannelTurnDelivery) -> String {
     if let Some(code) = message.error_code.as_deref() {
         let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
-            crate::services::org_channel_service::UNAVAILABLE.into()
+            crate::services::org_channel_service::guest_failure_notice(Some(code)).into()
         } else if code == "capacity_exceeded" {
             crate::services::assistant_turn_observability::capacity_message(
                 message

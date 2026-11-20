@@ -273,8 +273,10 @@ fn relay_failure_reply(message: &AssistantMessage, org_guest: bool) -> String {
             .and_then(|m| m.failure_reason.as_ref())
             .and_then(|r| r.model_route.as_ref())
             .map(|route| route.reason.as_str());
-        return if !org_guest && reason.is_some_and(super::assistant_guest_model_setup::failure_code)
-        {
+        return if org_guest {
+            "The assistant could not use its model for this question. No tool ran for this request."
+                .into()
+        } else if reason.is_some_and(super::assistant_guest_model_setup::failure_code) {
             "Visitor setup could not finish. No tool ran for this request. The owner has been notified.".into()
         } else {
             "I couldn't answer this message. No tool ran for this request.".into()
@@ -327,7 +329,7 @@ where
             } else if event.relay_message_id.is_some() {
                 (relay_failure_reply(&message, org_guest), false)
             } else if org_guest {
-                (super::org_channel_service::UNAVAILABLE.into(), false)
+                (super::org_channel_service::guest_failure_notice(message.error_code.as_deref()).into(), false)
             } else if message.error_code.as_deref() == Some("assistant_start_unavailable") {
                 (super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message, false)
             } else {

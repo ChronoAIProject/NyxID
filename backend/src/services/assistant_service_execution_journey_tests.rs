@@ -767,6 +767,7 @@ pub(super) async fn execute(
         "reply",
         &mut String::new(),
         &mut None,
+        None,
     ))
     .await
 }

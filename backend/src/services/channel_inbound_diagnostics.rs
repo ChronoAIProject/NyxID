@@ -223,6 +223,31 @@ async fn write_counter(
         .await
 }
 
+/// Use the authenticated context of this inbound turn. Its org owns the bot.
+pub(crate) async fn org_guest_turn(
+    db: &mongodb::Database,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    code: &'static str,
+) {
+    let Some(source) = turn.channel_context.as_ref().filter(|source| source.guest) else {
+        return;
+    };
+    let Some(org) = source
+        .org_origin
+        .as_ref()
+        .and_then(|o| o.org_execution.as_ref())
+        .filter(|e| e.guest)
+    else {
+        return;
+    };
+    if write_counter(db, &source.channel_bot_id, &org.org_id, code, true, None)
+        .await
+        .is_err()
+    {
+        tracing::warn!(bot_id=%source.channel_bot_id, code, "Guest turn diagnostic write unavailable");
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum TelegramRoute {
     Bound,

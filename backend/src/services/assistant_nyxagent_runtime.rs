@@ -1054,26 +1054,51 @@ async fn drive_owner_turn(
                 &block_id,
                 &mut partial,
                 &mut instruction_context,
+                None,
             )
             .await;
             let failure=match &outcome {Err(error)=>Some(error),Ok(result)=>result.error.as_ref()};
-            let route_failed=if row.guest_turn && !row.shared_agent_thread && let Some(error)=failure {
-                let current=if row.collaboration.is_some() {super::collaboration_group_service::runtime::refresh(&state.db,&row).await.ok()}else{engine::get(&state.db,&row.user_id,&row.id).await.ok()};
-                current.as_ref().and_then(|r|r.active_turn.as_ref()).is_some_and(|turn|
-                    super::assistant_model_observer::attribute(error,turn,Utc::now()).code=="guest_model_route_required"
-                    && turn.model_route_diagnostic.as_ref().is_some_and(|d|super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&d.reason)))
-            }else{false};
-            if route_failed && row.guest_turn && !row.shared_agent_thread && let Some(agent)=row.agent_id.as_deref() {
-                let current=super::assistant_guest_model_setup::record(&state.db,&row.user_id,agent,&row.model).await.ok().flatten()
-                    .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
-                // Another request may already have replaced the rejected generation.
-                let force = current==setup_generation;
-                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline,super::org_channel_service::origin(&row))).await.unwrap_or(false) {
-                    partial.clear();
-                    instruction_context = None;
-                    return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
+            if row.guest_turn && !row.shared_agent_thread
+                && let (Some(error), Some(agent)) = (failure, row.agent_id.as_deref())
+            {
+                let current = if row.collaboration.is_some() {
+                    super::collaboration_group_service::runtime::refresh(&state.db, &row).await.ok()
+                } else {
+                    engine::get(&state.db, &row.user_id, &row.id).await.ok()
+                };
+                if let Some(turn) = current.as_ref().and_then(|r| r.active_turn.as_ref())
+                    && turn.turn_id == turn_id
+                    && super::assistant_model_observer::attribute(error, turn, Utc::now()).code == "guest_model_route_required"
+                    && let Some(diagnostic) = turn.model_route_diagnostic.as_ref()
+                    && diagnostic.attempt_id.is_some() && diagnostic.attempt_id == turn.model_attempt_id
+                    && super::assistant_service_execution::model_diagnostic::Reason::needs_owner_setup(&diagnostic.reason)
+                {
+                    if diagnostic.reason == "route_mismatch" {
+                        Box::pin(super::channel_inbound_diagnostics::org_guest_turn(&state.db, turn, "guest_model_route_mismatch")).await;
+                    }
+                    let generation = super::assistant_guest_model_setup::record(&state.db, &row.user_id, agent, &row.model)
+                        .await.ok().flatten().and_then(|r| r.get_str("claim").ok().map(str::to_owned));
+                    let ready = Box::pin(super::assistant_guest_model_setup::ensure(
+                        &state, &row.user_id, agent, &row.model, generation == setup_generation,
+                        setup_deadline, super::org_channel_service::origin(&row),
+                    )).await.unwrap_or(false);
+                    if !ready {
+                        return Err(super::assistant_guest_model_setup::failure(&state.db, &row).await);
+                    }
+                    // A new request key can execute the input again. Require a terminal
+                    // response and the live turn's complete, empty tool history.
+                    if outcome.as_ref().is_ok_and(|result| result.text.is_empty()) && partial.is_empty()
+                        && turn.timing.first_output_ms.is_none() && turn.activity_count == Some(0)
+                        && !turn.business_system_success && turn.timing.tool_calls == 0
+                    {
+                        instruction_context = None;
+                        let key = format!("{turn_id}:guest-route");
+                        return execute_owner_turn(
+                            &state, egress.as_ref(), &authority, &row, &text, &mut credential, policy,
+                            &mut events, &block_id, &mut partial, &mut instruction_context, Some(&key),
+                        ).await;
+                    }
                 }
-                return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);
             }
             outcome
         });
@@ -1438,6 +1463,7 @@ pub(crate) async fn execute_owner_turn(
     block_id: &str,
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
+    request_key_base: Option<&str>,
 ) -> Result<TurnResult, TurnError> {
     let contract::NyxAgentExecutionContext::Owner {
         user_id,
@@ -1505,6 +1531,7 @@ pub(crate) async fn execute_owner_turn(
         partial,
         instruction_context,
         &mut tool_images,
+        request_key_base,
     ))
     .await;
     if let Some(fallback) = model_card_fallback(state, &attempt, row, &outcome, partial).await? {
@@ -1715,6 +1742,7 @@ async fn execute_turn_inner(
     partial: &mut String,
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
+    request_key_base: Option<&str>,
 ) -> Result<TurnResult, TurnError> {
     let platform_plan = if row.model.starts_with("nyxid/") {
         if row.guest_turn {
@@ -2264,12 +2292,13 @@ async fn execute_turn_inner(
         {
             return Err(TurnError::internal("cancelled", "stop"));
         }
+        let base = request_key_base.unwrap_or(turn_id);
         let request_key = if tool_images.fallback.is_some() {
-            format!("{turn_id}:images:{}", tool_images.rounds)
+            format!("{base}:images:{}", tool_images.rounds)
         } else if continuations.count == 0 {
-            turn_id.clone()
+            base.to_owned()
         } else {
-            format!("{turn_id}:continuation:{}", continuations.count)
+            format!("{base}:continuation:{}", continuations.count)
         };
         tool_images.attempted(state, row).await;
         let mut request_body = {
