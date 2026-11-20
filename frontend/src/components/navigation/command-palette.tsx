@@ -210,7 +210,7 @@ export function CommandPalette({
 
       <div className="relative z-10 w-full max-w-[640px] flex flex-col">
         {/* Search input bar */}
-        <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-[#1a1a1a] px-5 h-14">
+        <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-popover shadow-lg px-5 h-14">
           <Search className="h-5 w-5 shrink-0 text-text-tertiary" />
           <input
             type="text"
@@ -225,7 +225,7 @@ export function CommandPalette({
 
         {/* Results */}
         {filtered.length > 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] p-2 max-h-[360px] overflow-y-auto">
+          <div className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg p-2 max-h-[360px] overflow-y-auto">
             {filtered.map((item, i) => (
               <button
                 key={`${item.to ?? "action"}-${item.label}`}
@@ -247,7 +247,7 @@ export function CommandPalette({
                 />
                 <span className="flex-1">{translateUi(item.label)}</span>
                 {item.group === "action" && (
-                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
+                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-muted-foreground">{translateUi("Action")}</span>
                 )}
               </button>
             ))}
@@ -255,7 +255,7 @@ export function CommandPalette({
         )}
 
         {query.trim() && filtered.length === 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}&rdquo;
+          <div className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg py-8 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}&rdquo;
           </div>
         )}
       </div>
