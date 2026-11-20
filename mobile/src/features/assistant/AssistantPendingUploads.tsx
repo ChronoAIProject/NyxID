@@ -3,6 +3,7 @@ import { Image, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { X } from "lucide-react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import { LinearGradient } from "expo-linear-gradient";
@@ -59,10 +60,25 @@ export function AssistantPendingUploads({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const railIndicator = useRailScrollIndicator();
   const scroll = useRef<ScrollView>(null);
   const [width, setWidth] = useState(0);
   const [offset, setOffset] = useState(0);
   const strip = attachmentStripGeometry(width, files.length, offset);
+  const errors = files.flatMap(({ key, file, error }) =>
+    error
+      ? [{ key, message: t("{{name}}: {{error}}", { name: file.name, error }) }]
+      : [],
+  );
+  const range = strip.overflow
+    ? t("Attachments {{start}}–{{end}} of {{count}}", {
+        start: strip.start,
+        end: strip.end,
+        count: files.length,
+      })
+    : errors.length > 0
+      ? t("Attachments ({{count}})", { count: files.length })
+      : "";
   useEffect(() => {
     if (offset === strip.offset) return;
     setOffset(strip.offset);
@@ -190,14 +206,41 @@ export function AssistantPendingUploads({
               ) : null}
             </View>
           </View>
-          {strip.overflow ? (
-            <Label muted style={styles.range}>
-              {t("Attachments {{start}}–{{end}} of {{count}}", {
-                start: strip.start,
-                end: strip.end,
-                count: files.length,
-              })}
+          {range ? (
+            <Label muted numberOfLines={1} style={styles.range}>
+              {range}
             </Label>
+          ) : null}
+          {errors.length > 0 ? (
+            <ScrollView
+              style={styles.errors}
+              {...railIndicator}
+              contentContainerStyle={styles.errorContent}
+              keyboardShouldPersistTaps="always"
+              alwaysBounceVertical={false}
+              nestedScrollEnabled
+            >
+              {errors.map(({ key, message }) => (
+                <View key={key} style={styles.errorRow}>
+                  <Label
+                    aria-hidden
+                    style={[styles.status, { color: colors.danger }]}
+                  >
+                    •
+                  </Label>
+                  <Label
+                    accessibilityLiveRegion="polite"
+                    style={[
+                      styles.status,
+                      styles.errorMessage,
+                      { color: colors.danger },
+                    ]}
+                  >
+                    {message}
+                  </Label>
+                </View>
+              ))}
+            </ScrollView>
           ) : null}
         </View>
       ) : null}
@@ -314,7 +357,18 @@ function PendingUploadCard({
       <View style={styles.body} pointerEvents={hasThumbnail ? "none" : "auto"}>
         {hasThumbnail ? null : media}
       </View>
-      {handle || status.text ? (
+      {row.error ? (
+        <View pointerEvents="none" style={styles.failureOverlay}>
+          <Label
+            style={[
+              styles.failureLabel,
+              { color: colors.danger, backgroundColor: colors.groupedFill },
+            ]}
+          >
+            {t("Upload failed")}
+          </Label>
+        </View>
+      ) : handle || status.text ? (
         <View style={[styles.caption, { backgroundColor: colors.cardSoft }]}>
           {handle ? (
             <Label
@@ -330,10 +384,7 @@ function PendingUploadCard({
               numberOfLines={1}
               accessibilityLabel={status.text}
               accessibilityLiveRegion="polite"
-              style={[
-                styles.status,
-                row.error ? { color: colors.danger } : undefined,
-              ]}
+              style={styles.status}
             >
               {status.text}
             </Label>
@@ -354,7 +405,7 @@ function PendingUploadCard({
             { backgroundColor: colors.card, borderColor: colors.border },
           ]}
         >
-          <X size={16} color={colors.textPrimary} />
+          <X size={14.4} color={colors.textPrimary} />
         </View>
       </Pressable>
       <AssistantUploadProgress status={status} />
@@ -389,28 +440,50 @@ const styles = StyleSheet.create({
     gap: 4,
     overflow: "hidden",
   },
-  fileType: { fontSize: 11, paddingRight: 36, minHeight: 24 },
-  filename: { flexShrink: 1 },
+  fileType: { fontSize: 9.9, lineHeight: 18, paddingRight: 36, minHeight: 24 },
+  filename: { fontSize: 11.7, lineHeight: 18, flexShrink: 1 },
   caption: { padding: 6, gap: 2 },
-  status: { fontSize: 11 },
+  status: { fontSize: 9.9, lineHeight: 18 },
+  failureOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-end",
+    alignItems: "center",
+    padding: 6,
+    backgroundColor: "rgba(128, 128, 128, 0.48)",
+  },
+  failureLabel: {
+    fontSize: 9.9,
+    lineHeight: 18,
+    textAlign: "center",
+    fontWeight: "600",
+    borderRadius: radius.md,
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
   close: {
     position: "absolute",
-    top: 2,
-    right: 2,
+    top: 0,
+    right: 0,
     width: 44,
     height: 44,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: "flex-end",
+    paddingTop: 4,
+    paddingRight: 6,
   },
   closeCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 25.2,
+    height: 25.2,
+    borderRadius: 12.6,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
   },
   fadeLeft: { position: "absolute", top: 0, bottom: 0, left: 0, width: 32 },
   fadeRight: { position: "absolute", top: 0, bottom: 0, right: 0, width: 32 },
-  range: { fontSize: 11, textAlign: "center", paddingBottom: 2 },
+  range: { fontSize: 9.9, lineHeight: 18, textAlign: "center", paddingBottom: 2 },
+  errors: { flexGrow: 0, maxHeight: 100 },
+  errorContent: { paddingHorizontal: INSET, paddingBottom: 2 },
+  errorRow: { flexDirection: "row", alignItems: "baseline", gap: 5 },
+  errorMessage: { flex: 1 },
 });

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react-native";
+import { act, fireEvent, render, screen, within } from "@testing-library/react-native";
 import { Platform, StyleSheet } from "react-native";
 import { AssistantPendingUploads } from "./AssistantPendingUploads";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
@@ -168,7 +168,17 @@ it("mixed types, states, handles, decode failures and large text retain equal ou
   expect(screen.getByText("c.txt")).toBeTruthy();
   expect(screen.queryByText("a.png")).toBeNull();
   expect(screen.queryByText("b.pdf")).toBeNull();
-  expect(screen.getByLabelText(files[2]!.error!)).toBeTruthy();
+  const failedCard = within(screen.getByTestId("composer-attachment-3"));
+  const failureLabel = failedCard.getByText("Upload failed");
+  expect(style(failureLabel).color).toBe(
+    require("../../theme/mobileTheme").lightColors.danger,
+  );
+  expect(style(failureLabel.parent!)).toMatchObject({
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(128, 128, 128, 0.48)",
+  });
+  expect(failedCard.queryByText(files[2]!.error!)).toBeNull();
+  expect(screen.getByText(`c.txt: ${files[2]!.error}`)).toBeTruthy();
   expect(
     screen.getAllByTestId("upload-progress").map((n) => n.props.status.loader),
   ).toEqual(["determinate", "indeterminate", "none", "none"]);
@@ -179,15 +189,18 @@ it("mixed types, states, handles, decode failures and large text retain equal ou
     expect(style(button)).toMatchObject({
       width: 44,
       height: 44,
-      top: 2,
-      right: 2,
+      top: 0,
+      right: 0,
+      paddingTop: 4,
+      paddingRight: 6,
+      alignItems: "flex-end",
     });
     expect(style(button).backgroundColor).toBeUndefined();
-    const circle = descendants(button).find((n) => style(n)?.width === 28)!;
+    const circle = descendants(button).find((n) => style(n)?.width === 25.2)!;
     expect(style(circle)).toMatchObject({
-      width: 28,
-      height: 28,
-      borderRadius: 14,
+      width: 25.2,
+      height: 25.2,
+      borderRadius: 12.6,
     });
     expect(style(circle).backgroundColor).toBeTruthy();
   }
@@ -296,7 +309,53 @@ it("unvalidated/rejected files never decode; a network error preserves a validat
   expect(
     screen.getByRole("button", { name: "Preview network.png" }),
   ).toBeTruthy();
-  expect(screen.getByLabelText(failed.error)).toBeTruthy();
+  expect(screen.getByText(`network.png: ${failed.error}`)).toBeTruthy();
+  expect(screen.getAllByText("Upload failed")).toHaveLength(2);
+});
+
+it("keeps the attachment count on its own line and lists each failed file in a separate bullet, including offscreen files", async () => {
+  const files = Array.from({ length: 6 }, (_, i) => file(i, `file-${i}.txt`, "text/plain"));
+  const renderStrip = (rows: PendingAssistantUpload[]) => (
+    <AssistantPendingUploads files={rows} disabled={false} remove={jest.fn()} />
+  );
+  const view = await render(renderStrip(files));
+  await layout(343);
+  const failed = {
+    ...files[5]!,
+    item: undefined,
+    error: "Upload failed. Please try again.",
+  };
+  const withFailure = [...files.slice(0, 5), failed];
+  await view.rerender(renderStrip(withFailure));
+  const reason = "file-5.txt: Upload failed. Please try again.";
+  expect(screen.getByText("Attachments 1–3 of 6").props.numberOfLines).toBe(1);
+  expect(screen.getByText(reason)).toBeTruthy();
+
+  await fireEvent.scroll(screen.getByTestId("composer-attachments"), {
+    nativeEvent: { contentOffset: { x: 10000 } },
+  });
+  expect(screen.getByText("Attachments 4–6 of 6")).toBeTruthy();
+  expect(screen.getByText(reason)).toBeTruthy();
+  await view.rerender(renderStrip([
+    ...withFailure.slice(0, 4),
+    { ...files[4]!, item: undefined, error: "Upload cancelled." },
+    failed,
+  ]));
+  const cancelled = "file-4.txt: Upload cancelled.";
+  const cancelledRow = screen.getByText(cancelled).parent!;
+  const failedRow = screen.getByText(reason).parent!;
+  expect(failedRow).not.toBe(cancelledRow);
+  for (const row of [cancelledRow, failedRow]) {
+    expect(within(row).getByText("•", { includeHiddenElements: true })).toBeTruthy();
+  }
+
+  await view.rerender(renderStrip([failed]));
+  expect(screen.getByText("Attachments (1)")).toBeTruthy();
+  expect(screen.queryByText(cancelled)).toBeNull();
+  expect(screen.getByText(reason)).toBeTruthy();
+  await view.rerender(renderStrip(files.slice(0, 5)));
+  expect(screen.getByText("Attachments 1–3 of 5")).toBeTruthy();
+  expect(screen.queryByText(/failed to upload|Upload failed/)).toBeNull();
 });
 
 it("horizontal swipes, resize, removal and additions update/clamp the range and directional fades; fourth and tenth remove controls work", async () => {
