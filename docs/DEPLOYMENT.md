@@ -434,8 +434,8 @@ Both public and internal replica listeners continue serving during the work wait
 including ordinary requests and new turns that arrive while routing converges.
 There is no drain rejection on these request paths and `/ready` never accesses
 the database. Staging chrono-cd readiness/load-balancer consumers retain this
-drain-only, empty-body contract. The separate `/ready/dependencies` diagnostic
-checks MongoDB with bounded sharing and must not drive replica eviction (see
+drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
+MongoDB availability is monitored separately (see
 [Health and readiness contract](HEALTH_READINESS.md)).
 
 The process stops taking new background queue claims, scheduled work and polls.
@@ -940,8 +940,8 @@ For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
 production/staging base URLs, chrono-probe assertions and staged rollout, see
 [Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
 its backend/version proxy; frontend-only probes are `/frontend/health` and
-`/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd;
-`/ready/dependencies` is the separate MongoDB diagnostic for chrono-probe.
+`/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd and
+chrono-probe; neither backend probe accesses MongoDB.
 Production Compose keeps backend `/health` and checks frontend `/frontend/ready`.
 
 Publish Images may reuse successful CI jobs from an identical pull-request

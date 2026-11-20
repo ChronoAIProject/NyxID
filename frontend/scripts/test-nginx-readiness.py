@@ -121,7 +121,6 @@ for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
         self.healthy()
         self.assertEqual(self.request("/health")[0], 502)
         self.assertEqual(self.request("/ready")[0], 502)
-        self.assertEqual(self.request("/ready/dependencies")[0], 502)
 
     def test_02_missing_or_unreadable_artifacts_fail_then_recover(self):
         for path, reason in [("index.html", "entry_html"), ("assets/app.js", "static_assets"),
@@ -145,7 +144,7 @@ for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
                     self.healthy()
 
     def test_03_explicit_routes_do_not_use_spa_fallback(self):
-        for path in ["/frontend/ready/", "/frontend/ready.js", "/frontend/health/", "/frontend/health.css", "/ready/", "/ready.js", "/ready/dependencies/", "/ready/dependencies.js"]:
+        for path in ["/frontend/ready/", "/frontend/ready.js", "/frontend/health/", "/frontend/health.css", "/ready/", "/ready.js", "/ready/dependencies", "/ready/dependencies/", "/ready/dependencies.js"]:
             with self.subTest(path=path):
                 status, _, body = self.request(path)
                 self.assertEqual(status, 404)
@@ -156,11 +155,11 @@ for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
         source = '''from http.server import BaseHTTPRequestHandler, HTTPServer
 class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
-  self.send_response(503 if self.path == "/ready/dependencies" else 200)
-  self.send_header("Content-Type", "application/json")
+  self.send_response(200)
+  if self.path == "/health": self.send_header("Content-Type", "application/json")
   self.send_header("Cache-Control", "max-age=86400")
   self.end_headers()
-  bodies = {"/health": b'{"status":"ok","version":"legacy"}', "/ready": b'{"status":"ok"}', "/ready/dependencies": b'{"status":"unavailable","failing":["mongodb"]}'}
+  bodies = {"/health": b'{"status":"ok","version":"legacy"}', "/ready": b''}
   self.wfile.write(bodies[self.path])
 HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
 '''
@@ -170,8 +169,11 @@ HTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
                 break
             time.sleep(0.1)
         self.probe("/health", 200, {"status": "ok", "version": "legacy"})
-        self.probe("/ready", 200, {"status": "ok"})
-        self.probe("/ready/dependencies", 503, {"status": "unavailable", "failing": ["mongodb"]})
+        status, headers, body = self.request("/ready")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers.get_all("Cache-Control"), ["no-store"])
+        self.assertEqual(self.request("/ready/dependencies")[0], 404)
         self.healthy()
         target = "/usr/share/nginx/html/index.html"
         docker("exec", "--user", "0", self.name, "mv", target, target + ".saved")

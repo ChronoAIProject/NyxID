@@ -3868,7 +3868,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
         .route("/ready", get(handlers::health::ready))
-        .route("/ready/dependencies", get(handlers::health::dependencies_ready))
         .route("/favicon.ico", get(handlers::brand_icons::favicon_ico))
         .route("/favicon.svg", get(handlers::brand_icons::favicon_svg))
         .route("/icon-512.png", get(handlers::brand_icons::icon_png))

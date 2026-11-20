@@ -253,7 +253,6 @@ pub mod push_service;
 pub mod raw_attachment_tool;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
-pub mod readiness_service;
 pub(crate) mod record_field_service;
 pub mod reporting_identity_service;
 pub mod resource_adapter;

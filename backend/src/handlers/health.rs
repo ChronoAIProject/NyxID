@@ -54,13 +54,6 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
-#[derive(Serialize)]
-pub struct ReadinessResponse {
-    pub status: &'static str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub failing: Vec<crate::services::readiness_service::Failure>,
-}
-
 /// GET /ready: preserve the drain-only, empty-body orchestration contract.
 pub async fn ready(State(state): State<AppState>) -> Response {
     let status = if state.shutdown.is_draining() {
@@ -69,25 +62,6 @@ pub async fn ready(State(state): State<AppState>) -> Response {
         StatusCode::OK
     };
     (status, [(CACHE_CONTROL, "no-store")]).into_response()
-}
-
-/// GET /ready/dependencies: bounded, shared dependency diagnostic, without auth.
-pub async fn dependencies_ready(State(state): State<AppState>) -> Response {
-    let failing = state
-        .readiness_probe
-        .check(&state.db, &state.shutdown)
-        .await;
-    let (status, code) = if failing.is_empty() {
-        ("ok", StatusCode::OK)
-    } else {
-        ("unavailable", StatusCode::SERVICE_UNAVAILABLE)
-    };
-    (
-        code,
-        [(CACHE_CONTROL, "no-store")],
-        Json(ReadinessResponse { status, failing }),
-    )
-        .into_response()
 }
 
 /// GET /health
@@ -300,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_http_mongodb_unavailable_preserves_liveness_and_hides_errors() {
+    async fn readiness_http_stays_database_independent_and_preserves_drain_contract() {
         use axum::http::StatusCode;
         let state = crate::test_utils::test_app_state_no_db().await;
         assert_eq!(
@@ -310,15 +284,6 @@ mod tests {
         assert_eq!(
             assert_probe(state.clone(), "/ready", StatusCode::OK).await,
             serde_json::Value::Null
-        );
-        assert_eq!(
-            assert_probe(
-                state.clone(),
-                "/ready/dependencies",
-                StatusCode::SERVICE_UNAVAILABLE
-            )
-            .await,
-            serde_json::json!({"status":"unavailable", "failing":["mongodb"]})
         );
         state.shutdown.begin_drain();
         // Probe routes keep their contracts even after ordinary work is stopped.
@@ -330,31 +295,6 @@ mod tests {
         assert_eq!(
             assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
             serde_json::Value::Null
-        );
-        assert_eq!(
-            assert_probe(
-                state,
-                "/ready/dependencies",
-                StatusCode::SERVICE_UNAVAILABLE
-            )
-            .await,
-            serde_json::json!({"status":"unavailable", "failing":["draining"]})
-        );
-    }
-
-    #[tokio::test]
-    async fn readiness_http_real_mongodb_succeeds_without_authentication() {
-        let db = crate::test_utils::connect_test_database("readiness_http")
-            .await
-            .unwrap();
-        assert_eq!(
-            assert_probe(
-                crate::test_utils::test_app_state(db),
-                "/ready/dependencies",
-                axum::http::StatusCode::OK
-            )
-            .await,
-            serde_json::json!({"status":"ok"})
         );
     }
 
@@ -382,16 +322,6 @@ mod tests {
             assert_eq!(
                 assert_probe_headers(state.clone(), "/ready", StatusCode::OK, &headers).await,
                 serde_json::Value::Null
-            );
-            assert_eq!(
-                assert_probe_headers(
-                    state.clone(),
-                    "/ready/dependencies",
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    &headers
-                )
-                .await,
-                serde_json::json!({"status":"unavailable", "failing":["mongodb"]})
             );
         }
     }

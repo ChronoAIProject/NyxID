@@ -25,7 +25,6 @@ invalid or expired credentials do not change their probe result.
 | --- | --- | --- | --- | --- |
 | Backend liveness | `/health` | 200, JSON `status == "ok"`; existing `version`, `commit`, `encryption` retained | transport/HTTP/body mismatch | 3 s |
 | Backend orchestration | `/ready` | 200, **empty body** | 503, **empty body**, only while draining | 3 s |
-| Backend dependency diagnostic | `/ready/dependencies` | 200, JSON exactly `{"status":"ok"}` | 503, `{"status":"unavailable","failing":["mongodb"]}` or `failing:["draining"]` | 3 s |
 | Frontend liveness | `/frontend/health` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | transport/HTTP/body mismatch | 3 s |
 | Frontend static readiness | `/frontend/ready` | 200, JSON exactly `{"status":"ok","component":"frontend"}` | 503, JSON `status == "unavailable"`, `component == "frontend"`, nonempty `failing` | 4 s |
 
@@ -34,39 +33,25 @@ require `Content-Type: application/json`. Reject redirects, HTML/login pages,
 unexpected bodies and cached responses. Disable redirect following, caching and
 conditional-request headers in chrono-probe and any CDN/Ingress on these paths.
 A status-code-only assertion is insufficient for JSON endpoints. The four
-chrono-probe targets are backend `/health` and `/ready/dependencies`, and the two
-frontend probes. Probe every 10–30 seconds. Keep orchestration on `/ready`.
+chrono-probe targets are backend `/health` and `/ready`, and the two frontend
+probes. If only one backend target is needed, use `/ready` and assert HTTP 200
+with an empty body. Probe every 10–30 seconds. Keep orchestration on `/ready`.
 
-## Backend boundaries and database cost
+## Backend boundaries
 
 `/health` and `/ready` perform no database I/O. `/ready` retains its original
 meaning: this replica is accepting traffic until graceful draining starts.
+It returns an empty body with HTTP 200 normally and HTTP 503 during draining;
+`/health` remains HTTP 200 throughout draining. Both are independent of login
+state and database availability.
+
 MongoDB latency or pool pressure must not evict every replica from the load
-balancer simultaneously. The dependency endpoint is diagnostic, **not a new
-load-balancer, Kubernetes readiness or automatic restart signal**.
-
-Dependency failures are the closed set `mongodb`, `draining`. Draining takes
-precedence, bypasses cached results, and immediately cancels dependency reads
-and waiters. Otherwise a read-only MongoDB `ping` uses the application's actual
-database/client. A one-second deadline covers both waiting for another probe
-and server selection/pool checkout/the command. Errors expose no URI or raw
-exception.
-
-Each application instance permits at most one in-flight dependency read. Requests
-share its result for at most one second **from read admission**, not completion;
-a slow read never gains an extra second of cached success. Both success and
-failure are reused. A cancelled leader leaves a pessimistic failure until the
-same window expires, preventing disconnect-driven repeated pings. No background
-probe loop is started and no success can be reused after its one-second bound.
-These bounded internal observations are distinct from HTTP caching, which stays
-disabled. Once the window expires, a successful new check returns 200.
-
-MongoDB is the only live dependency shared by core authentication, authorization
-and credential persistence. JWT/encryption configuration and initial database
-setup already gate listener startup. Optional KMS providers, billing/Lago, email,
+balancer simultaneously. These probes do not certify database reads, writes,
+transactions or business operations. Monitor MongoDB and business error rates
+and latency separately. JWT/encryption configuration and initial database setup
+already gate listener startup. Optional KMS providers, billing/Lago, email,
 social providers, nodes, model/tool downstreams and feature rollout readiness
-are excluded. `ping` proves reachability, not arbitrary writes, replica-set
-transactions or every background job; retain Integrity/security diagnostics.
+are outside this probe contract; retain Integrity/security diagnostics.
 
 ## Frontend boundaries and supervision
 
@@ -108,12 +93,11 @@ image entrypoint for CSP/browser tests and does not launch this checker;
 ## Routes, existing consumers and rollout
 
 Frontend `/health` preserves the backend/version proxy consumed by SPA release
-detection. `/ready` proxies the backend's drain-only route;
-`/ready/dependencies` explicitly proxies its diagnostic route. These are not
+detection. `/ready` proxies the backend's drain-only route. These are not
 frontend static-delivery checks. Backend transport failures stay nginx 502/504.
 Use the direct backend base URL for chrono-probe. Probe routes are explicit;
-suffixes such as `/frontend/ready/`, `/frontend/ready.js`, `/ready/` and
-`/ready/dependencies/` return 404, never SPA `200 index.html`.
+suffixes such as `/frontend/ready/`, `/frontend/ready.js` and `/ready/` return
+404, never SPA `200 index.html`. Unregistered paths under `/ready` also return 404.
 
 **Staging's chrono-cd backend readiness probe and load balancer already use
 `/ready` as a drain signal. Keep that configuration unchanged.** The related
@@ -127,27 +111,24 @@ external readiness/load-balancer manifests, so this PR does not change them.
 1. Roll out backend first, retaining staging chrono-cd `/ready` routing and
    production `/health` settings. Verify `/ready` stays 200 with an empty body
    during isolated MongoDB failure and becomes 503 immediately on drain.
-2. Verify `/ready/dependencies` separately: MongoDB failure/timeout returns JSON
-   503; recovery returns 200 after at most the remaining one-second reuse window.
-   Do not wire dependency failures into replica eviction or automatic restarts.
-3. Deploy the matching frontend image with its default supervised entrypoint.
+2. Deploy the matching frontend image with its default supervised entrypoint.
    Route frontend probes to port 8080 with no auth, SPA rewrite, cache or redirect.
    Verify checker crash recovery, static fault/recovery and overload rejection.
-4. Enable the matching frontend Compose healthcheck only with that image.
+3. Enable the matching frontend Compose healthcheck only with that image.
    Existing orchestration `/ready` consumers keep their current path/body contract.
-5. Verify all four chrono-probe paths from its network, with redirects, caching
+4. Verify all four chrono-probe paths from its network, with redirects, caching
    and conditional headers disabled. Record image tag/digest and public
    status/body/content-type/no-store plus fault/recovery evidence, then enable
    monitoring in the parent issue. Inject faults on isolated staging replicas;
    never stop production MongoDB merely to test a probe.
 
-Example dependency assertion (no authentication or redirect following):
+Example readiness assertion (no authentication or redirect following):
 
 ```bash
-curl --silent --show-error --max-time 3 --dump-header /tmp/ready.headers \
-  https://api.nyxid.ai/ready/dependencies > /tmp/ready.json
-# Require HTTP 200, application/json and Cache-Control: no-store in headers.
-jq -e '. == {"status":"ok"}' /tmp/ready.json
+status=$(curl --silent --show-error --max-time 3 --dump-header /tmp/ready.headers \
+  --output /tmp/ready.body --write-out '%{http_code}' https://api.nyxid.ai/ready)
+test "$status" = 200 && test ! -s /tmp/ready.body
+# Also require Cache-Control: no-store in /tmp/ready.headers.
 ```
 
 ## Reproducible evidence
@@ -161,23 +142,20 @@ python3 frontend/scripts/test-nginx-readiness.py
 ```
 
 Rust tests cover the production router with anonymous/invalid credentials,
-MongoDB success/failure, drain-only orchestration, single-flight sharing,
-start-bounded reuse, leader cancellation, lock/command deadlines and drain
-interruption. `NYXID_TEST_DATABASE_URL` selects the test database. Run the full
-backend suite through the existing `backend-tests.yml` reusable workflow; use
+database-independent health/readiness and the drain-only orchestration contract.
+`NYXID_TEST_DATABASE_URL` selects the test database. Run the full backend suite through the existing `backend-tests.yml` reusable workflow; use
 its Rust toolchain, replica-set setup and `RUST_MIN_STACK=8388608` settings.
 
 The exact nginx 1.27 production runtime suite covers static failures/recovery,
 backend independence, explicit routes, six credential variants, bounded checker
 failure, supervised restart/reaping and overload. Checker unit tests (11), nginx
-policy tests (6), and all eight runtime groups pass locally on 2026-11-19. A real
+policy tests (6), and all eight runtime groups pass locally on 2026-11-20. A real
 Vite build (480 inventory files) was also checked through the packaged runtime.
 The PR records final backend/full-suite results and their exact commit scope.
 
-Public-route release verification is pending. Read-only requests on this date
+Public-route release verification is pending. Read-only requests on 2026-11-19
 to the production API health/ready, production frontend health/ready and staging
 ready targets returned edge HTTP 403, `text/plain; charset=UTF-8`,
-`error code: 1010`. Those are not application probe success. The new dependency
-path is unreleased and not included in that historical evidence. Deployment
-owners must verify edge access from chrono-probe's network after rollout.
+`error code: 1010`. Those are not application probe success. Deployment owners
+must verify edge access from chrono-probe's network after rollout.
 This PR does not deploy NyxID or modify chrono-probe scheduling/alerts.
