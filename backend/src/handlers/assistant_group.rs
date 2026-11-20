@@ -250,7 +250,7 @@ async fn advance_inner(state: &AppState, owner: &str, group_id: &str, background
         }
         if group.followers.iter().any(|f| f.automation.is_some()) {
             crate::services::trigger_schedule::group::recover(&state.db, &group).await?;
-            let current = groups::get(&state.db, owner, group_id).await?;
+            let current = groups::get_for_automation_dispatch(&state.db, owner, group_id).await?;
             for (work, agent_id) in crate::services::trigger_schedule::group::queued(&current) {
                 let _claim = if background {
                     let Some(work) = state.shutdown.background() else {

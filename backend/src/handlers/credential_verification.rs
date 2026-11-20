@@ -120,13 +120,7 @@ async fn run(
         .body(Body::empty())
         .map_err(|_| AppError::Internal("Verification request construction failed".into()))?;
     let mut proxy_state = state.clone();
-    proxy_state.http_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(verification::TIMEOUT)
-        .build()
-        .map_err(|_| AppError::Internal("Verification transport unavailable".into()))?;
+    proxy_state.http_client = verification::control_client()?;
     let result = tokio::time::timeout(
         verification::TIMEOUT,
         verification::CHECK.scope(

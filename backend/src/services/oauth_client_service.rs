@@ -1,3 +1,4 @@
+use crate::models::security_effect_intent::SecurityEffectIntent;
 use chrono::{NaiveDate, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, Bson, Document, doc, spec::BinarySubtype};
@@ -262,6 +263,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         delegation_scopes: String::new(),
         default_service_catalog_slugs: Vec::new(),
         broker_capability_enabled: false,
+        first_party_management: false,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,
@@ -297,6 +299,7 @@ async fn reconcile_default_client(db: &mongodb::Database, existing: &OauthClient
             doc! { "allowed_scopes": &updated_scopes,
             "updated_at": bson::DateTime::from_chrono(Utc::now()) },
             true,
+            None,
         )
         .await?;
 
@@ -377,6 +380,7 @@ pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
                 "updated_at": now,
             },
             true,
+            None,
         )
         .await?;
 
@@ -474,6 +478,7 @@ pub async fn create_client_with_id(
         delegation_scopes: delegation_scopes.to_string(),
         default_service_catalog_slugs: default_service_catalog_slugs.to_vec(),
         broker_capability_enabled,
+        first_party_management: false,
         revocation_webhook_url: revocation_webhook_url.map(str::to_string),
         revocation_webhook_secret_encrypted,
         connection_webhook_url: None,
@@ -1230,8 +1235,9 @@ async fn apply_client_update(
     filter: Document,
     set_doc: Document,
     security: bool,
+    audit: Option<SecurityEffectIntent>,
 ) -> AppResult<mongodb::results::UpdateResult> {
-    if !security {
+    if !security && audit.is_none() {
         return Ok(db
             .collection::<OauthClient>(OAUTH_CLIENTS)
             .update_one(filter, doc! { "$set": set_doc })
@@ -1243,26 +1249,57 @@ async fn apply_client_update(
         .to_owned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
-    session.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
-        let db = &db;
-        let result: AppResult<mongodb::results::UpdateResult> = async {
-            let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(filter.clone(),
-                doc! { "$set": set_doc.clone(), "$inc": { "machine_external_security_revision": 1_i64 } })
-                .session(&mut *session).await?;
-            if result.matched_count != 0 {
-                if set_doc.get_bool("is_active").ok() == Some(false) {
-                    for collection in [CONSENTS,REFRESH_TOKENS,AUTH_CODES] {
-                        db.collection::<bson::Document>(collection).delete_many(doc! {"client_id":&client_id})
-                            .session(&mut *session).await?;
-                    }
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let db = &db;
+            let result: AppResult<mongodb::results::UpdateResult> = async {
+                let mut mutation = doc! { "$set": set_doc.clone() };
+                if security {
+                    mutation.insert("$inc", doc! { "machine_external_security_revision": 1_i64 });
                 }
-                super::machine_external_grant_service::invalidate_client_in_session(
-                    db, &client_id, "oauth_client_security_changed", 100, session).await?;
+                let result = db
+                    .collection::<OauthClient>(OAUTH_CLIENTS)
+                    .update_one(filter.clone(), mutation)
+                    .session(&mut *session)
+                    .await?;
+                if result.matched_count == 0 {
+                    return Ok(result);
+                }
+                if let Some(intent) = audit.as_ref() {
+                    super::security_effect_service::enqueue_in_session(
+                        db,
+                        session,
+                        std::slice::from_ref(intent),
+                    )
+                    .await?;
+                }
+                if security {
+                    if set_doc.get_bool("is_active").ok() == Some(false) {
+                        for collection in [CONSENTS, REFRESH_TOKENS, AUTH_CODES] {
+                            db.collection::<bson::Document>(collection)
+                                .delete_many(doc! {"client_id":&client_id})
+                                .session(&mut *session)
+                                .await?;
+                        }
+                    }
+                    super::machine_external_grant_service::invalidate_client_in_session(
+                        db,
+                        &client_id,
+                        "oauth_client_security_changed",
+                        100,
+                        session,
+                    )
+                    .await?;
+                }
+                Ok(result)
             }
-            Ok(result)
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Update the redirect URIs on an OAuth client.
@@ -1282,6 +1319,7 @@ pub async fn update_redirect_uris(
             "updated_at": bson::DateTime::from_chrono(now),
         },
         true,
+        None,
     )
     .await?;
 
@@ -1370,6 +1408,7 @@ pub async fn update_client_for_creator(
             || delegation_scopes.is_some()
             || allowed_scopes.is_some()
             || broker_capability_enabled.is_some(),
+        None,
     )
     .await?;
 
@@ -1380,8 +1419,9 @@ pub async fn update_client_for_creator(
     get_client_for_creator(db, client_id, created_by).await
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AdminUpdateClient<'a> {
+    pub management_designation: Option<(bool, SecurityEffectIntent)>,
     pub client_name: Option<&'a str>,
     pub redirect_uris: Option<&'a [String]>,
     pub allowed_scopes: Option<&'a str>,
@@ -1426,6 +1466,9 @@ pub async fn admin_update_client(
         set_doc.insert("broker_capability_enabled", enabled);
     }
 
+    if let Some((enabled, _)) = &update.management_designation {
+        set_doc.insert("first_party_management", *enabled);
+    }
     if let Some(active) = update.is_active {
         set_doc.insert("is_active", active);
     }
@@ -1438,6 +1481,7 @@ pub async fn admin_update_client(
             || update.allowed_scopes.is_some()
             || update.broker_capability_enabled.is_some()
             || update.is_active.is_some(),
+        update.management_designation.map(|(_, intent)| intent),
     )
     .await?;
 
@@ -1467,6 +1511,7 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
             "updated_at": bson::DateTime::from_chrono(now),
         },
         true,
+        None,
     )
     .await?;
 
@@ -1491,6 +1536,7 @@ pub async fn delete_client_for_creator(
             "updated_at": bson::DateTime::from_chrono(now),
         },
         true,
+        None,
     )
     .await?;
 
@@ -1538,6 +1584,7 @@ pub async fn rotate_client_secret_for_creator(
             "updated_at": bson::DateTime::from_chrono(Utc::now()),
         },
         true,
+        None,
     )
     .await?;
 
@@ -2576,6 +2623,7 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -2647,6 +2695,7 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -3177,6 +3226,7 @@ mod tests {
                     delegation_scopes: String::new(),
                     default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
+                    first_party_management: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
@@ -3434,6 +3484,7 @@ mod tests {
                     delegation_scopes: String::new(),
                     default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
+                    first_party_management: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,

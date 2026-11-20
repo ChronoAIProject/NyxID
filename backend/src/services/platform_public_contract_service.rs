@@ -431,7 +431,7 @@ async fn control(
             http::HeaderValue::from_static("application/json"),
         );
         let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+            proxy_service::Redirects::Return,
             &target.0,
             http::Method::POST,
             path,

@@ -186,7 +186,7 @@ pub struct TurnMetadata {
     pub work: Option<WorkEvidence>,
     #[serde(default)]
     pub timing: Option<TurnTiming>,
-    /// Closed metadata from a failed model callback, or the upstream code alone.
+    /// Metadata-only explanation of a failed turn. Legacy failures can omit it.
     #[serde(default)]
     pub failure_reason: Option<Box<TurnFailureReason>>,
     #[serde(default)]
@@ -213,6 +213,20 @@ pub struct TurnFailureReason {
     pub code: String,
     pub http_status: Option<u16>,
     pub nyxid_error_code: Option<u32>,
+}
+
+impl TurnFailureReason {
+    pub fn new(source: &'static str, stage: &str, code: &str, http_status: Option<u16>) -> Self {
+        Self {
+            source: source.into(),
+            stage: stage.into(),
+            code: code.into(),
+            http_status,
+            nyxid_error_code: None,
+            model_route: None,
+            guest_setup_step: None,
+        }
+    }
 }
 
 /// Bounded internal setup location; never an upstream error or payload.

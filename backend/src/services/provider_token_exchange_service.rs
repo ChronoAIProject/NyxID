@@ -556,10 +556,13 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
         }
     };
 
-    let response = request
-        .send()
-        .await
-        .map_err(|_| AppError::ChannelPlatformError("token_exchange transport failed".into()))?;
+    let response = request.send().await.map_err(|error| {
+        if super::proxy_destination::http::refused_connection(&error) {
+            super::proxy_destination::refused()
+        } else {
+            AppError::ChannelPlatformError("token_exchange transport failed".into())
+        }
+    })?;
     check(&response)?;
     let status = response.status();
     let response: serde_json::Value = response.json().await.map_err(|_| {

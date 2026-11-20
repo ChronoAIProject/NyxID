@@ -130,7 +130,26 @@ In GitHub, create the `production` environment with a deployment branch rule
 for `main` only. Store `NYXID_PRODUCTION_DEPLOY_CLIENT_ID` and
 `NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET` as environment secrets for the
 NyxID service account authorized to deploy the two production apps through
-the chrono-cd proxy (OAuth scope `proxy`).
+the deployment proxy (OAuth scope `proxy`). The staging job reads
+`NYXID_STAGING_DEPLOY_CLIENT_ID` and `NYXID_STAGING_DEPLOY_CLIENT_SECRET`
+from the `staging` environment.
+
+Set `NYXID_DEPLOY_TARGET` separately in each GitHub environment's secrets.
+Supply a single-line JSON object with the following required fields.
+
+| Field | Meaning |
+| --- | --- |
+| `apps_url` | Full apps collection URL for the deployment project. The job appends the app name for updates and the app name followed by `/status` for readiness checks. |
+| `org_id` | Namespace scope sent with each deployment request. |
+| `backend.app`, `frontend.app` | App name in the corresponding component's JSON object. |
+| `backend.service`, `frontend.service` | Kubernetes service whose image the job updates and whose pod status it reads. |
+| `backend.version_url` | Backend health URL that reports status and the running commit. |
+| `frontend.version_url` | Frontend build-version URL that reports the running commit. |
+
+Use HTTPS URLs without credentials, query strings or fragments. App and service
+names start with an ASCII letter or digit, may also contain dots, underscores
+and hyphens, and have a 63-character limit. The namespace scope also permits
+colons after the first character and has a 128-character limit.
 
 Open **Actions → Publish Images → the main run → deploy-production** for
 progress. A push to `main` or **Run workflow** on `main` deploys once the
@@ -150,18 +169,18 @@ for update.
 ### Rolling back a production release
 
 Coordinate the rollback with any active or queued Publish Images deploys.
-In chrono-cd, select the production namespace `chrono-nyxid`, project
-`nyxid`, and the seven-character SHA of a known-good, rollback-compatible
-`main` build. Use these image references in order.
+In the deployment platform, select the project and namespace identified by
+`apps_url` and `org_id` in the production environment's `NYXID_DEPLOY_TARGET`.
+Choose the seven-character SHA of a known-good, rollback-compatible `main`
+build. Update the backend and frontend apps and services named in the
+environment's `NYXID_DEPLOY_TARGET` in this order.
 
-| App | Service | Image |
-| --- | --- | --- |
-| `prod-api` | `nyxid-backend-production-api-svc` | `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>` |
-| `prod` | `nyxid-frontend` | `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>` |
+1. Set the backend image to `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>`.
+   Wait for the app to report ready and for `backend.version_url` to return
+   `status: ok` and the expected 12-character commit.
+2. Set the frontend image to `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>`.
+   Verify the same commit at `frontend.version_url`.
 
-Wait for `prod-api` to report ready and for `https://api.nyxid.ai/health` to
-return `status: ok` and the expected 12-character commit before updating
-`prod`. Verify the same commit at `https://nyxid.ai/build-version.json`.
 Land the revert or fix on `main` so the next automatic deployment carries it.
 
 ---
@@ -500,8 +519,8 @@ returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
 including ordinary requests and new turns that arrive while routing converges.
 There is no drain rejection on these request paths and `/ready` never accesses
-the database. Staging chrono-cd readiness/load-balancer consumers retain this
-drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
+the database. The staging platform's readiness checks and load balancer retain
+this drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
 MongoDB availability is monitored separately (see
 [Health and readiness contract](HEALTH_READINESS.md)).
 
@@ -650,13 +669,30 @@ turn has its complete reply and needs no recovery.
 
 ### Background turn rollback
 
-Enrollment in `nyxagent-reattach-v1` defaults off. Keep the flag off in production
-until PR 2's recovery, cancellation, publication and accounting checks land.
-Then an admin can enable `assistant:turn-handoff` for a person, an organization
+Enrollment in `nyxagent-reattach-v1` defaults off. An admin can enable
+`assistant:turn-handoff` for a person, an organization
 or globally in Feature Flags after every NyxID replica advertises
 `assistant:turn-handoff-v2` and every NyxAgent replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
+
+The admitting replica discovers missing metadata with the owner's existing
+private assistant credential. It allows two seconds in total before admission
+for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
+The replica reuses deployment capabilities and the owner's profiles for up to
+60 seconds. Browser, mobile and automation clients can start a turn directly.
+If discovery lacks an authorized credential or times out, the turn proceeds
+in the foreground.
+
+Group `Assistant turn settled` logs by `restart_eligibility`. Count
+`watched_thread_credential` for enrolled turns. `capability_unavailable`
+indicates missing or incompatible deployment evidence, `profile_unknown`
+indicates insufficient evidence for the selected profile, and
+`platform_credential` identifies a profile using a platform key.
+`lane_ineligible` identifies a turn excluded by the lane check. `discovery_skipped`
+means the admission caller supplied no discovery snapshot. `upstream_refused_background`
+identifies a turn that fell back after an upstream refusal. The field is absent
+when the feature flag or fleet readiness gate skips negotiation.
 
 Disable every enabling override in Feature Flags **before rolling NyxAgent back**
 to a version without the credential watch. Allow 30 seconds for admission hints
@@ -1049,8 +1085,8 @@ For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
 production/staging base URLs, chrono-probe assertions and staged rollout, see
 [Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
 its backend/version proxy; frontend-only probes are `/frontend/health` and
-`/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd and
-chrono-probe; neither backend probe accesses MongoDB.
+`/frontend/ready`. The staging deployment platform and chrono-probe use backend
+`/ready` only for drain status. Both backend probes operate independently of MongoDB.
 Production Compose keeps backend `/health` and checks frontend `/frontend/ready`
 over loopback, exempt from its public rate/concurrency limits. Frontend
 orchestrators and load balancers must use `/frontend/health` for liveness and

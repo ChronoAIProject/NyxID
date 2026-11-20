@@ -168,6 +168,47 @@ async fn decrypt_master_credential_string(
 }
 
 impl ProxyTarget {
+    fn approved_private_base(&self) -> Option<&str> {
+        self.service
+            .approved_private_base_url
+            .as_deref()
+            .filter(|base| {
+                self.catalog_slug.is_some()
+                    && self.service.owner_user_id.is_none()
+                    && *base == self.service.base_url
+            })
+    }
+
+    pub(crate) async fn direct_destination(
+        &self,
+        url: &str,
+    ) -> AppResult<super::proxy_destination::Destination> {
+        super::proxy_destination::Destination::for_request(
+            self.approved_private_base(),
+            &self.base_url,
+            url,
+        )
+        .await
+        .inspect_err(|_| self.log_destination_refusal())
+    }
+
+    fn log_destination_refusal(&self) {
+        tracing::warn!(service_id=%self.service.id, "Direct proxy destination refused");
+    }
+
+    fn http_clients(
+        &self,
+        url: &reqwest::Url,
+    ) -> AppResult<Arc<super::proxy_destination::http::Clients>> {
+        super::proxy_destination::http::for_url(
+            self.approved_private_base(),
+            &self.base_url,
+            url,
+            false,
+        )
+        .inspect_err(|_| self.log_destination_refusal())
+    }
+
     pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
         if self.credential_deferred {
             return Err(AppError::Forbidden(
@@ -1512,7 +1553,7 @@ pub async fn resolve_proxy_target(
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<ProxyTarget> {
     // Load the downstream service
-    let service = db
+    let mut service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
@@ -1591,7 +1632,7 @@ pub async fn resolve_proxy_target(
         if service.provider_config_id.is_none() && service.platform_key.is_some() {
             super::platform_key_service::require(db, &service, user_id).await?;
         }
-        let base_url = resolve_gateway_url_override(db, user_id, &service)
+        let base_url = resolve_gateway_url_override(db, user_id, &mut service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
         let catalog_default_headers =
@@ -1646,7 +1687,7 @@ pub async fn resolve_proxy_target(
         Zeroizing::default()
     };
 
-    let base_url = resolve_gateway_url_override(db, user_id, &service)
+    let base_url = resolve_gateway_url_override(db, user_id, &mut service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
@@ -1757,7 +1798,7 @@ pub async fn resolve_proxy_target_lenient(
     service_id: &str,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<(ProxyTarget, bool)> {
-    let service = db
+    let mut service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
@@ -1823,7 +1864,7 @@ pub async fn resolve_proxy_target_lenient(
             super::platform_key_service::require(db, &service, user_id).await?;
         }
         let (base_url, has_server_credential) =
-            match resolve_gateway_url_override(db, user_id, &service).await {
+            match resolve_gateway_url_override(db, user_id, &mut service).await {
                 Ok(Some(url)) => (url, true),
                 Ok(None) => (service.base_url.clone(), true),
                 Err(_) => (String::new(), false),
@@ -1904,7 +1945,7 @@ pub async fn resolve_proxy_target_lenient(
         (Zeroizing::default(), false)
     };
 
-    let base_url = resolve_gateway_url_override(db, user_id, &service)
+    let base_url = resolve_gateway_url_override(db, user_id, &mut service)
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
@@ -3708,6 +3749,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    approved_private_base_url: Option<String>,
     managed_target: Option<(String, String, Option<String>)>,
     catalog_id: Option<String>,
     catalog_slug: Option<String>,
@@ -3779,7 +3821,20 @@ async fn load_catalog_proxy_authorization_for_user_service(
     } else {
         None
     };
+    let approved_private_base_url = if service.owner_user_id.is_none()
+        && service.approved_private_base_url.as_ref() == Some(&service.base_url)
+        && (platform_target
+            || endpoint.is_some_and(|endpoint| {
+                super::catalog_endpoint_service::linked(user_service, endpoint, &service)
+            }))
+        && super::catalog_endpoint_service::catalog_owns_url(db, &service).await?
+    {
+        service.approved_private_base_url.clone()
+    } else {
+        None
+    };
     Ok(CatalogProxyAuthorization {
+        approved_private_base_url,
         managed_target,
         catalog_id: Some(service.id.clone()),
         catalog_slug: Some(service.slug.clone()),
@@ -3809,6 +3864,9 @@ fn apply_catalog_proxy_authorization(
     if let Some(id) = &authorization.catalog_id {
         service.id = id.clone();
     }
+    service
+        .approved_private_base_url
+        .clone_from(&authorization.approved_private_base_url);
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -4342,6 +4400,7 @@ fn build_minimal_downstream_service(
         is_active: true,
         created_by: "system".to_string(),
         caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,
@@ -4408,7 +4467,7 @@ fn build_minimal_downstream_service(
 async fn resolve_gateway_url_override(
     db: &mongodb::Database,
     user_id: &str,
-    service: &DownstreamService,
+    service: &mut DownstreamService,
 ) -> AppResult<Option<String>> {
     let provider_config_id = match &service.provider_config_id {
         Some(id) => id,
@@ -4425,6 +4484,7 @@ async fn resolve_gateway_url_override(
         _ => return Ok(None),
     };
 
+    service.approved_private_base_url = None;
     let user_token = db
         .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .find_one(doc! {
@@ -4443,6 +4503,12 @@ async fn resolve_gateway_url_override(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Redirects {
+    SameOrigin,
+    Return,
+}
+
 /// Forward a request to the downstream service with credential injection,
 /// identity propagation headers, and delegated provider credentials.
 ///
@@ -4450,7 +4516,7 @@ async fn resolve_gateway_url_override(
 /// Preserves the original HTTP method for all auth methods including query auth.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
-    client: &Client,
+    redirects: Redirects,
     target: &ProxyTarget,
     method: reqwest::Method,
     path: &str,
@@ -4468,7 +4534,7 @@ pub async fn forward_request(
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<reqwest::Response> {
     forward_request_with_extra_outbound_headers(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4565,32 +4631,9 @@ pub fn no_redirect_http_client() -> &'static reqwest::Client {
     &CLIENT
 }
 
-fn target_http_client() -> Client {
-    #[cfg(test)]
-    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
-        return build_target_http_client(builder);
-    }
-    static CLIENT: std::sync::LazyLock<Client> =
-        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
-    CLIENT.clone()
-}
-
-fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
-    // See `no_redirect_http_client`: reused mock-server ports make idle
-    // sockets in this process-wide client fail after dispatch in tests.
-    #[cfg(test)]
-    let builder = builder.pool_max_idle_per_host(0);
-    builder
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()
-        .expect("target HTTP client")
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4606,7 +4649,7 @@ pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     forward_request_with_egress_guard(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4626,7 +4669,7 @@ pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_egress_guard<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4643,7 +4686,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     forward_request_with_resource_proof(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4667,7 +4710,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_request_with_resource_proof<'a>(
-    client: &'a Client,
+    redirects: Redirects,
     target: &'a ProxyTarget,
     method: reqwest::Method,
     path: &'a str,
@@ -4688,7 +4731,7 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     catalog_route: Option<&'a super::lark_attachment_tool::routing::BotRoute>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
-        client,
+        redirects,
         target,
         method,
         path,
@@ -4710,9 +4753,74 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     ))
 }
 
+async fn return_or_follow_same_origin(
+    target: &ProxyTarget,
+    mut client: Client,
+    mut request: reqwest::Request,
+    egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
+) -> Result<reqwest::Response, ForwardRequestError> {
+    use reqwest::header::{
+        CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, TRANSFER_ENCODING,
+    };
+    for hop in 0.. {
+        let replay = request.try_clone();
+        let response = client.execute(request).await.map_err(|error| {
+            if hop > 0 && super::proxy_destination::http::refused_connection(&error) {
+                target.log_destination_refusal();
+                ForwardRequestError::Application(super::proxy_destination::refused())
+            } else {
+                ForwardRequestError::from(error)
+            }
+        })?;
+        let status = response.status();
+        if hop == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(mut next) = replay else {
+            return Ok(response);
+        };
+        let Some(url) = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|location| next.url().join(location).ok())
+        else {
+            return Ok(response);
+        };
+        if next.url().origin() != url.origin()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Ok(response);
+        }
+        *next.url_mut() = url;
+        next.url_mut().set_fragment(None);
+        if status.as_u16() == 303
+            || (matches!(status.as_u16(), 301 | 302) && next.method() == reqwest::Method::POST)
+        {
+            *next.method_mut() = reqwest::Method::GET;
+            *next.body_mut() = None;
+            for name in [
+                CONTENT_LENGTH,
+                CONTENT_TYPE,
+                CONTENT_ENCODING,
+                TRANSFER_ENCODING,
+            ] {
+                next.headers_mut().remove(name);
+            }
+        }
+        client = target.http_clients(next.url())?.ordinary()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate()).await?;
+        }
+        request = next;
+    }
+    unreachable!()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward_request_with_egress_guard_inner(
-    client: &Client,
+    redirects: Redirects,
     target: &ProxyTarget,
     method: reqwest::Method,
     path: &str,
@@ -4790,11 +4898,6 @@ async fn forward_request_with_egress_guard_inner(
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
 
-    // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
-    // Currently base_url is only validated at service creation/update time. An attacker
-    // could change DNS to point to a private IP after validation. Consider using a custom
-    // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
-
     // Scope/permission/admission identities retain the existing logical path.
     // This capability only changes the wire prefix for two trusted bot calls;
     // it independently verifies the final destination policy and exact path.
@@ -4818,17 +4921,14 @@ async fn forward_request_with_egress_guard_inner(
         )
     };
 
-    let destination_client;
-    let client = if target.target_id.is_some()
-        || target.auth_method == "github_git"
-        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
-    {
-        destination_client = target_http_client();
-        &destination_client
+    let url = reqwest::Url::parse(&url).map_err(|_| ForwardRequestError::PreDispatchRejected(super::proxy_destination::refused()))?;
+    let clients = target.http_clients(&url).map_err(ForwardRequestError::PreDispatchRejected)?;
+    let client = if super::credential_verification::checking() {
+        clients.verification()?
     } else {
-        client
+        clients.ordinary()?
     };
-    let mut request = client.request(method.clone(), &url);
+    let mut request = client.request(method.clone(), url.clone());
 
     // Build the final outbound header list up front so reqwest's
     // append-by-default `RequestBuilder::header()` doesn't produce
@@ -4870,7 +4970,7 @@ async fn forward_request_with_egress_guard_inner(
                 .await
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
         }
-        return nyxid_service_adapters::ifttt::client()
+        return clients.ifttt()?
             .forward(
                 &target.base_url,
                 &method,
@@ -4904,7 +5004,7 @@ async fn forward_request_with_egress_guard_inner(
                     }
                 })
             };
-        return nyxid_service_adapters::ifttt_mcp::client()
+        return clients.ifttt_mcp()?
             .forward_with_guard(
                 &target.base_url,
                 &method,
@@ -5097,15 +5197,13 @@ async fn forward_request_with_egress_guard_inner(
                 &target.credential,
                 &exchange_config.credential_fields,
             )?;
-            let token = provider_token_exchange_service::get_cached_exchange_token(
-                token_exchange_cache,
-                client,
-                &target.base_url,
-                &target.credential,
-                exchange_config,
-                &credential_map,
-            )
-            .await?;
+            let cache_key = provider_token_exchange_service::cache_key(&target.base_url, &target.credential, exchange_config);
+            let token = token_exchange_cache.get_or_fetch(&cache_key, || async {
+                let exchange_url = provider_token_exchange_service::resolve_endpoint(&exchange_config.endpoint, &target.base_url);
+                let url = reqwest::Url::parse(&exchange_url).map_err(|_| super::proxy_destination::refused())?;
+                let client = target.http_clients(&url)?.ordinary()?;
+                provider_token_exchange_service::fetch_exchange_token(&client, &target.base_url, exchange_config, &credential_map).await
+            }).await?;
             request = provider_token_exchange_service::apply_injection(
                 request,
                 &exchange_config.injection,
@@ -5137,7 +5235,7 @@ async fn forward_request_with_egress_guard_inner(
                 )
             })?;
             let signed_headers =
-                aws_sigv4::sign_request(method.as_str(), &url, signed_input, body_bytes, &creds)
+                aws_sigv4::sign_request(method.as_str(), url.as_str(), signed_input, body_bytes, &creds)
                     .map_err(|e| {
                         tracing::error!(error = %e, "aws_sigv4 request signing failed");
                         AppError::BadRequest(
@@ -5208,7 +5306,7 @@ async fn forward_request_with_egress_guard_inner(
         if let Some(context) = &target.execution_request {
             context.native_dispatched();
         }
-        let result = no_redirect_http_client().execute(request).await;
+        let result = client.execute(request).await;
         if let Some(permit) = &target.execution_permission {
             permit
                 .complete(result.is_ok())
@@ -5235,7 +5333,7 @@ async fn forward_request_with_egress_guard_inner(
         if let Some(context) = &target.execution_request {
             context.native_dispatched();
         }
-        let result = no_redirect_http_client().execute(request).await;
+        let result = client.execute(request).await;
         if let Some(permit) = &target.execution_permission {
             permit
                 .complete(result.is_ok())
@@ -5255,13 +5353,19 @@ async fn forward_request_with_egress_guard_inner(
             if let Some(context) = &target.execution_request {
                 context.native_dispatched();
             }
-            no_redirect_http_client().execute(request).await
+            client.execute(request).await.map_err(ForwardRequestError::from)
         } else {
             let request = request.build()?;
             if let Some(context) = &target.execution_request {
                 context.native_dispatched();
             }
-            client.execute(request).await
+            if redirects == Redirects::SameOrigin
+                && target.target_id.is_none() && target.auth_method != "github_git"
+                && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+                && !super::telegram_new_api::original_bot_api_request(request.url())
+            {
+                return_or_follow_same_origin(target, client, request, egress_guard).await
+            } else { client.execute(request).await.map_err(ForwardRequestError::from) }
         };
         if let Some(permit) = &target.execution_permission {
             permit
@@ -5288,6 +5392,17 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
+    let result = match result {
+        Err(ForwardRequestError::Transport(error))
+            if super::proxy_destination::http::refused_connection(&error) =>
+        {
+            target.log_destination_refusal();
+            Err(ForwardRequestError::PreDispatchRejected(
+                super::proxy_destination::refused(),
+            ))
+        }
+        result => result,
+    };
     if let Err(ForwardRequestError::Transport(error)) = &result {
         super::credential_verification::record(
             "not_verified",
@@ -5394,6 +5509,9 @@ pub(crate) async fn read_connection_authority(
 
 #[cfg(test)]
 mod tests {
+    mod pooled_http {
+        include!("proxy_pool_tests.rs");
+    }
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::org_membership::{
@@ -5567,7 +5685,7 @@ mod tests {
             };
             target.credential = secret.to_owned().into();
             let failure = super::forward_request_with_extra_outbound_headers(
-                &Client::new(),
+                super::Redirects::Return,
                 &target,
                 reqwest::Method::GET,
                 "/operation",
@@ -5793,6 +5911,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -6061,7 +6180,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     async fn forward_request(
-        client: &Client,
+        _client: &Client,
         target: &ProxyTarget,
         method: reqwest::Method,
         path: &str,
@@ -6075,7 +6194,7 @@ mod tests {
         cloud_response_cache: &CloudResponseCache,
     ) -> AppResult<reqwest::Response> {
         super::forward_request(
-            client,
+            super::Redirects::SameOrigin,
             target,
             method,
             path,
@@ -7864,6 +7983,7 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -8175,6 +8295,202 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_dials_the_approved_address_for_streaming() {
+        use reqwest::dns::{Name, Resolve, Resolving};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        // The transport resolver deliberately has no answer. The request has
+        // one address from validation and must retain it through the TCP dial.
+        struct NoSecondLookup;
+        impl Resolve for NoSecondLookup {
+            fn resolve(&self, _: Name) -> Resolving {
+                Box::pin(async { Err(std::io::Error::other("unexpected second lookup").into()) })
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("stream response"))
+            .mount(&server)
+            .await;
+        let host = "stream-fixture.invalid";
+        let base = format!("http://{host}:{}", server.address().port());
+        let client_builder = || {
+            Client::builder()
+                .no_proxy()
+                .dns_resolver(Arc::new(NoSecondLookup))
+        };
+        let client = client_builder().build().unwrap();
+        let fixture = crate::services::channel_media_service::TestPinnedTransport {
+            target: format!("{base}/stream"),
+            host: host.into(),
+            addresses: vec![*server.address()],
+            builder: Arc::new(client_builder),
+        };
+        let target = make_proxy_target(base);
+        let tokens = empty_token_cache();
+        let responses = empty_response_cache();
+        let response = crate::services::channel_media_service::TEST_PINNED_TRANSPORT
+            .scope(
+                fixture,
+                forward_request(
+                    &client,
+                    &target,
+                    reqwest::Method::POST,
+                    "stream",
+                    None,
+                    Default::default(),
+                    ProxyBody::Streaming(axum::body::Body::from("stream request")),
+                    vec![],
+                    vec![],
+                    None,
+                    &tokens,
+                    &responses,
+                ),
+            )
+            .await
+            .expect("use the validated socket");
+        assert_eq!(response.text().await.unwrap(), "stream response");
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_follows_five_same_origin_hops() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        for hop in 0..7 {
+            Mock::given(path(format!("/{hop}")))
+                .respond_with(
+                    ResponseTemplate::new(308).insert_header("Location", format!("/{}", hop + 1)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(server.uri()),
+            reqwest::Method::GET,
+            "0",
+            None,
+            Default::default(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers()["Location"], "/6");
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_redirect_methods_and_streaming_bodies() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        for status in [301, 302, 303, 307, 308] {
+            let server = MockServer::start().await;
+            Mock::given(path("/start"))
+                .respond_with(ResponseTemplate::new(status).insert_header("Location", "/end"))
+                .mount(&server)
+                .await;
+            Mock::given(path("/end"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let mut target = make_proxy_target(server.uri());
+            target.auth_method = "header".into();
+            target.auth_key_name = "x-test-auth".into();
+            target.credential = String::from("fixture").into();
+            for streaming in [false, true] {
+                let body = if streaming {
+                    ProxyBody::Streaming(axum::body::Body::from("request"))
+                } else {
+                    ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"request")))
+                };
+                let response = forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    "start",
+                    None,
+                    Default::default(),
+                    body,
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                if streaming {
+                    assert_eq!(response.status().as_u16(), status);
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK);
+                let requests = server.received_requests().await.unwrap();
+                let last = requests.last().unwrap();
+                assert_eq!(last.headers["x-test-auth"], "fixture");
+                if matches!(status, 301..=303) {
+                    assert_eq!(last.method, reqwest::Method::GET);
+                    assert!(last.body.is_empty());
+                } else {
+                    assert_eq!(last.method, reqwest::Method::POST);
+                    assert_eq!(last.body, b"request");
+                }
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_returns_the_first_redirect() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let origin = MockServer::start().await;
+        for host in ["127.0.0.1", "elsewhere.invalid"] {
+            let location = format!("http://{host}:0/elsewhere");
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(302).insert_header("Location", location.as_str()),
+                )
+                .mount(&origin)
+                .await;
+            let mut target = make_proxy_target(origin.uri());
+            target.auth_method = "header".into();
+            target.auth_key_name = "x-test-key".into();
+            target.credential = String::from("fixture").into();
+            let client = Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::custom(|hop| {
+                    hop.error("cross-origin redirect reached the transport")
+                }))
+                .build()
+                .unwrap();
+            let response = forward_request(
+                &client,
+                &target,
+                reqwest::Method::GET,
+                "resource",
+                None,
+                Default::default(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_response_cache(),
+            )
+            .await
+            .expect("return redirect");
+            assert_eq!(response.status(), StatusCode::FOUND);
+            assert_eq!(response.headers()["Location"], location);
+            origin.reset().await;
+        }
     }
 
     #[tokio::test]
@@ -8708,7 +9024,7 @@ mod tests {
         ] {
             assert!(
                 super::forward_request(
-                    &Client::new(),
+                    super::Redirects::Return,
                     &target,
                     reqwest::Method::POST,
                     path,
@@ -8791,7 +9107,7 @@ mod tests {
         target.service.slug = "my-worker".into();
         target.catalog_slug = Some("cma".into());
         let error = super::forward_request_with_resource_proof(
-            &Client::new(),
+            super::Redirects::Return,
             &target,
             reqwest::Method::GET,
             "/api/v1/agents",
@@ -9338,6 +9654,7 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9749,6 +10066,7 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -10000,6 +10318,7 @@ mod tests {
                 is_active: true,
                 created_by: "test".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -10263,6 +10582,7 @@ mod tests {
             is_active: true,
             created_by: "system".into(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

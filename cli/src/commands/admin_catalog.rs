@@ -307,6 +307,20 @@ pub async fn run_catalog(command: AdminCatalogCommands) -> Result<()> {
             }
             Ok(())
         }
+        AdminCatalogCommands::PrivateDestination {
+            service_id,
+            revoke,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.put::<Value, _>(
+                &format!("/services/{service_id}"),
+                &json!({"approve_private_destination": !revoke}),
+            )
+            .await?;
+            println!("Updated private destination approval for {service_id}");
+            Ok(())
+        }
         AdminCatalogCommands::Icon {
             provider,
             file,
@@ -2555,6 +2569,28 @@ mod tests {
                 service: row["slug"].as_str().unwrap().into(),
                 destination_url: "https://docs.example.test".into(),
                 target_id: Some("docs".into()),
+                revoke,
+                auth: mock_auth(server.uri()),
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_cli_sets_and_revokes_catalog_approval() {
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4();
+        for revoke in [false, true] {
+            Mock::given(method("PUT"))
+                .and(path(format!("/api/v1/services/{id}")))
+                .and(body_json(json!({"approve_private_destination": !revoke})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            run_catalog(AdminCatalogCommands::PrivateDestination {
+                service_id: id,
                 revoke,
                 auth: mock_auth(server.uri()),
             })

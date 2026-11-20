@@ -836,6 +836,69 @@ fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppErr
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessScheme {
+    Bearer,
+    Dpop,
+}
+
+impl AccessScheme {
+    pub(crate) fn parse(header: &str) -> Option<(Self, &str)> {
+        let (scheme, token) = header.split_once(' ')?;
+        match scheme {
+            "Bearer" => Some((Self::Bearer, token)),
+            "DPoP" => Some((Self::Dpop, token)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn require_binding(self, claims: &jwt::Claims) -> AppResult<()> {
+        if self == Self::Dpop
+            && claims
+                .cnf
+                .as_ref()
+                .and_then(|cnf| cnf.jkt.as_ref())
+                .is_none()
+        {
+            return Err(AppError::Unauthorized(
+                "DPoP requires a key-bound access token".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn request_token(headers: &HeaderMap) -> Option<&str> {
+    AccessScheme::parse(headers.get(header::AUTHORIZATION)?.to_str().ok()?).map(|(_, token)| token)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OAuthConsentRoute;
+
+#[derive(Clone, Copy)]
+struct ServiceAccountsExcluded;
+
+fn relay_execution_route(method: &Method, path: &str) -> bool {
+    if path_matches_prefix(path, "/api/v1/proxy") || path_matches_prefix(path, "/api/v1/llm") {
+        return true;
+    }
+    let Some(segments) = api_v1_path_segments(path) else {
+        return false;
+    };
+    matches!(
+        (method, segments.as_slice()),
+        (
+            &Method::GET,
+            ["approvals", "requests", _, "status"]
+                | ["approvals", "exact-service", "requests", _, "status"]
+        ) | (
+            &Method::POST,
+            ["approvals", "exact-service", "requests"]
+                | ["approvals", "exact-service", "requests", _, "redeem"]
+        )
+    )
+}
+
 pub(crate) async fn validate_dpop_bound_access(
     parts: &Parts,
     state: &AppState,
@@ -850,7 +913,10 @@ pub(crate) async fn validate_dpop_bound_access(
     let proof_jkt = crate::crypto::dpop::validate_configured_proof(
         proof,
         parts.method.as_str(),
-        parts.uri.path(),
+        parts
+            .extensions
+            .get::<OriginalUri>()
+            .map_or_else(|| parts.uri.path(), |uri| uri.path()),
         &state.config,
         &state.db,
     )
@@ -1227,6 +1293,37 @@ pub(crate) fn is_assistant_conversation_key_candidate(
             || key.allow_auto_connected_services)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AccountManagementRoute;
+
+async fn check_app_management(state: &AppState, parts: &Parts, client_id: &str) -> AppResult<()> {
+    if parts.extensions.get::<AccountManagementRoute>().is_none() {
+        return Ok(());
+    }
+    let route = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
+        .map_or("<unmatched>", axum::extract::MatchedPath::as_str);
+    if parts.method == Method::GET
+        && matches!(
+            route,
+            "/api/v1/channel-bots" | "/api/v1/channel-conversations"
+        )
+    {
+        return Ok(());
+    }
+    state
+        .app_management_observations
+        .record(&state.shutdown, client_id, &parts.method, route);
+    if crate::services::feature_flag_service::app_token_management_enforced(&state.db).await? {
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            CredentialType::OauthClient,
+        ));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -1256,10 +1353,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     AppError::Unauthorized("Invalid authorization header".to_string())
                 })?;
 
-                let bearer_token = auth_str.strip_prefix("Bearer ");
-                let dpop_token = auth_str.strip_prefix("DPoP ");
-                if let Some(token) = bearer_token.or(dpop_token) {
-                    let allow_api_key_fallback = bearer_token.is_some();
+                if let Some((scheme, token)) = AccessScheme::parse(auth_str) {
+                    let allow_api_key_fallback = scheme == AccessScheme::Bearer;
                     // Try JWT verification first. If it fails for a reason
                     // other than expiry, fall back to API-key validation so
                     // that OpenAI-compatible clients (which send API keys as
@@ -1312,6 +1407,14 @@ impl FromRequestParts<AppState> for AuthUser {
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
+                    }
+
+                    scheme.require_binding(&claims)?;
+                    if claims.relay == Some(true) && !relay_execution_route(&parts.method, request_path) {
+                        return Err(AppError::unsupported_credential("Relay tokens cannot access this endpoint", CredentialType::Relay));
+                    }
+                    if claims.sa == Some(true) && parts.extensions.get::<ServiceAccountsExcluded>().is_some() {
+                        return Err(AppError::unsupported_credential("Service accounts cannot access this endpoint", CredentialType::ServiceAccount));
                     }
 
                     if let Some(claims_jkt) = claims.cnf.as_ref().and_then(|c| c.jkt.as_deref()) {
@@ -1423,7 +1526,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                     let user_id_str = user_id.to_string();
-                    crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    let unflagged_client = crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    if let Some(client_id) = unflagged_client.as_deref() {
+                        check_app_management(state, parts, client_id).await?;
+                    }
 
                     // Verify the user account is still active
                     let user_model = state
@@ -1910,15 +2016,7 @@ pub async fn reject_relay_tokens(
 
 /// Check if the request bears a relay token.
 fn is_relay_request(request: &axum::http::Request<axum::body::Body>) -> bool {
-    if let Some(auth_header) = request.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-        && is_jwt_relay(token)
-    {
-        return true;
-    }
-
-    false
+    request_token(request.headers()).is_some_and(is_jwt_relay)
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `relay`
@@ -1926,24 +2024,8 @@ fn is_relay_request(request: &axum::http::Request<axum::body::Body>) -> bool {
 /// is still rejected later by signature verification in the `AuthUser`
 /// extractor.
 fn is_jwt_relay(token: &str) -> bool {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        },
-    };
-
-    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
-        return claims.get("relay") == Some(&serde_json::Value::Bool(true));
-    }
-
-    false
+    peek_jwt_claims(token)
+        .is_some_and(|claims| claims.get("relay") == Some(&serde_json::Value::Bool(true)))
 }
 
 /// Fail-fast middleware for delegated tokens on management routers.
@@ -1954,7 +2036,7 @@ pub async fn reject_delegated_tokens(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(token) = delegated_bearer_token(&request)
+    if let Some(token) = request_token(request.headers())
         && is_jwt_delegated(token)
     {
         let scope = peek_jwt_scope(token).unwrap_or_default();
@@ -1971,15 +2053,6 @@ pub async fn reject_delegated_tokens(
         }
     }
     Ok(next.run(request).await)
-}
-
-fn delegated_bearer_token(request: &axum::http::Request<axum::body::Body>) -> Option<&str> {
-    request
-        .headers()
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `delegated` field.
@@ -2023,7 +2096,7 @@ fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
 
 /// Middleware that rejects service account tokens from human-only endpoints.
 pub async fn reject_service_account_tokens(
-    request: axum::http::Request<axum::body::Body>,
+    mut request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_service_account_request(&request) {
@@ -2032,6 +2105,7 @@ pub async fn reject_service_account_tokens(
             CredentialType::ServiceAccount,
         ));
     }
+    request.extensions_mut().insert(ServiceAccountsExcluded);
     Ok(next.run(request).await)
 }
 
@@ -2047,15 +2121,7 @@ pub async fn reject_oauth_client_tokens(
         .path()
         .split('/')
         .any(|part| part == "nyxagent")
-        && let Some(token) = request
-            .headers()
-            .get("authorization")
-            .and_then(|header| header.to_str().ok())
-            .and_then(|header| {
-                header
-                    .strip_prefix("Bearer ")
-                    .or_else(|| header.strip_prefix("DPoP "))
-            })
+        && let Some(token) = request_token(request.headers())
         && let Some(claims) = peek_jwt_claims(token)
         && claims
             .get("client_id")
@@ -2088,11 +2154,7 @@ fn is_api_key_request(request: &axum::http::Request<axum::body::Body>) -> bool {
         return true;
     }
 
-    request
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    request_token(request.headers())
         .map(|token| {
             token.starts_with("nyx_")
                 || token.starts_with("nyxid_")
@@ -2104,49 +2166,21 @@ fn is_api_key_request(request: &axum::http::Request<axum::body::Body>) -> bool {
 
 /// Check if the request bears a service account token.
 fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
-    // Check Authorization header
-    if let Some(auth_header) = request.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-        && is_jwt_service_account(token)
-    {
-        return true;
-    }
-
-    false
+    request_token(request.headers()).is_some_and(is_jwt_service_account)
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `sa` field.
 fn is_jwt_service_account(token: &str) -> bool {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(bytes) => bytes,
-        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        },
-    };
-
-    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
-        return claims.get("sa") == Some(&serde_json::Value::Bool(true));
-    }
-
-    false
+    peek_jwt_claims(token)
+        .is_some_and(|claims| claims.get("sa") == Some(&serde_json::Value::Bool(true)))
 }
 
-/// Non-rejecting version of `AuthUser`.
-///
-/// Returns `None` instead of 401 when no valid credentials are found.
-/// Used by the OAuth authorize endpoint to support unauthenticated browser
-/// visits (MCP clients that haven't logged in yet).
+/// Optional identity for browser entry and callback protocols. OAuth consent
+/// permits anonymous entry but propagates explicit credential failures.
 pub struct OptionalAuthUser(pub Option<AuthUser>);
 
 impl FromRequestParts<AppState> for OptionalAuthUser {
-    type Rejection = std::convert::Infallible;
+    type Rejection = AppError;
 
     #[allow(clippy::manual_async_fn)]
     fn from_request_parts(
@@ -2154,12 +2188,24 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
+            let consent = parts.extensions.get::<OAuthConsentRoute>().is_some();
+            let explicit = parts.headers.contains_key(header::AUTHORIZATION)
+                || parts.headers.contains_key("x-api-key");
             let result = AuthUser::from_request_parts(parts, state).await;
+            if consent {
+                if let Ok(user) = &result {
+                    require_first_party_human(user)?;
+                }
+                if explicit {
+                    return result.map(|user| OptionalAuthUser(Some(user)));
+                }
+            }
             match result {
                 Ok(user) => Ok(OptionalAuthUser(Some(user))),
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
+                Err(error) if consent => Err(error),
                 Err(AppError::Forbidden(error))
                 | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
                     tracing::debug!(%error, "OptionalAuthUser rejected credentials");
@@ -3762,6 +3808,7 @@ mod tests {
                 delegation_scopes: "proxy:*".to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,

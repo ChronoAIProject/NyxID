@@ -2331,6 +2331,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
         crash_reports: Arc::new(Default::default()),
@@ -3046,6 +3047,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         is_active: true,
         created_by: "system".to_string(),
         caller_token_approved_destinations: Default::default(),
+        approved_private_base_url: None,
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,

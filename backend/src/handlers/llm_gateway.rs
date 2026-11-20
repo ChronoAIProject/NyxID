@@ -1058,7 +1058,7 @@ async fn llm_proxy_request_inner(
 
             state.billing.mark_forwarded(&metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &path,
@@ -2011,7 +2011,7 @@ async fn gateway_provider_request(
         } else {
             state.billing.mark_forwarded(&metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &final_path,
@@ -2048,7 +2048,7 @@ async fn gateway_provider_request(
             llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             // If translator needs translation, parse and translate the response
-            if translator.needs_translation() {
+            if translator.needs_translation() && !downstream_response.status().is_redirection() {
                 if is_streaming {
                     // Streaming: translate SSE events on the fly
                     build_translated_sse_response(
@@ -2393,7 +2393,8 @@ async fn build_filtered_response(
         if is_sse && name_lower == "content-length" {
             continue;
         }
-        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+        if (ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+            || (status.is_redirection() && name_lower == "location"))
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
@@ -3198,11 +3199,11 @@ impl LlmOperationScope {
         )
     }
 
-    fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
+    fn redirects(&self) -> proxy_service::Redirects {
         if self.guest || self.identity.is_some() {
-            proxy_service::no_redirect_http_client()
+            proxy_service::Redirects::Return
         } else {
-            shared
+            proxy_service::Redirects::SameOrigin
         }
     }
 }

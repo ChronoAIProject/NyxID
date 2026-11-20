@@ -150,6 +150,8 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) app_management_observations:
+        Arc<mw::app_management_observations::AppManagementObservations>,
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
     pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
@@ -633,6 +635,8 @@ async fn server_run(cli: Cli) {
 
     // Load configuration
     let mut config = AppConfig::from_env();
+    services::proxy_destination::validate_configuration()
+        .expect("Invalid proxy destination configuration");
     config.validate_ssh_runtime_config();
     config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
@@ -845,6 +849,10 @@ async fn server_run(cli: Cli) {
             "Failed to seed NyxBot Voice catalog service; continuing startup"
         );
     }
+
+    services::proxy_destination::approve_existing_catalog(&db, audit_chain_hmac_key.as_slice())
+        .await
+        .expect("Failed to approve existing private catalog destinations");
 
     services::inference_service::backfill(&db)
         .await
@@ -1200,6 +1208,7 @@ async fn server_run(cli: Cli) {
             .expect("Invalid crash reporting configuration"),
     );
     let state = AppState {
+        app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
         crash_reports: crash_reports.clone(),

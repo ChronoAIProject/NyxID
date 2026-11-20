@@ -18,6 +18,15 @@ pub fn app_redirect_policy() -> reqwest::redirect::Policy {
     )
 }
 
+pub(super) fn original_bot_api_request(url: &url::Url) -> bool {
+    static ORIGIN: std::sync::LazyLock<url::Origin> = std::sync::LazyLock::new(|| {
+        url::Url::parse("https://api.telegram.org")
+            .expect("static Telegram API origin")
+            .origin()
+    });
+    is_bot_api_request(url, &ORIGIN)
+}
+
 fn is_bot_api_request(url: &url::Url, origin: &url::Origin) -> bool {
     if url.origin() != *origin {
         return false;

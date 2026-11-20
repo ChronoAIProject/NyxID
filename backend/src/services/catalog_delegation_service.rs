@@ -1,4 +1,4 @@
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use mongodb::bson::{self, doc};
 
 use crate::crypto::jwt::{Claims, TokenRestrictionClaims};
@@ -42,39 +42,32 @@ pub fn scope_has_catalog_read(scope: &str) -> bool {
         .any(|value| value == MCP_CATALOG_READ_SCOPE)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn persist_grant(
-    db: &mongodb::Database,
-    jti: &str,
-    user_id: &str,
-    actor_client_id: &str,
-    receiving_client_id: &str,
-    scope: &str,
-    authority: &CatalogAuthority,
-    expires_at: i64,
-) -> AppResult<()> {
-    let expires_at = Utc
-        .timestamp_opt(expires_at, 0)
-        .single()
-        .ok_or_else(|| AppError::Internal("Invalid delegated token expiry".to_string()))?;
-    let grant = CatalogDelegationGrant {
-        id: jti.to_string(),
-        user_id: user_id.to_string(),
-        actor_client_id: actor_client_id.to_string(),
-        receiving_client_id: receiving_client_id.to_string(),
-        scope: scope.to_string(),
-        resources: authority.resources.clone(),
+pub(super) fn grant_from_claims(claims: &Claims) -> AppResult<CatalogDelegationGrant> {
+    let authority = authority_from_claims(claims)?;
+    Ok(CatalogDelegationGrant {
+        id: claims.jti.clone(),
+        user_id: claims.sub.clone(),
+        actor_client_id: claims
+            .act
+            .as_ref()
+            .ok_or_else(invalid_catalog_authority)?
+            .sub
+            .clone(),
+        receiving_client_id: claims
+            .client_id
+            .clone()
+            .ok_or_else(invalid_catalog_authority)?,
+        scope: claims.scope.clone(),
+        resources: authority.resources,
         allow_all_services: authority.allow_all_services,
-        allowed_service_ids: authority.allowed_service_ids.clone(),
+        allowed_service_ids: authority.allowed_service_ids,
         allow_all_nodes: authority.allow_all_nodes,
-        allowed_node_ids: authority.allowed_node_ids.clone(),
+        allowed_node_ids: authority.allowed_node_ids,
         revoked: false,
-        expires_at,
+        expires_at: chrono::DateTime::from_timestamp(claims.exp, 0)
+            .ok_or_else(invalid_catalog_authority)?,
         created_at: Utc::now(),
-    };
-
-    super::erasure_admission::insert_owned(db, CATALOG_DELEGATION_GRANTS, user_id, &grant).await?;
-    Ok(())
+    })
 }
 
 /// Validate the complete signed catalog authority against its online grant and
@@ -406,6 +399,7 @@ mod tests {
                     delegation_scopes: MCP_CATALOG_READ_SCOPE.to_string(),
                     default_service_catalog_slugs: Vec::new(),
                     broker_capability_enabled: false,
+                    first_party_management: false,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
@@ -429,19 +423,10 @@ mod tests {
             .expect("grant catalog consent");
         }
 
-        let authority = authority_from_claims(&claims).expect("explicit catalog authority");
-        persist_grant(
-            &db,
-            &claims.jti,
-            &claims.sub,
-            actor_client_id,
-            receiving_client_id,
-            &claims.scope,
-            &authority,
-            claims.exp,
-        )
-        .await
-        .expect("persist catalog grant");
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .insert_one(grant_from_claims(&claims).expect("explicit catalog authority"))
+            .await
+            .expect("seed catalog grant");
         validate_live_grant(&db, &config, &claims)
             .await
             .expect("active catalog grant");

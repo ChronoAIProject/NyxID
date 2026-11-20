@@ -129,9 +129,9 @@ Readiness checks the selected configuration, then existing async API probes
 exercise actual credentials/authorization; metadata mode never requires a token
 file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
 `nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
-restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
-`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
-API connectivity and CA must be verified in the deployment environment. See
+restrictions are not relaxed. The backend's Google service account is distinct from the
+Kubernetes `nyxid-machine-manager` ServiceAccount. Verify the Google principal,
+its target permissions, API connectivity and CA in the deployment environment. See
 [Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
@@ -716,8 +716,31 @@ These variables are reserved for a future mail transport. The current NyxID serv
 | `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MiB). |
 | `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
+| `NYXID_PROXY_ALLOW_DEV_LOOPBACK` | `false` | Allow direct proxy connections to loopback for local development. Startup rejects this setting in production. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
 | `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections across the cluster. MongoDB capacity slots enforce the global cap. |
+
+Direct HTTP requests reuse pooled connections. Each new HTTP or WebSocket connection resolves
+and checks every downstream address before dialing. Literal IPs are checked at request selection.
+Ordinary buffered HTTP requests follow up to five redirects on the same scheme, host and port.
+A cross-origin redirect or a redirect for a one-shot upload comes back to the caller with its
+Location. Operation-scoped calls keep their single-destination contract.
+
+A platform Admin can approve a catalog-owned private destination. Check the service ID and its
+base URL in the catalog, then run `nyxid admin catalog private-destination <service-id>`, or
+send `{"approve_private_destination":true}` to `PUT /api/v1/services/{id}`. To revoke it,
+add `--revoke` or send `false`. Approval covers that exact base URL. A change to the base
+requires a fresh approval. Loopback also requires the development opt-in. The audit event
+records the row ID and approval state.
+
+On the first upgraded startup, NyxID approves eligible active catalog rows with private or
+loopback IP literals, single-label names, or names ending in `.svc`, `.cluster.local`,
+`.internal` or `.local`. When a public-looking name resolves privately, the server logs
+the service ID and returns `Direct proxy destination is not permitted`. Check the row and
+approve its catalog base if appropriate. User-chosen private endpoints use a credential node.
+Node transfer and deletion release route bindings. A direct request after release checks its
+destination when used. The Codex translator uses its fixed ChatGPT origin and the deployment's
+configured forward proxy.
 
 Other forwarding surfaces remain intentionally fixed and bounded: assistant direct/chat
 requests are capped at 256 KiB, SSH exec JSON requests at 64 KiB, and Oracle consumer

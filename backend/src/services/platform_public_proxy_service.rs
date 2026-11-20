@@ -478,7 +478,7 @@ pub(super) async fn send_model_request(
         http::HeaderValue::from_static("application/json"),
     );
     let response = proxy_service::forward_request_with_extra_outbound_headers(
-        proxy_service::no_redirect_http_client(),
+        proxy_service::Redirects::Return,
         target,
         method,
         path,
@@ -933,7 +933,7 @@ pub(crate) async fn dispatch_nyxagent(
     )
     .await?;
     let downstream = proxy_service::forward_request_with_extra_outbound_headers(
-        proxy_service::no_redirect_http_client(),
+        proxy_service::Redirects::Return,
         &target.0,
         Method::POST,
         "v1/responses",

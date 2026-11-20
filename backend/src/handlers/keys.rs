@@ -1817,7 +1817,12 @@ pub async fn update_key(
     // credential change having already applied.
     validate_optional_label_for_update(body.label.as_deref())?;
 
-    if let Some(endpoint_url) = body.endpoint_url.as_deref() {
+    let clearing_http_node = body.node_id.as_deref() == Some("") && view.service_type != "ssh";
+    if let Some(endpoint_url) = body
+        .endpoint_url
+        .as_deref()
+        .or(clearing_http_node.then_some(view.endpoint_url.as_str()))
+    {
         let effective_node_id = match body.node_id.as_deref() {
             Some("") => None,
             Some(node_id) => Some(node_id),
@@ -4354,7 +4359,7 @@ mod tests {
             use_platform_key: false,
             credential: Some("secret-token".to_string()),
             label: "Header Service".to_string(),
-            endpoint_url: Some("https://api.example.com".to_string()),
+            endpoint_url: Some("https://127.0.0.1".to_string()),
             slug: Some("header-service".to_string()),
             auth_method: Some("header".to_string()),
             auth_key_name: Some(String::new()),
@@ -4711,7 +4716,7 @@ mod tests {
         let body = make_create_key_request(
             "My Custom API",
             Some("my-custom-api"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test-credential"),
             Some("bearer"),
         );
@@ -4727,10 +4732,7 @@ mod tests {
 
         assert_eq!(response.label, "My Custom API");
         assert_eq!(response.slug, "my-custom-api");
-        assert_eq!(
-            response.endpoint_url.as_deref(),
-            Some("https://api.example.com")
-        );
+        assert_eq!(response.endpoint_url.as_deref(), Some("https://127.0.0.1"));
         assert_eq!(response.auth_method, "bearer");
         assert!(response.api_key_id.is_some());
         assert!(response.is_active);
@@ -4750,7 +4752,7 @@ mod tests {
         let body = make_create_key_request(
             "No Auth Service",
             Some("no-auth-svc"),
-            Some("https://public-api.example.com"),
+            Some("https://127.0.0.1"),
             None,
             Some("none"),
         );
@@ -4786,7 +4788,7 @@ mod tests {
         let body = make_create_key_request(
             "Missing Slug",
             None,
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -4859,7 +4861,7 @@ mod tests {
         let mut body = make_create_key_request(
             "Org Service",
             Some("org-svc"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -4944,7 +4946,7 @@ mod tests {
         let mut body2 = make_create_key_request(
             "Org Service 2",
             Some("org-svc-2"),
-            Some("https://api2.example.com"),
+            Some("https://127.0.0.2"),
             Some("sk-test2"),
             Some("bearer"),
         );
@@ -4974,7 +4976,7 @@ mod tests {
         let mut body = make_create_key_request(
             "OAuth Conflict",
             Some("oauth-conflict"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5007,7 +5009,7 @@ mod tests {
         let mut body = make_create_key_request(
             "Half OAuth",
             Some("half-oauth"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5042,7 +5044,7 @@ mod tests {
         let body = make_create_key_request(
             "Deletable Key",
             Some("deletable-key"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5092,7 +5094,7 @@ mod tests {
         let body = make_create_key_request(
             "Deletable By Slug",
             Some("del-by-slug"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5137,7 +5139,7 @@ mod tests {
         let body = make_create_key_request(
             "Owner Key",
             Some("owner-key"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5181,7 +5183,7 @@ mod tests {
         let body = make_create_key_request(
             "Original Label",
             Some("label-change-svc"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5223,7 +5225,7 @@ mod tests {
         let body = make_create_key_request(
             "Slug Updatable",
             Some("slug-updatable"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5296,7 +5298,7 @@ mod tests {
             .unwrap();
 
         let mut update = empty_update_request();
-        update.endpoint_url = Some("https://new.supabase.co".to_string());
+        update.endpoint_url = Some("https://127.0.0.1".to_string());
         let Json(updated) = super::update_key(
             State(state),
             test_auth_user(&user_id),
@@ -5308,7 +5310,7 @@ mod tests {
 
         assert_eq!(
             updated.endpoint_url.as_deref(),
-            Some("https://new.supabase.co/rest/v1")
+            Some("https://127.0.0.1/rest/v1")
         );
     }
 
@@ -5327,7 +5329,7 @@ mod tests {
         let body = make_create_key_request(
             "Private Key",
             Some("private-key"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5368,7 +5370,7 @@ mod tests {
         let body = make_create_key_request(
             "Good Label",
             Some("good-label-svc"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );
@@ -5409,7 +5411,7 @@ mod tests {
         let body = make_create_key_request(
             "Good Label",
             Some("good-label-svc2"),
-            Some("https://api.example.com"),
+            Some("https://127.0.0.1"),
             Some("sk-test"),
             Some("bearer"),
         );

@@ -47,6 +47,7 @@ impl Fixture {
                 delegation_scopes: "proxy:* mcp:catalog:read".into(),
                 default_service_catalog_slugs: vec![],
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -1134,3 +1135,5 @@ async fn delegation_fingerprint_mismatch_is_definitive_and_positive_reads_are_op
     assert_eq!(denied.into_response().status(), StatusCode::UNAUTHORIZED);
     fixture.state.db.drop().await.unwrap();
 }
+
+pub(super) mod catalog_issuance;

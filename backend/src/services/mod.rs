@@ -250,6 +250,9 @@ pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
+pub mod proxy_destination;
+#[cfg(test)]
+mod proxy_destination_transport_tests;
 pub mod proxy_discovery_service;
 pub mod proxy_http_response;
 pub mod proxy_service;

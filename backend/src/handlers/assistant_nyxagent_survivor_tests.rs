@@ -94,20 +94,19 @@ async fn transferring_capacity_preserves_running_slots_and_fifo_while_saturated(
         let old = guard.token().unwrap().clone();
         let mut session = db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let transferred = next
+        let grant = next
             .direct_chat_limiter
             .transfer_capacity(&mut session, &old, OWNER, limit)
             .await
             .unwrap()
             .unwrap();
         session.commit_transaction().await.unwrap();
+        let transferred = grant.token.clone();
         assert_eq!(old.id, transferred.id);
         assert_eq!(old.acquired_at, transferred.acquired_at);
         assert_eq!(old.order_id, transferred.order_id);
         assert_ne!(old.lease_id, transferred.lease_id);
-        let moved = next
-            .direct_chat_limiter
-            .transferred_permit(OWNER, transferred.clone());
+        let moved = next.direct_chat_limiter.transferred_permit(OWNER, grant);
         assert!(!SlotStore::release(&db, &old).await.unwrap());
         drop(guard);
         if old.namespace == DIRECT_CHAT_QUEUE_NAMESPACE {
@@ -284,6 +283,7 @@ async fn scripted_windows_with_limit(
                 OWNER,
                 start.clone(),
                 &state.encryption_keys,
+                None,
                 None,
             ),
         )
@@ -618,7 +618,14 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
         let claim = workers::TEST_WORKER
             .scope(
                 predecessor,
-                engine::claim_turn(&db, OWNER, start.clone(), &first.encryption_keys, None),
+                engine::claim_turn(
+                    &db,
+                    OWNER,
+                    start.clone(),
+                    &first.encryption_keys,
+                    None,
+                    None,
+                ),
             )
             .await
             .unwrap();
@@ -966,14 +973,11 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
             for _ in 0..2 {
                 let mut request = Request::builder().method("POST").body(Body::from(json!({"text":"Use the shorter answer","turn_id":&turn.turn_id,"clientRequestId":&client}).to_string())).unwrap();
                 request.extensions_mut().insert(SERVER_TURN_POLICY);
-                let response = steer(
-                    State(next.clone()),
-                    test_auth_user(OWNER),
-                    Path(row.id.clone()),
-                    request,
-                )
-                .await
-                .unwrap();
+                let mut bearer = test_auth_user(OWNER);
+                bearer.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+                let response = steer(State(next.clone()), bearer, Path(row.id.clone()), request)
+                    .await
+                    .unwrap();
                 assert_eq!(response.status(), StatusCode::OK);
             }
             assert_eq!(steered.load(Ordering::SeqCst), 1);
@@ -1250,7 +1254,7 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                 let mut successor = start.clone();
                 successor.conversation_id = Some(row.id.clone());
                 let claimed =
-                    engine::claim_turn(&db, OWNER, successor, &next.encryption_keys, None)
+                    engine::claim_turn(&db, OWNER, successor, &next.encryption_keys, None, None)
                         .await
                         .unwrap();
                 assert!(

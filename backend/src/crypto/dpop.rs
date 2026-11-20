@@ -211,6 +211,9 @@ pub(crate) fn test_dpop_keypair() -> (jsonwebtoken::EncodingKey, Jwk) {
 }
 
 #[cfg(test)]
+pub(crate) use tests::sign_test_proof;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use jsonwebtoken::jwk::{

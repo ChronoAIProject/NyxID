@@ -1,3 +1,5 @@
+#[path = "assistant_handoff_command_tests.rs"]
+mod handoff_command_tests;
 #[path = "assistant_shutdown_tests.rs"]
 mod shutdown_tests;
 #[path = "assistant_nyxagent_survivor_tests.rs"]
@@ -156,12 +158,15 @@ fn preexisting_message_row_without_diagnostics_remains_readable() {
     let row = mongodb::bson::from_document::<AssistantMessage>(mongodb::bson::doc! {
         "_id": "old-message", "conversation_id": "conversation", "user_id": OWNER,
         "seq": 1_i64, "turn_id": "turn", "role": "assistant", "text": "old",
-        "status": "completed", "error_code": mongodb::bson::Bson::Null,
+        "status": "failed",
         "created_at": mongodb::bson::DateTime::now(), "activities": [], "attachments": []
     })
     .unwrap();
     assert!(row.error_detail.is_none());
     assert!(row.upstream_error_code.is_none());
+    let json = serde_json::to_value(MessageResponse::from(row)).unwrap();
+    assert!(json["error_code"].is_null());
+    assert!(json["turn_metadata"]["failure_reason"].is_null());
 }
 const SESSION: &str = "conv_11111111111111111111111111111111";
 const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
@@ -5457,7 +5462,19 @@ async fn delayed_first_acceptance_emits_system_acknowledgement_without_model_or_
     .await
     .unwrap();
     let events = drain(response).await;
-    assert!(events.contains("\"engine_accepted\":true"));
+    if !events.contains("\"engine_accepted\":true") {
+        let terminal = state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id": OWNER, "role": "assistant"})
+            .projection(doc! {"_id": 0, "turn_id": 1, "status": 1, "error_code": 1,
+            "error_detail.stage": 1, "turn_metadata.timing": 1})
+            .await
+            .unwrap();
+        panic!("Missing engine acceptance. Saved turn metadata {terminal:?}");
+    }
     assert!(
         events.contains("\"capacity_wait_note_origin\":\"nyxid_system\""),
         "{events}"

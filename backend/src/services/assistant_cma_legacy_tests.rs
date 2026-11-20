@@ -826,7 +826,7 @@ async fn legacy_production_workspace_creation_is_forwarded_verbatim() {
     .await
     .expect("production workspace-only request must pass");
     let response = crate::services::proxy_service::forward_request_with_resource_proof(
-        &reqwest::Client::new(),
+        crate::services::proxy_service::Redirects::Return,
         &f.target,
         reqwest::Method::POST,
         "/api/v1/agents",

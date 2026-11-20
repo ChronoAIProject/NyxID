@@ -237,6 +237,8 @@ pub async fn run_metadata_in_session(
     data: &TurnMetadata,
 ) -> AppResult<()> {
     if let Some(run_id) = turn.trigger_run_id.as_ref() {
+        let reason = doc! {"$literal": bson::to_bson(&data.failure_reason)
+        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?};
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
             .update_one(
                 doc! {"_id": run_id, "user_id": &row.user_id, "turn_id": &turn.turn_id},
@@ -249,8 +251,9 @@ pub async fn run_metadata_in_session(
                     },
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
-                    "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)
-                        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?},
+                    // A terminal coordinator decision can precede settlement of its last turn.
+                    "failure_reason": {"$cond": [{"$eq": ["$outcome", "failed"]},
+                        {"$cond": [{"$eq": ["$reason", "cancelled"]}, null, {"$ifNull": ["$failure_reason", &reason]}]}, &reason]},
                 }}],
             )
             .session(session)
@@ -313,7 +316,7 @@ pub fn settled(
         attempts = error.and_then(TurnError::attempts).or(data.attempts),
         capacity_wait_ms = error.and_then(TurnError::capacity_wait_ms).or(data.capacity_wait_ms).unwrap_or(0),
         duration_ms = (now - turn.started_at).num_milliseconds().max(0), origin = origin(turn),
-        trigger_run_id = turn.trigger_run_id.as_deref(), "Assistant turn settled");
+        trigger_run_id = turn.trigger_run_id.as_deref(), restart_eligibility = turn.restart_eligibility.as_deref(), "Assistant turn settled");
 }
 
 fn heartbeat_age(turn: &ActiveTurn, error: Option<&TurnError>, now: DateTime<Utc>) -> Option<i64> {

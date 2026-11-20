@@ -2393,6 +2393,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     learning_epoch: Option<i64>,
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
+    metadata: Option<&RestartMetadata>,
 ) -> AppResult<OwnerTurnAdmission> {
     super::erasure_admission::fence_in_session(db, user_id, session).await?;
     if let Some(ack) = &start.acknowledgement_id
@@ -3062,13 +3063,12 @@ pub(crate) async fn begin_owner_turn_in_session(
             &lost_turn,
             Some(now),
         ));
+        let mut error = TurnError::internal("turn_lost", "lease_expiry");
+        lost_metadata.failure_reason =
+            super::assistant_model_observer::failure_reason(&error, &lost_turn, now);
+        error.metadata = Some(Box::new(lost_metadata.clone()));
         Box::pin(super::assistant_turn_observability::failed_in_session(
-            db,
-            session,
-            &row,
-            &lost_turn,
-            &TurnError::internal("turn_lost", "lease_expiry"),
-            now,
+            db, session, &row, &lost_turn, &error, now,
         ))
         .await?;
         Box::pin(
@@ -3654,20 +3654,20 @@ pub(crate) async fn begin_owner_turn_in_session(
     if voice_request.is_none() || hidden_voice {
         row.message_count += 1;
     }
-    if super::security_readiness_service::turn_restart_enrollment_ready()
-        && super::assistant_notification_service::turn_handoff_enabled(db, user_id)
-    {
-        let profile =
-            super::assistant_nyxagent_model_cache::inference_credential(db, user_id, &row.model);
-        let deployment = super::assistant_nyxagent_runtime::cached_reattach(db);
-        negotiate_restart(
-            &mut row,
-            start,
-            &message_id,
-            deployment,
-            profile,
-            super::shutdown::process().is_draining(),
-        );
+    if restart_enabled(db, user_id) {
+        if let Some(metadata) = metadata {
+            let profile = metadata.profile(&row.model);
+            negotiate_restart(
+                &mut row,
+                start,
+                &message_id,
+                metadata.deployment.clone(),
+                profile,
+                super::shutdown::process().is_draining(),
+            );
+        } else if let Some(active) = &mut row.active_turn {
+            active.restart_eligibility = Some("discovery_skipped".into());
+        }
         if let Some(active) = &row.active_turn
             && let Some(offer) = &active.restart_offer
         {
@@ -3962,7 +3962,7 @@ pub async fn begin_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<AssistantConversation> {
     Ok(
-        Box::pin(claim_turn(db, user_id, start, keys, voice_request_id))
+        Box::pin(claim_turn(db, user_id, start, keys, voice_request_id, None))
             .await?
             .conversation,
     )
@@ -3974,6 +3974,7 @@ pub(crate) async fn claim_turn(
     start: impl Into<TurnStart>,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     voice_request_id: Option<&str>,
+    metadata: Option<RestartMetadata>,
 ) -> AppResult<OwnerTurnClaim> {
     let voice_request_id = voice_request_id.map(str::to_owned);
     let start: TurnStart = start.into();
@@ -4047,7 +4048,9 @@ pub(crate) async fn claim_turn(
     let audit_db = db.clone();
     let audit_user = user_id.clone();
     let budget = ids.artifact_budget.clone();
+    let metadata = metadata.map(std::sync::Arc::new);
     let claim = loop {
+        let metadata = metadata.clone();
         let (db, user_id, keys, start, ids, new_agent, voice_request_id) = (
             db.clone(),
             user_id.clone(),
@@ -4077,6 +4080,7 @@ pub(crate) async fn claim_turn(
                         learning_epoch,
                         None,
                         voice_request_id.as_deref(),
+                        metadata.as_deref(),
                     ))
                     .await?;
                     if start.origin == TurnOrigin::Event
@@ -4570,6 +4574,31 @@ pub(crate) async fn mark_dequeued_with_capacity(
 
 #[derive(Clone)]
 pub(crate) struct WorkerFence(bson::Document);
+
+pub(crate) fn restart_enabled(db: &Database, owner: &str) -> bool {
+    super::security_readiness_service::turn_restart_enrollment_ready()
+        && super::assistant_notification_service::turn_handoff_enabled(db, owner)
+}
+
+#[derive(Default)]
+pub(crate) struct RestartMetadata {
+    pub deployment: Option<crate::models::assistant_conversation::ReattachDeployment>,
+    pub models: Vec<super::assistant_nyxagent_model_cache::ModelInfo>,
+}
+
+impl RestartMetadata {
+    fn profile(
+        &self,
+        model: &str,
+    ) -> Option<super::assistant_nyxagent_model_cache::InferenceCredential> {
+        let mut matching = self
+            .models
+            .iter()
+            .filter(|row| row.id == model && row.available);
+        let first = matching.next()?.inference_credential?;
+        matching.next().is_none().then_some(first)
+    }
+}
 
 pub(crate) fn negotiate_restart(
     row: &mut AssistantConversation,
@@ -7867,6 +7896,8 @@ pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instruction
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TurnError {
+    #[serde(skip)]
+    pub(super) origin: TurnErrorOrigin,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "upstream_error_code")]
     pub upstream_code: Option<Box<str>>,
@@ -7879,6 +7910,24 @@ pub struct TurnError {
     pub upstream_request_id: Option<Box<str>>,
     pub response_id: Option<Box<str>>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TurnErrorOrigin {
+    NyxId,
+    NyxAgent,
+}
+
+/// Only bounded protocol identifiers may enter failure metadata.
+pub(crate) fn diagnostic_code(code: &str) -> Option<&str> {
+    (code.len() <= 64
+        && code.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !code.starts_with("nyx_")
+        && !code.starts_with("sk_"))
+    .then_some(code)
+}
+
 impl TurnError {
     /// Reconstruct only fixed visitor copy from a recorded, attributed diagnostic.
     /// Unknown or absent reasons never claim that an owner notice was queued.
@@ -7904,6 +7953,7 @@ impl TurnError {
     /// sweep, settlement). It carries no upstream code and names its stage.
     pub fn internal(code: &str, stage: &'static str) -> Self {
         let mut error = Self::new(code);
+        error.origin = TurnErrorOrigin::NyxId;
         error.upstream_code = None;
         error.stage = stage;
         error
@@ -7923,16 +7973,7 @@ impl TurnError {
         )
     }
     pub fn new(code: &str) -> Self {
-        // Upstream prose, URLs, tokens and control characters never enter the
-        // transcript or logs. Keep only bounded protocol-style identifiers.
-        let upstream_code = (code.len() <= 64
-            && code.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-            && code
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            && !code.starts_with("nyx_")
-            && !code.starts_with("sk_"))
-        .then(|| code.into());
+        let upstream_code = diagnostic_code(code).map(Into::into);
         let (code, message) = match code {
             "assistant_start_unavailable" => (
                 "assistant_start_unavailable",
@@ -8081,6 +8122,7 @@ impl TurnError {
             message: message.into(),
             metadata: None,
             upstream_code,
+            origin: TurnErrorOrigin::NyxAgent,
             stage: "stream",
             http_status: None,
             upstream_request_id: None,

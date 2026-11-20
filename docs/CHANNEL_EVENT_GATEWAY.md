@@ -1686,6 +1686,17 @@ Exhausted proven refusals settle as `assistant_start_unavailable` and say that
 nothing was done; gateway presentation uses a human text reply instead of a
 generic failed-response fallback.
 
+For a settled relay turn, durable recovery returns its saved receipt or a
+deliverable text notice. A proven start refusal can say that nothing was done.
+A guest model-route refusal can report zero tool calls when the settled turn
+has complete zero-activity evidence. An uncertain outcome asks the caller to
+check the result, retaining any available partial reply within the original
+audience. The assistant transcript and dispatch lookup retain the execution
+outcome. A recovery read or repeated POST using the original command identity
+cannot execute tools. A newly typed Telegram command has its own identity.
+Deduplicating a business write across such messages requires a booking intent
+that the booking system can recognize.
+
 Typing uses the retained event's advertised `capabilities.typing` and
 `POST /events/{event_ref}/typing`. Current CMA documents relay typing as
 unsupported. For Telegram `nyxid_relay`, NyxID therefore uses its own adapter's

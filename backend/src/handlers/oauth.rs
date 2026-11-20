@@ -1034,6 +1034,7 @@ async fn authorize_decision_inner(
         }
     };
 
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
     let consent_request = form
         .consent_request
@@ -1085,7 +1086,6 @@ async fn authorize_decision_inner(
     }
 
     let machine = if validated_scope.split_whitespace().any(|s| s == "machine") {
-        super::login_client_context::require_first_party_human(&auth_user)?;
         params
             .machine_approval_request_id
             .clone()
@@ -1262,21 +1262,15 @@ async fn authorize_inner(
     is_browser_mode: bool,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
+    if let Some(auth) = opt_auth.0.as_ref() {
+        super::login_client_context::require_first_party_human(auth)?;
+    }
     let mut normalized_params = params.clone();
     if normalized_params.include_granted_scopes {
         normalized_params.service_access_mode = Some(ServiceAccessMode::Incremental);
     }
     let params = &normalized_params;
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
-    if validated_scope
-        .split_whitespace()
-        .any(|scope| scope == "machine")
-        && let Some(auth) = opt_auth.0.as_ref()
-    {
-        // A saved human grant does not let another credential mint OAuth
-        // Machine authority through the silent authorization shortcut.
-        super::login_client_context::require_first_party_human(auth)?;
-    }
     if !is_browser_mode && params.service_access_mode.is_some() {
         return Err(AppError::BadRequest(
             "Incremental consent requires a browser review".to_string(),
@@ -2199,12 +2193,7 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
     code_service_access: Option<(bool, Vec<String>)>,
 ) -> AppResult<String> {
-    if validated_scope
-        .split_whitespace()
-        .any(|scope| scope == "machine")
-    {
-        super::login_client_context::require_first_party_human(auth_user)?;
-    }
+    super::login_client_context::require_first_party_human(auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
     let protected_consent =
         Some(consent_service::ensure_issuance_reference(&state.db, consent).await?);
@@ -4440,6 +4429,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -6965,6 +6955,7 @@ mod tests {
                 delegation_scopes: String::new(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -7387,6 +7378,7 @@ mod tests {
                 unmatched_catalog.slug.clone(),
             ],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

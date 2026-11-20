@@ -443,6 +443,7 @@ pub(crate) async fn claim_personal_turn_in_session(
         None,
         Some(&model_origin(&origin)),
         None,
+        None,
     ))
     .await?
     .into_started()?;

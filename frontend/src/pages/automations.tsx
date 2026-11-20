@@ -1003,7 +1003,11 @@ function AutomationHistory({
                         {formatAutomationTime(run.missed.from, zone)}{translateUi(" and")}{" "}
                         {formatAutomationTime(run.missed.through, zone)}.
                       </p>
-                    ) : run.failure_reason ? (
+                    ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "permit" ? (
+                      <p>{translateUi("A temporary server problem interrupted this run. Check completed actions before starting another run.")}</p>
+                    ) : run.failure_reason?.source === "nyxid" && run.failure_reason.stage === "shutdown" ? (
+                      <p>{translateUi("NyxID restarted during this run. Check completed actions before starting another run.")}</p>
+                    ) : run.failure_reason && (run.failure_reason.stage !== "scheduler" || !run.reason) ? (
                       <p>
                         {run.failure_reason.stage === "model_proxy"
                           ? translateUi("Model request failed")
