@@ -7,7 +7,7 @@ use super::{
 use crate::{
     errors::{AppError, AppResult},
     models::sandbox_usage_rates::{
-        COLLECTION_NAME, PINS, POLICIES, PricePin, UsagePolicy, UsageScope, UsageTariff,
+        COLLECTION_NAME, ChargeMode, PINS, POLICIES, PricePin, UsagePolicy, UsageScope, UsageTariff,
     },
 };
 use chrono::{DateTime, Utc};
@@ -103,6 +103,7 @@ async fn pin_in_session(
         scope_key: key.into(),
         scope: scope.clone(),
         minute: time,
+        charge_mode: ChargeMode::Shadow,
         policy_id: policy.as_ref().map(|p| p.id.clone()),
         policy_version: policy.as_ref().map(|p| p.version),
         dimensions: policy

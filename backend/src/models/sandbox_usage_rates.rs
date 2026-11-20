@@ -97,6 +97,12 @@ pub struct UsagePolicy {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChargeMode {
+    Shadow,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PricePin {
@@ -107,6 +113,7 @@ pub struct PricePin {
     pub scope: UsageScope,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub minute: DateTime<Utc>,
+    pub charge_mode: ChargeMode,
     pub policy_id: Option<String>,
     pub policy_version: Option<i64>,
     pub dimensions: DimensionPolicy,

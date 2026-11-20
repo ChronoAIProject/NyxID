@@ -239,6 +239,7 @@ async fn shadow_pins_survive_reenable_policy_publication_and_owner_balance_chang
     assert_eq!(original, b.unwrap());
     assert_eq!(count(&db, PINS).await, 1);
     assert_eq!(original.dimensions, policy::shadow());
+    assert_eq!(original.charge_mode, ChargeMode::Shadow);
     let tariff = publish_tariff(&db, input(0), &actor(), &[42; 32])
         .await
         .unwrap();
@@ -329,6 +330,8 @@ async fn late_evidence_uses_usage_time_policy_and_tariff_without_money_effects()
     assert_eq!(before.policy_id, Some(first_policy.id));
     assert_eq!(at.tariff_id, Some(second.id));
     assert_eq!(at.dimensions.cpu, Selection::Free);
+    assert_eq!(before.charge_mode, ChargeMode::Shadow);
+    assert_eq!(at.charge_mode, ChargeMode::Shadow);
     assert_eq!(
         price_pins::pin(&db, &fixtures::scope(), fixtures::time())
             .await

@@ -50,6 +50,7 @@ pub(super) fn pin(tariff: &UsageTariff) -> PricePin {
         scope_key: policy::scope_key(&scope()).unwrap(),
         scope: scope(),
         minute: time(),
+        charge_mode: ChargeMode::Shadow,
         policy_id: Some(uuid::Uuid::new_v4().to_string()),
         policy_version: Some(1),
         dimensions: DimensionPolicy {
@@ -143,6 +144,12 @@ fn one_basis_per_dimension_and_no_fourth_uptime_charge() {
     let allocated = plan(&decode(&fixture("allocated")).unwrap(), &pin, Some(&tariff));
     let measured = plan(&decode(&fixture("measured")).unwrap(), &pin, Some(&tariff));
     assert_eq!(allocated.len() + measured.len(), 6);
+    assert!(
+        allocated
+            .iter()
+            .chain(&measured)
+            .all(|p| p.charge_mode == ChargeMode::Shadow)
+    );
     assert_eq!(
         allocated
             .iter()
@@ -358,4 +365,19 @@ fn nullable_bindings_keep_observed_absence_at_zero_without_inventing_a_charge() 
             );
         }
     }
+}
+
+#[test]
+fn persisted_price_pins_cannot_claim_charge_activation() {
+    let pin = pin(&tariff());
+    let mut record = bson::to_document(&pin).unwrap();
+    assert_eq!(record.get_str("charge_mode"), Ok("shadow"));
+    assert_eq!(
+        bson::from_document::<PricePin>(record.clone()).unwrap(),
+        pin
+    );
+    record.insert("charge_mode", "activated");
+    assert!(bson::from_document::<PricePin>(record.clone()).is_err());
+    record.remove("charge_mode");
+    assert!(bson::from_document::<PricePin>(record).is_err());
 }

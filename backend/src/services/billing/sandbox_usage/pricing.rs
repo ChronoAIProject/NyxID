@@ -5,7 +5,9 @@ use super::{
 };
 use crate::{
     errors::AppResult,
-    models::sandbox_usage_rates::{ChargeUnit, PricePin, Selection, UsageRate, UsageTariff},
+    models::sandbox_usage_rates::{
+        ChargeMode, ChargeUnit, PricePin, Selection, UsageRate, UsageTariff,
+    },
 };
 use chrono::{DateTime, Datelike, Utc};
 
@@ -67,6 +69,7 @@ pub enum Disposition {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PricePlan {
+    pub charge_mode: ChargeMode,
     pub metric: Metric,
     pub pin_id: String,
     pub tariff_id: Option<String>,
@@ -149,6 +152,7 @@ pub fn shadow_plan(
                 _ => candidate(fact, *metric, quantity.map(|q| q.get()), pin, tariff)?,
             };
             Ok(PricePlan {
+                charge_mode: pin.charge_mode,
                 metric: *metric,
                 pin_id: pin.id.clone(),
                 tariff_id: pin.tariff_id.clone(),
