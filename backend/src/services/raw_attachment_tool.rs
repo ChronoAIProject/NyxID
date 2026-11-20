@@ -406,7 +406,7 @@ fn upload_content_type(endpoint: &McpToolEndpoint, attachment_type: &str) -> App
 /// decryption verifies content once; the immutable buffer's plaintext SHA-256 is
 /// bound to confirmation. Re-encryption must not invalidate an approved buffer.
 fn identity_projection() -> bson::Document {
-    doc! {"_id":1,"user_id":1,"conversation_id":1,"group_id":1,"turn_id":1,"origin":1,"label":1,"size":1,"content_type":1,"chunks":1,"message_id":1,"parent_attachment_id":1,"chunk_index":1}
+    doc! {"_id":1,"user_id":1,"conversation_id":1,"group_id":1,"turn_id":1,"origin":1,"label":1,"size":1,"content_type":1,"chunks":1,"message_id":1,"parent_attachment_id":1,"chunk_index":1,"page":1,"render_version":1}
 }
 pub(crate) async fn metadata_identity(db: &Database, id: &str) -> AppResult<String> {
     let mut rows = db
@@ -453,6 +453,8 @@ mod tests {
             "chunks",
             "parent_attachment_id",
             "chunk_index",
+            "page",
+            "render_version",
         ] {
             assert_eq!(projection.get_i32(key).unwrap(), 1);
         }

@@ -78,6 +78,7 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
+  readonly pdf?: import("@/schemas/assistant-nyxagent").NyxAgentAttachment["pdf"];
   readonly origin?: string;
   readonly filename?: string;
   readonly source?: string;

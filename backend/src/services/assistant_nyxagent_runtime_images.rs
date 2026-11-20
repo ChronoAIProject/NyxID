@@ -300,6 +300,99 @@ pub(crate) async fn renew(
     Ok(())
 }
 
+pub(crate) async fn record_pdf_outcomes(
+    state: &AppState,
+    row: &AssistantConversation,
+    reports: &[(String, crate::models::assistant_upload::PdfCoverage)],
+) -> Result<(), TurnError> {
+    if reports.is_empty() {
+        return Ok(());
+    }
+    let Some(turn) = row.active_turn.as_ref() else {
+        return Err(TurnError::internal("cancelled", "turn_missing"));
+    };
+    let db = state.db.clone();
+    let conversation_id = row.id.clone();
+    let user_id = row.user_id.clone();
+    let turn_id = turn.turn_id.clone();
+    let group_id = row.group_id.clone();
+    let reports = reports.to_vec();
+    let mut session = db
+        .client()
+        .start_session()
+        .await
+        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    let result = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<()> = async {
+                // This write fence is in the same retried transaction as both
+                // transcript mirrors. Stop, reclaim and settlement therefore
+                // serialize before an old worker can publish its coverage.
+                let now = bson::DateTime::now();
+                let started_after = bson::DateTime::from_chrono(
+                    Utc::now()
+                        - chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS),
+                );
+                let touched = db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {
+                            "_id": &conversation_id,
+                            "user_id": &user_id,
+                            "active_turn.turn_id": &turn_id,
+                            "active_turn.stop_requested": false,
+                            "$or": [
+                                {"active_turn.lease_expires_at": {"$gt": now}},
+                                {"active_turn.lease_expires_at": bson::Bson::Null,
+                                 "active_turn.started_at": {"$gt": started_after}},
+                            ],
+                        },
+                        doc! {"$currentDate":{"updated_at":true}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if touched.matched_count != 1 {
+                    return Err(AppError::AssistantTurnRequired);
+                }
+                for (id, pdf) in &reports {
+                    let value = mongodb::bson::to_bson(pdf)
+                        .map_err(|_| AppError::Internal("PDF coverage encoding failed".into()))?;
+                    let update = doc! {"$set":{"attachments.$.pdf":value}};
+                    db.collection::<mongodb::bson::Document>(
+                        crate::models::assistant_message::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"user_id":&user_id,"conversation_id":&conversation_id,"turn_id":&turn_id,"attachments.id":id},
+                        update.clone(),
+                    )
+                    .session(&mut *session)
+                    .await?;
+                    if let Some(group) = &group_id {
+                        db.collection::<mongodb::bson::Document>(
+                            crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
+                        )
+                        .update_one(doc! {"group_id":group,"attachments.id":id}, update)
+                        .session(&mut *session)
+                        .await?;
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error);
+    match result {
+        Ok(()) => Ok(()),
+        Err(AppError::AssistantTurnRequired) => Err(TurnError::internal("cancelled", "stop")),
+        Err(_) => Err(TurnError::internal("assistant_unavailable", "prepare")),
+    }
+}
+
 #[cfg(test)]
 mod resource_intent_tests {
     use super::*;

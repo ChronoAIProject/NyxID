@@ -20,6 +20,7 @@ fn image(id: &str) -> TurnAttachment {
         chat_delivery: Some(true),
         image_input: None,
         image_input_reason: None,
+        pdf: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,

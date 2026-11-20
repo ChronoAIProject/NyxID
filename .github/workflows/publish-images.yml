@@ -181,6 +181,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Verify packaged PDF renderer on native architecture
+        if: matrix.component == 'backend'
+        timeout-minutes: 10
+        run: python3 scripts/check-pdf-renderer.py --platform '${{ matrix.platform }}'
+
       - name: Prepare backend image memory reserve
         if: matrix.component == 'backend'
         timeout-minutes: 5

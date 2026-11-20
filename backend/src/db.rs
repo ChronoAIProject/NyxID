@@ -406,14 +406,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
-    db.collection::<Document>("assistant_attachments")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
-                .options(IndexOptions::builder().unique(true).sparse(true).build())
-                .build(),
-        )
-        .await?;
+    crate::services::assistant_upload_service::pdf_vision::ensure_indexes(db).await?;
     Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
         db,
     ))
