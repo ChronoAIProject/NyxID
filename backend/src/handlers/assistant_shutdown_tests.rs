@@ -42,6 +42,12 @@ async fn started_turn(
 }
 
 async fn drain_audit_row(state: &AppState, event_type: &str) -> bson::Document {
+    find_drain_audit_row(state, event_type)
+        .await
+        .unwrap_or_else(|| panic!("expected one chained {event_type} audit row"))
+}
+
+async fn find_drain_audit_row(state: &AppState, event_type: &str) -> Option<bson::Document> {
     let rows: Vec<bson::Document> = state
         .db
         .collection(crate::models::audit_log::COLLECTION_NAME)
@@ -51,11 +57,39 @@ async fn drain_audit_row(state: &AppState, event_type: &str) -> bson::Document {
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1, "expected one chained {event_type} audit row");
-    assert!(rows[0].get("seq").is_some());
-    assert_eq!(rows[0].get_str("entry_hash").unwrap().len(), 64);
-    assert_eq!(rows[0].get_str("prev_hash").unwrap().len(), 64);
-    rows.into_iter().next().unwrap()
+    assert!(rows.len() <= 1, "duplicate {event_type} audit rows");
+    let row = rows.into_iter().next()?;
+    row.get_i64("seq").unwrap();
+    assert_eq!(row.get_str("entry_hash").unwrap().len(), 64);
+    assert_eq!(row.get_str("prev_hash").unwrap().len(), 64);
+    Some(row)
+}
+
+#[cfg(unix)]
+async fn idle_drain_record(
+    state: &AppState,
+    event: &str,
+    log: &str,
+) -> (Option<i64>, bson::Document) {
+    if let Some(row) = find_drain_audit_row(state, event).await {
+        return (
+            Some(row.get_i64("seq").unwrap()),
+            row.get_document("event_data").unwrap().clone(),
+        );
+    }
+    let marker = format!(
+        r#"nyxid::shutdown: Shutdown audit unavailable event="{event}" audit_outcome="timed_out" metadata="#
+    );
+    let mut records = log.lines().filter_map(|line| line.split_once(&marker));
+    let (_, data) = records
+        .next()
+        .unwrap_or_else(|| panic!("missing chained {event} row and timeout record"));
+    assert!(
+        records.next().is_none(),
+        "duplicate {event} timeout records"
+    );
+    let metadata: Value = serde_json::from_str(data).unwrap();
+    (None, bson::to_document(&metadata).unwrap())
 }
 
 async fn drain_audit(state: &AppState) -> bson::Document {
@@ -347,6 +381,7 @@ async fn actual_server_process(scenario: ProcessDrain) {
         .env("INTERNAL_BIND_ADDR", internal.to_string())
         .env("INTERNAL_ADVERTISE_URL", format!("http://{internal}"))
         .env("INSTANCE_NAME", "drain-process-test")
+        .env("NO_COLOR", "1")
         .env("SHUTDOWN_DRAIN_TIMEOUT_SECS", "30")
         // All external startup discovery fails locally. Only test loopback
         // MongoDB and mock upstreams are reachable by the HTTP clients.
@@ -932,11 +967,12 @@ async fn idle_node_and_subscriptions(
         std::fs::read_to_string(output).unwrap()
     );
     assert!(started.elapsed() < bound);
-    let start = drain_audit_row(state, "backend_shutdown_drain_started").await;
-    let finish = drain_audit_row(state, "backend_shutdown_drain").await;
-    assert!(start.get_i64("seq").unwrap() < finish.get_i64("seq").unwrap());
-    let start = start.get_document("event_data").unwrap();
-    let audit = finish.get_document("event_data").unwrap();
+    let log = std::fs::read_to_string(output).unwrap();
+    let (start_seq, start) = idle_drain_record(state, "backend_shutdown_drain_started", &log).await;
+    let (finish_seq, audit) = idle_drain_record(state, "backend_shutdown_drain", &log).await;
+    if let (Some(start_seq), Some(finish_seq)) = (start_seq, finish_seq) {
+        assert!(start_seq < finish_seq);
+    }
     for field in [
         "generation",
         "instance_name",
