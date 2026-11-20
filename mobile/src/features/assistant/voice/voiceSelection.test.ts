@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
+import { setAppTranslationLanguage } from "../../../i18n/appTranslation";
 import {
   chooseVoiceOption,
   composerTrailingControl,
@@ -46,6 +47,38 @@ function preferences(value: VoiceOption): VoicePreferences {
     notify_on_completion: false,
   };
 }
+
+test("Chinese voice pricing localizes every composed fragment and retains exact rates", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  const components = [
+    { metric: "input_tokens", credits_per_unit: "0.000000000001", sync_status: "synced" },
+    { metric: "cache_read_tokens", credits_per_unit: "0.000000000002", sync_status: "synced" },
+    { metric: "output_tokens", credits_per_unit: "0.000000000003", sync_status: "synced" },
+  ] as const;
+  for (const language of ["zh-CN", "zh-TW"] as const) {
+    setAppTranslationLanguage(language);
+    const own = voiceTariff(option({
+      key_source: "own", pricing: null,
+      reported_token_pricing: { ...components[0], components: [...components.slice(1)] },
+    }));
+    const platform = voiceTariff(option({
+      voice: { ...option().voice, protocol: "xai_realtime" },
+      pricing: {
+        metric: "voice_seconds", credits_per_unit: "0.02", sync_status: "synced",
+        components: [{ metric: "requests", credits_per_unit: "0.013", sync_status: "synced" }, ...components],
+      },
+    }));
+    for (const text of [own, platform]) {
+      assert.doesNotMatch(text, /credits per|plus |per start|input tokens|output tokens|cache read tokens/);
+      for (const component of components) assert.ok(text.includes(component.credits_per_unit));
+      assert.match(text, language === "zh-CN" ? /输入词元/ : /輸入詞元/);
+    }
+    assert.match(own, /NyxID/);
+    assert.ok(platform.includes("0.02"));
+    assert.ok(platform.includes("0.013"));
+    assert.match(platform, language === "zh-CN" ? /次启动/ : /次啟動/);
+  }
+});
 
 test("first-use voice selection matches web: platform default, any default, then first available", () => {
   const disabled = option({ model: "disabled", available: false });

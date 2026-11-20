@@ -1,6 +1,7 @@
 import { translateApp } from "../../i18n/appTranslation";
 import type { BillingAllowance, BillingGrant, BillingWallet } from "./billingContracts";
 import { billingDate, creditUnits, decimalCredits, formatExactCredits, formatQuantity } from "./credits";
+import { billingMetricName } from "./billingMetric";
 
 export type BalanceRow = {
   key: string; label: string; value: string; exactValue?: string; unit?: string;
@@ -76,7 +77,7 @@ export function balanceRows(wallet: BillingWallet, grants: BillingGrant[], allow
       weekly: "{{remaining}} / {{quantity}} {{metric}} left this week",
       monthly: "{{remaining}} / {{quantity}} {{metric}} left this month",
     }[allowance.recurrence];
-    const metric = allowance.metric.replaceAll("_", " ");
+    const metric = billingMetricName(allowance.metric);
     rows.push({ key: `allowance:${allowance.id}`, label: translateApp("Included allowance · {{service}}", {
         service: allowance.service_slug,
       }),
