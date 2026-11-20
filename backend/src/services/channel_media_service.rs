@@ -138,6 +138,7 @@ fn pinned_client(
 }
 
 #[cfg(test)]
+#[derive(Clone)]
 pub(crate) struct TestPinnedTransport {
     pub target: String,
     pub host: String,

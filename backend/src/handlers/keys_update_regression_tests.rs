@@ -569,7 +569,7 @@ async fn node_endpoint_2126_detached_legacy_key_cannot_enable_unconfirmed_fallba
         )
         .await
         .unwrap();
-    let (status, value) = f.put(json!({"endpoint_url":"http://new-monitor"})).await;
+    let (status, value) = f.put(json!({"endpoint_url":"http://127.0.0.1"})).await;
     assert_eq!(status, StatusCode::OK, "{value}");
     assert_eq!(value["node_target_sync"][0]["status"], "unsupported");
     assert_eq!(

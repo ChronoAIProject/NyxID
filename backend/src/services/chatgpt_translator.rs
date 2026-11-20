@@ -916,6 +916,7 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10));
 
+    // This translator uses a fixed ChatGPT origin and its deployment-configured forward proxy.
     if let Ok(proxy_url) = std::env::var("CHATGPT_PROXY_URL")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
         .or_else(|_| std::env::var("https_proxy"))

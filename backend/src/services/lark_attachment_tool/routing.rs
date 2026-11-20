@@ -356,7 +356,7 @@ mod tests {
         target.auth_method = "none".into();
         for capability in [None, Some(&route)] {
             proxy::forward_request_with_resource_proof(
-                proxy::no_redirect_http_client(),
+                proxy::Redirects::Return,
                 &target,
                 reqwest::Method::GET,
                 path,

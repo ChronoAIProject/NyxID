@@ -635,6 +635,8 @@ async fn server_run(cli: Cli) {
 
     // Load configuration
     let mut config = AppConfig::from_env();
+    services::proxy_destination::validate_configuration()
+        .expect("Invalid proxy destination configuration");
     config.validate_ssh_runtime_config();
     config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
@@ -847,6 +849,10 @@ async fn server_run(cli: Cli) {
             "Failed to seed NyxBot Voice catalog service; continuing startup"
         );
     }
+
+    services::proxy_destination::approve_existing_catalog(&db, audit_chain_hmac_key.as_slice())
+        .await
+        .expect("Failed to approve existing private catalog destinations");
 
     services::inference_service::backfill(&db)
         .await

@@ -82,6 +82,8 @@ pub async fn fixture(response: &str) -> Fixture {
 
 /// A bounded sequence of responses for multi-request protocols such as MCP/OAuth.
 pub struct ScriptedFixture {
+    pub address: std::net::SocketAddr,
+    pub certificate: reqwest::Certificate,
     pub builder: Option<reqwest::ClientBuilder>,
     pub requests: mpsc::UnboundedReceiver<Vec<u8>>,
     task: tokio::task::JoinHandle<()>,
@@ -128,10 +130,12 @@ async fn scripted_fixture_inner(
         .unwrap();
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let certificate = reqwest::Certificate::from_der(cert.cert.der()).unwrap();
     let builder = reqwest::Client::builder()
         .no_proxy()
-        .resolve(host, listener.local_addr().unwrap())
-        .add_root_certificate(reqwest::Certificate::from_der(cert.cert.der()).unwrap());
+        .resolve(host, address)
+        .add_root_certificate(certificate.clone());
     let (tx, requests) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let mut responses = std::collections::VecDeque::from(responses);
@@ -176,6 +180,8 @@ async fn scripted_fixture_inner(
         }
     });
     ScriptedFixture {
+        address,
+        certificate,
         builder: Some(builder),
         requests,
         task,

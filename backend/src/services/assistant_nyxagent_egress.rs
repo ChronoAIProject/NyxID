@@ -516,7 +516,7 @@ impl NyxAgentEgress for Egress {
         let result = crate::downstream_disconnect::until_client_disconnect(
             &cancellation,
             proxy_service::forward_request_with_extra_outbound_headers(
-                proxy_service::no_redirect_http_client(),
+                proxy_service::Redirects::Return,
                 &target,
                 request.method.clone(),
                 &request.relative_path,

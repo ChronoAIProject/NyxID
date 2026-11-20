@@ -107,7 +107,7 @@ async fn execute_public_proxy(
 
     let target = public_proxy_target(matched.service.clone());
     let response = proxy_service::forward_request(
-        &state.http_client,
+        proxy_service::Redirects::SameOrigin,
         &target,
         reqwest::Method::from_bytes(method.as_str().as_bytes()).map_err(|_| {
             AppError::BadRequest(format!("Unsupported HTTP method: {}", method.as_str()))
@@ -333,6 +333,7 @@ mod tests {
             is_active: true,
             created_by: "admin".to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -486,6 +487,7 @@ mod tests {
                 is_active: true,
                 created_by: "admin".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,

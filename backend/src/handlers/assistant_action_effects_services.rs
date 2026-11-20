@@ -487,7 +487,9 @@ async fn commit_service_update(
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
-    if let Some(url) = request.endpoint_url.as_deref() {
+    if let Some(url) = request.endpoint_url.as_deref()
+        && access.service.node_id.as_deref().is_none_or(str::is_empty)
+    {
         crate::services::url_validation::validate_user_endpoint_url(
             url,
             state.config.is_production(),
@@ -1179,7 +1181,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
             actor_id,
             "Example",
-            "https://api.example.com",
+            "https://127.0.0.1",
             None,
             None,
         );
@@ -1429,7 +1431,7 @@ mod tests {
             "actionRequestId": "update-normalize",
             "userServiceId": service.id,
             "name": "  Trimmed Label  ",
-            "endpointUrl": "https://api.example.com/v2",
+            "endpointUrl": "https://127.0.0.1/v2",
         });
 
         let (status, created) = request(
@@ -1458,7 +1460,7 @@ mod tests {
             .expect("load endpoint")
             .expect("endpoint exists");
         assert_eq!(endpoint.label, "Trimmed Label");
-        assert_eq!(endpoint.url, "https://api.example.com/v2");
+        assert_eq!(endpoint.url, "https://127.0.0.1/v2");
 
         let (status, replayed) = request(
             app(state),

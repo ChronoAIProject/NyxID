@@ -786,7 +786,7 @@ async fn guide_text_inner(
     }
     let response = Box::pin(
         super::proxy_service::forward_request_with_extra_outbound_headers(
-            &state.http_client,
+            super::proxy_service::Redirects::SameOrigin,
             &target,
             reqwest::Method::POST,
             path,
@@ -1115,7 +1115,7 @@ async fn discover_models_inner(
     };
     let response = Box::pin(
         super::proxy_service::forward_request_with_extra_outbound_headers(
-            &state.http_client,
+            super::proxy_service::Redirects::SameOrigin,
             &target,
             reqwest::Method::GET,
             "models",

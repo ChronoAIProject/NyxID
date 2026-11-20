@@ -1,4 +1,5 @@
-use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(test)]
+use super::url_validation::is_private_or_internal_ip;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -42,15 +43,6 @@ const YAML_PARSE_QUEUE_WAIT: Duration = Duration::from_secs(10);
 static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
 static YAML_PARSE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_YAML_PARSES)));
-static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Failed to create hardened spec fetch client")
-});
-
 #[derive(Clone)]
 struct CachedSpecEntry {
     spec: Arc<serde_json::Value>,
@@ -61,13 +53,6 @@ impl CachedSpecEntry {
     fn is_fresh(&self, now: Instant) -> bool {
         self.expires_at > now
     }
-}
-
-struct ValidatedSpecFetchTarget {
-    url: url::Url,
-    host: String,
-    resolved_addrs: Vec<SocketAddr>,
-    requires_dns_pinning: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -897,33 +882,27 @@ async fn fetch_json_spec_internal(
         return Ok(spec);
     }
 
-    let target = validate_spec_fetch_target(url).await?;
-    let cache_key = build_cache_key(target.url.as_ref(), scope);
+    let (url, client) = validate_spec_fetch_target(url)?;
+    let cache_key = build_cache_key(url.as_ref(), scope);
     if let Some(spec) = get_cached_spec(&cache_key) {
         return Ok(spec);
     }
 
     // Pre-compute the redacted URL once -- validated targets strip userinfo
     // but query strings may still carry signed-URL secrets.
-    let log_url = redact_url_for_logs(target.url.as_ref());
-
-    let response = if target.requires_dns_pinning {
-        build_pinned_spec_fetch_client(&target)?
-            .get(target.url.clone())
-            .timeout(SPEC_FETCH_TIMEOUT)
-            .send()
-            .await
-    } else {
-        SPEC_FETCH_CLIENT
-            .get(target.url.clone())
-            .timeout(SPEC_FETCH_TIMEOUT)
-            .send()
-            .await
-    }
-    .map_err(|error| {
-        tracing::warn!(url = %log_url, %error, "Failed to fetch downstream API spec");
-        AppError::BadRequest("Failed to fetch spec".to_string())
-    })?;
+    let log_url = redact_url_for_logs(url.as_ref());
+    let response = client
+        .get(url)
+        .timeout(SPEC_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| {
+            if super::proxy_destination::http::refused_connection(&error) {
+                return AppError::BadRequest("Spec URL must resolve to public addresses".into());
+            }
+            tracing::warn!(url = %log_url, "Failed to fetch downstream API spec");
+            AppError::BadRequest("Failed to fetch spec".into())
+        })?;
 
     if !response.status().is_success() {
         return Err(AppError::BadRequest(format!(
@@ -1163,7 +1142,7 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTarget> {
+fn validate_spec_fetch_target(url: &str) -> AppResult<(url::Url, reqwest::Client)> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -1189,54 +1168,16 @@ async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTa
         ));
     }
 
-    let port = parsed
-        .port_or_known_default()
-        .ok_or_else(|| AppError::BadRequest("Spec URL must include a valid port".to_string()))?;
-    let (resolved_addrs, requires_dns_pinning) =
-        resolve_fetch_host_socket_addrs(&normalized_host, port).await?;
-    if resolved_addrs.is_empty() {
-        return Err(AppError::BadRequest(
-            "Spec URL host did not resolve to any IP addresses".to_string(),
-        ));
-    }
-    if resolved_addrs
-        .iter()
-        .map(SocketAddr::ip)
-        .any(is_private_or_internal_ip)
-    {
-        return Err(AppError::BadRequest(
-            "Spec URL must not resolve to private or internal IP addresses".to_string(),
-        ));
-    }
-
     let mut url = parsed;
-    url.set_host(Some(&normalized_host))
-        .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".to_string()))?;
-
-    Ok(ValidatedSpecFetchTarget {
-        url,
-        host: normalized_host,
-        resolved_addrs,
-        requires_dns_pinning,
-    })
-}
-
-async fn resolve_fetch_host_socket_addrs(
-    host: &str,
-    port: u16,
-) -> AppResult<(Vec<SocketAddr>, bool)> {
-    if let Ok(ip) = parse_fetch_host_ip(host) {
-        return Ok((vec![SocketAddr::new(ip, port)], false));
+    url.set_fragment(None);
+    if matches!(url.host(), Some(url::Host::Domain(_))) {
+        url.set_host(Some(&normalized_host))
+            .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".into()))?;
     }
-
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to resolve spec host: {e}")))?;
-    Ok((resolved.collect(), true))
-}
-
-fn parse_fetch_host_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
-    normalize_fetch_host(host).parse()
+    let client = super::proxy_destination::http::for_url(None, "", &url, true)
+        .map_err(|_| AppError::BadRequest("Spec URL must resolve to public addresses".into()))?
+        .ordinary()?;
+    Ok((url, client))
 }
 
 fn is_blocked_fetch_hostname(host: &str) -> bool {
@@ -1339,42 +1280,6 @@ fn evict_oldest_cache_entry() -> bool {
     }
 
     false
-}
-
-fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&target.host, &target.resolved_addrs)
-        .build()
-        .map_err(|e| AppError::Internal(format!("Failed to build pinned spec fetch client: {e}")))
-}
-
-fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
-                || ipv4.is_private()
-                || ipv4.is_link_local()
-                || ipv4.is_unspecified()
-                || ipv4.is_broadcast()
-                || is_rfc6598_cgnat(ipv4)
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                || ipv6
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
-        }
-    }
-}
-
-fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 #[cfg(test)]
@@ -1758,27 +1663,13 @@ paths:
         assert!(csp.contains("script-src 'unsafe-inline'"));
     }
 
-    #[tokio::test]
-    async fn spec_fetch_validation_rejects_private_targets() {
+    #[test]
+    fn spec_fetch_validation_rejects_private_targets() {
+        assert!(validate_spec_fetch_target("http://100.64.0.1/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("http://127.0.0.1/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("https://[::1]/openapi.json").is_err());
         assert!(
-            validate_spec_fetch_target("http://100.64.0.1/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("http://127.0.0.1/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("https://[::1]/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("http://metadata.google.internal/openapi.json")
-                .await
-                .is_err()
+            validate_spec_fetch_target("http://metadata.google.internal/openapi.json").is_err()
         );
     }
 
@@ -1864,18 +1755,10 @@ paths:
         assert_eq!(super::redact_url_for_logs("not a url"), "<invalid-url>");
     }
 
-    #[tokio::test]
-    async fn validate_rejects_urls_with_embedded_credentials() {
-        assert!(
-            validate_spec_fetch_target("https://user:pass@example.com/openapi.json")
-                .await
-                .is_err()
-        );
-        assert!(
-            validate_spec_fetch_target("https://user@example.com/openapi.json")
-                .await
-                .is_err()
-        );
+    #[test]
+    fn validate_rejects_urls_with_embedded_credentials() {
+        assert!(validate_spec_fetch_target("https://user:pass@example.com/openapi.json").is_err());
+        assert!(validate_spec_fetch_target("https://user@example.com/openapi.json").is_err());
     }
 
     // ---- is_auto_discovered_openapi_spec_url ----
@@ -2120,16 +2003,28 @@ paths:
 
     #[test]
     fn rfc6598_cgnat_detects_range_boundaries() {
-        assert!(super::is_rfc6598_cgnat("100.64.0.0".parse().unwrap()));
-        assert!(super::is_rfc6598_cgnat("100.127.255.255".parse().unwrap()));
-        assert!(super::is_rfc6598_cgnat("100.100.50.25".parse().unwrap()));
+        assert!(super::is_private_or_internal_ip(
+            "100.64.0.0".parse().unwrap()
+        ));
+        assert!(super::is_private_or_internal_ip(
+            "100.127.255.255".parse().unwrap()
+        ));
+        assert!(super::is_private_or_internal_ip(
+            "100.100.50.25".parse().unwrap()
+        ));
     }
 
     #[test]
     fn rfc6598_cgnat_rejects_outside_range() {
-        assert!(!super::is_rfc6598_cgnat("100.63.255.255".parse().unwrap()));
-        assert!(!super::is_rfc6598_cgnat("100.128.0.0".parse().unwrap()));
-        assert!(!super::is_rfc6598_cgnat("8.8.8.8".parse().unwrap()));
+        assert!(!super::is_private_or_internal_ip(
+            "100.63.255.255".parse().unwrap()
+        ));
+        assert!(!super::is_private_or_internal_ip(
+            "100.128.0.0".parse().unwrap()
+        ));
+        assert!(!super::is_private_or_internal_ip(
+            "8.8.8.8".parse().unwrap()
+        ));
     }
 
     // ---- detect_streaming_from_openapi (edge cases) ----

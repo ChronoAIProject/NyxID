@@ -723,7 +723,7 @@ mod tests {
         };
         let permit = super::super::billing::route_inventory::internal_node_dispatch_permit();
         let result = super::super::proxy_service::forward_request_with_extra_outbound_headers(
-            &reqwest::Client::new(),
+            super::super::proxy_service::Redirects::Return,
             &target,
             reqwest::Method::POST,
             CHAT_PATH,

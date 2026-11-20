@@ -5715,11 +5715,6 @@ pub(crate) fn execute_tool_response_with_outcome<'a>(
         if let Some(scopes) = exec_ctx.operation_scopes {
             prepared.authorize_agent_operations(scopes, service, endpoint)?;
         }
-        let http_client = if scoped_execution(exec_ctx, service) {
-            proxy_service::no_redirect_http_client()
-        } else {
-            http_client
-        };
         let ResolvedToolTarget {
             target,
             node_route,
@@ -6140,7 +6135,7 @@ async fn collect_file_node_stream_response(
 /// this so the attested resolution is the one that produces the effect.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_tool_resolved<'a>(
-    http_client: &'a reqwest::Client,
+    _http_client: &'a reqwest::Client,
     db: &'a mongodb::Database,
     encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
@@ -6204,10 +6199,13 @@ pub fn execute_tool_resolved<'a>(
         .flatten();
         let wiki_slug = catalog_service_slug
             .filter(|_| super::lark_wiki::matches(catalog_service_slug, service, endpoint));
-        let http_client = if resource_source.is_some() || wiki_slug.is_some() {
-            super::resource_adapter::http_client()
+        let redirects = if resource_source.is_some()
+            || wiki_slug.is_some()
+            || scoped_execution(exec_ctx, service)
+        {
+            proxy_service::Redirects::Return
         } else {
-            http_client
+            proxy_service::Redirects::SameOrigin
         };
         let managed = super::telnyx_platform_service::contract(&target.service).is_some();
         let lease = super::service_concurrency_service::acquire(
@@ -6219,7 +6217,7 @@ pub fn execute_tool_resolved<'a>(
         let im_kind = super::lark_im_tool::kind(endpoint);
         let message_mode = prepared.lark_message.clone();
         let execution = execute_tool_resolved_boxed(
-            http_client,
+            redirects,
             db,
             encryption_keys,
             node_ws_manager,
@@ -6299,7 +6297,7 @@ pub fn execute_tool_resolved<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_tool_resolved_boxed<'a>(
-    http_client: &'a reqwest::Client,
+    redirects: proxy_service::Redirects,
     db: &'a mongodb::Database,
     encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
@@ -6325,7 +6323,7 @@ fn execute_tool_resolved_boxed<'a>(
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(execute_tool_resolved_inner(
-        http_client,
+        redirects,
         db,
         encryption_keys,
         node_ws_manager,
@@ -6363,7 +6361,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_resolved_inner(
-    http_client: &reqwest::Client,
+    redirects: proxy_service::Redirects,
     db: &mongodb::Database,
     encryption_keys: &std::sync::Arc<EncryptionKeys>,
     node_ws_manager: &std::sync::Arc<NodeWsManager>,
@@ -6474,21 +6472,6 @@ async fn execute_tool_resolved_inner(
     if exec_ctx.assistant_chat.is_some_and(|chat| chat.guest) {
         super::agent_operation_scope_service::validate_target(&target, prepared.method().as_str())?;
     }
-    let http_client = if scoped_execution(exec_ctx, service)
-        && super::resource_adapter::source(
-            service,
-            endpoint,
-            &target,
-            node_route.is_some(),
-            catalog_service_slug,
-        )
-        .is_none()
-    {
-        proxy_service::no_redirect_http_client()
-    } else {
-        http_client
-    };
-
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -7489,7 +7472,7 @@ async fn execute_tool_resolved_inner(
         }
         let catalog_route = super::lark_attachment_tool::routing::for_call(db, &target, service, endpoint, &path).await?;
         let response = match proxy_service::forward_request_with_resource_proof(
-            http_client,
+            redirects,
             &target,
             method.clone(),
             &path,
@@ -16477,6 +16460,7 @@ mod tests {
                 is_active: true,
                 created_by: "admin".to_string(),
                 caller_token_approved_destinations: Default::default(),
+                approved_private_base_url: None,
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
