@@ -51,10 +51,10 @@ async fn session_credentials(state: &crate::AppState, owner: &str) -> (String, S
 }
 
 // This narrowly mounted probe uses the real verified extractor and an allowed
-// management-read path. It proves negative credentials are live, independently
+// execution path. It proves negative credentials are live, independently
 // of the production router's early credential rejection layers.
 fn extractor_probe(state: &crate::AppState) -> Router {
-    Router::new().route("/api/v1/orgs", get(|auth: AuthUser| async move {
+    Router::new().route("/api/v1/llm/status", get(|auth: AuthUser| async move {
         Json(json!({"method": format!("{:?}", auth.auth_method), "user_id": auth.user_id.to_string()}))
     })).with_state(state.clone())
 }
@@ -178,11 +178,20 @@ async fn billing_wallet_view_genuinely_minted_credential_matrix_and_human_contro
         for scheme in ["Bearer", "DPoP"] {
             let header = format!("{scheme} {token}");
             let (status, identity) =
-                read_headers(&probe, "/api/v1/orgs", &[("authorization", &header)]).await;
-            assert_eq!(status, StatusCode::OK, "{name}/{scheme}: {identity}");
-            assert_eq!(identity["method"], method);
+                read_headers(&probe, "/api/v1/llm/status", &[("authorization", &header)]).await;
+            if scheme == "Bearer" {
+                assert_eq!(status, StatusCode::OK, "{name}: {identity}");
+                assert_eq!(identity["method"], method);
+            } else {
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{name}: {identity}");
+            }
             let (status, body) = read_headers(&app, VIEW, &[("authorization", &header)]).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{name}/{scheme}: {body}");
+            let expected = if scheme == "DPoP" && method == "AccessToken" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(status, expected, "{name}/{scheme}: {body}");
         }
     }
     for headers in [
@@ -264,8 +273,12 @@ async fn billing_wallet_view_live_service_delegation_authenticates_allowed_route
         let (status, body) = read_headers(&app, "/api/v1/orgs", &headers).await;
         assert_eq!(
             status,
-            StatusCode::OK,
-            "valid service delegation on allowed route: {body}"
+            if scheme == "Bearer" {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            },
+            "{scheme} on delegated read route: {body}"
         );
         let (status, body) = read_headers(&app, VIEW, &headers).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{scheme}: {body}");

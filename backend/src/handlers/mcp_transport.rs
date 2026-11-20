@@ -1216,19 +1216,21 @@ async fn authenticate_mcp_or_public(
         }
     }
 
-    let token = headers
+    let credential = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.strip_prefix("Bearer ")
-                .or_else(|| s.strip_prefix("DPoP "))
-        });
+        .and_then(auth::AccessScheme::parse);
+    let token = credential.map(|(_, token)| token);
+    let dpop = credential.is_some_and(|(scheme, _)| scheme == auth::AccessScheme::Dpop);
 
     // A raw API key must never acquire an unrelated stored MCP session via
     // bearer/JWT fallback. Public-purpose keys have no session authority.
     if let Some(token) = token.filter(|token| {
         token.starts_with(crate::crypto::token::AGENT_KEY_PREFIX) || token.starts_with("nyx_")
     }) {
+        if dpop {
+            return Err(mcp_401(&state.config.base_url));
+        }
         if allow_public {
             let (_, key, child) = crate::services::key_service::validate_api_key(&state.db, token)
                 .await
@@ -1248,9 +1250,12 @@ async fn authenticate_mcp_or_public(
     }
 
     // --- Try JWT-based auth ---
-    if let Some(token) = token {
+    if let Some((scheme, token)) = credential {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                scheme
+                    .require_binding(&claims)
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
                 let authority_user =
                     crate::services::oauth_token_authority_service::validate_claims_with_user_for_route(
                         &state.db, &claims,
@@ -1450,7 +1455,7 @@ async fn authenticate_mcp_or_public(
                 ctx.user_agent = request_ua.clone();
                 return Ok(McpAuthentication::Ordinary(Box::new(ctx)));
             }
-            Err(_) if session_fallback => {
+            Err(_) if session_fallback && !dpop => {
                 // Any JWT error (expired, invalid issuer, etc.) -- fall through
                 // to session-based auth. The MCP session ID is the real auth
                 // mechanism for long-lived connections; the JWT is only needed
@@ -10313,6 +10318,21 @@ mod curation_auth_regressions {
         headers.remove("authorization");
         headers.insert("mcp-session-id", sid.parse().unwrap());
         assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_policy_mcp_service_account_uses_ordinary_bearer() {
+        let f = fixture("mcp_service_account_scheme", false).await;
+        let token = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        headers.insert("authorization", format!("DPoP {token}").parse().unwrap());
+        assert!(matches!(
+            authenticate_mcp(&f.state, &headers, false).await,
+            Err(response) if response.status() == StatusCode::UNAUTHORIZED
+        ));
+        f.state.db.drop().await.unwrap();
     }
 
     #[tokio::test]
