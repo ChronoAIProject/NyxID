@@ -41,8 +41,17 @@ for (const initial of [
       $: { "android:name": ".Other", "android:configChanges": "keyboard" },
     };
     const manifest = {
-      manifest: { $: {}, application: [{ $: {}, activity: [other, main] }] },
-    };
+      manifest: {
+        $: { "xmlns:android": "http://schemas.android.com/apk/res/android" },
+        queries: [],
+        application: [
+          {
+            $: { "android:name": ".MainApplication" },
+            activity: [other, main],
+          },
+        ],
+      },
+    } satisfies AndroidConfig.Manifest.AndroidManifest;
     const mods = withBaseMod(plugin(plugin(config)), {
       platform: "android",
       mod: "manifest",
@@ -51,7 +60,7 @@ for (const initial of [
         assert.ok(mod.modRequest.nextMod);
         return mod.modRequest.nextMod({
           ...mod,
-          modResults: manifest as AndroidConfig.Manifest.AndroidManifest,
+          modResults: manifest,
         });
       },
     });
