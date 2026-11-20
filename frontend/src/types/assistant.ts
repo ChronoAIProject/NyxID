@@ -43,6 +43,11 @@ export interface ApprovalCardContentBlock {
   readonly block_id: string;
   readonly approval_request_id: string;
   readonly body: string;
+  /** Present for locally constructed copy. Other bodies are displayed verbatim. */
+  readonly body_template?:
+    | { readonly kind: "approval" }
+    | { readonly kind: "tool"; readonly tool: string }
+    | { readonly kind: "target"; readonly action: string; readonly target: string };
   readonly service_slug: string;
   readonly agent_key_prefix: string;
   readonly approval_mode: "per_request" | "grant";

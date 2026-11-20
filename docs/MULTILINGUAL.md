@@ -26,6 +26,12 @@ Chinese locale tags resolve by script. Explicit `Hans` selects Simplified Chines
 and `Hant` selects Traditional Chinese. Regional defaults include CN/SG as
 Simplified and TW/HK/MO as Traditional. English variants resolve to `en`.
 
+## Approval cards in NyxBot conversations
+
+Open **Working context → Approval card language** in a chat to follow the conversation, use the app language, or pin English, Simplified Chinese, or Traditional Chinese. A pin applies to that chat in the current browser tab, survives reload, and clears on account changes. The main Approvals page uses the app language.
+
+By default, cards use the app language until two human messages give a consistent language signal. Short terms, ambiguous text, code blocks, links, automated messages and tool output are ignored. Two clear messages in a new supported language can switch the cards. Sustained evidence of an unsupported language returns the cards to the app language. The same rule runs on loaded history. The setting covers approval controls, skill publication reviews, acknowledgements and decision receipts. Service names, submitted arguments, user content and provider descriptions keep their original wording.
+
 ## Current translated surfaces
 
 The shared language preference covers first-party web interface copy:
