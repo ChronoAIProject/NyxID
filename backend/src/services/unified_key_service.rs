@@ -5588,7 +5588,9 @@ mod tests {
             .await
             .unwrap();
 
-        auto_provision_no_auth_services(&db, &actor).await.unwrap();
+        crate::services::security_readiness_service::ready_test_replica(&db).await;
+        let opt_in = super::connect_catalog_service(&db, &actor, &actor, &catalog.slug).await;
+        assert!(matches!(opt_in, Err(AppError::NotFound(_))));
         let connections = db.collection::<UserService>(USER_SERVICES);
         assert_eq!(
             connections
