@@ -22,7 +22,7 @@ const INCOMPLETE: &str = "\n\n[Incomplete — I could not finish this turn.]";
 pub(super) fn answer(text: &str, failed: bool) -> String {
     if failed {
         if text.trim().is_empty() {
-            "I could not finish that. Please try again.".into()
+            engine::TurnError::new("outcome_unknown").message
         } else {
             format!("{text}{INCOMPLETE}")
         }
@@ -243,7 +243,7 @@ fn provider_stream_inner(
                             crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
                             crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
@@ -273,7 +273,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
