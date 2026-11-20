@@ -605,6 +605,7 @@ The same interval schedules an independent [bot-link recovery and delivery sweep
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTH_DEVICE_EIGHT_CHAR_CODES` | `true` | Issue eight-character public codes for installed app compatibility. All backend readers and writers must support the shared public-code namespace. Set `false` to restore prefixed v2 issuance during rollback. Legacy account requests always use eight characters. |
+| `STAGING_QR_PRODUCTION_PUBLIC_KEY_PATH` | unset | On the staging API, path to the PEM containing the active production JWT **public** key. Enables verification of production approvals for staging device logins. See [staging QR rollout](DEVICE_LOGIN_PROTOCOL.md#production-ios-approvals-for-staging). |
 
 When upgrading servers that predate public-code reservations, explicitly deploy
 with this flag off, drain older servers, then enable it across the upgraded fleet.

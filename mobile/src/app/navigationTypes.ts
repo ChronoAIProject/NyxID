@@ -60,7 +60,7 @@ type SharedEntryParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
   OpenSourceNotices: undefined;
-  DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
+  DeviceLogin: { user_code?: string; start_scanner?: boolean; staging_scan?: true } | undefined;
   AgentKeyLogin:
     | { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean }
     | undefined;

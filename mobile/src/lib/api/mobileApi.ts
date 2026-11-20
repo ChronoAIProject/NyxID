@@ -2,6 +2,8 @@ import { ApiError } from "./ApiError";
 import { buildApiUrl } from "./baseUrl";
 import {
   approveAuthDeviceRequest,
+  previewStagingDevice,
+  decideStagingDevice,
   denyAuthDeviceRequest,
   previewAuthDeviceRequest,
 } from "./authDeviceApi";
@@ -68,6 +70,8 @@ type SocialProvider = "google" | "github" | "apple";
 
 export const mobileApi = {
   previewAuthDevice: previewAuthDeviceRequest,
+  previewStagingDevice,
+  decideStagingDevice,
   approveAuthDevice: approveAuthDeviceRequest,
   denyAuthDevice: denyAuthDeviceRequest,
   async verifyMfa(body: { code: string; mfa_token: string }): Promise<LoginWithPasswordResponse> {
