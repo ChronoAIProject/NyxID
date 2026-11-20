@@ -2623,12 +2623,12 @@ pub(crate) async fn set_config_with_options(
         .map(bson::from_document)
         .transpose()
         .map_err(|_| AppError::Internal("Could not read policy".into()))?;
-    if let Some(days) = options.grant_expiry_days.flatten() {
-        if !(MIN_GRANT_EXPIRY_DAYS..=MAX_GRANT_EXPIRY_DAYS).contains(&days) {
-            return Err(AppError::ValidationError(
-                "grant_expiry_days must be between 1 and 365".into(),
-            ));
-        }
+    if let Some(days) = options.grant_expiry_days.flatten()
+        && !(MIN_GRANT_EXPIRY_DAYS..=MAX_GRANT_EXPIRY_DAYS).contains(&days)
+    {
+        return Err(AppError::ValidationError(
+            "grant_expiry_days must be between 1 and 365".into(),
+        ));
     }
     if let Some(expected) = &options.expected_revision {
         let actual = existing
@@ -2657,16 +2657,15 @@ pub(crate) async fn set_config_with_options(
     let disabled = options
         .disabled
         .unwrap_or_else(|| existing.as_ref().is_some_and(|cfg| cfg.disabled));
-    if let Some(existing) = &existing {
-        if existing.approval_required == approval_required
-            && existing.approval_mode == approval_mode
-            && existing.rules == rules
-            && existing.default_effect == default_effect
-            && existing.grant_expiry_days == days
-            && existing.disabled == disabled
-        {
-            return Ok(existing.clone());
-        }
+    if let Some(existing) = &existing
+        && existing.approval_required == approval_required
+        && existing.approval_mode == approval_mode
+        && existing.rules == rules
+        && existing.default_effect == default_effect
+        && existing.grant_expiry_days == days
+        && existing.disabled == disabled
+    {
+        return Ok(existing.clone());
     }
     if disabled || days.is_some() || rules.iter().any(|r| !r.api_key_ids.is_empty()) {
         super::security_readiness_service::require_serving(db, RULES_READINESS).await?;
@@ -2688,14 +2687,13 @@ pub(crate) async fn set_config_with_options(
     )?;
     if let crate::models::security_effect_intent::SecurityEffect::Audit { event } =
         &mut intent.effect
+        && let Some(data) = event.event_data.as_mut()
     {
-        if let Some(data) = event.event_data.as_mut() {
-            if options.grant_expiry_days.is_some() {
-                data["grant_expiry_days"] = serde_json::json!(days);
-            }
-            if options.disabled.is_some() {
-                data["disabled"] = serde_json::json!(disabled);
-            }
+        if options.grant_expiry_days.is_some() {
+            data["grant_expiry_days"] = serde_json::json!(days);
+        }
+        if options.disabled.is_some() {
+            data["disabled"] = serde_json::json!(disabled);
         }
     }
     let rules_bson = bson::to_bson(&rules)
@@ -6801,18 +6799,17 @@ async fn reconcile_grant_state_in_session(
             summary: request.operation_summary.clone(),
         };
         let key = request.caller_api_key_id.as_deref();
-        if let Some(decision) = approval_policy::evaluate(config, &descriptor, key) {
-            if decision.effect != ApprovalEffect::RequireApproval
-                || decision.mode != request.approval_mode
-            {
-                db.collection::<ApprovalRequest>(REQUESTS)
-                    .update_one(
-                        doc! {"_id":&request.id,"status":"pending"},
-                        doc! {"$set":{"status":"expired","decided_at":bson::DateTime::now()}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-            }
+        if let Some(decision) = approval_policy::evaluate(config, &descriptor, key)
+            && (decision.effect != ApprovalEffect::RequireApproval
+                || decision.mode != request.approval_mode)
+        {
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .update_one(
+                    doc! {"_id":&request.id,"status":"pending"},
+                    doc! {"$set":{"status":"expired","decided_at":bson::DateTime::now()}},
+                )
+                .session(&mut *session)
+                .await?;
         }
     }
     Ok(())

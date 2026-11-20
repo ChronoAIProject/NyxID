@@ -2056,7 +2056,7 @@ pub async fn list_keys_read_only_with_tool_bindings(
                 .as_deref()
                 .and_then(|id| cat_map.get(id))
             {
-                let catalog_owns_url = catalog.provider_config_id.as_ref().map_or(true, |id| {
+                let catalog_owns_url = catalog.provider_config_id.as_ref().is_none_or(|id| {
                     providers
                         .get(id)
                         .is_some_and(|provider| !provider.requires_gateway_url)
