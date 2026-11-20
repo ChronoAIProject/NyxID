@@ -87,8 +87,28 @@ export function AssistantDetailsScreen({
   const { runtime, history, agents, conversation, agentId, agent } =
     useChatDetailsData(conversationId, requestedAgent);
   const client = useQueryClient();
+  const models = useQuery({
+    queryKey: ["assistant", "models", runtime.epoch],
+    queryFn: ({ signal }) => assistantApi.models(signal),
+    enabled: runtime.active && !!conversationId,
+    retry: false,
+    staleTime: 60_000,
+  });
+  // This endpoint applies the account feature flag and the thread's effective grants.
+  const platformModels = useQuery({
+    queryKey: ["assistant", "platform-models", runtime.epoch, conversationId],
+    queryFn: ({ signal }) =>
+      assistantApi.platformModels(conversationId!, signal),
+    enabled: runtime.active && !!conversationId,
+    retry: false,
+  });
+  const choices = [
+    ...(models.isError ? [] : (models.data ?? [])),
+    ...(platformModels.isError ? [] : (platformModels.data ?? [])),
+  ];
   const scope = `${runtime.epoch}:${conversationId ?? "new"}:${requestedAgent ?? "nyxbot"}`;
-  const [busy, setBusy] = useState(false);
+  const [action, setAction] = useState<"delete" | "model">();
+  const busy = action !== undefined;
   const [deleted, setDeleted] = useState(false);
   const [error, setError] = useLocalizedState<string>();
   const mounted = useRef(true);
@@ -100,8 +120,32 @@ export function AssistantDetailsScreen({
     agent?.can_use === false ||
     busy ||
     deleted;
-  const latest = useRef({ scope, runtime, unavailable });
-  latest.current = { scope, runtime, unavailable };
+  const modelLocked =
+    unavailable || !agents.data || !!conversation?.active_turn;
+  const currentModel = choices.find((row) => row.id === conversation?.model);
+  const showMissingModel =
+    conversation &&
+    !currentModel &&
+    !models.isPending &&
+    !platformModels.isPending &&
+    !models.isError &&
+    !platformModels.isError;
+  const latest = useRef({
+    scope,
+    runtime,
+    unavailable,
+    modelLocked,
+    choices,
+    conversation,
+  });
+  latest.current = {
+    scope,
+    runtime,
+    unavailable,
+    modelLocked,
+    choices,
+    conversation,
+  };
   const access = useComposerAccessChange({
     scope,
     agentOverride: agent?.access_mode_override,
@@ -141,6 +185,57 @@ export function AssistantDetailsScreen({
     );
     if (action) navigation.dispatch(action);
   }, [deleted, busy, navigation, agentId]);
+  async function changeModel(model: string) {
+    const state = latest.current;
+    if (
+      !conversationId ||
+      !alive() ||
+      !state.runtime.available() ||
+      state.modelLocked ||
+      model === state.conversation?.model ||
+      lock.current ||
+      !state.choices.some((row) => row.id === model && row.available)
+    )
+      return;
+    lock.current = true;
+    setAction("model");
+    setError(undefined);
+    const key = detailsKey(runtime.epoch, conversationId);
+    try {
+      const updated = await assistantApi.changeModel(conversationId, model);
+      if (!alive()) return;
+      await client.cancelQueries({ queryKey: key, exact: true });
+      if (!alive()) return;
+      client.setQueryData<typeof history.data>(key, (page) =>
+        page
+          ? {
+              ...page,
+              conversation: {
+                ...page.conversation,
+                model: updated.model,
+                context_reset_at: updated.context_reset_at,
+                context_reset_reason: updated.context_reset_reason,
+              },
+            }
+          : page,
+      );
+      void client.invalidateQueries({ queryKey: key, exact: true });
+    } catch (cause) {
+      if (alive()) {
+        setError(() =>
+          cause instanceof Error
+            ? cause.message
+            : translateApp("Could not confirm the model change."),
+        );
+        void client.invalidateQueries({ queryKey: key, exact: true });
+        void models.refetch();
+        void platformModels.refetch();
+      }
+    } finally {
+      lock.current = false;
+      if (mounted.current) setAction(undefined);
+    }
+  }
   async function remove() {
     if (
       lock.current ||
@@ -151,7 +246,7 @@ export function AssistantDetailsScreen({
     )
       return;
     lock.current = true;
-    setBusy(true);
+    setAction("delete");
     setError(undefined);
     try {
       await assistantApi.delete(conversationId);
@@ -171,7 +266,7 @@ export function AssistantDetailsScreen({
         );
     } finally {
       lock.current = false;
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setAction(undefined);
     }
   }
   const agentName =
@@ -192,7 +287,8 @@ export function AssistantDetailsScreen({
   return (
     <SettingsPage>
       {!runtime.online && (
-        <Notice message={translateApp(
+        <Notice
+          message={translateApp(
             "You’re offline. Reconnect to change this chat.",
           )}
         />
@@ -201,7 +297,9 @@ export function AssistantDetailsScreen({
         <Label muted>{translateApp("Loading chat details…")}</Label>
       )}
       {(history.isError || agents.isError) && (
-        <Notice tone="error" message={translateApp("Couldn’t load chat details.")}
+        <Notice
+          tone="error"
+          message={translateApp("Couldn’t load chat details.")}
         />
       )}
       {(history.isError || agents.isError) && (
@@ -233,7 +331,9 @@ export function AssistantDetailsScreen({
                 ? translateApp("Personal specialist")
                 : translateApp("Your personal assistant")
           }
-          accessibilityHint={agentId ? translateApp("Opens agent details") : undefined}
+          accessibilityHint={
+            agentId ? translateApp("Opens agent details") : undefined
+          }
           onPress={
             agentId
               ? () => navigation.push("AgentDetail", { agentId })
@@ -271,8 +371,74 @@ export function AssistantDetailsScreen({
       </SettingsGroup>
       <SettingsGroup
         inset={false}
-        footer={permissionsFooter || undefined}
+        title={translateApp("Model")}
+        footer={translateApp(
+          "Changing the model restarts the working context for this chat.",
+        )}
       >
+        <SettingsRow
+          label={translateApp("Current model")}
+          value={
+            currentModel?.label ||
+            (conversation?.model?.startsWith("nyxid/")
+              ? undefined
+              : conversation?.model)
+          }
+          detail={
+            !conversationId
+              ? translateApp(
+                  "Send the first message to choose a model for this chat.",
+                )
+              : conversation?.active_turn
+                ? translateApp("Wait for the current turn to finish.")
+                : showMissingModel
+                  ? translateApp("The current model is unavailable.")
+                  : undefined
+          }
+        />
+        {conversationId &&
+          (models.isPending || platformModels.isPending) &&
+          runtime.active && (
+            <Label muted>{translateApp("Loading models…")}</Label>
+          )}
+        {choices.map((row) => (
+          <SettingsRow
+            key={row.id}
+            label={row.label || row.id}
+            detail={
+              !row.available
+                ? [translateApp("Unavailable for this chat."), row.description]
+                    .filter(Boolean)
+                    .join(" ")
+                : row.id.startsWith("nyxid/")
+                  ? translateApp("Model usage is billed to you.")
+                  : (row.description ?? undefined)
+            }
+            accessibilityRole="radio"
+            accessibilityState={{ checked: row.id === conversation?.model }}
+            value={
+              row.id === conversation?.model
+                ? translateApp("Selected")
+                : undefined
+            }
+            disabled={modelLocked || !row.available}
+            chevron={false}
+            onPress={() => void changeModel(row.id)}
+          />
+        ))}
+        {(models.isError || platformModels.isError) && (
+          <SettingsRow
+            label={translateApp("Retry loading models")}
+            detail={translateApp("Couldn’t load models.")}
+            disabled={!runtime.active}
+            onPress={() => {
+              if (models.isError) void models.refetch();
+              if (platformModels.isError) void platformModels.refetch();
+            }}
+          />
+        )}
+      </SettingsGroup>
+      <SettingsGroup inset={false} footer={permissionsFooter || undefined}>
         {access.mode ? (
           <SettingsMenuRow
             label={translateApp("Permissions")}
@@ -286,7 +452,8 @@ export function AssistantDetailsScreen({
             onChange={(mode) => void access.change(mode)}
           />
         ) : (
-          <SettingsRow label={translateApp("Permissions")}
+          <SettingsRow
+            label={translateApp("Permissions")}
             value={translateApp("Loading permissions…")}
           />
         )}
@@ -309,7 +476,10 @@ export function AssistantDetailsScreen({
           <SettingsRow
             centered
             destructive
-            label={busy ? translateApp("Deleting…") : translateApp("Delete Chat")
+            label={
+              action === "delete"
+                ? translateApp("Deleting…")
+                : translateApp("Delete Chat")
             }
             disabled={unavailable}
             onPress={() =>

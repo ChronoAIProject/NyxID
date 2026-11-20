@@ -71,3 +71,100 @@ for (const read of ["history", "index"] as const) {
     assert.deepEqual(requests, Array(7).fill("GET"));
   });
 }
+
+test("model options use the saved thread's grants, page every platform model and read back the confirmed selection", async () => {
+  const thread = { ...fixture.conversation, active_turn: null };
+  const paths: string[] = [];
+  const signal = new AbortController().signal;
+  const h = hookHarness({
+    "./http": {
+      requestJson: async (
+        path: string,
+        options: {
+          method?: string;
+          body?: { model: string };
+          signal?: AbortSignal;
+        },
+      ) => {
+        paths.push(path);
+        if (path.endsWith("/models"))
+          return [{ id: "nyxagent/chat", label: "Chat", available: true }];
+        if (path.includes("/platform-models?")) {
+          const params = new URLSearchParams(path.split("?")[1]);
+          assert.equal(params.get("conversation_id"), thread.id);
+          assert.equal(options.signal, signal);
+          const nextPage = params.has("after");
+          if (nextPage) assert.equal(params.get("after"), "nyxid/a");
+          return {
+            models: [
+              {
+                id: nextPage ? "nyxid/b" : "nyxid/a",
+                display_name: nextPage ? "B" : "A",
+                availability: "request_dependent",
+                retail_prices: [
+                  {
+                    available: true,
+                    variant: nextPage ? { tier: "other" } : {},
+                  },
+                ],
+              },
+            ],
+            next_after: nextPage ? null : "nyxid/a",
+          };
+        }
+        if (path.endsWith("/model")) {
+          assert.equal(
+            path,
+            `/assistant/nyxagent/conversations/${thread.id}/model`,
+          );
+          assert.equal(options.method, "PATCH");
+          thread.model = options.body!.model;
+          return thread;
+        }
+        assert.equal(
+          path,
+          `/assistant/nyxagent/conversations/${thread.id}?limit=50`,
+        );
+        return { ...fixture, conversation: thread };
+      },
+    },
+  });
+  const { assistantApi } = h.load(
+    fileURLToPath(new URL("./assistantApi.ts", import.meta.url)),
+  ) as unknown as typeof import("./assistantApi");
+  assert.equal((await assistantApi.models(signal))[0]!.id, "nyxagent/chat");
+  const rows = await assistantApi.platformModels(thread.id, signal);
+  assert.deepEqual(
+    Array.from(rows, (row) => [row.id, row.available]),
+    [
+      ["nyxid/a", true],
+      ["nyxid/b", false],
+    ],
+  );
+  await assistantApi.changeModel(thread.id, rows[0]!.id);
+  assert.equal(
+    (await assistantApi.history(thread.id)).conversation.model,
+    "nyxid/a",
+  );
+  assert.equal(paths.length, 5);
+});
+
+test("model selection refuses a mismatched confirmation or repeating platform cursor", async () => {
+  const row = fixture.conversation;
+  const h = hookHarness({
+    "./http": {
+      requestJson: async (path: string) =>
+        path.includes("/platform-models?")
+          ? { models: [], next_after: "repeat" }
+          : row,
+    },
+  });
+  const { assistantApi } = h.load(
+    fileURLToPath(new URL("./assistantApi.ts", import.meta.url)),
+  ) as unknown as typeof import("./assistantApi");
+  await assert.rejects(
+    assistantApi.changeModel(row.id, "nyxagent/other"),
+    /confirm the model change/,
+  );
+  await assert.rejects(assistantApi.platformModels(row.id), /load models/);
+});
