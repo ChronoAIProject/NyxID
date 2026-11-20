@@ -33,7 +33,12 @@ async fn fixture(status: u16, code: &'static str, support: bool) -> Fixture {
         let sink = sink.clone();
         async move {
             let response_id = body["expected_response_id"].clone();
-            sink.lock().await.push(Capture { uri, headers, body });
+            sink.lock().await.push(Capture {
+                uri,
+                headers,
+                body,
+                received_at: std::time::Instant::now(),
+            });
             tokio::time::sleep(if code == "timeout_test" { Duration::from_secs(16) } else { Duration::from_millis(30) }).await;
             (StatusCode::from_u16(status).unwrap(), Json(if status == 200 {
                 json!({"object":"conversation.steer", "conversation_id":SESSION,"response_id":response_id,"status":"accepted"})

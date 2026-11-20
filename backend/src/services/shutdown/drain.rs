@@ -359,6 +359,14 @@ pub async fn settle_remaining(
                 &state.db, &row, &worker.id,
             )
             .await;
+            if matches!(&result, Ok(Some(_)))
+                && row
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.stop_requested && turn.restart_admission.is_some())
+            {
+                crate::handlers::assistant_nyxagent::survivor::cancel(state, &row).await;
+            }
             (row, result)
         })
         .buffer_unordered(16);

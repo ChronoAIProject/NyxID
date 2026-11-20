@@ -629,6 +629,14 @@ pub async fn set_user_status(
 
     let admin_id = auth_user.user_id.to_string();
 
+    if !body.is_active && admin_id != user_id {
+        super::assistant_nyxagent::survivor::cancel_before_revocation(
+            &state,
+            &user_id,
+            mongodb::bson::doc! {"user_id":&user_id},
+        )
+        .await;
+    }
     admin_user_service::set_user_active_as(&state.db, &admin_id, &user_id, body.is_active, &actor)
         .await?;
 
@@ -691,6 +699,12 @@ pub async fn delete_user(
             "Use personal account deletion to confirm its owner policy".into(),
         ));
     }
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id,
+        mongodb::bson::doc! {"user_id":&user_id},
+    )
+    .await;
     let job = crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
         .await?;
     Ok(Json(

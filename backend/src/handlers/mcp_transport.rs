@@ -2982,6 +2982,7 @@ async fn handle_tools_call_inner(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
+            chat.turn_id.as_deref().unwrap_or_default(),
         )
         .await
         {

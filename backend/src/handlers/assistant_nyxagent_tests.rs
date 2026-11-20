@@ -169,6 +169,7 @@ struct Capture {
     uri: Uri,
     headers: HeaderMap,
     body: Value,
+    received_at: std::time::Instant,
 }
 type Captures = Arc<Mutex<Vec<Capture>>>;
 
@@ -319,6 +320,10 @@ async fn setup_options_with_tool_gate(
     let image_state = state.clone();
     let calls: Captures = Arc::new(Mutex::new(vec![]));
     let sink = calls.clone();
+    let lookups = calls.clone();
+    let lookup_script = failures.clone();
+    let cancellations = calls.clone();
+    let cancel_script = failures.clone();
     let attempts = Arc::new(AtomicUsize::new(0));
     let upstream = Router::new().route(
         "/v1/responses",
@@ -330,8 +335,16 @@ async fn setup_options_with_tool_gate(
                 let failures = failures.clone();
                 let response_gate = response_gate.clone();
                 async move {
-                    sink.lock().await.push(Capture { uri, headers, body });
                     let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 && failures.get(1) == Some(&"http_budget_absent") {
+                        use crate::services::assistant_continuation as progress;
+                        let row = image_state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                            .find_one(doc! {"user_id":OWNER,"active_turn.turn_id":{"$exists":true}}).await.unwrap().unwrap();
+                        let started = progress::started(&image_state.db, OWNER, &row.id, &row.active_turn.unwrap().turn_id).await.unwrap().unwrap();
+                        let digest = progress::call_digest("read", &json!({}), "first-result");
+                        progress::completed(&image_state.db, OWNER, &row.id, &started, &digest).await.unwrap();
+                    }
+                    sink.lock().await.push(Capture { uri, headers, body, received_at: std::time::Instant::now() });
                     let failure = failures.get(attempt).copied().filter(|code| !code.is_empty());
                     let multipart = matches!(failure, Some("multipart_success" | "multipart_budget"));
                     let delay_first = matches!(failure, Some("delay_before_image" | "delay_image_success" | "delay_image_failure"));
@@ -372,10 +385,17 @@ async fn setup_options_with_tool_gate(
                     if failure == Some("http_oversized") {
                         return (StatusCode::SERVICE_UNAVAILABLE, "x".repeat(engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES + 1)).into_response();
                     }
-                    if failure == Some("invalid_stream") {
+                    if matches!(failure, Some("invalid_stream" | "invalid_stream_confirmed")) {
                         return (StatusCode::OK, "not an event stream").into_response();
                     }
-                    if matches!(failure, Some("http_credential" | "http_slow_credential")) {
+                    if matches!(failure, Some("held_success" | "held_budget")) {
+                        let stream = futures::stream::pending::<Result<axum::body::Bytes, Infallible>>();
+                        return ([("content-type", "text/event-stream")], Body::from_stream(stream)).into_response();
+                    }
+                    if matches!(failure, Some("lookup_budget" | "lookup_success")) {
+                        return ([("content-type","text/event-stream")], "data: {\"type\":\"error\",\"error\":{\"code\":\"subscriber_expired\"}}\n\n").into_response();
+                    }
+                    if matches!(failure, Some("http_credential" | "http_slow_credential" | "http_credential_confirmed_absent")) {
                         let body = async_stream::stream! {
                             if failure == Some("http_slow_credential") { tokio::time::sleep(Duration::from_secs(2)).await; }
                             yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b"{\"error\":{\"code\":\"agent_key_required\"}}"));
@@ -390,8 +410,11 @@ async fn setup_options_with_tool_gate(
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         None
                     } else { failure };
-                    if failure == Some("http_budget") {
+                    if matches!(failure, Some("http_budget" | "http_budget_absent")) {
                         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"code":"tool_budget_exhausted"}}))).into_response();
+                    }
+                    if failure == Some("http_model_unavailable") {
+                        return (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"model_unavailable"}}))).into_response();
                     }
                     if failure == Some("http_not_found") {
                         return (
@@ -479,6 +502,51 @@ async fn setup_options_with_tool_gate(
             },
         ),
     );
+    let upstream = upstream.route("/v1/responses/lookup", axum::routing::get(move |headers:HeaderMap| {
+        let calls = lookups.clone(); let script = lookup_script.clone(); async move {
+            let calls = calls.lock().await;
+            let Some(index) = calls.iter().rposition(|call| call.headers["idempotency-key"] == headers["idempotency-key"]) else {return StatusCode::NOT_FOUND.into_response()};
+            if script.get(index) == Some(&"http_budget_absent") {
+                return Json(json!({"status":"not_found","response_id":null,"conversation_id":null,"last_sequence_number":null,"response":null})).into_response();
+            }
+            let Some(kind @ ("lookup_budget" | "lookup_success" | "held_success" | "held_budget")) = script.get(index).copied() else {return StatusCode::NOT_FOUND.into_response()};
+            let budget = matches!(kind, "lookup_budget" | "held_budget");
+            let status = if budget {"failed"}else{"completed"};
+            let id = format!("resp_{}_{index:032x}",&SESSION[5..]);
+            Json(json!({"status":status,"response_id":id,"conversation_id":SESSION,"last_sequence_number":2,"response":{"id":id,"conversation":{"id":SESSION},"status":status,"error":budget.then(||json!({"code":"tool_budget_exhausted"})),"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("window {index}")}]}]}})).into_response()
+        }
+    }));
+    let upstream = upstream.route(
+        "/v1/responses/cancel",
+        post(move |headers: HeaderMap| {
+            let calls = cancellations.clone();
+            let script = cancel_script.clone();
+            async move {
+                let calls = calls.lock().await;
+                let Some(index) = calls
+                    .iter()
+                    .position(|call| call.headers["idempotency-key"] == headers["idempotency-key"])
+                else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+                if script.get(index) == Some(&"http_credential_confirmed_absent") {
+                    assert!(headers["authorization"] == calls[index].headers["authorization"]);
+                    return Json(json!({"status":"cancelled","conversation_id":null,"response_id":null,"last_sequence_number":null,"response":null})).into_response();
+                }
+                if script.get(index) != Some(&"invalid_stream_confirmed") {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                assert!(headers["authorization"] == calls[index].headers["authorization"]);
+                let id = format!("resp_{}_{index:032x}", &SESSION[5..]);
+                Json(
+                    json!({"status":"cancelled", "conversation_id":SESSION, "response_id":id,
+                "last_sequence_number":1, "response":{"id":id,"conversation":{"id":SESSION},
+                "status":"cancelled","error":{"code":"cancelled"},"output":[]}}),
+                )
+                .into_response()
+            }
+        }),
+    );
     let upstream = upstream.route(
         "/v1/capabilities",
         axum::routing::get(move || {
@@ -562,7 +630,7 @@ async fn setup_stream(
             let sink = sink.clone();
             let frames = frames.clone();
             async move {
-                sink.lock().await.push(Capture { uri, headers, body });
+                sink.lock().await.push(Capture { uri, headers, body, received_at: std::time::Instant::now() });
                 tokio::time::sleep(header_delay).await;
                 let stream = async_stream::stream! {
                     let mut sequence = 0u64;
@@ -1462,6 +1530,44 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         Some(SESSION)
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn unenrolled_model_unavailable_403_preserves_the_thread_credential() {
+    let (state, calls, server) = setup(Some((403, "model_unavailable")), Duration::ZERO).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let _ = drain(response).await;
+    let row = settled(&state).await;
+    let reply = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(reply.error_code.as_deref(), Some("model_unavailable"));
+    let credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let captures = calls.lock().await;
+    assert_eq!(captures.len(), 1);
+    assert!(
+        captures[0].headers["authorization"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("Bearer ")
+            == Some(credential.raw_key.as_str())
+    );
+    assert_ne!(captures[0].body["background"], true);
+    server.abort();
+    let _ = server.await;
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -5954,7 +6060,7 @@ async fn queued_turn(
 async fn the_deadline_wins_over_an_outstanding_claim_and_its_slot_is_released() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let mut running = hold_running_slots(&state).await;
-    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let (mut row, turn_id, mut permit) = queued_turn(&state).await;
     let gate = gate_claims();
     // The first claim starts one poll in; the deadline falls well after it.
     let since = Utc::now();
@@ -5966,7 +6072,7 @@ async fn the_deadline_wins_over_an_outstanding_claim_and_its_slot_is_released() 
         tokio::spawn(async move {
             let result = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
                 &state,
-                &row,
+                &mut row,
                 &turn_id,
                 &mut permit,
                 since,
@@ -5997,7 +6103,7 @@ async fn the_deadline_wins_over_an_outstanding_claim_and_its_slot_is_released() 
 async fn stop_wins_over_an_outstanding_claim() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let mut running = hold_running_slots(&state).await;
-    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let (mut row, turn_id, mut permit) = queued_turn(&state).await;
     let conversation_id = row.id.clone();
     let gate = gate_claims();
     let mut waiting = {
@@ -6006,7 +6112,7 @@ async fn stop_wins_over_an_outstanding_claim() {
             let since = Utc::now();
             let result = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
                 &state,
-                &row,
+                &mut row,
                 &turn_id,
                 &mut permit,
                 since,
@@ -6207,10 +6313,10 @@ async fn stopping_a_queued_turn_cancels_it_without_calling_the_assistant() {
 async fn a_queued_turn_gives_up_at_its_deadline_without_resetting_context() {
     let (state, calls, server) = setup(None, Duration::ZERO).await;
     let _running = hold_running_slots(&state).await;
-    let (row, turn_id, mut permit) = queued_turn(&state).await;
+    let (mut row, turn_id, mut permit) = queued_turn(&state).await;
     let error = crate::services::assistant_nyxagent_runtime::wait_for_running_slot(
         &state,
-        &row,
+        &mut row,
         &turn_id,
         &mut permit,
         Utc::now(),

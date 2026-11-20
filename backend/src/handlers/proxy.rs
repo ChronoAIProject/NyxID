@@ -345,6 +345,9 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
 #[derive(Clone)]
 pub(super) struct NyxAgentAdmission;
 
+#[derive(Clone)]
+pub(super) struct NyxAgentSubscriberControl;
+
 /// Only the permission engine's transport can construct this in-process ingress.
 #[derive(Clone)]
 struct PermissionIngress {
@@ -4477,8 +4480,13 @@ async fn execute_resolved_proxy_inner<'a>(
             .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
     // Only the server-authored, exact-connection check can select this lane;
     // no caller header or body can opt ordinary traffic out of billing.
-    let credential_check = crate::services::credential_verification::checking();
-    let platform_metric = if credential_check {
+    let subscriber_control = request
+        .extensions()
+        .get::<NyxAgentSubscriberControl>()
+        .is_some()
+        && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
+    let metering_only = subscriber_control || crate::services::credential_verification::checking();
+    let platform_metric = if metering_only {
         crate::models::service_billing::BillingMetric::Requests
     } else {
         platform_metric_for_target(&target, is_ws_candidate || shared_connect)
@@ -4510,11 +4518,7 @@ async fn execute_resolved_proxy_inner<'a>(
         // Verification records request metadata without catalog prices,
         // components, operation prices or resale funding. Ordinary calls keep
         // their original billing policy, including on this same connection.
-        target
-            .service
-            .billing
-            .as_ref()
-            .filter(|_| !credential_check),
+        target.service.billing.as_ref().filter(|_| !metering_only),
         state.billing.resale_enabled(),
     );
     if nyxagent_admission

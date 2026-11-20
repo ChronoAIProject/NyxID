@@ -89,6 +89,7 @@ export const conversationSchema = z.object({
       capacity_wait_started_at: z.string().nullish(),
       capacity_wait_deadline: z.string().nullish(),
       activity_total: z.number().int().nonnegative().nullish(),
+      continued_after_restart: z.boolean().optional(),
       activities: z.array(activitySchema).default([]),
       attachments: z.array(attachmentSchema).default([]),
     })
@@ -192,6 +193,7 @@ export const messageSchema = z.object({
   recovery: recoverySchema.nullish(),
   upstream_error_code: z.string().nullish(),
   activity_total: z.number().int().nonnegative().nullish(),
+  continued_after_restart: z.boolean().optional(),
   turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z
     .object({

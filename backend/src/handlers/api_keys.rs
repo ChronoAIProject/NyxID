@@ -48,7 +48,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// org-owned API key as a unit.
 ///
 /// Used by update / delete / rotate / per-key read handlers.
-async fn resolve_api_key_write_owner(
+pub(super) async fn resolve_api_key_write_owner(
     state: &AppState,
     actor: &str,
     key_id: &str,
@@ -1677,10 +1677,16 @@ pub async fn delete_key(
     // Look up platform before delete so we can attribute the event. The
     // delete path only carries `key_id`, so the record must be fetched while
     // it still exists.
-    let pre_delete_platform = key_service::get_api_key(&state.db, &user_id_str, &key_id)
+    let pre_delete = key_service::get_api_key(&state.db, &user_id_str, &key_id)
         .await
-        .ok()
-        .and_then(|k| k.platform);
+        .ok();
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id_str,
+        mongodb::bson::doc! {"user_id":&user_id_str,"credential_api_key_id":&key_id},
+    )
+    .await;
+    let pre_delete_platform = pre_delete.and_then(|key| key.platform);
 
     key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
 
@@ -1725,6 +1731,12 @@ pub async fn rotate_key(
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id_str,
+        mongodb::bson::doc! {"user_id":&user_id_str,"credential_api_key_id":&key_id},
+    )
+    .await;
     let created = key_service::rotate_api_key_with_scope_authorization(
         &state.db,
         &state.encryption_keys,

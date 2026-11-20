@@ -1628,6 +1628,18 @@ mod tests {
                 "turn_id": &turn.turn_id, "credential_id": &old.api_key_id, "window_key": Uuid::new_v4().to_string()
             }}},
         ).await.unwrap();
+        let mut pending = db.client().start_session().await.unwrap();
+        pending.start_transaction().await.unwrap();
+        assert!(matches!(
+            Box::pin(crate::services::assistant_acknowledgement_service::fence(
+                db,
+                in_flight.assistant_chat.as_deref().unwrap(),
+                &mut pending,
+            ))
+            .await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        pending.abort_transaction().await.unwrap();
         let tool_request = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
         assert_eq!(
             thread_mcp(&state, &old.raw_key, tool_request)
@@ -1660,6 +1672,18 @@ mod tests {
         let committed = engine::get(db, &owner, &row.id).await.unwrap();
         assert!(committed.stopped_window.is_none());
         assert!(committed.credential_version_floor() > in_flight.thread_key_version());
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(matches!(
+            Box::pin(crate::services::assistant_acknowledgement_service::fence(
+                db,
+                in_flight.assistant_chat.as_deref().unwrap(),
+                &mut session
+            ))
+            .await,
+            Err(AppError::Unauthorized(_))
+        ));
+        session.abort_transaction().await.unwrap();
         assert!(matches!(
             Box::pin(crate::handlers::mcp::get_mcp_config(
                 axum::extract::State(state.clone()),

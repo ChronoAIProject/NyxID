@@ -67,7 +67,7 @@ fn requests_inspection(attachment: &crate::models::assistant_conversation::TurnA
         && attachment.content_type.starts_with("image/")
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ToolImages {
     pub rounds: u32,
     seen: HashSet<String>,
@@ -77,6 +77,7 @@ pub(crate) struct ToolImages {
     omitted: Vec<String>,
     attempted: bool,
     model_unsupported: bool,
+    #[serde(skip)]
     pub fallback: Option<TurnResult>,
 }
 
@@ -286,7 +287,7 @@ pub(crate) async fn renew(
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
     let updated = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},
+        .update_one(engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false}).map_err(|_|TurnError::internal("cancelled","stop"))?,
             doc! {"$set":{"nyxagent_session_id":binding,"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}})
         .await.map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
     if updated.matched_count != 1 {

@@ -584,7 +584,7 @@ Enrollment in `nyxagent-reattach-v1` defaults off. Keep the flag off in producti
 until PR 2's recovery, cancellation, publication and accounting checks land.
 Then an admin can enable `assistant:turn-handoff` for a person, an organization
 or globally in Feature Flags after every NyxID replica advertises
-`assistant:turn-handoff-v1` and every NyxAgent replica advertises
+`assistant:turn-handoff-v2` and every NyxAgent replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
 
@@ -604,6 +604,21 @@ subscribed, offered, claimed or stopped windows. A read error requires another
 check. A stopped window clears after confirmed cancellation or after the next
 authorized admission replaces the internal credential. Deleting its marker by
 hand could let an earlier execution use the next turn's authority.
+
+Admins can read `assistant_turn_handoff` entries in the audit log. Each committed
+offer, claim and settlement records the generation of the pod that offered the
+turn. A second handoff has its own offering generation. Count transitions by
+generation in the NyxID database with the following read-only aggregation.
+
+```javascript
+db.audit_log.aggregate([
+  { $match: { event_type: "assistant_turn_handoff" } },
+  { $group: { _id: { generation: "$event_data.generation",
+                     transition: "$event_data.transition", outcome: "$event_data.outcome" },
+              count: { $sum: 1 } } },
+  { $sort: { "_id.generation": 1, "_id.transition": 1, "_id.outcome": 1 } }
+], { readConcern: { level: "majority" } })
+```
 
 ## Environment Configuration
 

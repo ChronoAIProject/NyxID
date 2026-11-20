@@ -577,16 +577,25 @@ async fn key_authority_request_command_counts() {
         );
         let expected = match case {
             Case::Child => 7,
-            Case::Rotate => 25,
-            Case::Delete => 22,
+            Case::Rotate => 26,
+            Case::Delete => 23,
             Case::Operations => 17,
             Case::Provision => 69,
             Case::Grant => 4,
             Case::Create => 16,
             Case::Pause => 3,
-            Case::Revoke => 12,
+            Case::Revoke => 13,
         };
         assert_eq!(commands.len(), expected, "{case:?}: command budget");
+        if matches!(case, Case::Rotate | Case::Delete | Case::Revoke) {
+            let window_lookups = commands
+                .iter()
+                .filter(|(command, collection)| {
+                    command == "find" && collection == "assistant_conversations"
+                })
+                .count();
+            assert_eq!(window_lookups, 1, "{case:?}: lookup before revocation");
+        }
         cleanup(&f.state.db).await;
     }
 }

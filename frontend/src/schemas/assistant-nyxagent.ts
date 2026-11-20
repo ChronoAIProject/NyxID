@@ -117,6 +117,7 @@ export const nyxAgentConversationSchema = z.object({
       stop_requested: z.boolean().optional(),
       continuations: z.number().int().nonnegative().optional(),
       activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
+      continued_after_restart: z.boolean().optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -217,6 +218,7 @@ export const nyxAgentMessageSchema = z.object({
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
   activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
+  continued_after_restart: z.boolean().optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
   execution_pending: z.boolean().optional(),
