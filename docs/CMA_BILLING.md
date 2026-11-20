@@ -465,14 +465,13 @@ Wire bounds and ordering are fixed as follows:
   UUIDv4 strings. Digests are 64 lowercase hexadecimal characters. Other text
   is nonempty, at most 256 UTF-8 bytes, without control characters or leading
   or trailing whitespace.
-- Resource fields are required, with explicit nulls for absent or unknown
-  identity components. Home generation is opaque bounded text, preserved
+- Resource fields are required. Each runtime or home binding contains both its
+  ID and generation, or two explicit nulls; partial pairs are rejected even when
+  inactive. Home generation is opaque bounded text, preserved
   exactly rather than parsed as a counter. Compute without a home and retained
   home storage without a runtime are valid. Positive audit duration or expected
   coverage requires both ID and generation for the corresponding resource,
   including measured residual or missing evidence at zero logical uptime.
-  Inactive legacy runtime metadata can retain its ID with an unknown generation;
-  decoding preserves that evidence without constructing a complete binding.
 - Facts are strictly ascending by `fact_id`. Source references are strictly
   ascending by `(kind, id, revision, part)`, comparing text by Unicode scalar
   order and revision/part numerically. Historical missing ranges ascend by

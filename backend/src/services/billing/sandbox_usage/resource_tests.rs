@@ -1,39 +1,12 @@
 use super::contract_tests::{decode, fixture};
 use serde_json::{Value, json};
 
-fn remove_usage(fact: &mut Value, dimensions: &[&str]) {
-    for dimension in dimensions {
-        fact["coverage"][dimension]["covered_binding_ms"] = json!("0");
-        fact["coverage"][dimension]["expected_binding_ms"] = json!("0");
-        let metric = match *dimension {
-            "cpu" => "sandbox_cpu_millis_seconds",
-            "memory" => "sandbox_memory_mib_seconds",
-            "disk" => "sandbox_disk_gib_seconds",
-            _ => unreachable!(),
-        };
-        fact["quantities"][metric] = json!("0");
-    }
-}
-
 fn compute_without_home() -> Value {
-    let mut event = fixture("allocated");
-    let fact = &mut event["facts"][0];
-    fact["resource"]["home_id"] = Value::Null;
-    fact["resource"]["home_generation"] = Value::Null;
-    fact["audit_time"]["retained_home_ms"] = json!("0");
-    remove_usage(fact, &["disk"]);
-    event
+    fixture("allocated-compute-only")
 }
 
 fn retained_home() -> Value {
-    let mut event = fixture("allocated");
-    let fact = &mut event["facts"][0];
-    fact["resource"]["runtime_id"] = Value::Null;
-    fact["resource"]["runtime_generation"] = Value::Null;
-    fact["resource"]["home_generation"] = json!("opaque-home-generation");
-    fact["audit_time"]["compute_uptime_ms"] = json!("0");
-    remove_usage(fact, &["cpu", "memory"]);
-    event
+    fixture("allocated-retained-home")
 }
 
 #[test]
@@ -44,12 +17,21 @@ fn compute_without_a_home_preserves_explicit_null_bindings() {
     assert_eq!(roundtrip, event);
     let validator = jsonschema::validator_for(&fixture("schema")).unwrap();
     assert!(validator.is_valid(&event));
+    let mut transition = event;
+    transition["facts"] = json!([]);
+    assert!(validator.is_valid(&transition));
+    assert!(decode(&transition).is_ok());
 }
 
 #[test]
 fn retained_home_preserves_opaque_generation_without_runtime_binding() {
     let mut event = retained_home();
-    for generation in ["opaque-home-generation", "0007", "9223372036854775808"] {
+    for generation in [
+        "opaque-home-generation",
+        "0007",
+        "9223372036854775808",
+        "generation:alpha/7",
+    ] {
         event["facts"][0]["resource"]["home_generation"] = json!(generation);
         let decoded = decode(&event).expect("home generation is an opaque identity");
         let roundtrip: Value = serde_json::from_slice(decoded.canonical_bytes()).unwrap();
@@ -72,9 +54,10 @@ fn resource_fields_are_required_and_usage_requires_both_identity_components() {
         event["facts"][0]["resource"][field] = Value::Null;
         assert_eq!(
             decode(&event).err(),
-            Some("usage_resource_binding_required"),
+            Some("partial_resource_binding"),
             "{field}"
         );
+        assert!(!validator.is_valid(&event), "partial {field}");
         event["facts"][0]["resource"]
             .as_object_mut()
             .unwrap()
@@ -85,19 +68,23 @@ fn resource_fields_are_required_and_usage_requires_both_identity_components() {
 }
 
 #[test]
-fn inactive_legacy_binding_metadata_is_retained_without_inventing_a_generation() {
-    let mut event = retained_home();
-    event["facts"][0]["resource"]["runtime_id"] = json!("retained-legacy-runtime");
-    let decoded = decode(&event).unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(decoded.canonical_bytes()).unwrap(),
-        event
-    );
-    assert!(
-        jsonschema::validator_for(&fixture("schema"))
-            .unwrap()
-            .is_valid(&event)
-    );
+fn inactive_bindings_still_require_complete_pairs() {
+    let validator = jsonschema::validator_for(&fixture("schema")).unwrap();
+    for (event, fields) in [
+        (retained_home(), ["runtime_id", "runtime_generation"]),
+        (compute_without_home(), ["home_id", "home_generation"]),
+    ] {
+        for field in fields {
+            let mut partial = event.clone();
+            partial["facts"][0]["resource"][field] = json!("7");
+            assert_eq!(
+                decode(&partial).err(),
+                Some("partial_resource_binding"),
+                "{field}"
+            );
+            assert!(!validator.is_valid(&partial), "{field}");
+        }
+    }
 }
 
 #[test]
@@ -116,7 +103,11 @@ fn usage_requires_its_binding_even_for_measured_residual_or_missing_evidence() {
             }
             assert_eq!(
                 decode(&event).err(),
-                Some("usage_resource_binding_required")
+                Some(if id == "runtime_id" {
+                    "compute_binding_required"
+                } else {
+                    "home_binding_required"
+                })
             );
         }
     }
@@ -126,10 +117,7 @@ fn usage_requires_its_binding_even_for_measured_residual_or_missing_evidence() {
     event["facts"][0]["resource"]["runtime_id"] = Value::Null;
     event["facts"][0]["resource"]["runtime_generation"] = Value::Null;
     event["facts"][0]["audit_time"]["compute_uptime_ms"] = json!("0");
-    assert_eq!(
-        decode(&event).err(),
-        Some("usage_resource_binding_required")
-    );
+    assert_eq!(decode(&event).err(), Some("compute_binding_required"));
 }
 
 #[test]

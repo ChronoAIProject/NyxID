@@ -140,7 +140,57 @@
         "home_id",
         "home_generation"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "runtime_id": {
+                  "type": "null"
+                },
+                "runtime_generation": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "runtime_id": {
+                  "type": "string"
+                },
+                "runtime_generation": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "home_id": {
+                  "type": "null"
+                },
+                "home_generation": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "home_id": {
+                  "type": "string"
+                },
+                "home_generation": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      ]
     },
     "allocation": {
       "type": "object",
