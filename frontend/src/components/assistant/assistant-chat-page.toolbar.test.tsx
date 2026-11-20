@@ -97,6 +97,7 @@ vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));
 vi.mock("@/hooks/use-assistant-onboarding", () => ({
   useAssistantOnboarding: () => ({ data: undefined }),
   useHideSuggestions: () => ({ mutate: () => undefined }),
+  useShowSuggestions: () => ({ mutate: () => undefined }),
   useIntroReplay: (select: (state: { pending: boolean; consume: () => void }) => unknown) =>
     select({ pending: false, consume: () => undefined }),
 }));

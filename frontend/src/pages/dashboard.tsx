@@ -197,7 +197,7 @@ export function DashboardPage() {
             label={translateUi("Nodes")}
             value={
               totalNodes > 0
-                ? `${String(onlineNodes)}/${String(totalNodes)} online`
+                ? translateUi("{{online}}/{{total}} online", { online: String(onlineNodes), total: String(totalNodes) })
                 : translateUi("No nodes")
             }
             loading={nodesLoading}

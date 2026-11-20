@@ -28,15 +28,15 @@ function remainingLabel(remainingMs: number): string {
   // NaN when the server didn't send a parseable expiry (e.g. an older
   // backend without expires_at on the listing) — omit the countdown.
   if (Number.isNaN(remainingMs)) return "";
-  if (remainingMs <= 0) return "expired";
-  return `expires in ${String(Math.max(1, Math.ceil(remainingMs / 60_000)))} min`;
+  if (remainingMs <= 0) return translateUi("expired");
+  return translateUi("expires in {{minutes}} min", { minutes: Math.max(1, Math.ceil(remainingMs / 60_000)) });
 }
 
 function grantDurationLabel(seconds: number | null): string {
-  if (seconds === null) return "grant";
-  if (seconds < 3600) return `${String(Math.round(seconds / 60))} min`;
-  if (seconds < 86_400) return `${String(Math.round(seconds / 3600))} h`;
-  return `${String(Math.round(seconds / 86_400))} d`;
+  if (seconds === null) return translateUi("grant");
+  if (seconds < 3600) return translateUi("{{minutes}} min", { minutes: Math.round(seconds / 60) });
+  if (seconds < 86_400) return translateUi("{{hours}} h", { hours: Math.round(seconds / 3600) });
+  return translateUi("{{days}} d", { days: Math.round(seconds / 86_400) });
 }
 
 /** Small mono chip used by the scope row (mockup: `.a-scope code`). */
@@ -119,9 +119,9 @@ function DecidedCard({ block, onRequestAgain, disabled }: { readonly block: Appr
     <section className={`${STATUS_CARD_MAX_W} rounded-xl border p-4 ${style.container}`}>
       <div className="flex flex-wrap items-center gap-2 type-body-strong text-foreground">
         <DecidedIcon decision={decision} />
-        <span>{style.title}</span>
+        <span>{translateUi(style.title)}</span>
         {block.decision_channel && (
-          <Badge variant="secondary" className="ml-auto">{translateUi("via ")}{block.decision_channel}
+          <Badge variant="secondary" className="ml-auto">{translateUi("via {{channel}}", { channel: block.decision_channel })}
           </Badge>
         )}
       </div>
@@ -155,7 +155,9 @@ function SubmittedCard({
       <p className="mt-2 text-14 text-muted-foreground">
         {block.body}
       </p>
-      <p className="mt-1.5 text-13 text-text-tertiary">{translateUi("Waiting for the committed ")}{block.decision_submission}{translateUi(" decision.")}</p>
+      <p className="mt-1.5 text-13 text-text-tertiary">{block.decision_submission === "approved"
+        ? translateUi("Waiting for the committed approved decision.")
+        : translateUi("Waiting for the committed denied decision.")}</p>
     </section>
   );
 }
@@ -260,7 +262,9 @@ function LegacyApprovalCard({
         {reviewPath ? <a className="type-row-title underline" href={reviewPath}>{translateUi("Open Approvals")}</a> : null}
 
         {block.approval_mode === "grant" && (
-          <p className="mt-2.5 text-13 text-muted-foreground">{translateUi("Approving also allows repeat ")}{block.service_slug}{translateUi(" writes for the next ")}{grantDurationLabel(block.grant_duration_sec)}{translateUi(" without asking again.")}</p>
+          <p className="mt-2.5 text-13 text-muted-foreground">{translateUi("Approving also allows repeat {{service}} writes for the next {{duration}} without asking again.", {
+            service: block.service_slug, duration: grantDurationLabel(block.grant_duration_sec),
+          })}</p>
         )}
       </div>
 

@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthoredSkillScopePreview } from "./authored-skill-scope-preview";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
+import { appI18n } from "@/i18n";
 const mocks = vi.hoisted(() => ({ json: vi.fn() }));
 vi.mock("@/lib/assistant/assistant-http", () => ({ assistantJson: mocks.json }));
 vi.mock("@/stores/auth-store", () => ({ useAuthStore: (select: (s: unknown) => unknown) => select({ user: { id: "owner" } }) }));
@@ -27,7 +28,89 @@ function show(value = card, decide = vi.fn().mockResolvedValue(undefined), acces
   return decide;
 }
 beforeEach(() => { mocks.json.mockReset().mockResolvedValue(preview); });
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
+});
+it.each([
+  [["retry"], "The last attempt was interrupted before anything was sent to Ornn.", "上次尝试已中断，尚未向 Ornn 发送任何内容。"],
+  [["check"], "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version; Check again only reads, it never writes again.", "上次尝试已中断。NyxID 暂时无法确认 Ornn 是否已发布此版本；“再次检查”只会读取状态，不会再次写入。"],
+  [[], "The last attempt was interrupted. NyxID cannot yet confirm whether Ornn published this version.", "上次尝试已中断。NyxID 暂时无法确认 Ornn 是否已发布此版本。"],
+] as const)("translates interrupted-publication copy for %j on a mounted card", async (actions, english, chinese) => {
+  mocks.json.mockResolvedValue({ ...preview, status: "publishing", actions, lease_live: false });
+  show({ ...card, status: "used" });
+  expect(await screen.findByText(english)).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByText(chinese)).toBeVisible();
+  expect(screen.getByText("Verify every date")).toBeVisible();
+});
+
+it.each([
+  ["pinned", "Skill weekly-review 1.0 published and attached to Operations", "技能 weekly-review 1.0 已发布并附加到 Operations", "技能 weekly-review 1.0 已發布並附加至 Operations"],
+  ["discarded", "Skill draft discarded", "技能草稿已丢弃", "技能草稿已捨棄"],
+  ["invalidated", "Skill draft is no longer available", "技能草稿已不可用", "技能草稿已無法使用"],
+  ["dismissed", "Confirmation dismissed; the publication remains available.", "确认请求已关闭；仍可继续发布。", "確認請求已關閉；仍可繼續發布。"],
+  ["changed", "This confirmation no longer matches the draft.", "此确认请求已与草稿不匹配。", "此確認請求已與草稿不符。"],
+] as const)("translates a mounted %s skill receipt", async (state, english, simplified, traditional) => {
+  mocks.json.mockResolvedValue({ ...preview, state, actions: [] });
+  show();
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(english));
+  for (const [language, summary] of [["zh-CN", simplified], ["zh-TW", traditional], ["en", english]]) {
+    await act(async () => { await appI18n.changeLanguage(language); });
+    expect(screen.getByRole("status")).toHaveTextContent(summary!);
+  }
+});
+
+it("translates the published summary when confirmations are bypassed", async () => {
+  mocks.json.mockResolvedValue({ ...preview, state: "pinned", actions: [] });
+  show(card, undefined, "autopilot");
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Skill weekly-review 1.0 published and attached to Operations"));
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByRole("status")).toHaveTextContent("技能 weekly-review 1.0 已发布并附加到 Operations");
+});
+
+it.each([
+  ["renew", "Request a new confirmation", false, false, "A new confirmation was posted in this conversation.", "新的确认请求已发布到本对话中。"],
+  ["reprepare", "Review updated package", false, false, "The package was rebuilt from the source skill. Review the new confirmation posted in this conversation.", "软件包已根据源技能重新构建。请审核本对话中发布的新确认请求。"],
+  ["reprepare", "Review updated package", true, false, "The package was rebuilt, but its review card was not posted. Use Show updated draft to post it.", "软件包已重新构建，但审核卡片尚未发布。请使用“显示更新后的草稿”发布卡片。"],
+  ["reprepare", "Review updated package", false, true, "The package could not be rebuilt. The current state is shown below.", "无法重新构建软件包。当前状态如下。"],
+  ["renew", "Request a new confirmation", false, true, "The request could not be completed. Reload the current state and try again.", "无法完成请求。请重新加载当前状态后重试。"],
+] as const)("translates the stored %s outcome from %s (pending=%s, failed=%s)", async (action, button, card_pending, failed, english, chinese) => {
+  mocks.json.mockImplementation(async (_path: string, init?: { method?: string }) => {
+    if (init?.method === "POST") {
+      if (failed) throw new Error("refused");
+      return { card_pending };
+    }
+    return { ...preview, actions: [action] };
+  });
+  show();
+  fireEvent.click(await screen.findByRole("button", { name: button }));
+  expect(await screen.findByText(english)).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByText(chinese)).toBeVisible();
+  await act(async () => { await appI18n.changeLanguage("en"); });
+  expect(screen.getByText(english)).toBeVisible();
+});
+
+it("translates the stored publication error and read coverage at render time", async () => {
+  mocks.json.mockResolvedValue({ ...preview, coverage: [
+    { id: "upload", name: "source.txt", expired: false, reads: 1, percent: 75, lower_bound: true, since_reset_percent: 25 },
+  ], scope: { status: "reduced", omissions: ["Untranslated author detail"] }, coverage_omitted: 2 });
+  show(card, vi.fn().mockRejectedValue(new Error("refused")));
+  const consent = await screen.findByRole("checkbox");
+  expect(consent).toHaveAccessibleName("I accept this reduced scope (1 declared omission).");
+  fireEvent.click(consent);
+  fireEvent.click(screen.getByRole("button", { name: "Allow and publish" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Publication did not finish. The current state is shown below.");
+  expect(screen.getByText(/source.txt: at least 75%/)).toHaveTextContent("at least 25% since the last context reset");
+  await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+  expect(screen.getByRole("alert")).toHaveTextContent("发布未完成。当前状态如下所示。");
+  expect(screen.getByText(/source.txt: 至少 75%/)).toHaveTextContent("自上次上下文重置后至少读取了 25%");
+  expect(screen.getByText("未显示更早的 2 个上传文件。")).toBeVisible();
+  expect(screen.getByText("Untranslated author detail")).toBeVisible();
+  expect(screen.getByRole("checkbox")).toHaveAccessibleName("我接受此缩减范围（已声明 1 项遗漏）。");
+});
+
 it.each(["autopilot", "nyxmode", "ask_every_time"] as const)("keeps an expired authored card free of confirmation controls only in %s", async (accessMode) => {
   mocks.json.mockResolvedValue({ ...preview, actions: ["renew", "discard"] });
   const decide = show({ ...card, status: "expired" }, undefined, accessMode);

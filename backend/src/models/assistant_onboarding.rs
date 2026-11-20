@@ -61,7 +61,7 @@ pub struct AssistantOnboarding {
     pub topics: Vec<InterestTopic>,
     #[serde(default)]
     pub work_style: Option<WorkStyle>,
-    /// When the owner hid the home's suggestions; cleared by retaking the intro.
+    /// When the owner hid the home's suggestions; cleared by Show suggestions or retaking the intro.
     #[serde(default, with = "super::bson_datetime::optional")]
     pub suggestions_hidden_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

@@ -760,6 +760,8 @@
   "Show routing for {{serviceName}}": "顯示 {{serviceName}} 的路由",
   "Show sources for {{name}}": "顯示 {{name}} 的來源",
   "Show {{count}} more": "再顯示 {{count}} 個",
+  "Show {{count}} more_one": "再顯示 {{count}} 個",
+  "Show {{count}} more_other": "再顯示 {{count}} 個",
   "Showing only {{value}} connections. Switch to services with a personal connection and their counterparts.": "僅顯示 {{value}} 連線。切換為顯示具有個人連線的服務及其對應項。",
   "Showing up to 100 events on this page.": "此頁面最多顯示 100 個事件。",
   "Sign in to review personal access. Registration and email verification do not link Telegram automatically.": "登入以檢視個人存取權限。註冊和電子郵件驗證不會自動連結 Telegram。",
