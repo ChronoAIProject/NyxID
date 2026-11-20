@@ -923,6 +923,22 @@ pub(crate) async fn ready_test_replica(db: &Database) {
 }
 
 #[cfg(test)]
+pub(crate) async fn refresh_test_replica_heartbeat(db: &Database) {
+    let result = db
+        .collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "test-process"},
+            doc! {"$currentDate": {"observed_at": true}},
+        )
+        .await
+        .expect("refresh the fixture replica heartbeat");
+    assert_eq!(
+        result.matched_count, 1,
+        "fixture replica must be registered"
+    );
+}
+
+#[cfg(test)]
 pub(crate) async fn ready_automation_test_replica(db: &Database) {
     drop(ready_test_replica_inner(db, true, None).await);
 }

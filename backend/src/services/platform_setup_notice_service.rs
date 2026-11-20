@@ -198,6 +198,11 @@ mod tests {
             let f = super::super::platform_onboarding_test_support::distinct_fixture().await;
             Box::pin(f.observe()).await;
             let before_dispatch = f.server.received_requests().await.unwrap().len();
+            let due = f.state.db.collection::<Document>(NOTICES).update_one(
+                doc! {"setup_id": &f.setup.id, "kind": "awaiting_child_review", "attempts": 0_i64, "completed": false},
+                doc! {"$currentDate": {"retry_at": true}},
+            ).await.unwrap();
+            assert_eq!(due.matched_count, 1, "expected one newly queued notice");
             let old = claim_notice(&f.state.db).await.unwrap().unwrap();
             let winner = std::sync::Arc::new(std::sync::Mutex::new(None));
             let base = f.server.uri();
