@@ -16,7 +16,7 @@ verification before enabling fixed production probes.
 | Container | `http://backend:3001` | `http://frontend:8080` |
 | Local production Compose host | internal backend; probe inside its container | `http://127.0.0.1:3000` |
 
-Staging URLs match `.github/scripts/deploy_staging.py`. Custom deployments use
+Production and staging URLs match `.github/scripts/deploy_images.py`. Custom deployments use
 `BASE_URL` and `FRONTEND_URL`. Requests are direct, never NyxID UserService/proxy
 requests. None of these GET endpoints requires login, a token or an Agent Key;
 invalid or expired credentials do not change their probe result.
@@ -114,7 +114,7 @@ suffixes such as `/frontend/ready/`, `/frontend/ready.js` and `/ready/` return
 **Staging's chrono-cd backend readiness probe and load balancer already use
 `/ready` as a drain signal. Keep that configuration unchanged.** The related
 multi-replica drain contract is described in `DEPLOYMENT.md` and #2277. The
-release-version sampling in `.github/scripts/deploy_staging.py` uses `/health`
+release-version sampling in `.github/scripts/deploy_images.py` uses `/health`
 and is a separate consumer. Production currently probes backend `/health`;
 production Compose retains that dependency-free backend healthcheck. Frontend
 Compose adds `/frontend/ready`. The repository does not maintain chrono-cd's

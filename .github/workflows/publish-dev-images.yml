@@ -54,4 +54,4 @@ jobs:
         env:
           NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
           NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
-        run: python3 .github/scripts/deploy_staging.py
+        run: python3 .github/scripts/deploy_images.py staging
