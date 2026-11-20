@@ -8,7 +8,7 @@
     "android": "APP_ENV=dev expo prebuild --platform android --clean --no-install && APP_ENV=dev expo run:android",
     "ios": "APP_ENV=dev expo run:ios",
     "web": "APP_ENV=dev expo start --web",
-    "test": "tsx --test \"src/**/*.test.ts\" scripts/android-build-command.test.js scripts/i18n-catalogs.test.mjs scripts/i18n-tools.test.mjs scripts/i18n-mixed-matrix.test.mjs scripts/crash-artifacts.test.js scripts/native-crash.test.js",
+    "test": "tsx --test \"src/**/*.test.ts\" scripts/android-build-command.test.js scripts/i18n-catalogs.test.mjs scripts/i18n-tools.test.mjs scripts/i18n-mixed-matrix.test.mjs scripts/crash-artifacts.test.js scripts/native-crash.test.js scripts/pdf-thumbnail.test.js",
     "test:jest": "jest",
     "typecheck": "tsc --noEmit",
     "check:native-sync": "node scripts/check-native-sync.js",
