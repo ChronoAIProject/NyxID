@@ -16,6 +16,7 @@ pub const MAX_BYTES: usize = nyxid_machine::MAX_ATTACHMENT_UPLOAD_BYTES;
 const MAX_TEXT: usize = 1_000_000;
 const MAX_EXPANDED: u64 = 40 * 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
+const MAX_EXTENSION_HINT_BYTES: usize = 20;
 static WORKERS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(2));
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,6 +46,12 @@ fn bad(message: &'static str) -> AppError {
 }
 fn malformed() -> AppError {
     bad("Malformed or unsupported attachment. Use PDF, DOCX, UTF-8 text, PNG, JPEG, GIF or WebP.")
+}
+
+/// PDFs can consist entirely of UTF-8 bytes; recognize their structure before
+/// treating a tool download as generic text.
+pub(crate) fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
 }
 
 /// Filename is only a hint for text dialects; every hinted structure is validated.
@@ -77,7 +84,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             sections: vec![],
         });
     }
-    if bytes.starts_with(b"%PDF-") {
+    if is_pdf(bytes) {
         let document = lopdf::Document::load_mem(bytes).map_err(|_| malformed())?;
         if document.is_encrypted() {
             return Err(bad(
@@ -338,7 +345,7 @@ pub fn worker() {
                 let split = input
                     .iter()
                     .position(|b| *b == b'\n')
-                    .filter(|n| *n <= 20)
+                    .filter(|n| *n <= MAX_EXTENSION_HINT_BYTES)
                     .ok_or_else(malformed)?;
                 let extension = std::str::from_utf8(&input[..split]).map_err(|_| malformed())?;
                 parse(&input[split + 1..], extension)
@@ -366,6 +373,14 @@ async fn extract_deadline(
     if bytes.len() > MAX_BYTES {
         return Err(bad("Attachment exceeds 20 MiB."));
     }
+    // The display filename may have a long Unicode suffix. Bound the worker
+    // hint without turning an unknown suffix into the empty/plain-text hint.
+    let extension =
+        if extension.len() > MAX_EXTENSION_HINT_BYTES || extension.chars().any(char::is_control) {
+            "unsupported".into()
+        } else {
+            extension
+        };
     let _permit = WORKERS.acquire().await.map_err(|_| malformed())?;
     let mut command =
         tokio::process::Command::new(std::env::current_exe().map_err(|_| malformed())?);
@@ -503,6 +518,42 @@ mod tests {
             extract(b"after timeout".to_vec(), "txt".into())
                 .await
                 .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn long_unicode_hints_validate_rasters_without_admitting_unknown_text_formats() {
+        let png = include_bytes!("../../tests/fixtures/generated-artifacts/blue.png");
+        for hint in [
+            "归档收据原始凭证".to_owned(),
+            "x".repeat(21),
+            "bad\nhint".into(),
+        ] {
+            assert_eq!(
+                extract(png.to_vec(), hint.clone())
+                    .await
+                    .unwrap()
+                    .content_type,
+                "image/png"
+            );
+            assert!(
+                extract(b"ordinary UTF-8 text".to_vec(), hint.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                extract(br#"{"valid":"JSON"}"#.to_vec(), hint.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(extract(vec![0, 255, 0, 255], hint).await.is_err());
+        }
+        assert_eq!(
+            extract(b"still supported".to_vec(), "txt".into())
+                .await
+                .unwrap()
+                .content_type,
+            "text/plain"
         );
     }
     #[test]

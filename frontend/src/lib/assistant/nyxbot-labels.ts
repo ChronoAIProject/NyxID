@@ -153,10 +153,10 @@ function firstSentence(text: string): string {
  * `nyxbot` notifiers) into a compact card. Unknown shapes fall back to their
  * first sentence, so new notices still render.
  */
-export function describeEventNotice(text: string): EventNotice {
+export function describeEventNotice(text: string, t = translateUi): EventNotice {
   const notice = text.trim();
   if (notice.startsWith("Skill ") && (notice.includes("published and attached") || notice.includes("requires a corrected package"))) {
-    return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: "Skill publication", detail: notice };
+    return { kind: "notice", tone: notice.includes("published and attached") ? "success" : "warning", summary: t("Skill publication"), detail: notice };
   }
   // The server swaps double quotes in quoted text for single ones.
   let match = /^Specialist (\S+) (replied|was stopped|failed \(([^)]*)\))\. Reply excerpt: "([^"]*)"/.exec(
@@ -168,7 +168,9 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "reply",
       tone: failed ? "destructive" : status === "replied" ? "neutral" : "warning",
-      summary: `${agent} ${failed ? "failed" : status}`,
+      summary: failed ? t("{{agent}} failed", { agent })
+        : status === "replied" ? t("{{agent}} replied", { agent })
+        : t("{{agent}} was stopped", { agent }),
       detail: match[4]?.trim() || undefined,
       agent,
     };
@@ -181,7 +183,8 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "request",
       tone: "warning",
-      summary: service ? `${agent} asks to use ${service}` : `${agent} asks to read your account`,
+      summary: service ? t("{{agent}} asks to use {{service}}", { agent, service })
+        : t("{{agent}} asks to read your account", { agent }),
       detail: match[3]?.trim() || undefined,
       agent,
     };
@@ -191,10 +194,18 @@ export function describeEventNotice(text: string): EventNotice {
   );
   if (match) {
     const [, by = "", verdict = "", service, reason] = match;
+    const allowed = verdict === "allowed";
+    const summary = service
+      ? by === "NyxBot"
+        ? t(allowed ? "NyxBot allowed {{service}}" : "NyxBot denied {{service}}", { service })
+        : t(allowed ? "You allowed {{service}}" : "You denied {{service}}", { service })
+      : by === "NyxBot"
+        ? t(allowed ? "NyxBot allowed read-only account access" : "NyxBot denied read-only account access")
+        : t(allowed ? "You allowed read-only account access" : "You denied read-only account access");
     return {
       kind: "decision",
-      tone: verdict === "allowed" ? "success" : "destructive",
-      summary: `${by === "NyxBot" ? "NyxBot" : "You"} ${verdict} ${service ?? "read-only account access"}`,
+      tone: allowed ? "success" : "destructive",
+      summary,
       detail: reason?.trim() || undefined,
     };
   }
@@ -206,7 +217,11 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "approval",
       tone: verdict === "approved" ? "success" : "destructive",
-      summary: `You ${verdict} the ${service} request${via ? ` via ${channelPlatformName(via)}` : ""}`,
+      summary: via
+        ? t(verdict === "approved" ? "You approved the {{service}} request via {{platform}}" : "You rejected the {{service}} request via {{platform}}", {
+          service, platform: channelPlatformName(via),
+        })
+        : t(verdict === "approved" ? "You approved the {{service}} request" : "You rejected the {{service}} request", { service }),
       detail: description?.trim() || undefined,
     };
   }
@@ -216,7 +231,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "connection",
       tone: verdict === "finished" ? "success" : "neutral",
-      summary: `${verdict === "finished" ? "Finished" : "Declined"} connecting ${service}`,
+      summary: t(verdict === "finished" ? "Finished connecting {{service}}" : "Declined connecting {{service}}", { service }),
     };
   }
   match = /^The (\S+) channel bot (\S+) (?:the user just created is now linked to (\S+)\.|was created but could not be linked)/.exec(
@@ -229,8 +244,8 @@ export function describeEventNotice(text: string): EventNotice {
       kind: "channel",
       tone: agent ? "success" : "destructive",
       summary: agent
-        ? `${name} bot ${label} linked to ${agent}`
-        : `${name} bot ${label} could not be linked`,
+        ? t("{{platform}} bot {{label}} linked to {{agent}}", { platform: name, label, agent })
+        : t("{{platform}} bot {{label}} could not be linked", { platform: name, label }),
     };
   }
   match = /^The user verified their (\S+) account on channel bot (\S+);/.exec(notice);
@@ -239,7 +254,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "channel",
       tone: "success",
-      summary: `Verified your ${channelPlatformName(platform)} account on ${label}`,
+      summary: t("Verified your {{platform}} account on {{label}}", { platform: channelPlatformName(platform), label }),
     };
   }
   match = /^The owner sent another (\S+) message while you were working\.[\s\S]*?: "([^"]*)"/.exec(
@@ -249,7 +264,7 @@ export function describeEventNotice(text: string): EventNotice {
     return {
       kind: "message",
       tone: "neutral",
-      summary: `New ${channelPlatformName(match[1] ?? "")} message`,
+      summary: t("New {{platform}} message", { platform: channelPlatformName(match[1] ?? "") }),
       detail: match[2]?.trim() || undefined,
     };
   }
@@ -257,16 +272,16 @@ export function describeEventNotice(text: string): EventNotice {
   if (match) {
     const outcome = match[1]?.trim() ?? "";
     if (outcome === "operation_cancelled") {
-      return { kind: "task", tone: "neutral", summary: "Background task cancelled" };
+      return { kind: "task", tone: "neutral", summary: t("Background task cancelled") };
     }
     if (outcome === "timeout") {
-      return { kind: "task", tone: "warning", summary: "Background tracking timed out" };
+      return { kind: "task", tone: "warning", summary: t("Background tracking timed out") };
     }
     const ok = outcome === "done" || outcome === "completed";
     return {
       kind: "task",
       tone: ok ? "success" : "warning",
-      summary: ok ? "Background task finished" : `Background task ${outcome.replace(/_/g, " ")}`,
+      summary: ok ? t("Background task finished") : t("Background task {{outcome}}", { outcome: outcome.replace(/_/g, " ") }),
     };
   }
   const summary = firstSentence(notice);
@@ -359,10 +374,20 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   );
 }
 
+const accessModeLabelKeys = {
+  autopilot: "Full access",
+  nyxmode: "Auto",
+  ask_every_time: "Ask every time",
+} as const;
+
+function accessModeLabel(key: keyof typeof accessModeLabelKeys, t = translateUi) {
+  return t(accessModeLabelKeys[key]);
+}
+
 export const ACCESS_MODE_LABEL = {
-  get autopilot() { return translateUi("Full access"); },
-  get nyxmode() { return translateUi("Auto"); },
-  get ask_every_time() { return translateUi("Ask every time"); },
+  get autopilot() { return accessModeLabel("autopilot"); },
+  get nyxmode() { return accessModeLabel("nyxmode"); },
+  get ask_every_time() { return accessModeLabel("ask_every_time"); },
 } as const satisfies Record<NyxAgentAccessMode, string>;
 
 /** What each access mode asks before, in one line. */
@@ -381,23 +406,34 @@ export function effectiveAccessMode(
   return override ?? workspace ?? "nyxmode";
 }
 
+const actionRiskLabelKeys = {
+  read: "Read",
+  change: "Change",
+  sensitive: "Sensitive",
+  destructive: "Destructive",
+} as const;
+
+export function actionRiskLabel(key: keyof typeof actionRiskLabelKeys, t = translateUi) {
+  return t(actionRiskLabelKeys[key]);
+}
+
 export const ACTION_RISK_LABEL = {
-  get read() { return translateUi("Read"); },
-  get change() { return translateUi("Change"); },
-  get sensitive() { return translateUi("Sensitive"); },
-  get destructive() { return translateUi("Destructive"); },
+  get read() { return actionRiskLabel("read"); },
+  get change() { return actionRiskLabel("change"); },
+  get sensitive() { return actionRiskLabel("sensitive"); },
+  get destructive() { return actionRiskLabel("destructive"); },
 } as const;
 
 /** Why a card asks, for its risk line. */
-export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
-  if (confirmation.reason === "org_connection") return translateUi("Using this organization connection requires your instruction, including in Full access.");
-  if (confirmation.reason === "webhook") return translateUi("This automation's confirmation policy asks.");
+export function confirmationReason(confirmation: NyxAgentActionConfirmation, t = translateUi): string {
+  if (confirmation.reason === "org_connection") return t("Using this organization connection requires your instruction, including in Full access.");
+  if (confirmation.reason === "webhook") return t("This automation's confirmation policy asks.");
   if (confirmation.reason === "policy") {
-    return translateUi("This machine's or saved login's confirmation setting asks.");
+    return t("This machine's or saved login's confirmation setting asks.");
   }
   return confirmation.access_mode
-    ? translateUi("Your access mode is {{mode}}.", { mode: ACCESS_MODE_LABEL[confirmation.access_mode] })
-    : translateUi("Your access mode asks.");
+    ? t("Your access mode is {{mode}}.", { mode: accessModeLabel(confirmation.access_mode, t) })
+    : t("Your access mode asks.");
 }
 
 /** Missing deployment metadata is unknown, never a reason to omit an image. */

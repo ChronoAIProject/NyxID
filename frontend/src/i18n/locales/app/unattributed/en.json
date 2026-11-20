@@ -760,6 +760,8 @@
   "Show routing for {{serviceName}}": "Show routing for {{serviceName}}",
   "Show sources for {{name}}": "Show sources for {{name}}",
   "Show {{count}} more": "Show {{count}} more",
+  "Show {{count}} more_one": "Show {{count}} more",
+  "Show {{count}} more_other": "Show {{count}} more",
   "Showing only {{value}} connections. Switch to services with a personal connection and their counterparts.": "Showing only {{value}} connections. Switch to services with a personal connection and their counterparts.",
   "Showing up to 100 events on this page.": "Showing up to 100 events on this page.",
   "Sign in to review personal access. Registration and email verification do not link Telegram automatically.": "Sign in to review personal access. Registration and email verification do not link Telegram automatically.",

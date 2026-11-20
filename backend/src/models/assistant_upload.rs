@@ -20,6 +20,10 @@ pub struct AssistantUpload {
     pub group_id: Option<String>,
     pub message_id: Option<String>,
     pub label: String,
+    /// New human/Lark uploads distinguish supplied names (including "attachment")
+    /// from verified fallbacks. Absent legacy rows remain ambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename_is_original: Option<bool>,
     pub content_type: String,
     pub size: i64,
     pub pages: usize,

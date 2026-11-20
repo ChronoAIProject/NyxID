@@ -205,7 +205,11 @@ async fn callback(f: &Fixture, source: &str, reply: Value, headers: &HeaderMap) 
 async fn deliver(f: &Fixture, c: &Captured, text: &str) {
     platform_reply(f, text, 1).await;
     let (token, _) = thread_reply_headers(&f.state, &f.row, &c.source);
-    let reply = json!({"text":text,"metadata":null});
+    let reply = if c.live.is_some() {
+        json!({"text":text})
+    } else {
+        json!({"text":text,"metadata":{"text_format":"commonmark"}})
+    };
     assert_eq!(
         callback(f, &c.source, reply.clone(), &token).await,
         StatusCode::OK
@@ -422,7 +426,7 @@ async fn org_notice_2625_member_removal_and_disabled_guests_complete_reads_and_r
 #[tokio::test]
 async fn org_notice_2625_changed_bytes_markup_and_image_refuse_before_dispatch() {
     Box::pin(async {
-        for mutation in ["whitespace","empty","markup","image"] {
+        for mutation in ["whitespace","empty","markup","image","formatted_markup"] {
             let f=Box::pin(Fixture::with_org("org_notice_mismatch",true)).await;
             notice_member(&f).await;
             configure_group(&f).await;
@@ -432,6 +436,7 @@ async fn org_notice_2625_changed_bytes_markup_and_image_refuse_before_dispatch()
             let reply=match mutation {
                 "whitespace"=>json!({"text":format!("{text} ")}),
                 "empty"=>json!({"text":""}),
+                "formatted_markup"=>json!({"text":text,"metadata":{"text_format":"commonmark","card":{}}}),
                 "markup"=>json!({"text":text,"metadata":{"reply_markup":{"inline_keyboard":[]}}}),
                 _=>json!({"text":text,"attachments":[{"kind":"image","source":{"type":"base64","data":"aGVsbG8="}}]}),
             };
@@ -490,7 +495,12 @@ async fn org_notice_2625_token_and_assigned_key_race_over_live_and_replayed_noti
         let (token, jti) = thread_reply_headers(&f.state, &f.row, &c.source);
         let (a, b) = tokio::join!(
             Box::pin(callback(&f, &c.source, json!({"text":live}), &token)),
-            Box::pin(callback(&f, &c.source, json!({"text":replay}), &key))
+            Box::pin(callback(
+                &f,
+                &c.source,
+                json!({"text":replay,"metadata":{"text_format":"commonmark"}}),
+                &key
+            ))
         );
         assert_ne!(a.is_success(), b.is_success(), "{a}, {b}");
         let uses = f

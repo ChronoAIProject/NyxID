@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { NodeInfo } from "@/types/nodes";
+import { appI18n } from "@/i18n";
 
 const state = vi.hoisted(() => ({
   nodes: undefined as readonly NodeInfo[] | undefined,
@@ -9,8 +10,8 @@ const state = vi.hoisted(() => ({
   servicesLoading: false,
 }));
 
-vi.mock("@/i18n/use-ui-translation", () => ({
-  translateUi: (key: string) => key,
+vi.mock("@/i18n/use-ui-translation", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/i18n/use-ui-translation")>(),
   useUiTranslation: () => ({ t: (key: string) => key }),
 }));
 
@@ -79,13 +80,14 @@ function makeNode(
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   state.nodes = undefined;
   state.nodesLoading = false;
   state.servicesLoading = false;
   localStorage.clear();
   vi.clearAllMocks();
+  await appI18n.changeLanguage("en");
 });
 
 it("counts connected nodes using the same live status rule as NodesPage", () => {
@@ -119,4 +121,31 @@ it("keeps the dashboard loading while services are unresolved", () => {
   expect(screen.queryByText("Welcome back, {{name}}"),).not.toBeInTheDocument();
   expect(screen.queryByText("No nodes")).not.toBeInTheDocument();
   expect(container.querySelector(".animate-pulse")).toBeInTheDocument();
+});
+
+it("counts connected nodes using lowercase API statuses, excluding disconnected nodes", () => {
+  state.nodes = [
+    makeNode("online-connected", "online", true),
+    makeNode("offline", "offline", false),
+    makeNode("draining", "draining", false),
+    makeNode("online-disconnected", "online", false),
+  ];
+
+  render(<DashboardPage />);
+
+  expect(screen.getByText("1/4 online")).toBeInTheDocument();
+});
+
+it("translates the whole connected-node count phrase in zh-CN", async () => {
+  state.nodes = [
+    makeNode("online-connected", "online", true),
+    makeNode("offline", "offline", false),
+    makeNode("draining", "draining", false),
+    makeNode("online-disconnected", "online", false),
+  ];
+  await appI18n.changeLanguage("zh-CN");
+
+  render(<DashboardPage />);
+
+  expect(screen.getByText("1/4 在线")).toBeInTheDocument();
 });

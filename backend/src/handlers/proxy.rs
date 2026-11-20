@@ -5399,6 +5399,32 @@ async fn execute_resolved_proxy_inner<'a>(
     }
     target.require_credential_materialized()?;
 
+    // Ornn's server-marked lookup supplies a membership capability. Node
+    // WebSocket handshakes do not take a caller credential.
+    let forward_bearer = if is_ws && node_route.is_some() {
+        false
+    } else if assistant_projection.org_skill_lookup {
+        true
+    } else {
+        let server_headers = if is_ws {
+            &[][..]
+        } else {
+            extra_outbound_headers.as_slice()
+        };
+        Box::pin(proxy_service::admit_caller_bearer(
+            &state.db,
+            &user_id_str,
+            resolved_user_service_id.as_deref(),
+            &target,
+            node_route.as_ref(),
+            caller_token.as_deref(),
+            server_headers,
+        ))
+        .await?
+        .is_some()
+    };
+    let caller_bearer = caller_token.filter(|_| forward_bearer);
+
     let body = if body_bytes.is_empty() {
         None
     } else {
@@ -6003,7 +6029,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         &identity_headers,
                         query.as_deref(),
                         &ws_forward_headers,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         collect_realtime_llm_usage,
                         metered.clone(),
                         billing_egress_permit,
@@ -6036,7 +6062,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     node_forward_headers,
                     &identity_headers,
                     &delegated,
-                    caller_token.as_deref(),
+                    caller_bearer.as_deref(),
                     &extra_outbound_headers,
                 )?;
                 let node_location_context = AsyncLocationContext::new(
@@ -7523,7 +7549,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         },
                         identity_headers,
                         delegated,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         &state.token_exchange_cache,
                         &state.cloud_response_cache,
                         extra_outbound_headers,
@@ -13869,7 +13895,24 @@ mod proxy_resolution_integration_tests {
                     ),
                 )
             };
-            let request = async {
+            let successor_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(survivor.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    successor_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                .await
+                .unwrap();
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let request = node_dispatch::WAITING_FOR_NODE_HANDOVER.scope(waiting.clone(), async {
                 let mut slug = String::new();
                 proxy_request_by_slug_inner(
                     &survivor,
@@ -13881,29 +13924,12 @@ mod proxy_resolution_integration_tests {
                 )
                 .await
                 .unwrap()
-            };
+            });
             let agent = async {
-                tokio::time::sleep(Duration::from_millis(850)).await;
+                waiting.notified().await;
                 if let Some(fence) = release {
                     assert!(owners::release(&db, &fence).await.unwrap());
                 }
-                let router = Router::new()
-                    .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
-                    .with_state(survivor.clone());
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let server = tokio::spawn(async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .await
-                    .unwrap();
-                });
-                let (mut ws, _) =
-                    tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
-                        .await
-                        .unwrap();
                 let mut auth = serde_json::json!({"type":"auth","node_id":node.id,"token":format!("test-node-auth-{}",node.id)});
                 if let Some(proof) = retired {
                     auth["retirement_v1"] = serde_json::json!({"predecessor":proof});

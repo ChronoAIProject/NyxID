@@ -181,7 +181,7 @@ impl Writer<'_> {
                 platform_message_id: None,
                 file_key: (kind == "file").then(|| handle.clone()).flatten(),
                 image_key: (kind == "image").then_some(handle).flatten(),
-                filename: None,
+                filename: super::filename::selector(element),
                 mime_type: None,
                 size_bytes: None,
             });

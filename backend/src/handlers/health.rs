@@ -1,5 +1,7 @@
 use axum::Json;
 use axum::extract::State;
+use axum::http::{StatusCode, header::CACHE_CONTROL};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::AppState;
@@ -52,28 +54,32 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
-/// Readiness is process-local; liveness and security capability readiness are independent.
-pub async fn ready(State(state): State<AppState>) -> axum::http::StatusCode {
-    if state.shutdown.is_draining() {
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
+/// GET /ready: preserve the drain-only, empty-body orchestration contract.
+pub async fn ready(State(state): State<AppState>) -> Response {
+    let status = if state.shutdown.is_draining() {
+        StatusCode::SERVICE_UNAVAILABLE
     } else {
-        axum::http::StatusCode::OK
-    }
+        StatusCode::OK
+    };
+    (status, [(CACHE_CONTROL, "no-store")]).into_response()
 }
 
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
-        encryption: EncryptionHealthResponse {
-            previous_key_configured: state.encryption_keys.has_previous(),
-            decrypt_stats: state.encryption_keys.decrypt_stats(),
-        },
-    })
+pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(HealthResponse {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
+            encryption: EncryptionHealthResponse {
+                previous_key_configured: state.encryption_keys.has_previous(),
+                decrypt_stats: state.encryption_keys.decrypt_stats(),
+            },
+        }),
+    )
 }
 
 /// Container releases stamp this after compilation. Standalone binaries keep
@@ -214,6 +220,111 @@ pub async fn automation_continuations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_probe(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+    ) -> serde_json::Value {
+        assert_probe_headers(state, path, expected_status, &[]).await
+    }
+
+    async fn assert_probe_headers(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        use tower::ServiceExt;
+        let (_, router) = crate::routes::build_router_with_state(state.clone());
+        let app = router
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::mw::csrf::browser_csrf_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.shutdown.clone(),
+                crate::mw::shutdown::track,
+            ))
+            .with_state(state);
+        let mut request = axum::http::Request::builder().uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(!response.headers().contains_key("location"));
+        assert!(!response.headers().contains_key("www-authenticate"));
+        if path != "/ready" {
+            assert_eq!(response.headers()["content-type"], "application/json");
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        if path == "/ready" {
+            assert!(bytes.is_empty());
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_http_stays_database_independent_and_preserves_drain_contract() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state.clone(), "/ready", StatusCode::OK).await,
+            serde_json::Value::Null
+        );
+        state.shutdown.begin_drain();
+        // Probe routes keep their contracts even after ordinary work is stopped.
+        state.shutdown.stop();
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_production_routes_ignore_missing_and_invalid_login_credentials() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        for headers in [
+            vec![],
+            vec![("authorization", "Bearer invalid.expired.token")],
+            vec![("cookie", "nyx_session=expired; nyx_access_token=expired")],
+            vec![
+                ("authorization", "Bearer nyx_invalid_agent_key"),
+                ("x-api-key", "invalid"),
+            ],
+            vec![
+                ("origin", "https://untrusted.example"),
+                ("cookie", "nyx_session=expired"),
+            ],
+        ] {
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/health", StatusCode::OK, &headers).await["status"],
+                "ok"
+            );
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/ready", StatusCode::OK, &headers).await,
+                serde_json::Value::Null
+            );
+        }
+    }
 
     #[test]
     fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {

@@ -1245,6 +1245,7 @@ async fn existing_personal_approval_and_explicit_deny_are_not_bypassed() {
         state.clone(),
         Arc::new(execution::Runtime::mocked(&server.uri())),
     );
+    crate::services::security_readiness_service::refresh_test_replica_heartbeat(&state.db).await;
     let response = app
         .clone()
         .oneshot(request(
@@ -1280,17 +1281,26 @@ async fn existing_personal_approval_and_explicit_deny_are_not_bypassed() {
         .count_documents(doc! {})
         .await
         .unwrap();
-    assert_eq!(
-        app.oneshot(request(
+    crate::services::security_readiness_service::refresh_test_replica_heartbeat(&state.db).await;
+    let denied = app
+        .oneshot(request(
             &key,
             &row,
             &plan.model.public_id,
-            &uuid::Uuid::new_v4().to_string()
+            &uuid::Uuid::new_v4().to_string(),
         ))
         .await
-        .unwrap()
-        .status(),
-        http::StatusCode::FORBIDDEN
+        .unwrap();
+    let status = denied.status();
+    let body = axum::body::to_bytes(denied.into_body(), 65536)
+        .await
+        .unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "explicit deny returned error {}",
+        error["error"]
     );
     assert_eq!(
         state

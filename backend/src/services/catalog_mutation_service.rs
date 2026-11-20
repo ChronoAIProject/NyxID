@@ -168,6 +168,7 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
         "destination_targets",
         "identity_propagation_mode",
         "forward_access_token",
+        super::caller_token_approval::FIELD,
         "inject_delegation_token",
         "token_exchange_config",
         "default_request_headers",
@@ -234,6 +235,7 @@ pub async fn commit_update(
                 super::audit_service::log_actor_event_in_session(db, session, key, &authority.actor, "tools_manager_updated",
                     serde_json::json!({"service_id":live.id,"authority":if admin {"admin"} else {"tools_manager"},"fields":fields.keys().filter(|k| k.as_str() != "updated_at").collect::<Vec<_>>()})).await?;
             }
+            super::caller_token_approval::audit_change(db, session, key, Some(&authority.actor), &live, &updated.caller_token_approved_destinations).await?;
             Ok(updated)
         })
     }).await

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { capture } from "@/lib/telemetry";
 import { transitionAssistantIdentity } from "./identity";
-import { uploadFile } from "./uploads";
+import { isSupportedAttachment, uploadFile } from "./uploads";
+import { assistantUploadNameHeader, sanitizeAssistantUploadName } from "../../../../shared/assistantUploadFilename";
 
 vi.mock("@/lib/telemetry", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/telemetry")>(),
@@ -44,6 +45,77 @@ describe("production attachment upload error telemetry", () => {
     transitionAssistantIdentity("upload-owner");
   });
   afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ["a".repeat(117) + ".v1.csv ", "application/vnd.ms-excel", "a".repeat(116) + ".csv"],
+    ["a".repeat(117) + ".v1.csv. .🔥", "application/vnd.ms-excel", "a".repeat(116) + ".csv"],
+    ["Invoice.json. .", "application/json", "Invoice.json"],
+    ["Invoice.json. .🔥", "application/json", "Invoice.json"],
+    ["🧾.PDF.", "application/pdf", undefined],
+    ["🧾.PDF. .🔥", "application/pdf", undefined],
+    [".gitignore. .🔥", "text/plain", "gitignore"],
+    ["attachment. .", "application/pdf", "attachment"],
+  ])("normalizes trailing padding before classification and the actual request: %s", async (name, type, expected) => {
+    const selected = new File(["original bytes"], name, { type });
+    expect(isSupportedAttachment(selected)).toBe(true);
+    expect(sanitizeAssistantUploadName(name)).toBe(expected);
+    if (expected !== undefined) {
+      expect(sanitizeAssistantUploadName(expected)).toBe(expected);
+      expect(assistantUploadNameHeader(expected)).toBe(assistantUploadNameHeader(name));
+    }
+    const pending = uploadFile(scope, selected, new AbortController().signal, vi.fn());
+    const xhr = UploadRequest.latest;
+    const sent = xhr.setRequestHeader.mock.calls.find(([key]) => key.toLowerCase() === "x-attachment-name");
+    expect(sent?.[1]).toBe(expected === undefined ? undefined : encodeURIComponent(expected));
+    expect(xhr.send).toHaveBeenCalledExactlyOnceWith(selected);
+    xhr.respond(201, JSON.stringify({ id: "saved", content_type: "text/plain", size: selected.size, label: expected ?? "attachment.pdf" }));
+    await pending;
+  });
+
+  it.each([
+    ["a".repeat(118) + ".pdf", "a".repeat(116) + ".pdf"],
+    ["a".repeat(121) + ".pdf", "a".repeat(116) + ".pdf"],
+    [" ".repeat(120) + "a.pdf", "a.pdf"],
+    [" .".repeat(120) + "a.pdf", "a.pdf"],
+    ["attachment", "attachment"],
+    ["🧾.PDF", undefined],
+    ["📷.jpg", undefined],
+    ["..", undefined],
+  ])("preflight and raw upload preserve the server filename contract for %s", async (name, expected) => {
+    const selected = new File(["original bytes"], name);
+    expect(isSupportedAttachment(selected)).toBe(true);
+    const pending = uploadFile(scope, selected, new AbortController().signal, vi.fn());
+    const xhr = UploadRequest.latest;
+    const sent = xhr.setRequestHeader.mock.calls.find(([key]) => key.toLowerCase() === "x-attachment-name");
+    expect(sent?.[1]).toBe(expected === undefined ? undefined : encodeURIComponent(expected));
+    expect(xhr.send).toHaveBeenCalledExactlyOnceWith(selected);
+    xhr.respond(201, JSON.stringify({ id: "saved", content_type: "application/pdf", size: selected.size, label: expected ?? "attachment.pdf" }));
+    await pending;
+  });
+
+  it.each(["报".repeat(118) + ".pdf", "𠮷".repeat(118) + ".pdf"])("fits encoded Unicode names into the real header cap: %s", async (name) => {
+    const selected = new File(["original bytes"], name);
+    expect(isSupportedAttachment(selected)).toBe(true);
+    const pending = uploadFile(scope, selected, new AbortController().signal, vi.fn());
+    const xhr = UploadRequest.latest;
+    const sent = xhr.setRequestHeader.mock.calls.find(([key]) => key.toLowerCase() === "x-attachment-name")?.[1];
+    expect(sent).toBeDefined();
+    expect(sent.length).toBeLessThanOrEqual(1024);
+    expect(decodeURIComponent(sent)).toMatch(/\.pdf$/);
+    expect([...decodeURIComponent(sent)].length).toBeLessThanOrEqual(120);
+    xhr.respond(201, JSON.stringify({ id: "saved", content_type: "application/pdf", size: selected.size, label: decodeURIComponent(sent) }));
+    await pending;
+  });
+
+  it.each(["🧾.PDF", "attachment", "报".repeat(118) + ".pdf"])("uses the same optional name header in the preview transport: %s", async (name) => {
+    const mock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "preview", content_type: "application/pdf", size: 3, label: "preview.pdf" }), { status: 201 }));
+    globalThis.__nyxidAssistantHttpMock = mock;
+    try {
+      await uploadFile(scope, new File(["pdf"], name), new AbortController().signal, vi.fn());
+      const headers = new Headers(mock.mock.calls[0]?.[0].init.headers);
+      expect(headers.get("x-attachment-name")).toBe(assistantUploadNameHeader(name) ?? null);
+    } finally { globalThis.__nyxidAssistantHttpMock = undefined; }
+  });
 
   it.each([403, 500])("reports HTTP %s once with bounded metadata and trace correlation", async (status) => {
     const pending = expect(uploadFile(scope, file, new AbortController().signal, vi.fn())).rejects.toThrow("private response");

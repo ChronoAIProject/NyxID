@@ -6684,6 +6684,16 @@ async fn execute_tool_resolved_inner(
     }
 
     target.require_credential_materialized()?;
+    let caller_bearer = Box::pin(proxy_service::admit_caller_bearer(
+        db,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+        billing_context_builder.user_service_id.as_deref(),
+        &target,
+        node_route.as_ref(),
+        exec_ctx.caller_token,
+        &prepared.server_owned_headers,
+    ))
+    .await?;
     box_mcp_forwarding(move || async move {
         if let Some(permit) = &target.execution_permission {
             let mut headers = axum::http::HeaderMap::new();
@@ -7112,7 +7122,7 @@ async fn execute_tool_resolved_inner(
             let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
                 super::lark_base_writes::transport::Transport {
                     target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
-                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:caller_bearer,
                 }).await;
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
@@ -7165,7 +7175,7 @@ async fn execute_tool_resolved_inner(
                 base_headers,
                 &identity_headers,
                 &delegated,
-                exec_ctx.caller_token,
+                caller_bearer,
                 &server_owned_headers,
             )?;
             let node_request = NodeProxyRequest {
@@ -7323,11 +7333,13 @@ async fn execute_tool_resolved_inner(
                                 super::assistant_tool_files::reserve().await
                             } else { None };
                             let text = if reservation.is_some() && !response_body_limit.is_some_and(|n| resp.body.len() > n) {
+                                let legacy_text = std::str::from_utf8(&resp.body).ok();
                                 super::assistant_tool_files::response_text(db,encryption_keys,chat,resp.status,
-                                    mime,header_value(&resp.headers,"content-disposition"),&endpoint.name,&resp.body).await
+                                    mime,header_value(&resp.headers,"content-disposition"),&endpoint.name,
+                                    legacy_text,&resp.body).await
                             } else { None };
                             if let Some(text) = text {
-                                return Ok(McpToolExecutionOutcome::Response(tool_response(resp.status,Some("application/json"),text.as_bytes())));
+                                return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(resp.status, text)));
                             }
                         }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
@@ -7379,8 +7391,9 @@ async fn execute_tool_resolved_inner(
                             && let Some(chat) = node_file_chat
                             && let Some(text) = super::assistant_tool_files::response_text(db,encryption_keys,chat,status,
                                 header_value(&headers,"content-type").unwrap_or_default(),
-                                header_value(&headers,"content-disposition"),&endpoint.name,&body_buf).await {
-                            return Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())));
+                                header_value(&headers,"content-disposition"),&endpoint.name,
+                                std::str::from_utf8(&body_buf).ok(),&body_buf).await {
+                            return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(status, text)));
                         }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             status,
@@ -7486,7 +7499,7 @@ async fn execute_tool_resolved_inner(
             proxy_service::ProxyBody::Buffered(body),
             identity_headers,
             delegated,
-            exec_ctx.caller_token,
+            caller_bearer,
             token_exchange_cache,
             cloud_response_cache,
             server_owned_headers,
@@ -7624,10 +7637,34 @@ async fn execute_tool_resolved_inner(
                         break;
                     }
                 }
-                if file_reservation.is_some()
-                    && let Some(text) = super::assistant_tool_files::response_text(db, encryption_keys, chat,
-                        status, &response_mime, disposition.as_deref(), &endpoint.name, &bytes).await {
-                    return Ok((ToolResponse::execution_receipt(status, text), None));
+                if file_reservation.is_some() {
+                    let legacy_text = if std::str::from_utf8(&bytes).is_ok()
+                        && super::assistant_tool_files::is_file(status, &response_mime, disposition.as_deref(), &bytes) {
+                        // Large text remains readable from the attachment; drop
+                        // its temporary decoder allocation before encryption.
+                        Some(legacy_buffered_response_text(headers.clone(), bytes.clone()).await?)
+                            .filter(|text| text.chars().take(8_001).count() <= 8_000)
+                    } else {
+                        None
+                    };
+                    if let Some(text) = super::assistant_tool_files::response_text(
+                        db,
+                        encryption_keys,
+                        chat,
+                        status,
+                        &response_mime,
+                        disposition.as_deref(),
+                        &endpoint.name,
+                        legacy_text.as_deref(),
+                        &bytes,
+                    )
+                    .await
+                    {
+                        let usage = mcp_platform_usage_for_path(
+                            &bytes, request_len, &target.service, &path, status,
+                        );
+                        return Ok((ToolResponse::execution_receipt(status, text), Some(usage)));
+                    }
                 }
                 // Non-files keep the bounded/strict decoder and accounting,
                 // or reqwest's exact original charset/BOM decoder when unbounded.
@@ -8909,6 +8946,30 @@ mod tests {
             ),
             (20, 20, 100, 1)
         );
+    }
+
+    #[test]
+    fn mcp_retained_file_usage_counts_original_bytes_for_token_services() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::models::service_billing::ServiceBilling;
+
+        let mut service = dummy_service();
+        service.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(
+                    serde_json::json!({"metric": "tokens", "credits_per_unit": "1"}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let file = vec![b'x'; 10 * 1024 * 1024];
+        let handle = br#"{"attachment_id":"id","name":"large.bin","type":"application/octet-stream","size":10485760}"#;
+        let file_usage = mcp_platform_usage_for_path(&file, 17, &service, "/files", 200);
+        let handle_usage = mcp_platform_usage_for_path(handle, 17, &service, "/files", 200);
+        assert_eq!(file_usage.bytes, 17 + file.len() as i64);
+        assert_eq!(handle_usage.bytes, 17 + handle.len() as i64);
+        assert!(file_usage.tokens > handle_usage.tokens);
     }
 
     use super::*;
@@ -16470,6 +16531,7 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,

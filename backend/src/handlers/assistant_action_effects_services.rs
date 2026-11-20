@@ -1648,6 +1648,40 @@ mod tests {
         assert!(stored.state_version > version_after_set);
     }
 
+    async fn assert_service_action_state(
+        db: &mongodb::Database,
+        expected: &UserService,
+        credentials: u64,
+        receipts: u64,
+    ) {
+        let stored = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id": &expected.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state_version, expected.state_version);
+        assert_eq!(stored.api_key_id, expected.api_key_id);
+        assert_eq!(
+            stored.rotation_predecessor_id,
+            expected.rotation_predecessor_id
+        );
+        assert_eq!(stored.node_id, expected.node_id);
+        for (collection, count) in [
+            (USER_API_KEYS, credentials),
+            (ASSISTANT_ACTION_RECEIPTS, receipts),
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                count,
+                "{collection}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn service_rotate_credential_never_returns_credential_material() {
         let Some((db, actor_id)) = prepare_actor("svc_rotate_secret_free").await else {
@@ -1663,12 +1697,18 @@ mod tests {
             "credential": "sk-live-replacement-credential",
         });
 
-        let (status, rotated) = request(
-            app(state.clone()),
-            &token,
-            "POST",
-            "/assistant/actions/services/rotate-credential",
-            Some(body.clone()),
+        let (status, rotated) = crate::test_utils::retry_oauth_authority(
+            async || {
+                request(
+                    app(state.clone()),
+                    &token,
+                    "POST",
+                    "/assistant/actions/services/rotate-credential",
+                    Some(body.clone()),
+                )
+                .await
+            },
+            async || assert_service_action_state(&db, &service, 1, 0).await,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{rotated}");
@@ -1695,16 +1735,23 @@ mod tests {
         );
         assert_eq!(stored.state_version, 2);
 
-        let (status, replayed) = request(
-            app(state),
-            &token,
-            "POST",
-            "/assistant/actions/services/rotate-credential",
-            Some(body),
+        let (status, replayed) = crate::test_utils::retry_oauth_authority(
+            async || {
+                request(
+                    app(state.clone()),
+                    &token,
+                    "POST",
+                    "/assistant/actions/services/rotate-credential",
+                    Some(body.clone()),
+                )
+                .await
+            },
+            async || assert_service_action_state(&db, &stored, 2, 1).await,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{replayed}");
         assert_eq!(replayed["replayed"], true);
+        assert_service_action_state(&db, &stored, 2, 1).await;
         assert!(
             !replayed
                 .to_string()
@@ -2013,35 +2060,43 @@ mod tests {
         let state = test_app_state(db);
         let token = access_token(&state, &actor_id);
 
-        let (status, routed) = request(
-            app(state.clone()),
-            &token,
-            "POST",
-            "/assistant/actions/services/route",
-            Some(json!({
-                "actionRequestId": "route-evidence",
-                "userServiceId": service.id,
-                "viaNodeId": node_id,
-            })),
+        let (status, routed) = crate::test_utils::retry_oauth_authority(
+            async || {
+                request(
+                    app(state.clone()),
+                    &token,
+                    "POST",
+                    "/assistant/actions/services/route",
+                    Some(json!({
+                        "actionRequestId": "route-evidence",
+                        "userServiceId": service.id,
+                        "viaNodeId": node_id,
+                    })),
+                )
+                .await
+            },
+            async || assert_service_action_state(&state.db, &service, 0, 0).await,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{routed}");
 
-        let (status, evidence) = request(
-            app(state),
-            &token,
-            "GET",
-            &format!("/keys/{}/authorization", service.id),
-            None,
+        let (status, evidence) = crate::test_utils::retry_oauth_authority(
+            async || {
+                request(
+                    app(state.clone()),
+                    &token,
+                    "GET",
+                    &format!("/keys/{}/authorization", service.id),
+                    None,
+                )
+                .await
+            },
+            async || {},
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{evidence}");
         assert_eq!(evidence["node_id"], node_id);
-        assert!(
-            evidence["state_version"]
-                .as_i64()
-                .is_some_and(|value| value >= 1)
-        );
+        assert_eq!(evidence["state_version"], service.state_version + 1);
         assert_eq!(
             crate::test_utils::aevatar_secret_free_violation(&evidence),
             None

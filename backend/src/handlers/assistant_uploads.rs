@@ -75,22 +75,23 @@ pub async fn upload(
         .headers()
         .get("x-attachment-name")
         .and_then(|v| v.to_str().ok())
-        .filter(|v| v.len() <= 1024)
-        .unwrap_or("attachment");
-    let name = urlencoding::decode(encoded)
+        .filter(|v| v.len() <= 1024);
+    let name = encoded
+        .map(urlencoding::decode)
+        .transpose()
         .map_err(|_| AppError::BadRequest("Invalid display filename".into()))?
-        .into_owned();
+        .map(|name| name.into_owned());
     let bytes = axum::body::to_bytes(request.into_body(), reservation.payload_limit)
         .await
         .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
     let payload = bytes.to_vec();
     drop(bytes);
-    let item = Box::pin(uploads::upload_authorized(
+    let item = Box::pin(uploads::upload_named_authorized(
         &state.db,
         &state.encryption_keys,
         &user,
         &scope,
-        &name,
+        name.as_deref(),
         payload,
         access,
     ))

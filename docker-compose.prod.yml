@@ -52,7 +52,8 @@ services:
       mongodb-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      # Preserve dependency-free process health; /ready is drain-only.
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:3001/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -69,6 +70,12 @@ services:
       NYXID_BROWSER_CONNECT_ORIGINS: ${NYXID_BROWSER_CONNECT_ORIGINS:-}
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:8080/frontend/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   backend_tuf:

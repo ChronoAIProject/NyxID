@@ -202,6 +202,17 @@ sanitized attachment label, and supplies the mandatory JSON-string `extra` with
 match. Success requires HTTP 2xx, `code: 0` and a nonempty `data.file_token`;
 the upload does not create a Base record.
 
+Original safe filenames, including meaningful extensionless names and a newly
+supplied literal `attachment`, are preserved. New human/Lark uploads retain
+optional filename provenance; absent provenance keeps legacy rows compatible.
+Missing names and ambiguous legacy generic `attachment` labels receive a canonical suffix
+from the stored content type: PNG/JPEG/GIF/WebP, PDF, DOCX, plain text, Markdown,
+CSV, JSON and explicitly recognized audio/video types. Opaque or unknown types
+keep a generic name. Filename bounds retain the original suffix when truncating
+a named original, including browser uploads before retention. Explicit `file_name` overrides are preserved exactly. Direct
+uploads and managed record-with-attachments operations share this default policy;
+the file bytes and content identity do not change. See issue #2453.
+
 Attachment access is granted only by the compiled overlay's trusted projection
 on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
 `api-feishu` and `api-feishu-bot`. Custom services, edited contracts and mounted

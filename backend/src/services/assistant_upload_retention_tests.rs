@@ -63,6 +63,7 @@ async fn root(
         sections: Vec::new(),
     };
     let row = AssistantUpload {
+        filename_is_original: None,
         source: None,
         content_sha256: None,
         secret_context_versions: Default::default(),

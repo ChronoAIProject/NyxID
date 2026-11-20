@@ -584,7 +584,8 @@ export function ChannelBotSetup({
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent
         ref={dialogContentRef}
-        className="channel-connect-dialog max-h-[90dvh] overflow-y-auto md:max-w-md"
+        // scroll-py-1 keeps keyboard-focused controls fully inside the scrollport when native focus scrolling lands on a fractional edge at larger text sizes (#2218).
+        className="channel-connect-dialog max-h-[90dvh] scroll-py-1 overflow-y-auto md:max-w-md"
       >
         {content}
       </DialogContent>

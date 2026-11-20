@@ -294,6 +294,7 @@ With a NyxID account, pick the workflow that matches what you want to build and 
 | Nyxbot Onboarding | [docs/NYXBOT_ONBOARDING.md](docs/NYXBOT_ONBOARDING.md) | Onboarding entry, existing integrations, and pending backend contracts |
 | NyxBot CLI and API | [docs/chat/09-owner-cli-api.md](docs/chat/09-owner-cli-api.md) | Owner commands, invocation lifecycle, security boundaries, and rollout |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
+| Health / Readiness | [docs/HEALTH_READINESS.md](docs/HEALTH_READINESS.md) | Independent frontend/backend probe contracts and rollout |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
 | Service Monitoring | [docs/SERVICE_MONITORING.md](docs/SERVICE_MONITORING.md) | Scoped chrono-probe status, owner configuration, and explicit checks |

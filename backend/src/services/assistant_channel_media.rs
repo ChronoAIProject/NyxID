@@ -333,13 +333,8 @@ async fn fetch_item(
         if authorized.guest != guest_media {
             return Err(AppError::ChannelAttachmentNotFound);
         }
-        let selector = if item.embedded {
-            &authorized.source.embedded_attachments
-        } else {
-            &authorized.source.attachments
-        }
-        .get(item.index)
-        .ok_or(AppError::ChannelAttachmentNotFound)?;
+        let selector =
+            super::channel_media_fetch::selector(&authorized.source, item.index, item.embedded)?;
         if selector.size_bytes.is_some_and(|n| n > maximum as u64) {
             return Err(AppError::ChannelMediaTooLarge);
         }
@@ -349,7 +344,7 @@ async fn fetch_item(
             &state.encryption_keys,
             &state.http_client,
             &authorized.bot,
-            selector,
+            &selector,
             adapter.as_ref(),
             reservation.payload_limit as u64,
         )
@@ -372,7 +367,16 @@ async fn fetch_item(
                         return Err(AppError::ChannelAttachmentNotFound);
                     }
                 }
-                let name = selector.filename.as_deref().unwrap_or("attachment");
+                // Lark resource responses can supply an original filename even
+                // when image/file/post selectors omit one (including PDFs).
+                // Other platforms and opaque file originals keep source labels.
+                let lark = matches!(authorized.bot.platform.as_str(), "lark" | "feishu");
+                let name = if lark {
+                    fetched.filename.as_deref()
+                } else {
+                    selector.filename.as_deref()
+                }
+                .map(str::to_owned);
                 let bytes = fetched.bytes.to_vec();
                 drop(fetched);
                 let source = UploadSource {
@@ -395,7 +399,27 @@ async fn fetch_item(
                     embedded: item.embedded,
                     declared: event.media.as_ref().expect("media event").declared,
                 };
-                let upload = if authority::expanded_relay(&authorized.bot.platform) || guest_media {
+                let upload = if lark {
+                    if guest_media {
+                        Box::pin(authority::resolve(&state.db, &request)).await?;
+                    }
+                    Box::pin(uploads::upload_lark_channel_authorized(
+                        &state.db,
+                        &state.encryption_keys,
+                        &row.user_id,
+                        &row.id,
+                        name.as_deref(),
+                        bytes,
+                        source,
+                        guest_media.then_some(
+                            selector
+                                .mime_type
+                                .as_deref()
+                                .unwrap_or("application/octet-stream"),
+                        ),
+                    ))
+                    .await?
+                } else if authority::expanded_relay(&authorized.bot.platform) || guest_media {
                     // Custody or membership can change while the network is in flight.
                     Box::pin(authority::resolve(&state.db, &request)).await?;
                     Box::pin(uploads::upload_channel_original_authorized(
@@ -403,7 +427,7 @@ async fn fetch_item(
                         &state.encryption_keys,
                         &row.user_id,
                         &row.id,
-                        name,
+                        name.as_deref().unwrap_or("attachment"),
                         bytes,
                         source,
                         selector.mime_type.as_deref(),
@@ -415,7 +439,7 @@ async fn fetch_item(
                         &state.encryption_keys,
                         &row.user_id,
                         &row.id,
-                        name,
+                        name.as_deref().unwrap_or("attachment"),
                         bytes,
                         source,
                     ))

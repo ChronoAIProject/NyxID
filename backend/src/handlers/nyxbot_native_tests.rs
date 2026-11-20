@@ -662,7 +662,8 @@ impl Drop for NativeDiscordFixtureGuard {
 #[tokio::test]
 async fn native_guild_messages_share_history_but_retain_independent_reply_sources() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let (state, calls, server) = setup("native_guild_identity").await;
+    let (state, calls, server) =
+        setup_with_reply("native_guild_identity", GATEWAY_LINK_REPLY).await;
     let (row, key) = native_channel(&state).await;
     let http = MockServer::start().await;
     crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
@@ -691,7 +692,7 @@ async fn native_guild_messages_share_history_but_retain_independent_reply_source
             .unwrap()
             .to_owned();
         let wire = body_text(response).await;
-        assert!(wire.contains("Here is your answer"), "{id}: {wire}");
+        assert_gateway_link_frames(&frames(&wire));
         saved.push(
             recovery::load(&state.db, &row, &response_id)
                 .await
@@ -702,15 +703,17 @@ async fn native_guild_messages_share_history_but_retain_independent_reply_source
     assert_eq!(calls.lock().await.len(), 2);
     assert_eq!(saved[0].conversation_id, saved[1].conversation_id);
     assert_ne!(saved[0].event_key, saved[1].event_key);
+    let snapshot = native_responses::snapshot(
+        State(state.clone()),
+        Path(saved[0].response_id.clone()),
+        bearer(&key),
+    )
+    .await;
+    assert_eq!(snapshot.status(), StatusCode::OK);
+    let snapshot: Value = serde_json::from_str(&body_text(snapshot).await).unwrap();
     assert_eq!(
-        native_responses::snapshot(
-            State(state.clone()),
-            Path(saved[0].response_id.clone()),
-            bearer(&key)
-        )
-        .await
-        .status(),
-        StatusCode::OK
+        snapshot["output"][0]["content"][0]["text"],
+        GATEWAY_LINK_REPLY
     );
     server.abort();
 }
