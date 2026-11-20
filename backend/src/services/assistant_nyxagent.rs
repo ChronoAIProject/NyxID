@@ -4639,8 +4639,9 @@ pub(crate) fn enroll_restart(
     draining: bool,
 ) {
     use crate::models::assistant_conversation::{
-        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource,
+        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource, TeamRestartSource,
     };
+    let specialist = row.is_subagent();
     let Some(turn) = row.active_turn.as_mut() else {
         return;
     };
@@ -4674,6 +4675,7 @@ pub(crate) fn enroll_restart(
     {
         return;
     }
+    let mut team_source = None;
     let source = match (&turn.automation_work, turn.origin) {
         (Some(work), _)
             if matches!(work.role.as_str(), "coordinator" | "direct" | "group")
@@ -4698,6 +4700,54 @@ pub(crate) fn enroll_restart(
         {
             RestartSource::FirstPartyOwner
         }
+        (None, TurnOrigin::Orchestrator)
+            if specialist
+                && row.group_id.is_none()
+                && row.group_request_id.is_none()
+                && turn.trigger_run_id.is_none()
+                && super::security_readiness_service::team_restart_enrollment_ready() =>
+        {
+            let Some(target) = turn
+                .report_to
+                .as_ref()
+                .filter(|target| Some(*target) == start.report_to.as_ref())
+            else {
+                return;
+            };
+            team_source = Some(TeamRestartSource::Assignment {
+                report_to: target.clone(),
+            });
+            RestartSource::FirstPartyOwner
+        }
+        (None, TurnOrigin::Group)
+            if turn.group_reply_in_settlement
+                && row.group_seen_seq > 0
+                && row.group_request_id.is_none()
+                && turn.trigger_run_id.is_none()
+                && super::security_readiness_service::team_restart_enrollment_ready() =>
+        {
+            let Some(group) = row
+                .group_id
+                .as_ref()
+                .filter(|group| Some(*group) == start.group_id.as_ref())
+            else {
+                return;
+            };
+            if !row.agent_id.as_ref().is_some_and(|agent| {
+                super::assistant_wake_service::group::admitted_member(
+                    group,
+                    agent,
+                    row.group_seen_seq,
+                )
+            }) {
+                return;
+            }
+            team_source = Some(TeamRestartSource::GroupMember {
+                group_id: group.clone(),
+                upper_seq: row.group_seen_seq,
+            });
+            RestartSource::FirstPartyOwner
+        }
         _ => return,
     };
     let (Some(initiating_seq), Some(agent_id), Some(worker)) = (
@@ -4710,11 +4760,12 @@ pub(crate) fn enroll_restart(
     turn.restart_admission = Some(Box::new(RestartAdmission {
         continued_after_restart: false,
         generation: super::security_readiness_service::local_generation().map(str::to_owned),
-        version: 2,
+        version: if team_source.is_some() { 3 } else { 2 },
         capacity: start.capacity.clone(),
         reattach: Some(deployment),
         window: None,
         source,
+        team_source,
         initiating_message_id: message_id.into(),
         initiating_seq,
         reply_id: Uuid::new_v4().to_string(),
@@ -5114,17 +5165,8 @@ artifact_recovery_target: None,
                 if let Some(turn) = settled_turn.as_ref() && let Some(offer) = &turn.restart_offer {
                     super::assistant_turn_restart::audit(&db, session, &row.user_id, &turn.turn_id, offer, "settled", error.as_ref().map_or("completed",|error|error.code)).await?;
                 }
-                if let Some(turn) = settled_turn.as_ref()
-                    && let Some(source) = turn.restart_admission.as_deref().filter(|source| !source.credential_ended)
-                    && let Some(window) = &source.window
-                    && !window.terminal
-                {
-                    current.stopped_window = Some(crate::models::assistant_conversation::StoppedWindow {
-                        turn_id: turn.turn_id.clone(),
-                        credential_id: source.credential_id.clone(),
-                        window_key: window.key.clone(),
-                        destination_hash: source.reattach.as_ref().map(|deployment| deployment.destination_hash.clone()),
-                    });
+                if let Some(window) = settled_turn.as_ref().and_then(unconfirmed_window) {
+                    current.stopped_window = Some(window);
                 }
                 // A disposable upstream session may retain fetched pixels or
                 // injected document text. Never carry it into another guest's
@@ -5160,6 +5202,7 @@ artifact_recovery_target: None,
                     automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
+                        text_report_in_settlement: settled_turn.as_ref().and_then(|turn|turn.restart_admission.as_ref()).is_some_and(|source|matches!(source.team_source,Some(crate::models::assistant_conversation::TeamRestartSource::Assignment { .. }))),
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
                         references: if error.is_none() { settled_turn.as_ref().map(|t| t.delegated_images.references.clone()).unwrap_or_default() } else { Vec::new() },
@@ -5282,6 +5325,24 @@ artifact_recovery_target: None,
         super::assistant_turn_observability::settled(&log_row, turn, error.as_ref(), Utc::now());
     }
     Ok(error)
+}
+
+pub(crate) fn unconfirmed_window(
+    turn: &ActiveTurn,
+) -> Option<crate::models::assistant_conversation::StoppedWindow> {
+    let source = turn.restart_admission.as_ref()?;
+    let window = source.window.as_ref()?;
+    (!source.credential_ended && !window.terminal).then(|| {
+        crate::models::assistant_conversation::StoppedWindow {
+            turn_id: turn.turn_id.clone(),
+            credential_id: source.credential_id.clone(),
+            window_key: window.key.clone(),
+            destination_hash: source
+                .reattach
+                .as_ref()
+                .map(|deployment| deployment.destination_hash.clone()),
+        }
+    })
 }
 
 /// Force a stopped turn through the same fenced settlement used by its worker.
@@ -7016,6 +7077,16 @@ pub async fn delete(
     user_id: &str,
     id: &str,
 ) -> AppResult<Vec<AssistantConversation>> {
+    delete_with_retirement(db, user_id, id, None).await
+}
+
+pub(crate) async fn delete_with_retirement(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    retirement: Option<&super::assistant_group_service::RetirementWindows>,
+) -> AppResult<Vec<AssistantConversation>> {
+    let retirement = retirement.cloned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let user_id = user_id.to_owned();
@@ -7026,7 +7097,9 @@ pub async fn delete(
             let db = &db;
             let user_id = user_id.as_str();
             let id = id.as_str();
-            let operation = delete_in_session(db, user_id, id, session).await;
+            let operation =
+                delete_with_retirement_in_session(db, user_id, id, retirement.as_ref(), session)
+                    .await;
             transactions::transaction_result(operation)
         })
         .await
@@ -7040,6 +7113,19 @@ pub(crate) async fn delete_in_session(
     db: &Database,
     user_id: &str,
     id: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<(
+    Vec<AssistantConversation>,
+    Vec<crate::models::api_key_credential::ApiKeyCredential>,
+)> {
+    delete_with_retirement_in_session(db, user_id, id, None, session).await
+}
+
+pub(crate) async fn delete_with_retirement_in_session(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    retirement: Option<&super::assistant_group_service::RetirementWindows>,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<(
     Vec<AssistantConversation>,
@@ -7077,6 +7163,19 @@ pub(crate) async fn delete_in_session(
     let mut children = Vec::new();
     for row in &rows {
         let id = row.id.as_str();
+        if let Some(attempts) = retirement
+            && (row
+                .stopped_window
+                .as_ref()
+                .is_some_and(|window| Some(window) != attempts.get(id))
+                || row
+                    .active_turn
+                    .as_ref()
+                    .and_then(|turn| turn.restart_admission.as_ref())
+                    .is_some())
+        {
+            return Err(AppError::AssistantTurnActive);
+        }
         if row.shared_agent_thread {
             db.collection::<bson::Document>(
                 crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,

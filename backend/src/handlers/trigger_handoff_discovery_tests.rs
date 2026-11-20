@@ -3,6 +3,9 @@ use crate::handlers::assistant_nyxagent::{SERVER_TURN_POLICY, start_turn};
 use crate::services::{feature_flag_service as flags, security_readiness_service as readiness};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "assistant_team_handoff_tests.rs"]
+mod team_handoff;
+
 #[derive(Default, Clone)]
 struct Requests {
     capabilities: Arc<AtomicUsize>,
