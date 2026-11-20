@@ -261,12 +261,12 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         router(&f.state).oneshot(req).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
-    assert_eq!(
-        request(&f.state, "GET", &path, &f.human_token, None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    let (status, denied) = test_utils::retry_oauth_authority(
+        async || request(&f.state, "GET", &path, &f.human_token, None).await,
+        async || {},
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
     let readonly = token(&f, Some("catalog:skills:read")).await;
     assert_eq!(request(&f.state, "PUT", &path, &readonly, Some(json!({"base_revision":1,"request_id":Uuid::new_v4().to_string(),"recommended_skills":[]}))).await.0, StatusCode::FORBIDDEN);
     let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &bearer).unwrap();

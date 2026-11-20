@@ -886,14 +886,43 @@ async fn machine_proposal_connected_timeout_is_terminal_and_worker_cannot_send()
         .start(s.request(Some("connected"), 25, "/s/b2-test/upload").await)
         .await;
     let row = s.proposal().await;
-    let error = tokio::time::timeout(Duration::from_secs(30), call)
-        .await
+    let deadline = row
+        .execution_proposal
+        .as_ref()
         .unwrap()
+        .v2
+        .as_ref()
+        .unwrap()
+        .waiter_until
+        .expect("connected proposal has a waiter deadline");
+    assert_eq!(row.status, "pending");
+    // The signed wait elapses before the abandonment transaction can begin.
+    let until_expiry = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
+    let error = tokio::time::timeout(until_expiry + Duration::from_secs(30), call)
+        .await
+        .expect("connected call did not settle within 30 seconds of its waiter deadline")
         .unwrap()
         .unwrap_err();
     assert!(
         matches!(error,AppError::ApprovalFailed{reason,..} if reason=="Approval request timed out")
     );
+    assert!(chrono::Utc::now() >= deadline);
+    let expired =
+        s.f.state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(expired.status, "expired");
+    let terminal = expired.execution_proposal.unwrap().v2.unwrap();
+    assert_eq!(terminal.state, "not_sent");
+    assert_eq!(
+        terminal.failure_code.as_deref(),
+        Some("approval_wait_timed_out")
+    );
+    assert!(terminal.payload.is_none());
     assert!(s.approve(&row).await.is_err());
     assert!(
         proposals::v2::execute(&s.f.state, &row)

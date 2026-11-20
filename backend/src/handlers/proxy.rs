@@ -13842,7 +13842,24 @@ mod proxy_resolution_integration_tests {
                     ),
                 )
             };
-            let request = async {
+            let successor_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(survivor.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    successor_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                .await
+                .unwrap();
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let request = node_dispatch::WAITING_FOR_NODE_HANDOVER.scope(waiting.clone(), async {
                 let mut slug = String::new();
                 proxy_request_by_slug_inner(
                     &survivor,
@@ -13854,29 +13871,12 @@ mod proxy_resolution_integration_tests {
                 )
                 .await
                 .unwrap()
-            };
+            });
             let agent = async {
-                tokio::time::sleep(Duration::from_millis(850)).await;
+                waiting.notified().await;
                 if let Some(fence) = release {
                     assert!(owners::release(&db, &fence).await.unwrap());
                 }
-                let router = Router::new()
-                    .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
-                    .with_state(survivor.clone());
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let server = tokio::spawn(async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                    )
-                    .await
-                    .unwrap();
-                });
-                let (mut ws, _) =
-                    tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
-                        .await
-                        .unwrap();
                 let mut auth = serde_json::json!({"type":"auth","node_id":node.id,"token":format!("test-node-auth-{}",node.id)});
                 if let Some(proof) = retired {
                     auth["retirement_v1"] = serde_json::json!({"predecessor":proof});
