@@ -293,7 +293,7 @@ test("keyboard search gives results the footer's space and keeps the selection f
   assert.equal(state.one((row) => row.type === "FlatList").props.ListHeaderComponent, null, "intro and account controls yield to search results while typing");
   state.select("Document research");
   assert.equal(state.checkbox("Document research").props.accessibilityState.checked, true);
-  assert.deepEqual(state.saves, []);
+  assert.equal(state.saves.length, 0);
   viewport.props.onViewportChange({ y: 48, height: 700 });
   state.harness.flush();
   assert.equal(state.action().props.disabled, false, "a tall keyboard-visible window retains its save action");
