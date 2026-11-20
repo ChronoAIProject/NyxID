@@ -20,6 +20,7 @@ import type { User } from "@/types/api";
 export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
+  STAGING_QR_LOGIN: "auth:staging-qr-login",
   INVITATION_CODE: "auth:invitation-code",
   // Global only: mobile builds with both domain sets read it at launch.
   MOBILE_NEW_DOMAINS: "mobile:new-domains",
