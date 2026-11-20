@@ -34,7 +34,7 @@
 
 Expected: FAIL with seven missing packages.
 
-- [x] Select exactly one active connected UserService row with `slug=ornn-api` and endpoint host `ornn-api-deployment-api-svc.chronoai-platform.svc.cluster.local` from `nyxid service list --output json`.
+- [x] Select exactly one active connected UserService row with `slug=ornn-api` and the endpoint host of the in-cluster Ornn API service from `nyxid service list --output json`.
 
 - [x] Read `/api/v1/skillsets/aevatar-platform/closure?version=1.14` through that exact binding.
 

@@ -4,16 +4,103 @@ import os
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlsplit
 
-from deploy_images import PRODUCTION, STAGING, DeployError, Rollout, main, mask_token
+from deploy_images import DeployError, Rollout, load_target, main
 
 
 SECRET = "fake +&secret"
 TOKEN = "fake.bearer"
-APPS = "/api/v1/proxy/s/chrono-cd/api/v1/projects/nyxid/apps/"
+
+
+def fake_config(suffix):
+    return {
+        "apps_url": f"https://deploy-{suffix}.example.test:8443/team%20{suffix}/apps",
+        "org_id": f"org:{suffix}",
+        **{role: {"app": f"app-{role}-{suffix}", "service": f"svc-{role}-{suffix}",
+                  "version_url": f"https://{role}-{suffix}.example.test/version"}
+           for role in ("backend", "frontend")},
+    }
+
+
+def private_values(config):
+    return {config["apps_url"], config["apps_url"].removeprefix("https://"), config["org_id"],
+            *config["backend"].values(), *config["frontend"].values()}
+
+
+class TargetConfigTests(unittest.TestCase):
+    def assert_rejected(self, raw, field, *invalid_values):
+        output = io.StringIO()
+        errors = io.StringIO()
+        env = {"GITHUB_ACTIONS": "true"}
+        if raw is not None:
+            env["NYXID_DEPLOY_TARGET"] = raw
+        with patch.dict(os.environ, env, clear=True), patch("sys.argv", ["deploy_images.py", "staging"]), \
+                redirect_stdout(output), redirect_stderr(errors), patch("deploy_images.Rollout") as rollout:
+            with self.assertRaises(SystemExit) as failure:
+                main()
+        rollout.assert_not_called()
+        message = str(failure.exception)
+        self.assertIn("NYXID_DEPLOY_TARGET" + field, message)
+        self.assertEqual(output.getvalue() + errors.getvalue(), "")
+        for value in private_values(fake_config("a")) | set(invalid_values):
+            self.assertNotIn(value, message)
+
+    def test_requires_single_line_json_object(self):
+        for raw in (None, "", "bad-private-json", "null", "[]", json.dumps(fake_config("a"), indent=2)):
+            with self.subTest(raw=raw):
+                self.assert_rejected(raw, "", "bad-private-json")
+
+    def test_exact_object_fields(self):
+        for role in ("", "backend", "frontend"):
+            path = "." + role if role else ""
+            fields = ("app", "service", "version_url") if role else ("org_id", "apps_url", "backend", "frontend")
+            for key in (*fields, "private-extra-key"):
+                with self.subTest(role=role, key=key):
+                    config = fake_config("a")
+                    obj = config[role] if role else config
+                    if key in fields:
+                        del obj[key]
+                        self.assert_rejected(json.dumps(config), f"{path}.{key}")
+                    else:
+                        obj[key] = "private-extra-value"
+                        self.assert_rejected(json.dumps(config), path, key, obj[key])
+            if role:
+                config = fake_config("a")
+                config[role] = list(config[role].items())
+                self.assert_rejected(json.dumps(config), path)
+
+    def test_duplicate_field(self):
+        raw = json.dumps(fake_config("a")).replace('"app":', '"app": "private-duplicate", "app":', 1)
+        self.assert_rejected(raw, ".backend.app", "private-duplicate")
+
+    def test_invalid_identifiers(self):
+        for role, key, limit in (("", "org_id", 128), ("backend", "app", 63), ("frontend", "service", 63)):
+            for value in (None, 42, [], "", " ", "bad/private", "..", "x" * (limit + 1), "bad\nprivate"):
+                with self.subTest(role=role, key=key, value=value):
+                    config = fake_config("a")
+                    obj = config[role] if role else config
+                    obj[key] = value
+                    field = f".{role}.{key}" if role else f".{key}"
+                    self.assert_rejected(json.dumps(config), field, "bad/private", "x" * (limit + 1), "private")
+
+    def test_invalid_urls(self):
+        for role in ("", "backend", "frontend"):
+            for url in (None, 42, "", "https://", "http://private.test/apps",
+                        "https://user:pass@private.test", "https://@private.test", "https://private.test?",
+                        "https://private.test/#", "https://private.test/a?b", "https://private.test/a#b",
+                        "https://private.test:99999", "https://[private.test", "https://private.test/\npath",
+                        "https://private.test/bad path", "https://private.test/%zz"):
+                with self.subTest(role=role, url=url):
+                    config = fake_config("a")
+                    if role:
+                        config[role]["version_url"] = url
+                    else:
+                        config["apps_url"] = url
+                    self.assert_rejected(json.dumps(config), f".{role}.version_url" if role else ".apps_url",
+                                         "private.test", "user:pass")
 
 
 class FakeDeployment:
@@ -25,6 +112,7 @@ class FakeDeployment:
         self.phases = {case.backend: "ready", case.frontend: "ready"}
         self.health_sequence = []
         self.frontend_versions = []
+        self.pod_reason = "FixturePod"
         self.patch_failure = None
         self.status_failure = None
 
@@ -47,15 +135,17 @@ class FakeDeployment:
             })
             return 200, json.dumps({"access_token": TOKEN}).encode()
 
-        if parsed.hostname == "api.nyxid.ai" and parsed.path.startswith(APPS):
-            case.assertEqual(parse_qs(parsed.query), {"org_id": [case.org_id]})
+        apps = urlsplit(case.config["apps_url"])
+        prefix = apps.path.rstrip("/") + "/"
+        if parsed.netloc == apps.netloc and parsed.path.startswith(prefix):
+            case.assertEqual(parse_qs(parsed.query), {"org_id": [case.config["org_id"]]})
             case.assertEqual(headers["Authorization"], "Bearer " + TOKEN)
-            app = parsed.path[len(APPS):].split("/")[0]
+            app = parsed.path[len(prefix):].split("/")[0]
             component = {case.backend: "backend", case.frontend: "frontend"}[app]
-            service = case.backend_service if app == case.backend else "nyxid-frontend"
+            service = case.config[component]["service"]
             if method == "PATCH":
                 self.events.append(("patch", app))
-                case.assertEqual(parsed.path, APPS + app)
+                case.assertEqual(parsed.path, prefix + app)
                 case.assertEqual(headers["Content-Type"], "application/json")
                 case.assertEqual(json.loads(body), {"services": {service: {
                     "image": f"ghcr.io/chronoaiproject/nyxid/{component}:{case.branch}-{case.sha[:7]}",
@@ -65,18 +155,18 @@ class FakeDeployment:
                 self.commits[app] = case.sha[:12]
                 return 200, b"{}"
             case.assertEqual(method, "GET")
-            case.assertEqual(parsed.path, APPS + app + "/status")
+            case.assertEqual(parsed.path, prefix + app + "/status")
             if self.status_failure:
                 return self.status_failure
             phase = self.phases[app]
             self.events.append(("status", app, phase))
             return 200, json.dumps({"phase": phase,
-                                    "services": {service: {"pods": [{"reason": "FixturePod"}]}}}).encode()
+                                    "services": {service: {"pods": [{"reason": self.pod_reason}]}}}).encode()
 
         case.assertEqual(method, "GET")
         case.assertNotIn("Authorization", headers)
         case.assertEqual(headers.get("Cache-Control"), "no-cache")
-        if url == case.health_url:
+        if url == case.config["backend"]["version_url"]:
             if self.health_sequence:
                 answer = self.health_sequence.pop(0)
                 if isinstance(answer, int):
@@ -85,23 +175,18 @@ class FakeDeployment:
                 self.events.append(("health", answer))
                 return 200, json.dumps({"status": "ok", "commit": answer}).encode()
             return 200, json.dumps({"status": "ok", "commit": self.commits[case.backend]}).encode()
-        case.assertEqual(url, case.version_url)
+        case.assertEqual(url, case.config["frontend"]["version_url"])
         if self.frontend_versions:
             return self.frontend_versions.pop(0)
         return 200, json.dumps({"commit": self.commits[case.frontend]}).encode()
 
 
 class StagingDeployTests(unittest.TestCase):
-    target = STAGING
+    name = "staging"
+    suffix = "a"
     credential_prefix = "NYXID_STAGING_DEPLOY_CLIENT"
     branch = "dev"
-    client_id = "staging-deployer"
-    backend = "staging-api"
-    frontend = "staging"
-    backend_service = "nyxid-backend"
-    org_id = "internal:chrono-ai-staging"
-    health_url = "https://staging-api.nyxid.ai/health"
-    version_url = "https://staging.nyxid.ai/build-version.json"
+    client_id = "fixture-a-deployer"
     rollout_seconds = 900
 
     @classmethod
@@ -124,15 +209,49 @@ class StagingDeployTests(unittest.TestCase):
         cls.other = git("commit-tree", tree, "-p", base, "-m", "manual branch")[:12]
 
     def setUp(self):
-        self.server = FakeDeployment(self)
+        self.configure(fake_config(self.suffix))
         self.output = io.StringIO()
+        self.errors = io.StringIO()
+        self.enterContext(redirect_stderr(self.errors))
         self.enterContext(redirect_stdout(self.output))
         self.enterContext(patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}))
 
+    def configure(self, config, public_values=()):
+        self.config = config
+        self.expected_private = private_values(config).difference(public_values)
+        self.backend = config["backend"]["app"]
+        self.frontend = config["frontend"]["app"]
+        self.target = load_target(self.name, json.dumps(config))
+        self.server = FakeDeployment(self)
+
+    def configure_public_labels(self):
+        config = fake_config(self.suffix)
+        frontend = self.name if self.name == "staging" else "product"
+        config["frontend"]["app"] = frontend
+        config["backend"]["app"] = f"{frontend}-worker-{self.suffix}"
+        config["backend"]["service"] = "Back"
+        config["frontend"]["service"] = "rOnT"
+        self.configure(config, public_values=(frontend, "Back", "rOnT"))
+
+    def assert_private_values_absent(self, text):
+        for value in self.expected_private | {TOKEN, SECRET, self.client_id}:
+            self.assertNotIn(value, text)
+            self.assertNotIn(quote_plus(value), text)
+
+    def tearDown(self):
+        # Only Actions mask commands may carry the individual values.
+        lines = self.output.getvalue().splitlines()
+        self.assert_private_values_absent("\n".join(line for line in lines if not line.startswith("::add-mask::")))
+        self.assert_private_values_absent(self.errors.getvalue())
+
     def deploy(self, timeout=None):
         s = self.server
-        Rollout(self.target, send=s.send, sleep=s.sleep, clock=lambda: s.now, timeout=timeout).run(
-            self.sha, self.client_id, SECRET)
+        rollout = Rollout(self.target, send=s.send, sleep=s.sleep, clock=lambda: s.now, timeout=timeout)
+        try:
+            rollout.run(self.sha, self.client_id, SECRET)
+        except DeployError as error:
+            self.assert_private_values_absent(str(error))
+            raise
 
     def writes(self):
         return [e[1] for e in self.server.events if e[0] == "patch"]
@@ -158,13 +277,13 @@ class StagingDeployTests(unittest.TestCase):
                          f"at {self.sha[:12]} (backend already current, frontend already current).\n")
 
     def test_late_older_run_skips_pair_if_either_component_is_newer(self):
-        for app in (self.backend, self.frontend):
-            with self.subTest(app=app):
+        for role, app in (("backend", self.backend), ("frontend", self.frontend)):
+            with self.subTest(role=role):
                 self.server.commits = dict.fromkeys((self.backend, self.frontend), self.old)
                 self.server.commits[app] = self.newer
                 self.deploy()
                 self.assertEqual(self.writes(), [])
-                self.assertIn(f"{app} already runs newer commit {self.newer}", self.output.getvalue())
+                self.assertIn(f"{role} already runs newer commit {self.newer}", self.output.getvalue())
 
     def test_diverged_frontend_blocks_backend(self):
         self.server.commits[self.frontend] = self.other
@@ -222,7 +341,7 @@ class StagingDeployTests(unittest.TestCase):
 
     def test_ready_frontend_serving_old_build_cannot_finish_rollout(self):
         self.server.frontend_versions = [(200, json.dumps({"commit": self.old}).encode())] * 9
-        with self.assertRaisesRegex(DeployError, f"timed out.*{self.frontend} phase=ready.*commit={self.old}"):
+        with self.assertRaisesRegex(DeployError, f"timed out.*frontend phase=ready.*commit={self.old}"):
             self.deploy(timeout=75)
         self.assertEqual(self.writes(), [self.backend, self.frontend])
 
@@ -234,14 +353,14 @@ class StagingDeployTests(unittest.TestCase):
 
     def test_backend_not_ready_blocks_frontend_and_reports_pod_reason(self):
         self.server.phases[self.backend] = "progressing"
-        with self.assertRaisesRegex(DeployError, f"timed out.*{self.backend} phase=progressing.*FixturePod"):
+        with self.assertRaisesRegex(DeployError, f"timed out.*backend phase=progressing.*FixturePod"):
             self.deploy(timeout=37)
         self.assertEqual(self.server.now, 37)
         self.assertEqual(self.writes(), [self.backend])
 
     def test_frontend_shares_the_backend_deadline(self):
         self.server.phases[self.frontend] = "degraded"
-        with self.assertRaisesRegex(DeployError, f"timed out.*{self.frontend} phase=degraded.*FixturePod"):
+        with self.assertRaisesRegex(DeployError, f"timed out.*frontend phase=degraded.*FixturePod"):
             self.deploy(timeout=55)
         self.assertEqual(self.server.now, 55)
         self.assertEqual(self.writes(), [self.backend, self.frontend])
@@ -249,12 +368,14 @@ class StagingDeployTests(unittest.TestCase):
     def test_permanent_proxy_error_surfaces_details_and_redacts_secrets(self):
         self.server.status_failure = 403, json.dumps({
             "error": "wrong_namespace", "error_code": 4,
-            "message": f"forbidden {TOKEN} {self.client_id} {SECRET} {quote_plus(SECRET)}",
+            "message": "forbidden " + " ".join([
+                TOKEN, self.client_id, SECRET, quote_plus(SECRET), *private_values(self.config),
+                quote_plus(self.config["org_id"]), urlsplit(self.config["apps_url"]).path,
+            ]),
         }).encode()
         with self.assertRaisesRegex(DeployError, "HTTP 403 wrong_namespace forbidden") as result:
             self.deploy()
-        for private in (SECRET, TOKEN, self.client_id, quote_plus(SECRET)):
-            self.assertNotIn(private, str(result.exception) + self.output.getvalue())
+        self.assertNotIn(urlsplit(self.config["apps_url"]).path, str(result.exception))
         self.assertEqual(self.writes(), [])
 
     def test_ambiguous_patch_fails_without_blind_retry(self):
@@ -263,25 +384,56 @@ class StagingDeployTests(unittest.TestCase):
             self.deploy()
         self.assertEqual(self.writes(), [self.backend])
 
-    def test_token_registered_with_actions_runner(self):
+    def test_actions_masks_precede_rollout_output(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
-            with patch("deploy_images.mask_token", wraps=mask_token) as mask:
-                self.deploy()
-                mask.assert_called_once_with(TOKEN)
-        protocol, summary = self.output.getvalue().splitlines()
-        self.assertEqual(protocol, "::add-mask::" + TOKEN)
-        self.assertNotIn(TOKEN, summary)
-        self.assertNotIn(SECRET, summary)
+            self.deploy()
+        *commands, summary = self.output.getvalue().splitlines()
+        expected = private_values(self.config) | {TOKEN}
+        self.assertCountEqual(commands, ["::add-mask::" + value.replace("%", "%25") for value in expected])
+        self.assertIn("ready at", summary)
 
-    def test_cli_uses_the_selected_targets_credentials(self):
+    def test_public_labels_survive_in_summary_and_job_log(self):
+        self.configure_public_labels()
+        self.server.commits = dict.fromkeys((self.backend, self.frontend), self.sha[:12])
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            self.deploy()
+        *commands, summary = self.output.getvalue().splitlines()
+        self.assertEqual(summary, f"Skipping deployment, {self.name} already ready at {self.sha[:12]} "
+                         "(backend already current, frontend already current).")
+        self.assertCountEqual(commands, ["::add-mask::" + value.replace("%", "%25")
+                                         for value in self.expected_private | {TOKEN}])
+
+    def test_public_labels_survive_in_failure_details(self):
+        self.configure_public_labels()
+        self.server.phases[self.backend] = "progressing"
+        self.server.pod_reason = f"{self.frontend} Back rOnT " + " ".join(sorted(self.expected_private))
+        with self.assertRaisesRegex(DeployError, f"{self.name} rollout timed out") as failure:
+            self.deploy(timeout=5)
+        self.assertIn(f"backend phase=progressing pod reasons={self.frontend} Back rOnT ", str(failure.exception))
+
+    def test_actions_masks_registered_even_when_preflight_skips_login(self):
+        self.server.commits[self.frontend] = self.newer
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            self.deploy()
+        *commands, summary = self.output.getvalue().splitlines()
+        self.assertCountEqual(commands, ["::add-mask::" + value.replace("%", "%25")
+                                         for value in private_values(self.config)])
+        self.assertIn("frontend already runs newer commit", summary)
+
+    def test_timeout_redacts_phase_and_pod_reasons(self):
+        self.server.phases[self.backend] = "waiting-" + self.backend
+        self.server.pod_reason = "PodFailure " + " ".join(private_values(self.config))
+        with self.assertRaisesRegex(DeployError, f"backend phase=waiting-.*PodFailure.*commit={self.old}"):
+            self.deploy(timeout=5)
+
+    def test_cli_uses_the_selected_targets_configuration_and_credentials(self):
         s = self.server
-        rollout = Rollout(self.target, send=s.send, sleep=s.sleep, clock=lambda: s.now)
         env = {"GITHUB_SHA": self.sha, self.credential_prefix + "_ID": self.client_id,
-               self.credential_prefix + "_SECRET": SECRET}
-        with patch.dict(os.environ, env), patch("sys.argv", ["deploy_images.py", self.target.name]):
-            with patch("deploy_images.Rollout", return_value=rollout) as factory:
+               self.credential_prefix + "_SECRET": SECRET, "NYXID_DEPLOY_TARGET": json.dumps(self.config)}
+        with patch.dict(os.environ, env), patch("sys.argv", ["deploy_images.py", self.name]):
+            with patch("deploy_images.Rollout", side_effect=lambda target: Rollout(
+                    target, send=s.send, sleep=s.sleep, clock=lambda: s.now)):
                 main()
-        factory.assert_called_once_with(self.target)
         self.assertEqual(self.writes(), [self.backend, self.frontend])
 
     def test_configured_deadline(self):
@@ -298,14 +450,9 @@ class StagingDeployTests(unittest.TestCase):
 
 
 class ProductionDeployTests(StagingDeployTests):
-    target = PRODUCTION
+    name = "production"
+    suffix = "b"
     credential_prefix = "NYXID_PRODUCTION_DEPLOY_CLIENT"
     branch = "main"
-    client_id = "production-deployer"
-    backend = "prod-api"
-    frontend = "prod"
-    backend_service = "nyxid-backend-production-api-svc"
-    org_id = "internal:chrono-nyxid"
-    health_url = "https://api.nyxid.ai/health"
-    version_url = "https://nyxid.ai/build-version.json"
+    client_id = "fixture-b-deployer"
     rollout_seconds = 1800
