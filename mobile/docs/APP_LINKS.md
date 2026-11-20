@@ -120,6 +120,42 @@ Links. iOS retains its configured associated domains. The API-only versus
 API-plus-frontend host rollout remains an independent owner decision; this
 feature does not select another host set.
 
+### Business links on frontend hosts
+
+To associate frontend business URLs such as `https://nyxid.ai/activity`, set the
+active build profile's `DEV_NATIVE_LINK_HOSTS=api+frontend` or
+`PROD_NATIVE_LINK_HOSTS=api+frontend`. Unset, empty and `api` keep the existing
+API-only host selection. The selector never falls back to the other build
+profile. `api+frontend` requires that profile's explicit `*_FRONTEND_URL`; it
+cannot claim a host borrowed from the other profile or from `*_LEGAL_BASE_URL`.
+Production builds also include `PROD_NEW_FRONTEND_URL` when the complete new
+domain set is configured. Both API and frontend host sets share the existing
+`shared/native-app-links.json` paths; this includes `/activity`.
+
+For the dual-domain production profile, the intended frontend inputs are:
+
+```dotenv
+PROD_FRONTEND_URL=https://nyx.chrono-ai.fun
+PROD_NEW_FRONTEND_URL=https://nyxid.ai
+PROD_NATIVE_LINK_HOSTS=api+frontend
+```
+
+Keep the existing complete `PROD_NEW_*` domain set; the snippet is not a complete
+build environment. iOS derives its associated-domain entitlement from the
+selected host list. Android additionally needs the existing, profile-local
+`*_ANDROID_HTTPS_APP_LINKS=true` opt-in **after** every selected host serves a
+valid Digital Asset Links file for that build's package and signing certificate.
+The Android and iOS release scripts both use this same profile resolver through
+Expo prebuild. Changing these inputs requires a new signed native artifact; an
+OTA JavaScript update cannot add host entitlements or intent filters.
+
+The QA package `dev.nyxid.nativecheck` and its Android Debug certificate do not
+identify the Play-distributed `fun.chronoai.nyxid` application. Do not publish
+that debug identity on production domains to make a sideloaded QA build verify.
+Use the Play App Signing identity for Play builds, or an explicitly approved
+separate QA host and identity. A successful custom-scheme launch or a forced
+`pm set-app-links` state does not prove HTTPS domain verification.
+
 On supported Android versions through Android 11, **every host in the manifest
 must verify**. Every selected API/frontend host and the retained OneLink host
 must keep serving valid associations for that build. A missing association can

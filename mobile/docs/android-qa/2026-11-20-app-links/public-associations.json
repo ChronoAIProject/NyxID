@@ -1,0 +1,82 @@
+[
+  {
+    "host": "nyxid.ai",
+    "assetlinksStatus": "HTTP/2 404 ",
+    "aasa": {
+      "applinks": {
+        "details": [
+          {
+            "appID": "56DKXVFJS2.fun.chrono-ai.nyxid",
+            "paths": [
+              "/login/device",
+              "/login/agent-key",
+              "/assistant/machines",
+              "/assistant/machines/*",
+              "/chat",
+              "/chat/*",
+              "/groups/*",
+              "/search",
+              "/recents",
+              "/automations",
+              "/automations/*",
+              "/assistant/automations",
+              "/agents",
+              "/agents/*",
+              "/plugins",
+              "/services",
+              "/activity",
+              "/account",
+              "/account/*",
+              "/terms",
+              "/privacy"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "host": "nyx.chrono-ai.fun",
+    "assetlinksStatus": "HTTP/2 404 ",
+    "aasa": {
+      "applinks": {
+        "details": [
+          {
+            "appID": "56DKXVFJS2.fun.chrono-ai.nyxid",
+            "paths": [
+              "/login/device",
+              "/login/agent-key",
+              "/assistant/machines",
+              "/assistant/machines/*",
+              "/chat",
+              "/chat/*",
+              "/groups/*",
+              "/search",
+              "/recents",
+              "/automations",
+              "/automations/*",
+              "/assistant/automations",
+              "/agents",
+              "/agents/*",
+              "/plugins",
+              "/services",
+              "/activity",
+              "/account",
+              "/account/*",
+              "/terms",
+              "/privacy"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "host": "api.nyxid.ai",
+    "assetlinksStatus": "HTTP/2 404 "
+  },
+  {
+    "host": "nyx-api.chrono-ai.fun",
+    "assetlinksStatus": "HTTP/2 404 "
+  }
+]
