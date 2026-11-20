@@ -650,10 +650,7 @@ export function useAssistantUploads({
             text: translateApp("More options…"),
             onPress: () =>
               Alert.alert(translateApp("More attachment options"), undefined, [
-                {
-                  text: translateApp("Files"),
-                  onPress: () => void pick("files"),
-                },
+                { text: translateApp("Files"), onPress: () => void pick("files") },
                 ...extra,
                 { text: translateApp("Cancel"), style: "cancel" },
               ]),
