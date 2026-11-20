@@ -343,7 +343,7 @@ fn nullable_bindings_keep_observed_absence_at_zero_without_inventing_a_charge() 
         disk: Selection::Allocated,
     };
     for (name, absent) in [
-        ("allocated-no-home", vec![Metric::AllocatedDisk]),
+        ("allocated-compute-only", vec![Metric::AllocatedDisk]),
         (
             "allocated-retained-home",
             vec![Metric::AllocatedCpu, Metric::AllocatedMemory],
