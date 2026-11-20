@@ -52,6 +52,7 @@ pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
 pub mod assistant_turn_restart;
 pub mod assistant_wire_log_service;
+pub(crate) mod attachment_filename;
 pub mod audit_chain_service;
 pub mod audit_service;
 pub mod auth_agent_key_login_service;

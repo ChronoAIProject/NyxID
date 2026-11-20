@@ -383,7 +383,7 @@ pub(super) async fn materialize(
         .ok()
         .filter(|n| *n > 0 && *n <= super::attachment_extraction::MAX_BYTES)
         .ok_or_else(|| diagnostics::Reason::AttachmentSize.error(AppError::BadRequest("attachment_write_invalid_attachment_size: Choose a nonempty attachment within upload limits".into())))?;
-    let fields = upload.fields(attachment.label(), size)?;
+    let fields = upload.fields(&attachment.filename(), size)?;
     let reservation = byte_budget::reserve(size).await?;
     let bytes = uploads::egress_bytes(db, keys, chat, &attachment)
         .await

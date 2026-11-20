@@ -396,7 +396,7 @@ fn is_device_reply_forbidden(original_platform: &str, conversation_platform: &st
     original_platform == "device" || conversation_platform == "device"
 }
 
-fn message_to_item(
+pub(crate) fn message_to_item(
     msg: &crate::models::channel_message::ChannelMessage,
     base_url: &str,
 ) -> MessageItem {
@@ -2392,33 +2392,53 @@ async fn fetch_resolved_attachment(
         None => load_active_bot(state, &context.original).await?,
     };
     validate_message_bot_scope(&context.original, &context.conversation, &bot)?;
-    let attachment = context
-        .original
-        .attachments
-        .get(index)
-        .filter(|_| context.original.direction == "inbound")
-        .ok_or(AppError::ChannelAttachmentNotFound)?;
+    if context.original.direction != "inbound" {
+        return Err(AppError::ChannelAttachmentNotFound);
+    }
+    let attachment =
+        crate::services::channel_media_fetch::selector(&context.original, index, false)?;
     let fetched = crate::services::channel_media_fetch::fetch(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
         &bot,
-        attachment,
+        &attachment,
         adapter,
         state.config.channel_media_max_bytes,
     )
     .await?;
     tracing::debug!(message_id = %context.original.id, index, byte_count = fetched.bytes.len(), "Channel attachment fetched");
-    let content_type = fetched
-        .mime_type
-        .as_deref()
+    let lark = matches!(bot.platform.as_str(), "lark" | "feishu");
+    let image_type = (lark && attachment.content_type == "image")
+        .then(|| crate::services::attachment_filename::image_content_type(&fetched.bytes))
+        .flatten();
+    let content_type = image_type
+        .or(fetched.mime_type.as_deref())
         .and_then(|value| axum::http::HeaderValue::from_str(value).ok())
         .unwrap_or_else(|| axum::http::HeaderValue::from_static("application/octet-stream"));
     let length = fetched.bytes.len();
-    let disposition = format!(
-        "attachment; filename=\"{}\"",
-        channel_media_service::safe_filename(fetched.filename.as_deref())
-    );
+    let name = if lark {
+        fetched.filename.clone().unwrap_or_else(|| {
+            crate::services::attachment_filename::default_name(
+                None,
+                image_type.unwrap_or("application/octet-stream"),
+                crate::services::assistant_upload_service::MAX_FILENAME_CHARS,
+            )
+        })
+    } else {
+        fetched
+            .filename
+            .clone()
+            .unwrap_or_else(|| "attachment".into())
+    };
+    let ascii_name = channel_media_service::safe_filename(Some(&name));
+    let mut disposition = format!("attachment; filename=\"{}\"", ascii_name);
+    if lark && ascii_name != name {
+        disposition.push_str(&format!(
+            "; filename*=UTF-8''{}",
+            urlencoding::encode(&name)
+        ));
+    }
     let mut response = axum::response::Response::new(axum::body::Body::from(fetched.bytes));
     let headers = response.headers_mut();
     headers.insert(axum::http::header::CONTENT_TYPE, content_type);
@@ -2574,6 +2594,11 @@ mod tests {
     mod complete_replies {
         use super::*;
         include!("channel_relay_complete_tests.rs");
+    }
+
+    mod attachment_downloads {
+        use super::*;
+        include!("channel_relay_attachment_tests.rs");
     }
 
     struct ReplyTokenFixture {
@@ -4435,6 +4460,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4469,6 +4495,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4972,6 +4999,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -5588,6 +5616,7 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -5885,6 +5914,7 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

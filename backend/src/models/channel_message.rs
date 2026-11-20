@@ -84,6 +84,10 @@ pub struct NyxbotAdmission {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Private download-name overrides aligned with top-level attachments.
+    /// Public callback/history DTOs continue to expose the raw source metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effective_attachment_filenames: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nyxbot_admission: Option<NyxbotAdmission>,
     /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
@@ -197,6 +201,7 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

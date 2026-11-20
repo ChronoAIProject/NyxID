@@ -4,6 +4,7 @@ import { assistantJson } from "@/lib/assistant/assistant-http";
 import { captureNyxbotError, httpErrorCode, responseCorrelation } from "./error-telemetry";
 import { getAssistantIdentityRevision } from "./identity";
 import type { NyxbotErrorCode } from "@/lib/telemetry-schema";
+import { assistantUploadExtension, assistantUploadNameHeader } from "../../../../shared/assistantUploadFilename";
 import {
   nyxAgentAttachmentSchema,
   type NyxAgentAttachment,
@@ -32,15 +33,6 @@ const UNKNOWN_TYPES = new Set(["", "application/octet-stream"]);
 // Windows reports CSV files with Excel's MIME type.
 const CSV_TYPES = new Set(["application/csv", "application/vnd.ms-excel"]);
 
-/** The extension the server derives from the sanitized upload name (`safe_name`). */
-function serverExtension(name: string): string {
-  const leaf = name.split(/[/\\]/).pop() ?? "";
-  const kept = [...leaf.replace(/[^\p{L}\p{N}._\- ()]/gu, "")].slice(0, 120).join("");
-  const clean = kept.trim().replace(/^\.+|\.+$/g, "").trim();
-  const dot = clean.lastIndexOf(".");
-  return dot < 0 ? "" : clean.slice(dot + 1).toLowerCase();
-}
-
 /**
  * Mirrors `attachment_extraction::parse`: PNG, JPEG, GIF, WebP, PDF and DOCX
  * (content-sniffed), and UTF-8 text, Markdown, CSV and JSON chosen by
@@ -48,7 +40,7 @@ function serverExtension(name: string): string {
  */
 export function isSupportedAttachment(file: Pick<File, "name" | "type">): boolean {
   const type = (file.type.split(";")[0] ?? "").trim().toLowerCase();
-  const extension = serverExtension(file.name);
+  const extension = assistantUploadExtension(file.name);
   if (SNIFFED_TYPES.has(type)) return true;
   if (UNKNOWN_TYPES.has(type)) {
     return SNIFFED_EXTENSIONS.has(extension) || TEXT_EXTENSIONS.has(extension);
@@ -86,6 +78,8 @@ export function uploadFile(
   const startedAt = Date.now();
   if (!file.size || file.size > 20 * 1024 * 1024)
     return Promise.reject(new Error("Choose a file between 1 byte and 20 MB."));
+  const filename = assistantUploadNameHeader(file.name);
+  const filenameHeaders: Record<string, string> = filename === undefined ? {} : { "x-attachment-name": filename };
   // The preview fixture accepts raw files without sending them to a backend.
   // Vite removes this branch from production builds.
   if ((import.meta.env.DEV || import.meta.env.MODE === "test") && globalThis.__nyxidAssistantHttpMock) {
@@ -94,7 +88,7 @@ export function uploadFile(
       if (signal.aborted) throw new Error("Upload cancelled.");
       const response = await mock({
         endpoint: attachmentPath(scope),
-        init: { method: "POST", body: file, signal, headers: { "x-attachment-name": encodeURIComponent(file.name) } },
+        init: { method: "POST", body: file, signal, headers: filenameHeaders },
       });
       if (signal.aborted) throw new Error("Upload cancelled.");
       if (!response) throw new Error("Preview upload route not found.");
@@ -137,7 +131,7 @@ export function uploadFile(
         xhr.setRequestHeader(key, value);
     });
     xhr.setRequestHeader("content-type", "application/octet-stream");
-    xhr.setRequestHeader("x-attachment-name", encodeURIComponent(file.name));
+    if (filename !== undefined) xhr.setRequestHeader("x-attachment-name", filename);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable)
         progress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
