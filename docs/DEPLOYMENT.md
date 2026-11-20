@@ -650,13 +650,30 @@ turn has its complete reply and needs no recovery.
 
 ### Background turn rollback
 
-Enrollment in `nyxagent-reattach-v1` defaults off. Keep the flag off in production
-until PR 2's recovery, cancellation, publication and accounting checks land.
-Then an admin can enable `assistant:turn-handoff` for a person, an organization
+Enrollment in `nyxagent-reattach-v1` defaults off. An admin can enable
+`assistant:turn-handoff` for a person, an organization
 or globally in Feature Flags after every NyxID replica advertises
 `assistant:turn-handoff-v2` and every NyxAgent replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
+
+The admitting replica discovers missing metadata with the owner's existing
+private assistant credential. It allows two seconds in total before admission
+for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
+The replica reuses deployment capabilities and the owner's profiles for up to
+60 seconds. Browser, mobile and automation clients can start a turn directly.
+If discovery lacks an authorized credential or times out, the turn proceeds
+in the foreground.
+
+Group `Assistant turn settled` logs by `restart_eligibility`. Count
+`watched_thread_credential` for enrolled turns. `capability_unavailable`
+indicates missing or incompatible deployment evidence, `profile_unknown`
+indicates insufficient evidence for the selected profile, and
+`platform_credential` identifies a profile using a platform key.
+`lane_ineligible` identifies a turn excluded by the lane check. `discovery_skipped`
+means the admission caller supplied no discovery snapshot. `upstream_refused_background`
+identifies a turn that fell back after an upstream refusal. The field is absent
+when the feature flag or fleet readiness gate skips negotiation.
 
 Disable every enabling override in Feature Flags **before rolling NyxAgent back**
 to a version without the credential watch. Allow 30 seconds for admission hints

@@ -1,3 +1,5 @@
+#[path = "assistant_handoff_command_tests.rs"]
+mod handoff_command_tests;
 #[path = "assistant_shutdown_tests.rs"]
 mod shutdown_tests;
 #[path = "assistant_nyxagent_survivor_tests.rs"]

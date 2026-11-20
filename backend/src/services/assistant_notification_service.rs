@@ -186,6 +186,10 @@ pub(crate) fn turn_handoff_enabled(db: &Database, user_id: &str) -> bool {
     cached_features(db, user_id).is_some_and(|features| features.turn_handoff)
 }
 
+pub(crate) fn has_admission_features(db: &Database, user_id: &str) -> bool {
+    cached_features(db, user_id).is_some()
+}
+
 fn cached_features(db: &Database, user_id: &str) -> Option<AdmissionFeatures> {
     let key = flag_cache_key(db, user_id);
     flag_cache()

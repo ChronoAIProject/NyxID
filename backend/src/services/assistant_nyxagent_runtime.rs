@@ -2969,11 +2969,15 @@ static CAPABILITIES: LazyLock<Mutex<CapabilityCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const CAPABILITY_TTL: Duration = Duration::from_secs(60);
 
-pub(crate) fn cached_reattach(
+pub(crate) enum CapabilityLookup {
+    Admission,
+    CurrentCatalog,
+}
+
+fn unique_cached_destination(
+    cache: &CapabilityCache,
     db: &mongodb::Database,
-) -> Option<crate::models::assistant_conversation::ReattachDeployment> {
-    use crate::models::assistant_conversation::{ReattachDeployment, ReattachLimits};
-    let cache = CAPABILITIES.try_lock().ok()?;
+) -> Option<(contract::NyxAgentDestination, Value)> {
     let mut fresh = cache.iter().filter(|((database, _, _), (seen, _))| {
         database == db.name() && seen.elapsed() < CAPABILITY_TTL
     });
@@ -2981,6 +2985,17 @@ pub(crate) fn cached_reattach(
     if fresh.next().is_some() {
         return None;
     }
+    Some((
+        contract::NyxAgentDestination::for_service(service, url),
+        value.clone(),
+    ))
+}
+
+pub(crate) fn reattach_deployment(
+    destination: contract::NyxAgentDestination,
+    value: &Value,
+) -> Option<crate::models::assistant_conversation::ReattachDeployment> {
+    use crate::models::assistant_conversation::{ReattachDeployment, ReattachLimits};
     let limits: ReattachLimits = serde_json::from_value(value.get("reattach")?.clone()).ok()?;
     (limits.protocol == "nyxagent-reattach-v1"
         && limits.credential_watch.as_ref().is_some_and(|watch| {
@@ -2994,8 +3009,8 @@ pub(crate) fn cached_reattach(
         && limits.absence_retention_seconds > 0
         && limits.max_subscribers_per_response > 0
         && limits.max_subscribers_per_owner >= limits.max_subscribers_per_response)
-        .then(|| ReattachDeployment {
-            destination_hash: contract::NyxAgentDestination::for_service(service, url).0,
+        .then_some(ReattachDeployment {
+            destination_hash: destination.0,
             limits,
         })
 }
@@ -3010,6 +3025,39 @@ pub(crate) async fn upstream_capabilities(
     credential: &AssistantCredential,
     policy: Option<BillingRoutePolicy>,
 ) -> Value {
+    fetch_capabilities(
+        state,
+        CapabilityLookup::CurrentCatalog,
+        |destination| async move {
+            Box::pin(request(
+                state,
+                egress,
+                authority,
+                credential,
+                "GET",
+                "v1/capabilities",
+                None,
+                None,
+                Some(destination),
+                policy,
+            ))
+            .await
+        },
+    )
+    .await
+    .map_or(Value::Null, |(_, value)| value)
+}
+
+pub(crate) async fn fetch_capabilities<F: Future<Output = AppResult<axum::response::Response>>>(
+    state: &AppState,
+    lookup: CapabilityLookup,
+    fetch: impl FnOnce(contract::NyxAgentDestination) -> F,
+) -> Option<(contract::NyxAgentDestination, Value)> {
+    if matches!(lookup, CapabilityLookup::Admission)
+        && let Some(cached) = unique_cached_destination(&*CAPABILITIES.lock().await, &state.db)
+    {
+        return Some(cached);
+    }
     let service =
         match assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG)
             .await
@@ -3021,7 +3069,7 @@ pub(crate) async fn upstream_capabilities(
                     http_status = error.status_code().as_u16(),
                     "NyxAgent capability lookup failed"
                 );
-                return Value::Null;
+                return None;
             }
         };
     let key = (
@@ -3029,34 +3077,18 @@ pub(crate) async fn upstream_capabilities(
         service.id.clone(),
         service.base_url.clone(),
     );
+    let destination = contract::NyxAgentDestination::for_service(&service.id, &service.base_url);
+    if let Some((at, value)) = CAPABILITIES.lock().await.get(&key)
+        && at.elapsed() < CAPABILITY_TTL
     {
-        let cache = CAPABILITIES.lock().await;
-        if let Some((at, value)) = cache.get(&key)
-            && at.elapsed() < CAPABILITY_TTL
-        {
-            return value.clone();
-        }
+        return Some((destination, value.clone()));
     }
     // Concurrent misses may fetch in parallel. Do not hold the cache lock over
     // network/body reads, or one slow credential would block every image turn.
     let lookup = async {
-        let response = Box::pin(request(
-            state,
-            egress,
-            authority,
-            credential,
-            "GET",
-            "v1/capabilities",
-            None,
-            None,
-            Some(contract::NyxAgentDestination::for_service(
-                &service.id,
-                &service.base_url,
-            )),
-            policy,
-        ))
-        .await
-        .map_err(|error| ("request", Some(error.status_code().as_u16())))?;
+        let response = fetch(destination.clone())
+            .await
+            .map_err(|error| ("request", Some(error.status_code().as_u16())))?;
         let status = response.status();
         if !status.is_success() {
             return Err(("http_status", Some(status.as_u16())));
@@ -3083,7 +3115,7 @@ pub(crate) async fn upstream_capabilities(
                 http_status,
                 "NyxAgent capability lookup failed"
             );
-            return Value::Null;
+            return None;
         }
     };
     let mut cache = CAPABILITIES.lock().await;
@@ -3091,7 +3123,7 @@ pub(crate) async fn upstream_capabilities(
         cache.clear();
     }
     cache.insert(key, (Instant::now(), value.clone()));
-    value
+    Some((destination, value))
 }
 
 #[path = "assistant_nyxagent_runtime_images.rs"]

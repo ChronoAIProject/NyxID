@@ -2049,25 +2049,45 @@ pub(crate) async fn live_models(
     auth: &AuthUser,
     policy: Option<BillingRoutePolicy>,
 ) -> Option<Vec<ModelResponse>> {
+    live_model_info(state, auth, policy, None)
+        .await
+        .map(|rows| rows.into_iter().map(ModelResponse::from).collect())
+}
+
+async fn metadata_credential(state: &AppState, auth: &AuthUser) -> AppResult<AssistantCredential> {
+    credentials::load_existing(&state.db, &state.encryption_keys, &auth.user_id.to_string())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Assistant credential not provisioned".into()))
+}
+
+async fn live_model_info(
+    state: &AppState,
+    auth: &AuthUser,
+    policy: Option<BillingRoutePolicy>,
+    credential: Option<&AssistantCredential>,
+) -> Option<Vec<ModelInfo>> {
     let user_id = auth.user_id.to_string();
     let cache_key = format!("{}:{user_id}", state.db.name());
     if let Some((time, models)) = MODELS.lock().await.get(&cache_key)
         && time.elapsed() < Duration::from_secs(60)
     {
-        return models
-            .clone()
-            .map(|rows| rows.into_iter().map(ModelResponse::from).collect());
+        return models.clone();
     }
-    let loaded: AppResult<Vec<ModelResponse>> = async {
-        let credential = credentials::load_existing(&state.db, &state.encryption_keys, &user_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Assistant credential not provisioned".into()))?;
+    let loaded: AppResult<Vec<ModelInfo>> = async {
+        let loaded;
+        let credential = match credential {
+            Some(credential) => credential,
+            None => {
+                loaded = metadata_credential(state, auth).await?;
+                &loaded
+            }
+        };
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             proxy(
                 state,
                 auth,
-                &credential,
+                credential,
                 "GET",
                 "v1/models?include_capabilities=true",
                 None,
@@ -2095,6 +2115,7 @@ pub(crate) async fn live_models(
             .flatten()
             .filter_map(model_response)
             .take(50)
+            .map(ModelInfo::from)
             .collect();
         if rows.is_empty() {
             return Err(AppError::Internal("Assistant profiles unavailable".into()));
@@ -2115,14 +2136,7 @@ pub(crate) async fn live_models(
             cache.remove(&oldest);
         }
     }
-    cache.insert(
-        cache_key,
-        (
-            Instant::now(),
-            rows.clone()
-                .map(|rows| rows.into_iter().map(ModelInfo::from).collect()),
-        ),
-    );
+    cache.insert(cache_key, (Instant::now(), rows.clone()));
     rows
 }
 
@@ -2712,12 +2726,30 @@ pub(crate) async fn start_turn_with_voice(
     let user_id = auth.user_id.to_string();
     let mut admitted = start.clone();
     admitted.capacity = permit.token().cloned();
+    if start.origin == crate::models::assistant_conversation::TurnOrigin::Event
+        && crate::services::security_readiness_service::turn_restart_enrollment_ready()
+    {
+        let _ = crate::services::assistant_notification_service::enabled(&state.db, &user_id).await;
+    }
+    let metadata = if engine::restart_enabled(&state.db, &user_id)
+        && voice_request_id.is_none()
+        && !start.guest
+        && start.channel.is_none()
+        && start.reply_channel.is_none()
+        && start.invocation_id.is_none()
+        && start.origin != crate::models::assistant_conversation::TurnOrigin::Channel
+    {
+        Some(Box::pin(restart_metadata(state, &auth, policy)).await)
+    } else {
+        None
+    };
     let claim = Box::pin(engine::claim_turn(
         &state.db,
         &user_id,
         &admitted,
         &state.encryption_keys,
         voice_request_id,
+        metadata,
     ))
     .await?;
     let mut row = claim.conversation;
@@ -2760,6 +2792,56 @@ pub(crate) async fn start_turn_with_voice(
         .in_current_span(),
     );
     Ok((row, receiver))
+}
+
+async fn restart_metadata(
+    state: &AppState,
+    auth: &AuthUser,
+    policy: Option<BillingRoutePolicy>,
+) -> engine::RestartMetadata {
+    use crate::services::assistant_nyxagent_runtime as runtime;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut credential = None;
+    let deployment = tokio::time::timeout_at(deadline, async {
+        let slot = &mut credential;
+        let (destination, value) = runtime::fetch_capabilities(
+            state,
+            runtime::CapabilityLookup::Admission,
+            |destination| async move {
+                let credential = slot.insert(metadata_credential(state, auth).await?);
+                proxy_raw(
+                    state,
+                    auth,
+                    credential.raw_key.as_str(),
+                    "GET",
+                    "v1/capabilities",
+                    None,
+                    None,
+                    Some(destination),
+                    policy,
+                )
+                .await
+            },
+        )
+        .await?;
+        runtime::reattach_deployment(destination, &value)
+    })
+    .await
+    .ok()
+    .flatten();
+    let models = if deployment.is_some() {
+        tokio::time::timeout_at(
+            deadline,
+            live_model_info(state, auth, policy, credential.as_ref()),
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    engine::RestartMetadata { deployment, models }
 }
 
 fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {

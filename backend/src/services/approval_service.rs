@@ -315,6 +315,14 @@ pub async fn evaluate_and_check_with_options(
         return Ok(ApprovalOutcome::Denied);
     }
 
+    if resolution.required
+        && !resolution.from_org_policy
+        && requester_type == Some("access_token")
+        && super::assistant_steering::personal_control(actor_user_id, descriptor)
+    {
+        return Ok(ApprovalOutcome::Allowed { required: false });
+    }
+
     super::assistant_model_observer::exempt_personal_requirement(
         actor_user_id,
         service_id,

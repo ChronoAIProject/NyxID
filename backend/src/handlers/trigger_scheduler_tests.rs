@@ -42,10 +42,18 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
 }
 
 async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_with_discovery(name, reply, Router::new()).await
+}
+
+async fn setup_with_discovery(
+    name: &str,
+    reply: &str,
+    discovery: Router,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let reply = reply.to_owned();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
-    let upstream = Router::new().route(
+    let upstream = discovery.route(
         "/v1/responses",
         post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
@@ -89,6 +97,9 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
     let (state, _, server) = setup_with_response_router(name, upstream).await;
     (state, calls, server)
 }
+
+#[path = "trigger_handoff_discovery_tests.rs"]
+mod handoff_discovery;
 
 async fn setup_with_response_router(
     name: &str,

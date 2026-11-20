@@ -2393,6 +2393,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     learning_epoch: Option<i64>,
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
+    metadata: Option<&RestartMetadata>,
 ) -> AppResult<OwnerTurnAdmission> {
     super::erasure_admission::fence_in_session(db, user_id, session).await?;
     if let Some(ack) = &start.acknowledgement_id
@@ -3654,20 +3655,20 @@ pub(crate) async fn begin_owner_turn_in_session(
     if voice_request.is_none() || hidden_voice {
         row.message_count += 1;
     }
-    if super::security_readiness_service::turn_restart_enrollment_ready()
-        && super::assistant_notification_service::turn_handoff_enabled(db, user_id)
-    {
-        let profile =
-            super::assistant_nyxagent_model_cache::inference_credential(db, user_id, &row.model);
-        let deployment = super::assistant_nyxagent_runtime::cached_reattach(db);
-        negotiate_restart(
-            &mut row,
-            start,
-            &message_id,
-            deployment,
-            profile,
-            super::shutdown::process().is_draining(),
-        );
+    if restart_enabled(db, user_id) {
+        if let Some(metadata) = metadata {
+            let profile = metadata.profile(&row.model);
+            negotiate_restart(
+                &mut row,
+                start,
+                &message_id,
+                metadata.deployment.clone(),
+                profile,
+                super::shutdown::process().is_draining(),
+            );
+        } else if let Some(active) = &mut row.active_turn {
+            active.restart_eligibility = Some("discovery_skipped".into());
+        }
         if let Some(active) = &row.active_turn
             && let Some(offer) = &active.restart_offer
         {
@@ -3962,7 +3963,7 @@ pub async fn begin_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<AssistantConversation> {
     Ok(
-        Box::pin(claim_turn(db, user_id, start, keys, voice_request_id))
+        Box::pin(claim_turn(db, user_id, start, keys, voice_request_id, None))
             .await?
             .conversation,
     )
@@ -3974,6 +3975,7 @@ pub(crate) async fn claim_turn(
     start: impl Into<TurnStart>,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     voice_request_id: Option<&str>,
+    metadata: Option<RestartMetadata>,
 ) -> AppResult<OwnerTurnClaim> {
     let voice_request_id = voice_request_id.map(str::to_owned);
     let start: TurnStart = start.into();
@@ -4047,7 +4049,9 @@ pub(crate) async fn claim_turn(
     let audit_db = db.clone();
     let audit_user = user_id.clone();
     let budget = ids.artifact_budget.clone();
+    let metadata = metadata.map(std::sync::Arc::new);
     let claim = loop {
+        let metadata = metadata.clone();
         let (db, user_id, keys, start, ids, new_agent, voice_request_id) = (
             db.clone(),
             user_id.clone(),
@@ -4077,6 +4081,7 @@ pub(crate) async fn claim_turn(
                         learning_epoch,
                         None,
                         voice_request_id.as_deref(),
+                        metadata.as_deref(),
                     ))
                     .await?;
                     if start.origin == TurnOrigin::Event
@@ -4570,6 +4575,31 @@ pub(crate) async fn mark_dequeued_with_capacity(
 
 #[derive(Clone)]
 pub(crate) struct WorkerFence(bson::Document);
+
+pub(crate) fn restart_enabled(db: &Database, owner: &str) -> bool {
+    super::security_readiness_service::turn_restart_enrollment_ready()
+        && super::assistant_notification_service::turn_handoff_enabled(db, owner)
+}
+
+#[derive(Default)]
+pub(crate) struct RestartMetadata {
+    pub deployment: Option<crate::models::assistant_conversation::ReattachDeployment>,
+    pub models: Vec<super::assistant_nyxagent_model_cache::ModelInfo>,
+}
+
+impl RestartMetadata {
+    fn profile(
+        &self,
+        model: &str,
+    ) -> Option<super::assistant_nyxagent_model_cache::InferenceCredential> {
+        let mut matching = self
+            .models
+            .iter()
+            .filter(|row| row.id == model && row.available);
+        let first = matching.next()?.inference_credential?;
+        matching.next().is_none().then_some(first)
+    }
+}
 
 pub(crate) fn negotiate_restart(
     row: &mut AssistantConversation,

@@ -313,7 +313,7 @@ pub fn settled(
         attempts = error.and_then(TurnError::attempts).or(data.attempts),
         capacity_wait_ms = error.and_then(TurnError::capacity_wait_ms).or(data.capacity_wait_ms).unwrap_or(0),
         duration_ms = (now - turn.started_at).num_milliseconds().max(0), origin = origin(turn),
-        trigger_run_id = turn.trigger_run_id.as_deref(), "Assistant turn settled");
+        trigger_run_id = turn.trigger_run_id.as_deref(), restart_eligibility = turn.restart_eligibility.as_deref(), "Assistant turn settled");
 }
 
 fn heartbeat_age(turn: &ActiveTurn, error: Option<&TurnError>, now: DateTime<Utc>) -> Option<i64> {

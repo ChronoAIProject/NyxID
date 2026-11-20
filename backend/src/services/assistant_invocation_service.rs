@@ -238,7 +238,7 @@ pub async fn admit(
                     .session(&mut *session)
                     .await?;
                 let claim = Box::pin(engine::begin_owner_turn_in_session(
-                    &db2, session, &keys, &owner2, &start, &ids, &agent, learning, None, None,
+                    &db2, session, &keys, &owner2, &start, &ids, &agent, learning, None, None, None,
                 ))
                 .await?
                 .into_started()?;
