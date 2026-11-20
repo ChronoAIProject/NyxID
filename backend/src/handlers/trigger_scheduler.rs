@@ -1138,7 +1138,7 @@ async fn settle_notification_result(
         } else {
             RunOutcome::Failed
         },
-        error.or(status.reason.as_deref()),
+        schedules::FinishReason::from_result(error, status.reason.as_deref()),
         &state.config.frontend_url,
     )
     .await
@@ -1216,7 +1216,7 @@ async fn settle_chat_result(
                 } else {
                     RunOutcome::Completed
                 },
-                error,
+                schedules::FinishReason::from_result(error, None),
                 &state.config.frontend_url,
             )
             .await
@@ -1232,7 +1232,7 @@ async fn settle_chat_result(
                 &state.db,
                 &claim,
                 RunOutcome::Failed,
-                Some("result_delivery_failed"),
+                schedules::FinishReason::Scheduler(Some("result_delivery_failed")),
                 &state.config.frontend_url,
             )
             .await

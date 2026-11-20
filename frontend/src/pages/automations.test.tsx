@@ -490,6 +490,16 @@ it("shows the closed model failure in run history and preserves legacy reasons",
                 nyxid_error_code: 9000,
               },
             },
+            ...["permit", "shutdown"].map((stage) => ({
+              id: stage,
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              reason: stage === "permit" ? "assistant_unavailable" : "turn_lost",
+              failure_reason: {
+                source: "nyxid", stage,
+                code: stage === "permit" ? "assistant_unavailable" : "turn_lost",
+              },
+            })),
             {
               id: "legacy",
               outcome: "failed",
@@ -514,6 +524,8 @@ it("shows the closed model failure in run history and preserves legacy reasons",
   ).toBeInTheDocument();
   expect(screen.queryByText("assistant unavailable")).not.toBeInTheDocument();
   expect(screen.getByText("turn lost")).toBeInTheDocument();
+  expect(screen.getByText("A temporary server problem interrupted this run. Check completed actions before starting another run.")).toBeInTheDocument();
+  expect(screen.getByText("NyxID restarted during this run. Check completed actions before starting another run.")).toBeInTheDocument();
 });
 it("shows preference validation errors and keeps invalid timezones unsaved", async () => {
   mocks.settings.mockReturnValue({ data: { timezone: "Mars/Olympus" } });
