@@ -2949,6 +2949,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         requires_user_credential: false,
         is_active: true,
         created_by: "system".to_string(),
+        caller_token_approved_destinations: Default::default(),
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,

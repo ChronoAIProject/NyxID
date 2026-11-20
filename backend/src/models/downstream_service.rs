@@ -326,6 +326,9 @@ pub struct DownstreamService {
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
+    /// Digests bind caller-token approval to this row, target selector and exact URL.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub caller_token_approved_destinations: std::collections::BTreeSet<String>,
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
@@ -670,6 +673,7 @@ pub mod test_helpers {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -790,6 +794,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -894,6 +899,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

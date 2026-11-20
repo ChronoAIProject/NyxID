@@ -5374,6 +5374,32 @@ async fn execute_resolved_proxy_inner<'a>(
     }
     target.require_credential_materialized()?;
 
+    // Ornn's server-marked lookup supplies a membership capability. Node
+    // WebSocket handshakes do not take a caller credential.
+    let forward_bearer = if is_ws && node_route.is_some() {
+        false
+    } else if assistant_projection.org_skill_lookup {
+        true
+    } else {
+        let server_headers = if is_ws {
+            &[][..]
+        } else {
+            extra_outbound_headers.as_slice()
+        };
+        Box::pin(proxy_service::admit_caller_bearer(
+            &state.db,
+            &user_id_str,
+            resolved_user_service_id.as_deref(),
+            &target,
+            node_route.as_ref(),
+            caller_token.as_deref(),
+            server_headers,
+        ))
+        .await?
+        .is_some()
+    };
+    let caller_bearer = caller_token.filter(|_| forward_bearer);
+
     let body = if body_bytes.is_empty() {
         None
     } else {
@@ -5978,7 +6004,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         &identity_headers,
                         query.as_deref(),
                         &ws_forward_headers,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         collect_realtime_llm_usage,
                         metered.clone(),
                         billing_egress_permit,
@@ -6011,7 +6037,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     node_forward_headers,
                     &identity_headers,
                     &delegated,
-                    caller_token.as_deref(),
+                    caller_bearer.as_deref(),
                     &extra_outbound_headers,
                 )?;
                 let node_location_context = AsyncLocationContext::new(
@@ -7498,7 +7524,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         },
                         identity_headers,
                         delegated,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         &state.token_exchange_cache,
                         &state.cloud_response_cache,
                         extra_outbound_headers,

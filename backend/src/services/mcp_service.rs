@@ -6676,6 +6676,16 @@ async fn execute_tool_resolved_inner(
     }
 
     target.require_credential_materialized()?;
+    let caller_bearer = Box::pin(proxy_service::admit_caller_bearer(
+        db,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+        billing_context_builder.user_service_id.as_deref(),
+        &target,
+        node_route.as_ref(),
+        exec_ctx.caller_token,
+        &prepared.server_owned_headers,
+    ))
+    .await?;
     box_mcp_forwarding(move || async move {
         if let Some(permit) = &target.execution_permission {
             let mut headers = axum::http::HeaderMap::new();
@@ -7104,7 +7114,7 @@ async fn execute_tool_resolved_inner(
             let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
                 super::lark_base_writes::transport::Transport {
                     target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
-                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:caller_bearer,
                 }).await;
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
@@ -7157,7 +7167,7 @@ async fn execute_tool_resolved_inner(
                 base_headers,
                 &identity_headers,
                 &delegated,
-                exec_ctx.caller_token,
+                caller_bearer,
                 &server_owned_headers,
             )?;
             let node_request = NodeProxyRequest {
@@ -7481,7 +7491,7 @@ async fn execute_tool_resolved_inner(
             proxy_service::ProxyBody::Buffered(body),
             identity_headers,
             delegated,
-            exec_ctx.caller_token,
+            caller_bearer,
             token_exchange_cache,
             cloud_response_cache,
             server_owned_headers,
@@ -16458,6 +16468,7 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
