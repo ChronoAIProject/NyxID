@@ -1,4 +1,5 @@
 import { useContext } from "react";
+import { useIsFocused } from "@react-navigation/native";
 import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Platform } from "react-native";
@@ -12,6 +13,7 @@ import {
   ChatTranscriptSeparator,
   chatSurfaceStyles,
 } from "../assistant/ChatSurface";
+import { CrewHeaderActions } from "../assistant/ChatHeaderActions";
 import { CrewVoiceComposer } from "./CrewVoiceComposer";
 import {
   ChatComposerInput,
@@ -53,7 +55,7 @@ import { workspaceSidebarLayout } from "../../components/workspace/workspacePush
 import { workspaceSheetRailReserve } from "../../components/workspace/workspaceLayout";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AssistantReplyBody } from "../assistant/AssistantReplyBody";
-import { Check, Plus, MoreHorizontal, X } from "lucide-react-native";
+import { Check, Plus, X } from "lucide-react-native";
 import {
   ActionButton,
   Card,
@@ -156,6 +158,7 @@ function GroupChat({
   onOpenAgent,
 }: GroupChatScreenProps) {
   const railIndicator = useRailScrollIndicator();
+  const focused = useIsFocused();
   const { t } = useAppLanguage();
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
@@ -421,14 +424,13 @@ function GroupChat({
   const groupHeaderOptions = useMemo<NativeStackNavigationOptions>(() => {
     const settings = () => (
       <WorkspaceHeaderVisibility>
-        <Icon
-          label={t("Crew options")}
-          onPress={onSettings}
-          disabled={!group || chat.sending || uploads.session.sending}
-          floating
-        >
-          <MoreHorizontal size={23} color={colors.textPrimary} />
-        </Icon>
+        <CrewHeaderActions
+          scope={`${chat.epoch}:${groupId}`}
+          onSettings={onSettings}
+          disabled={
+            !focused || !group || chat.sending || uploads.session.sending
+          }
+        />
       </WorkspaceHeaderVisibility>
     );
     return {
@@ -466,6 +468,7 @@ function GroupChat({
     };
   }, [
     group,
+    focused,
     chat.data?.pending_actions.length,
     chat.data?.collaboration_decisions,
     names.data,
@@ -1197,7 +1200,6 @@ function GroupChat({
                 editable={!blocked && (collaboration || !!liveMembers.length)}
                 // Phones: same one-row idle composer as private chats.
                 compactWhenIdle={
-                  cornerWindow &&
                   narrow &&
                   !dictation.active &&
                   uploads.files.length === 0 &&
@@ -1206,7 +1208,7 @@ function GroupChat({
                 }
                 renderActions={(mentionAction, layout) => (
                   <ChatComposerToolbar
-                    layout={cornerWindow ? layout : undefined}
+                    layout={narrow ? layout : undefined}
                     dictation={dictation}
                     dictationDisabled={
                       blocked || uploads.picking || uploads.session.sending
