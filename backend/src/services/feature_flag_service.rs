@@ -369,6 +369,12 @@ const ASSISTANT_NOTIFICATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const STAGING_QR_LOGIN: FeatureFlagDef = FeatureFlagDef {
+    key: "auth:staging-qr-login",
+    description: "Allow a production account to approve staging device sign-ins for its verified email.",
+    default_enabled: false,
+};
+
 pub const MOBILE_MFA_FLAG_KEY: &str = "auth:mobile-mfa";
 const MOBILE_MFA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MOBILE_MFA_FLAG_KEY,
@@ -520,6 +526,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
+    STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
@@ -588,6 +595,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
+    STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
@@ -3442,6 +3450,7 @@ mod tests {
                 "auth:app-token-management-v1",
                 "mobile:new-domains",
                 "auth:mobile-mfa",
+                "auth:staging-qr-login",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:workspace-preview",

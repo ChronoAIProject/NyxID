@@ -57,6 +57,7 @@ pub mod audit_chain_service;
 pub mod audit_service;
 pub mod auth_agent_key_login_service;
 pub mod auth_device_service;
+pub mod staging_qr;
 pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;

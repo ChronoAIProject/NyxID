@@ -2249,6 +2249,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     AppState {
         jobs: Arc::new(crate::services::job_health::Jobs::new(&config)),
         app_management_observations: Arc::default(),
+        staging_qr: crate::services::staging_qr::Peer::Disabled,
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
         crash_reports: Arc::new(Default::default()),

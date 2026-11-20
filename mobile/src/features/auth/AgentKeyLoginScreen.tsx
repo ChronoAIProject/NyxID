@@ -558,7 +558,9 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         onManualEntry={() => setScanning(false)}
         onCode={(value, kind) => {
           setScanning(false);
-          if (kind === "device")
+          if (kind === "staging-device")
+            navigation.navigate("DeviceLogin", { user_code: value, staging_scan: true });
+          else if (kind === "device")
             navigation.navigate("DeviceLogin", { user_code: value });
           else {
             setCode(formatAuthDeviceUserCode(value));

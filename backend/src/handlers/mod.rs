@@ -41,6 +41,7 @@ pub mod assistant_sharing;
 pub mod auth;
 pub mod auth_agent_key;
 pub mod auth_device;
+pub mod staging_qr;
 pub mod billing;
 pub mod billing_credit_schedules;
 pub mod billing_credits;

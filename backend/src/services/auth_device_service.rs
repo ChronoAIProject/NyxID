@@ -555,6 +555,14 @@ pub async fn preview(
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (_, row) = find_by_user_code(db, &user_code_hmac).await?;
 
+    Ok(preview_row(row, viewer_ip, viewer_ip_attribution))
+}
+
+pub(super) fn preview_row(
+    row: AuthDeviceCode,
+    viewer_ip: Option<&str>,
+    viewer_ip_attribution: AuthDeviceClientIpAttribution,
+) -> PreviewOutput {
     tracing::Span::current().record("row_id", row.id.as_str());
     let context = InitiateInput {
         requested_profile: row.requested_profile,
@@ -581,7 +589,7 @@ pub async fn preview(
         client_hardware_concurrency: row.client_hardware_concurrency,
         client_device_memory: row.client_device_memory,
     };
-    Ok(context_preview(
+    context_preview(
         context,
         row.created_at,
         row.expires_at,
@@ -589,7 +597,7 @@ pub async fn preview(
         row.supports_grant_choice,
         viewer_ip,
         viewer_ip_attribution,
-    ))
+    )
 }
 
 #[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
@@ -602,12 +610,42 @@ pub async fn approve(
     input: ApproveInput,
     authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    approve_bound(
+        db,
+        config,
+        jwt_keys,
+        encryption_keys,
+        hmac_key,
+        input,
+        authority,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn approve_bound(
+    db: &Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    encryption_keys: &EncryptionKeys,
+    hmac_key: &[u8],
+    input: ApproveInput,
+    authority: super::session_authority::DerivedMfaAuthority,
+    staging: Option<super::staging_qr::VerifiedMatch>,
+) -> AppResult<()> {
     let mfa_policy_revision = app_policy::authorize(db, &input.user_id, authority).await?;
     let mfa_assured = authority.verified;
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if staging
+        .as_ref()
+        .is_some_and(|verified| verified.request_id != row.id)
+    {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());
@@ -628,6 +666,7 @@ pub async fn approve(
             mfa_assured,
             mfa_policy_revision.as_deref(),
             authority,
+            staging,
         )
         .await;
     }
@@ -663,6 +702,9 @@ pub async fn approve(
         transaction.start_transaction().and_run2(async move |session| {
     let db = &db_owned;
     let operation: AppResult<String> = async {
+    if let Some(verified) = staging.as_ref() {
+        verified.fence(db, &input.user_id, session, mfa_assured).await?;
+    }
     app_policy::fence_approval(db, &input.user_id, authority, mfa_policy_revision.as_deref(), session).await?;
     let claimed = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
@@ -755,9 +797,21 @@ pub async fn approve(
     fields(row_id, user_id = %input.user_id)
 )]
 pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+    deny_bound(db, hmac_key, input, None).await
+}
+
+pub(super) async fn deny_bound(
+    db: &Database,
+    hmac_key: &[u8],
+    input: DenyInput,
+    expected_id: Option<&str>,
+) -> AppResult<()> {
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if expected_id.is_some_and(|id| id != row.id) {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());

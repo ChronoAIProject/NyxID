@@ -12,6 +12,7 @@ import {
   resolveLoginRequest,
   previewLoginRequest,
   previewCooldownMs,
+  recordLoginPreviewFailure,
   deviceLoginErrorCopy,
   classifyLoginError,
   isLoginDecisionUncertain,
@@ -407,9 +408,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   );
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
+  const stagingScan = route.params?.staging_scan === true;
   const [terminal, setTerminal] = useState<TerminalState>(null);
   const stepUp = useMfaStepUp(
-    `${confirmedCode}:${isAuthenticated}:${terminal}`,
+    `${preview?.stagingBinding?.request_id ?? "local"}:${confirmedCode}:${isAuthenticated}:${terminal}`,
   );
   const [isScanning, setIsScanning] = useState(
     () => route.params?.start_scanner === true && !route.params?.user_code,
@@ -488,7 +490,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     currentDeadline.current = null;
     setRawUserAgentExpanded(false);
     updateDecisionUncertain(null);
-    const handoff = takeLoginRequest(route.params.user_code, "device");
+    const handoff = stagingScan ? null : takeLoginRequest(route.params.user_code, "device");
     if (handoff?.result.kind === "device") {
       lastActionAt.current = handoff.at;
       acceptPreview(handoff.code, handoff.result.preview);
@@ -496,7 +498,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     } else {
       setLinkedPreview({ code: route.params.user_code, generation: generation.current });
     }
-  }, [route.params?.start_scanner, route.params?.user_code, routeRevision]);
+  }, [route.params?.start_scanner, route.params?.user_code, stagingScan, routeRevision]);
   useEffect(() => {
     // Commit the decision or verification prompt before applying the newest link.
     if (
@@ -516,7 +518,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     const incoming = route.params?.user_code;
     if (
       incoming === undefined ||
-      (terminal &&
+      (terminal && Boolean(preview?.stagingBinding) === stagingScan &&
         normalizeAuthDeviceUserCode(incoming) ===
           normalizeAuthDeviceUserCode(confirmedCode ?? userCode))
     )
@@ -576,8 +578,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setIsPreviewing(true);
     const current = generation.current;
     const requestCode = confirmedCode;
-    return previewLoginRequest(requestCode, "device")
-      .then(
+    const staging = preview?.stagingBinding;
+    const request = staging
+      ? mobileApi.previewStagingDevice(requestCode, staging)
+      : previewLoginRequest(requestCode, "device");
+    return request.then(
         (result) => {
           if (
             current === generation.current &&
@@ -587,10 +592,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         },
         (error: unknown) => {
           if (current !== generation.current) return;
+          if (staging) recordLoginPreviewFailure(error);
           setTerminal((previous) => terminalFromError(error) ?? previous);
           if (!automatic)
             setErrorMessage(
-              () => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })),
+              () => (translateApp(deviceLoginErrorCopy(error), { host: staging ? "staging.nyxid.ai" : loginServerHost() })),
             );
           cooldown.sync();
         },
@@ -651,10 +657,15 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       setIsPreviewing(true);
       setErrorMessage(null);
       const current = generation.current;
+      const normalized = normalizeAuthDeviceUserCode(candidate);
+      const staging = stagingScan && normalized !== null &&
+        normalized === normalizeAuthDeviceUserCode(route.params?.user_code ?? "");
       try {
-        const result = await resolveLoginRequest(candidate, "device");
+        const result = staging
+          ? { kind: "device" as const, preview: await mobileApi.previewStagingDevice(candidate) }
+          : await resolveLoginRequest(candidate, "device");
         if (current !== generation.current) return false;
-        const normalized = normalizeAuthDeviceUserCode(candidate)!;
+        if (!normalized) return false;
         if (result.kind === "agent-key") {
           if (handoffLoginRequest(normalized, result))
             navigation.navigate("AgentKeyLogin", { user_code: normalized });
@@ -664,6 +675,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         return true;
       } catch (error) {
         if (current === generation.current) {
+          if (staging) recordLoginPreviewFailure(error);
           const state = terminalFromError(error);
           if (state && state !== "unavailable") {
             setTerminal(state);
@@ -671,7 +683,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             setManualEntryVisible(false);
           }
           setErrorMessage(
-            () => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })),
+            () => (translateApp(deviceLoginErrorCopy(error), { host: staging ? "staging.nyxid.ai" : loginServerHost() })),
           );
           cooldown.sync();
         }
@@ -683,7 +695,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         }
       }
     },
-    [claimAction, cooldown.coolingDown, navigation, t],
+    [claimAction, cooldown.coolingDown, navigation, stagingScan, route.params?.user_code, t],
   );
 
   // Incoming links use the same resolver, throttle and cooldown as manual
@@ -711,8 +723,19 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
   const handleScannedCode = (
     normalized: string,
-    kind: "device" | "agent-key",
+    kind: "device" | "agent-key" | "staging-device",
   ) => {
+    if (kind === "staging-device" || (stagingScan && kind === "device")) {
+      setIsScanning(false);
+      navigation.setParams({
+        user_code: normalized,
+        staging_scan: kind === "staging-device" ? true : undefined,
+        start_scanner: undefined,
+      });
+      // A repeat scan of the same URL still starts a fresh preview.
+      setRouteRevision((revision) => revision + 1);
+      return;
+    }
     if (kind === "agent-key") {
       setIsScanning(false);
       navigation.navigate("AgentKeyLogin", { user_code: normalized });
@@ -758,15 +781,16 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setErrorMessage(null);
     let dispatched = false;
     try {
-      if (decision === "approve") {
-        dispatched = true;
+      dispatched = true;
+      if (preview.stagingBinding) {
+        await mobileApi.decideStagingDevice(decision, confirmedCode, preview.stagingBinding);
+      } else if (decision === "approve") {
         await mobileApi.approveAuthDevice(confirmedCode);
-        if (current === generation.current) setTerminal("approved");
       } else {
-        dispatched = true;
         await mobileApi.denyAuthDevice(confirmedCode);
-        if (current === generation.current) setTerminal("denied");
       }
+      if (current === generation.current)
+        setTerminal(decision === "approve" ? "approved" : "denied");
     } catch (error) {
       if (current !== generation.current) return;
       actionBusy.current = false;
@@ -780,7 +804,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
       setTerminal(
         (previous) => terminalFromError(error, decisionUncertain) ?? previous,
       );
-      setErrorMessage(() => (translateApp(deviceLoginErrorCopy(error), { host: loginServerHost() })));
+      setErrorMessage(() => (translateApp(deviceLoginErrorCopy(error), { host: preview.stagingBinding ? "staging.nyxid.ai" : loginServerHost() })));
     } finally {
       if (decisionOperation.current === owner) {
         decisionOperation.current = null;
@@ -821,6 +845,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     navigation.setParams({
       user_code: undefined,
       start_scanner: undefined,
+      staging_scan: undefined,
     });
   };
 

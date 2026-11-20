@@ -112,3 +112,19 @@ test("rejects malformed and non-URL input", () => {
 test("normalizes ambiguous characters I/L to 1, O to 0, and U to V", () => {
   assert.equal(normalizeAuthDeviceUserCode("iLou-aubc"), "110VAVBC");
 });
+
+test("camera routes only exact staging HTTPS device QR origins", async () => {
+  const { extractCameraLoginRequest } = await import("./deviceUserCode");
+  const path = "/login/device?user_code=ABCD-EFGH";
+  for (const host of ["staging.nyxid.ai", "staging-api.nyxid.ai:443"]) {
+    assert.deepEqual(extractCameraLoginRequest(`https://${host}${path}`), {
+      kind: "staging-device", userCode: "ABCDEFGH",
+    });
+  }
+  for (const url of [
+    `http://staging.nyxid.ai${path}`, `https://staging.nyxid.ai.other.test${path}`,
+    `https://user@staging.nyxid.ai${path}`, `https://staging.nyxid.ai:8443${path}`,
+    `https://staging.nyxid.ai${path}&user_code=ZYXW-VTSR`,
+    "https://staging.nyxid.ai/login/agent-key?user_code=ABCD-EFGH",
+  ]) assert.equal(extractCameraLoginRequest(url), null);
+});
