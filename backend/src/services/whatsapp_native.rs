@@ -384,6 +384,18 @@ pub fn verified_account<'a>(
     channel_id: &str,
     context: &'a Value,
 ) -> Option<&'a str> {
+    if context["activity"]["kind"]["type"] != "message" {
+        return None;
+    }
+    verified_source_account(config, bot, channel_id, context)
+}
+
+pub(crate) fn verified_source_account<'a>(
+    config: &NativeWhatsapp,
+    bot: &ChannelBot,
+    channel_id: &str,
+    context: &'a Value,
+) -> Option<&'a str> {
     if !matches!(
         config.callback.phase,
         CallbackPhase::Gateway | CallbackPhase::AwaitingRelay
@@ -419,7 +431,6 @@ fn source_account<'a>(
         && activity["conversation"]["kind"] == "private"
         && activity["conversation"]["id"].as_str() == Some(sender)
         && activity["conversation"]["thread_id"].is_null()
-        && activity["kind"]["type"] == "message"
         && activity["event_id"]
             .as_str()
             .is_some_and(|id| !id.is_empty() && id.len() <= 256))

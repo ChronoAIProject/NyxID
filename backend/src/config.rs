@@ -569,6 +569,7 @@ pub struct AppConfig {
     /// Additional lowercase URL schemes accepted for mobile OAuth returns.
     /// `nyxid` is always accepted implicitly.
     pub mobile_app_return_schemes: Vec<String>,
+    pub mobile_social_redirect_uris: Vec<String>,
 
     /// Use APNs sandbox instead of production.
     /// Default: true in development, false otherwise.
@@ -1211,6 +1212,40 @@ fn parse_android_fingerprints(raw: Option<&str>) -> Result<Vec<String>, &'static
     Ok(result)
 }
 
+fn parse_mobile_social_redirect_uris(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let mut uris = Vec::new();
+    for uri in raw
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let invalid = "expected an exact mobile social callback URI";
+        let url = url::Url::parse(uri).map_err(|_| invalid)?;
+        if uri.len() > 512
+            || url.as_str() != uri
+            || url.host_str().is_none()
+            || uri.contains('@')
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid);
+        }
+        if url.scheme() == "exp" {
+            if url.path() != "/--/auth/social/callback" {
+                return Err(invalid);
+            }
+        } else {
+            parse_mobile_app_return_schemes(Some(url.scheme()))?;
+            if uri != format!("{}://auth/social/callback", url.scheme()) {
+                return Err(invalid);
+            }
+        }
+        uris.push(uri.to_owned());
+    }
+    Ok(uris)
+}
+
 fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
     const RESERVED: &[&str] = &[
         "http",
@@ -1529,6 +1564,7 @@ impl AppConfig {
             apns_topic: env::var("APNS_TOPIC").ok().filter(|s| !s.is_empty()),
             android_app_package: parse_android_package(env::var("ANDROID_APP_PACKAGE").ok().as_deref()).expect("invalid ANDROID_APP_PACKAGE"),
             android_app_sha256_cert_fingerprints: parse_android_fingerprints(env::var("ANDROID_APP_SHA256_CERT_FINGERPRINTS").ok().as_deref()).expect("invalid ANDROID_APP_SHA256_CERT_FINGERPRINTS"),
+            mobile_social_redirect_uris: parse_mobile_social_redirect_uris(env::var("MOBILE_SOCIAL_REDIRECT_URIS").ok().as_deref()).expect("invalid MOBILE_SOCIAL_REDIRECT_URIS"),
             mobile_app_return_schemes: parse_mobile_app_return_schemes(env::var("MOBILE_APP_RETURN_SCHEMES").ok().as_deref()).expect("invalid MOBILE_APP_RETURN_SCHEMES"),
             apns_sandbox: env::var("APNS_SANDBOX")
                 .ok()
@@ -2334,6 +2370,7 @@ mod tests {
             android_app_package: None,
             android_app_sha256_cert_fingerprints: Vec::new(),
             mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -2891,6 +2928,26 @@ mod android_app_link_tests {
 
 #[cfg(test)]
 mod mobile_app_return_scheme_tests {
+    #[test]
+    fn mobile_social_redirect_configuration_accepts_canonical_callbacks() {
+        let parse = super::parse_mobile_social_redirect_uris;
+        let native = "custom-app://auth/social/callback";
+        let expo = "exp://127.0.0.1:8081/--/auth/social/callback";
+        assert_eq!(
+            parse(Some(&format!("{native}, {expo}"))).unwrap(),
+            [native, expo]
+        );
+        for value in [
+            "https://auth/social/callback",
+            "custom-app://auth/social/callback?",
+            "custom-app://user@auth/social/callback",
+            "custom-app://auth/social/callback#x",
+            "exp://localhost:8081/--/other",
+        ] {
+            assert!(parse(Some(value)).is_err());
+        }
+    }
+
     use super::parse_mobile_app_return_schemes;
 
     #[test]

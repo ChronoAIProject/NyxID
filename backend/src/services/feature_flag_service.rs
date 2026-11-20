@@ -278,6 +278,12 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
+pub const TURN_HANDOFF_FLAG_KEY: &str = "assistant:turn-handoff";
+const TURN_HANDOFF_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: TURN_HANDOFF_FLAG_KEY,
+    description: "Allow eligible assistant turns to reattach across replicas when the fleet and model support it.",
+    default_enabled: false,
+};
 const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
     description: "Admit generated Sandbox files for Web user turns once capability support is recorded and every live API and async worker supports it.",
@@ -487,6 +493,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
@@ -551,6 +558,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
@@ -3389,6 +3397,7 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:turn-handoff",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
@@ -4114,6 +4123,7 @@ mod tests {
     #[test]
     fn channel_media_attachment_writes_and_generated_artifacts_are_registered_default_off() {
         for key in [
+            TURN_HANDOFF_FLAG_KEY,
             ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
             ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,

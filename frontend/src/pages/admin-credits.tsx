@@ -69,6 +69,7 @@ import { CreditGrantsTable } from "@/components/admin-credits/credit-grants-tabl
 import { GrantRevokeDescription } from "@/components/admin-credits/grant-revoke-description";
 import { ScheduleDialog } from "@/components/admin-credits/schedule-dialog";
 import { SchedulesTable } from "@/components/admin-credits/schedules-table";
+import { SeedScheduleDialog } from "@/components/admin-credits/seed-schedule-dialog";
 import { rolloutWarningMessage } from "@/components/admin-credits/credit-grant-visibility";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -161,6 +162,9 @@ export function AdminCreditsPage() {
     null,
   );
   const [grantToRevoke, setGrantToRevoke] = useState<CreditGrant | null>(null);
+  const [scheduleToSeed, setScheduleToSeed] = useState<CreditSchedule | null>(
+    null,
+  );
 
   const grantForm = useAppForm<IssueGrantForm>({
     resolver: zodResolver(issueGrantFormSchema),
@@ -189,6 +193,9 @@ export function AdminCreditsPage() {
     setAllowanceOpen(true);
   }
 
+  const recipientSchedules =
+    overview.data?.recipient_schedules === true && !overview.isError;
+
   function openScheduleDialog(schedule?: CreditSchedule) {
     setEditingSchedule(schedule ?? null);
     scheduleForm.reset(
@@ -206,6 +213,7 @@ export function AdminCreditsPage() {
               service_refs: r.service_ids,
             })),
             recurrence: schedule.recurrence,
+            timing: schedule.timing,
             expiry: schedule.expiry,
             target_kind: schedule.target_kind,
             ...normalizedBillingTargets(schedule),
@@ -213,7 +221,10 @@ export function AdminCreditsPage() {
             service_refs: schedule.scope.service_ids,
             reason: schedule.reason ?? "",
           }
-        : SCHEDULE_DEFAULTS,
+        : {
+            ...SCHEDULE_DEFAULTS,
+            timing: recipientSchedules ? "recipient" : undefined,
+          },
     );
     setScheduleOpen(true);
   }
@@ -683,6 +694,11 @@ export function AdminCreditsPage() {
               updatePending={updateSchedule.isPending}
               onEdit={openScheduleDialog}
               onToggle={(schedule) => void toggleSchedule(schedule)}
+              onSeed={
+                overview.data?.schedule_seeding === true && !overview.isError
+                  ? setScheduleToSeed
+                  : undefined
+              }
             />
           )}
         </TabsContent>
@@ -697,7 +713,14 @@ export function AdminCreditsPage() {
         servicesLoading={servicesQuery.isLoading}
         retryServices={() => void servicesQuery.refetch()}
         canRecurring={canWrite}
+        recipientSchedules={recipientSchedules}
       />
+      {scheduleToSeed ? (
+        <SeedScheduleDialog
+          schedule={scheduleToSeed}
+          onClose={() => setScheduleToSeed(null)}
+        />
+      ) : null}
       <GrantDialog
         open={grantOpen}
         onOpenChange={setGrantOpen}
@@ -723,6 +746,7 @@ export function AdminCreditsPage() {
         pending={createSchedule.isPending || updateSchedule.isPending}
         editingSchedule={editingSchedule}
         allocationPolicies={allocationPolicies}
+        recipientSchedules={recipientSchedules}
         servicesError={servicesQuery.isError}
         servicesLoading={servicesQuery.isLoading}
         retryServices={() => void servicesQuery.refetch()}

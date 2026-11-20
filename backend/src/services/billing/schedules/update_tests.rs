@@ -19,6 +19,7 @@ async fn stale_schedule_update_returns_conflict_without_overwriting_winner() {
             request_id: None,
             amount_credits: 25,
             recurrence: ScheduleRecurrence::Monthly,
+            timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind: BillingTargetKind::AllUsers,
             target_user_ids: Vec::new(),

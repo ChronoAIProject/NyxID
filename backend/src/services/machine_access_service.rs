@@ -1097,6 +1097,7 @@ pub fn admit<'a>(
             capabilities: access.capabilities,
         });
         let lease = model::Lease {
+            key_version: chat.key_version,
             id: authority.lease_id.clone(),
             node_id: node.id.clone(),
             api_key_id: chat.api_key_id.clone(),
@@ -1189,10 +1190,12 @@ pub(super) async fn fence_renewal_in_session(
 /// Keep renewal independent of the requesting HTTP connection for background
 /// jobs. Authentication is rebuilt from MongoDB on every renewal.
 pub(super) async fn renew_one(state: &crate::AppState, mut lease: model::Lease) -> AppResult<()> {
-    let chat = super::assistant_acknowledgement_service::for_key(
+    let chat = super::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &lease.authority.actor_id,
         Some(&lease.api_key_id),
+        lease.key_version,
+        None,
     )
     .await?
     .ok_or_else(refused)?;

@@ -174,6 +174,12 @@ pub(super) async fn member_recipients(
             MEMBERSHIPS,
             vec![
                 doc! { "$match": membership },
+                doc! { "$lookup": {
+                    "from": USERS, "localField": "org_user_id", "foreignField": "_id",
+                    "pipeline": [{ "$match": { "is_active": true, "user_type": "org" } }, { "$project": { "_id": 1 } }],
+                    "as": "active_org",
+                } },
+                doc! { "$match": { "active_org.0": { "$exists": true } } },
                 doc! { "$group": { "_id": "$member_user_id" } },
                 doc! { "$sort": { "_id": 1 } },
                 doc! { "$lookup": {
@@ -220,14 +226,48 @@ pub(super) async fn allowance_clauses(
     db: &mongodb::Database,
     owner_id: &str,
 ) -> AppResult<Vec<Document>> {
-    let mut clauses = vec![
+    Ok(active_person_targets(db, owner_id).await?.map_or_else(
+        || personal_clauses(owner_id),
+        |targets| targets.clauses(owner_id),
+    ))
+}
+
+fn personal_clauses(owner_id: &str) -> Vec<Document> {
+    vec![
         doc! { "target_kind": "all_users" },
         doc! { "target_kind": "selected_users", "target_user_ids": owner_id },
-    ];
+    ]
+}
+
+pub(super) struct ActivePersonTargets {
+    pub org_ids: Vec<String>,
+    pub group_ids: Vec<String>,
+}
+
+impl ActivePersonTargets {
+    pub fn clauses(&self, owner_id: &str) -> Vec<Document> {
+        let mut clauses = personal_clauses(owner_id);
+        for (ids, kind, field) in [
+            (&self.org_ids, "org_members", "target_org_ids"),
+            (&self.group_ids, "groups", "target_group_ids"),
+        ] {
+            if !ids.is_empty() {
+                clauses.push(doc! { "target_kind": kind, field: { "$in": ids } });
+            }
+        }
+        clauses
+    }
+}
+
+/// Allowances and lifecycle credit grants use the same live membership lookup.
+pub(super) async fn active_person_targets(
+    db: &mongodb::Database,
+    owner_id: &str,
+) -> AppResult<Option<ActivePersonTargets>> {
     let Some(owner) = db
         .collection::<Document>(USERS)
         .aggregate([
-            doc! { "$match": { "_id": owner_id, "is_active": true } },
+            doc! { "$match": { "_id": owner_id, "is_active": true, "user_type": { "$ne": "org" } } },
             doc! { "$lookup": {
                 "from": MEMBERSHIPS, "localField": "_id", "foreignField": "member_user_id",
                 "pipeline": [
@@ -246,7 +286,6 @@ pub(super) async fn allowance_clauses(
                 "as": "memberships",
             } },
             doc! { "$project": {
-                "user_type": 1,
                 "group_ids": { "$ifNull": ["$group_ids", []] },
                 "org_ids": "$memberships._id",
             } },
@@ -255,22 +294,21 @@ pub(super) async fn allowance_clauses(
         .try_next()
         .await?
     else {
-        return Ok(clauses);
+        return Ok(None);
     };
-    if owner.get_str("user_type") == Ok("org") {
-        return Ok(clauses);
-    }
-    for (field, kind, target_field) in [
-        ("org_ids", "org_members", "target_org_ids"),
-        ("group_ids", "groups", "target_group_ids"),
-    ] {
-        if let Ok(ids) = owner.get_array(field)
-            && !ids.is_empty()
-        {
-            clauses.push(doc! { "target_kind": kind, target_field: { "$in": ids } });
-        }
-    }
-    Ok(clauses)
+    let ids = |field| {
+        owner
+            .get_array(field)
+            .into_iter()
+            .flatten()
+            .filter_map(bson::Bson::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    Ok(Some(ActivePersonTargets {
+        org_ids: ids("org_ids"),
+        group_ids: ids("group_ids"),
+    }))
 }
 
 #[cfg(test)]

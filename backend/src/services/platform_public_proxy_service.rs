@@ -791,6 +791,7 @@ pub(crate) async fn dispatch_nyxagent(
     policy::verified_context(&state.db, context).await?;
     if request.method != Method::POST
         || request.relative_path != "v1/responses"
+        || request.destination.is_some()
         || request.idempotency_key != context.turn.turn_id
     {
         return Err(denied());

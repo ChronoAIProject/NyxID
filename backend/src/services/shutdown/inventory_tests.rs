@@ -500,6 +500,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Supervisor helper; its implementation enters the shutdown runtime and is independently scanned here.",
     ),
     (
+        "handlers/assistant_team.rs",
+        "spawn_sweeps",
+        "super::assistant_nyxagent::survivor::spawn",
+        1,
+        "The change-stream listener and the offer scanner are tracked shutdown workers. Both stop on intake closure.",
+    ),
+    (
         "handlers/assistant_titles.rs",
         "spawn",
         "titles::spawn",

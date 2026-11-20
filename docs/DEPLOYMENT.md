@@ -578,6 +578,33 @@ the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
 cadence. A worker loss never automatically replays execution. A fully drained
 turn has its complete reply and needs no recovery.
 
+### Background turn rollback
+
+Enrollment in `nyxagent-reattach-v1` defaults off. Keep the flag off in production
+until PR 2's recovery, cancellation, publication and accounting checks land.
+Then an admin can enable `assistant:turn-handoff` for a person, an organization
+or globally in Feature Flags after every NyxID replica advertises
+`assistant:turn-handoff-v1` and every NyxAgent replica advertises
+`reattach.credential_watch`. Enrollment requires live fleet readiness, the
+watch capability and a selected profile with `inference_credential: thread`.
+
+Disable every enabling override in Feature Flags **before rolling NyxAgent back**
+to a version without the credential watch. Allow 30 seconds for admission hints
+to expire and let admissions already in flight finish. Keep enrollment disabled until every NyxAgent
+replica advertises `reattach.credential_watch` again. Model discovery can
+precede a profile reload, and a different replica can admit the request.
+
+Before rolling back a fleet that has enrolled turns, disable every enabling
+override, allow 30 seconds for admission hints to expire and let admissions already in
+flight finish. Keep compatible subscribers and cancellation handlers serving.
+Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
+with a URI selecting the NyxID database. Exit 0 means the majority read on the
+primary found zero outstanding conversation records. Exit 2 prints counts for
+subscribed, offered, claimed or stopped windows. A read error requires another
+check. A stopped window clears after confirmed cancellation or after the next
+authorized admission replaces the internal credential. Deleting its marker by
+hand could let an earlier execution use the next turn's authority.
+
 ## Environment Configuration
 
 ### Required Variables

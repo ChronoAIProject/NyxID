@@ -939,6 +939,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
@@ -6501,7 +6509,14 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
@@ -8453,6 +8468,7 @@ pub async fn connect_service_with_binding(
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    super::catalog_service::require_connection_access(db, user_id, &catalog).await?;
     let created = crate::services::unified_key_service::create_platform_key(
         db,
         user_id,
@@ -8490,6 +8506,7 @@ pub async fn connect_service(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     let has_credential = credential.is_some_and(|value| !value.trim().is_empty());
     if !scopes.is_empty() && has_credential {
         return Err(AppError::ValidationError(
@@ -10790,6 +10807,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,

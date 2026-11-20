@@ -194,7 +194,7 @@ pub enum MemberScopeSource {
 }
 ```
 
-`COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles.
+`COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles. The founder, admin-added members and invite recipients can receive matching scheduled credits in their personal wallets after the membership commits. An exit preserves issued grants and recipient-cycle anchors. Later issuance checks active membership, and rejoining retains the original anchor. See [scheduled credit eligibility](BILLING_EXACT_ACCOUNTING.md#scheduled-credits-at-signup-sign-in-and-membership-changes).
 
 **Legacy rows.** Membership rows written before this feature don't have a `scope_source` field. Serde deserializes missing values as `Override` to preserve behavior (null `allowed_service_ids` = full access, previously), and a startup backfill in `db::ensure_indexes` idempotently writes `scope_source = "override"` on any row still missing the field. New memberships created through `create_membership` default to `Inherit`.
 

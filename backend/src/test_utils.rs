@@ -1966,6 +1966,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         android_app_package: None,
         android_app_sha256_cert_fingerprints: Vec::new(),
         mobile_app_return_schemes: Vec::new(),
+        mobile_social_redirect_uris: Vec::new(),
         apns_sandbox: true,
         key_provider: "local".to_string(),
         aws_kms_key_arn: None,

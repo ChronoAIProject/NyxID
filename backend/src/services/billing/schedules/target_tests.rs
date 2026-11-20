@@ -65,6 +65,7 @@ async fn exercise_member_pages(kind: BillingTargetKind) {
             request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
+            timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind: kind,
             target_user_ids: vec![],
@@ -206,9 +207,11 @@ async fn exercise_member_pages(kind: BillingTargetKind) {
     let mut stored = bson::to_document(&schedule).unwrap();
     stored.remove("target_org_ids");
     stored.remove("target_group_ids");
+    stored.remove("timing");
     let legacy: CreditSchedule = bson::from_document(stored).unwrap();
     assert!(legacy.target_org_ids.is_empty());
     assert!(legacy.target_group_ids.is_empty());
+    assert_eq!(legacy.timing, ScheduleTiming::Calendar);
     let mut stored = bson::to_document(&period).unwrap();
     stored.remove("target_org_ids");
     stored.remove("target_group_ids");
@@ -265,6 +268,7 @@ async fn selected_schedule_creation_validates_users_in_one_query() {
             request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
+            timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
             expiry: CreditExpiryPolicy::Never,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec!["person".into(), "org".into()],

@@ -7431,6 +7431,33 @@ pub async fn relay_callback(
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
     }
+    let source = Box::pin(
+        crate::services::channel_relay_service::direct_callback_sender(
+            &state.db, &row, &claims, &payload,
+        ),
+    )
+    .await;
+    let sender = match source {
+        Ok(Some(sender)) => sender,
+        other => {
+            return Box::pin(provider_refusal::scope(
+                &state.db,
+                provider_refusal::Endpoint::RelayCallback,
+                async {
+                    provider_refusal::channel(&row.user_id, &row.id);
+                    provider_refusal::event(&claims.message_id);
+                    if other.is_err() {
+                        problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
+                    } else {
+                        problem(StatusCode::FORBIDDEN, "relay_source_refused")
+                    }
+                },
+            ))
+            .await;
+        }
+    };
+    let mut sender_id = sender.sender_platform_id;
+    let mut display = sender.sender_display_name;
     // Dedup redeliveries of the same inbound message.
     let sender_kind = chats::native_sender_kind(&row.platform, &payload["raw_platform_data"]);
     let native_source_key = if payload["conversation"]["type"] == "group"
@@ -7450,9 +7477,7 @@ pub async fn relay_callback(
             payload["conversation"]["platform_id"]
                 .as_str()
                 .unwrap_or_default(),
-            payload["sender"]["platform_id"]
-                .as_str()
-                .unwrap_or_default(),
+            &sender_id,
         )
         .await
         {
@@ -7488,13 +7513,7 @@ pub async fn relay_callback(
     // A private chat is one thread per sender (as before); a group, channel
     // or topic is one thread its members share.
     let partition = if kind == "private" {
-        chats::direct_partition(
-            &chat_id,
-            payload["sender"]["platform_id"]
-                .as_str()
-                .unwrap_or_default(),
-            thread_id.as_deref(),
-        )
+        chats::direct_partition(&chat_id, &sender_id, thread_id.as_deref())
     } else {
         chats::group_partition(&chat_id, thread_id.as_deref())
     };
@@ -7515,9 +7534,7 @@ pub async fn relay_callback(
             &row,
             &claims.message_id,
             &chat_id,
-            payload["sender"]["platform_id"]
-                .as_str()
-                .unwrap_or_default(),
+            &sender_id,
             thread_id.as_deref(),
             false,
         ))
@@ -7583,13 +7600,6 @@ pub async fn relay_callback(
     let reply_token = payload["reply_token"]
         .as_str()
         .map(|token| Zeroizing::new(token.to_owned()));
-    let mut sender_id = payload["sender"]["platform_id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    let mut display = payload["sender"]["display_name"]
-        .as_str()
-        .map(str::to_owned);
     let raw = payload["raw_platform_data"].clone();
     let mut text = if canonical_platform(&row.platform) == "telegram" {
         chats::native_message(&raw)

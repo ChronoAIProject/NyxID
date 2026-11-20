@@ -243,8 +243,16 @@ async fn saved_source(
 }
 
 async fn callback(state: &AppState, row: &NyxbotChannel, source: &ChannelMessage) -> StatusCode {
+    callback_response(state, row, source).await.status()
+}
+
+async fn callback_response(
+    state: &AppState,
+    row: &NyxbotChannel,
+    source: &ChannelMessage,
+) -> Response {
     let body = json!({
-        "message_id":source.id,"correlation_id":format!("jti-{}",source.id),"platform":row.platform,
+        "message_id":source.id,"correlation_id":format!("jti-{}",source.id),"platform":source.platform,
         "agent":{"api_key_id":row.route_api_key_id,"name":"route"},
         "conversation":{"id":row.route_id,"platform_id":source.platform_conversation_id,"type":"private"},
         "sender":{"platform_id":source.sender_platform_id},"content":{"type":"image","text":""},
@@ -259,7 +267,7 @@ async fn callback(state: &AppState, row: &NyxbotChannel, source: &ChannelMessage
         &format!("jti-{}", source.id),
         &row.route_api_key_id,
         &source.id,
-        &row.platform,
+        &source.platform,
         &sha256_hex(&bytes),
     )
     .unwrap();
@@ -272,7 +280,236 @@ async fn callback(state: &AppState, row: &NyxbotChannel, source: &ChannelMessage
         Bytes::from(bytes),
     )
     .await
-    .status()
+}
+
+#[tokio::test]
+async fn direct_callback_requires_the_same_stored_inbound_on_redelivery() {
+    let (state, row, _, _, server) = media_fixture("callback_source_binding", "direct").await;
+    let source = media_source(&state, &row, "source", "native", "").await;
+    let (_guard, done) = watch_relay_callback(&row.id, &source.id);
+    assert_eq!(callback(&state, &row, &source).await, StatusCode::ACCEPTED);
+    done.await.unwrap();
+
+    let records = state.db.collection::<bson::Document>(MESSAGES);
+    let original = bson::to_document(&source).unwrap();
+    let mut results = Vec::new();
+    for field in [
+        "channel_bot_id",
+        "platform",
+        "conversation_id",
+        "sender_platform_id",
+        "agent_api_key_id",
+        "user_id",
+        "direction",
+        "platform_conversation_id",
+        "thread_id",
+    ] {
+        let mut changed = original.clone();
+        changed.insert(field, "other");
+        records
+            .replace_one(doc! {"_id": &source.id}, changed)
+            .await
+            .unwrap();
+        results.push((field, callback(&state, &row, &source).await));
+    }
+    records.delete_one(doc! {"_id": &source.id}).await.unwrap();
+    results.push(("absent", callback(&state, &row, &source).await));
+    assert!(
+        results
+            .iter()
+            .all(|(_, status)| *status == StatusCode::FORBIDDEN),
+        "{results:?}"
+    );
+    let mut fresh = source.clone();
+    fresh.id = Uuid::new_v4().to_string();
+    let refused = callback_response(&state, &row, &fresh).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let problem: Value = serde_json::from_str(&body_text(refused).await).unwrap();
+    assert_eq!(
+        problem,
+        json!({"error": {"code": "relay_source_refused"}, "code": "relay_source_refused"})
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .count_documents(doc! {"channel_id": &row.id})
+            .await
+            .unwrap(),
+        1
+    );
+    let audit = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .find_one(
+            doc! {"event_type": "nyxbot_provider_refused", "event_data.endpoint": "relay_callback"},
+        )
+        .await
+        .unwrap()
+        .expect("authenticated callback refusal");
+    let details = audit.get_document("event_data").unwrap();
+    assert_eq!(details.get_str("code").unwrap(), "relay_source_refused");
+    assert_eq!(details.get_str("channel_agent_id").unwrap(), &row.id);
+    server.abort();
+}
+
+#[tokio::test]
+async fn direct_callback_admits_each_platform_once() {
+    let (state, _, server) = setup("callback_platforms").await;
+    for name in [
+        "telegram",
+        "telegram-new",
+        "lark",
+        "feishu",
+        "discord",
+        "slack",
+        "whatsapp",
+        "x",
+        "aurinko",
+    ] {
+        let (mut row, _) = channel(&state, "direct").await;
+        platform(&state, &mut row, name).await;
+        let source = media_source(&state, &row, name, "native", "").await;
+        if name == "telegram-new" {
+            row.platform = "telegram".into();
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .replace_one(doc! {"_id": &row.id}, &row)
+                .await
+                .unwrap();
+        }
+        let (_guard, done) = watch_relay_callback(&row.id, &source.id);
+        assert_eq!(
+            callback(&state, &row, &source).await,
+            StatusCode::ACCEPTED,
+            "{name}"
+        );
+        done.await.unwrap();
+        assert_eq!(
+            callback(&state, &row, &source).await,
+            StatusCode::ACCEPTED,
+            "{name}"
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .count_documents(doc! {"channel_id": &row.id})
+                .await
+                .unwrap(),
+            1,
+            "{name}"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn pending_relay_redelivery_completes_once_on_the_current_route() {
+    use crate::services::{channel_retry_ingress as retry, channel_routing_service as routes};
+    let (state, _, server) = setup("callback_pending_retry").await;
+    let (mut row, _) = channel(&state, "direct").await;
+    platform(&state, &mut row, "aurinko").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new()
+        .route("/relay/{id}", axum::routing::post(relay_callback))
+        .with_state(state.clone());
+    let relay = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.route_api_key_id},
+            doc! {"$set": {"callback_url": format!("http://{address}/relay/{}", row.id)}},
+        )
+        .await
+        .unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let adapter = adapters::resolve_adapter("aurinko", &state.token_exchange_cache).unwrap();
+    let inbound = InboundMessage {
+        platform_message_id: "mail-message".into(),
+        conversation_id: "mail-thread".into(),
+        conversation_type: "private".into(),
+        sender_platform_id: "sender@example.test".into(),
+        sender_display_name: None,
+        content_type: "text".into(),
+        text: None,
+        attachments: vec![],
+        embedded_attachments: vec![],
+        embedded_attachments_omitted: 0,
+        reply_to_platform_message_id: None,
+        thread_id: Some("mail-thread".into()),
+        raw_data: json!({}),
+    };
+    let context = retry::IngressContext {
+        db: &state.db,
+        config: &state.config,
+        jwt_keys: &state.jwt_keys,
+        encryption_keys: &state.encryption_keys,
+        http: &state.http_client,
+        rate_limiter: &state.per_channel_event_limiter,
+    };
+    let id = Uuid::new_v4().to_string();
+    let deliver = || {
+        Box::pin(retry::deliver(
+            &context,
+            &bot,
+            adapter.as_ref(),
+            &inbound,
+            &id,
+        ))
+    };
+    let exact = routes::create_conversation(
+        &state.db,
+        OWNER,
+        Some(&bot.id),
+        "aurinko",
+        &inbound.conversation_id,
+        "private",
+        None,
+        &row.route_api_key_id,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    let messages = state.db.collection::<ChannelMessage>(MESSAGES);
+    let source = || messages.find_one(doc! {"_id": &id});
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    let count = || events.count_documents(doc! {"channel_id": &row.id});
+    assert!(matches!(
+        deliver().await,
+        Err(AppError::ChannelRelayFailed(_))
+    ));
+    let pending = source().await.unwrap().unwrap();
+    assert_eq!(pending.conversation_id, exact.id);
+    assert_eq!(pending.callback_status.as_deref(), Some("failed"));
+    assert_eq!(count().await.unwrap(), 0);
+
+    // Once normal routing selects the channel's default again, the producer
+    // updates its retained route and sends the same message ID.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": exact.id}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    let (_watch, done) = watch_relay_callback(&row.id, &id);
+    deliver().await.unwrap();
+    done.await.unwrap();
+    let accepted = source().await.unwrap().unwrap();
+    assert_eq!(Some(accepted.conversation_id), row.route_id);
+    assert_eq!(accepted.callback_status.as_deref(), Some("delivered"));
+    relay.abort();
+    relay.await.unwrap_err();
+    // A further provider redelivery completes with the callback listener down.
+    deliver().await.unwrap();
+    assert_eq!(count().await.unwrap(), 1);
+    server.abort();
 }
 
 fn provider_event(row: &NyxbotChannel, source: &ChannelMessage) -> Value {

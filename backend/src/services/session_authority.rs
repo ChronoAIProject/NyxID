@@ -301,6 +301,10 @@ pub(crate) async fn revoke_pending(
         )
         .session(&mut *transaction)
         .await?;
+    db.collection::<Document>(crate::models::mobile_social::MobileSocialDelivery::COLLECTION_NAME)
+        .delete_many(doc! {"user_id": user_id})
+        .session(&mut *transaction)
+        .await?;
     Ok(())
 }
 

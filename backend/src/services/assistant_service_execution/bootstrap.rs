@@ -24,7 +24,7 @@ pub async fn begin_model_attempt(
         if live.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
         db.collection::<Document>(COLLECTION).insert_one(doc! {
             "_id":&attempt,"kind":"model_attempt","active":true,"user_id":&row.user_id,
-            "conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"turn_id":turn,
+            "conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"turn_id":turn,"key_version":row.credential_version_floor(),
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))
         }).session(&mut *tx).await?;
         Ok(())
@@ -59,7 +59,7 @@ pub async fn finish_model_attempt(db: &Database, attempt: &str) -> AppResult<Opt
         doc! {"_id":attempt,"kind":"model_attempt","active":true,"expires_at":{"$gt":bson::DateTime::now()}},
         doc! {"$set":{"active":false}},
     ).await? else { return Ok(None); };
-    let live = acks::for_key(
+    let live = acks::chat_for_key_version(
         db,
         marker
             .get_str("user_id")
@@ -69,6 +69,8 @@ pub async fn finish_model_attempt(db: &Database, attempt: &str) -> AppResult<Opt
                 .get_str("api_key_id")
                 .map_err(|_| AppError::AssistantTurnRequired)?,
         ),
+        marker.get_i64("key_version").unwrap_or_default(),
+        None,
     )
     .await?;
     if live.as_ref().is_none_or(|chat| {

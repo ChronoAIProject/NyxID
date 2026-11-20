@@ -50,6 +50,7 @@ pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
 pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
+pub mod assistant_turn_restart;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;
@@ -163,6 +164,7 @@ pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod mobile_social_service;
 pub mod node_credential_delivery;
 pub mod node_dispatch;
 #[cfg(test)]

@@ -236,6 +236,7 @@ pub async fn register_user(
     } else {
         db.collection::<User>(USERS).insert_one(&new_user).await?;
     }
+    super::billing::schedules::eligibility::after_user_created(db, &user_id, now).await;
 
     tracing::info!(user_id = %user_id, "User registered");
 

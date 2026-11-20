@@ -740,6 +740,42 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    let mobile_flows = db.collection::<crate::models::mobile_social::MobileSocialFlow>(
+        crate::models::mobile_social::MobileSocialFlow::COLLECTION_NAME,
+    );
+    let mobile_deliveries = db.collection::<crate::models::mobile_social::MobileSocialDelivery>(
+        crate::models::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+    );
+    let expiry = IndexModel::builder()
+        .keys(doc! {"expires_at": 1})
+        .options(
+            IndexOptions::builder()
+                .expire_after(std::time::Duration::ZERO)
+                .build(),
+        )
+        .build();
+    mobile_flows.create_index(expiry.clone()).await?;
+    mobile_deliveries.create_index(expiry).await?;
+    mobile_flows
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"state_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"code_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mobile_deliveries
+        .create_index(IndexModel::builder().keys(doc! {"user_id": 1}).build())
+        .await?;
+
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
     mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
@@ -3751,6 +3787,13 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
                 .build(),
         )
         .await?;
+    db.collection::<Document>(CREDIT_SCHEDULES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "timing": 1, "is_active": 1, "target_kind": 1, "target_group_ids": 1 })
+                .build(),
+        )
+        .await?;
     let credit_schedule_periods = db.collection::<Document>(CREDIT_SCHEDULE_PERIODS);
     credit_schedule_periods
         .create_index(
@@ -3767,6 +3810,32 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
 
+    credit_schedule_periods
+        .create_index(IndexModel::builder().keys(doc! { "period_end": 1 }).build())
+        .await?;
+
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "recipient_user_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "recipient_user_id": 1, "created_at": -1, "_id": -1 })
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::credit_schedule_recipient::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "is_eligible": 1, "next_due_at": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
     // ── usage_allowances / usage_allowance_periods ──
     let usage_allowances = db.collection::<Document>(USAGE_ALLOWANCES);
     usage_allowances

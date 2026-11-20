@@ -42,3 +42,9 @@ Fixture refreshes must preserve the release identity, subject digest and exact
 logged body. Record the retrieval source and new file hashes here. Run both the
 CLI and dedicated machine-updater verifier tests, including explicit live TUF
 validation, when refreshing producer fixtures or trust bootstrap material.
+
+`local-release.json` contains four small cargo-dist-layout tarballs, a single
+Sigstore v0.3 bundle covering their SHA-256 digests, and the public keys of a
+local test issuer and logs. Each tarball contains a shell executable that
+records the updater's skills handoff. The signed event time is 2026-01-01 UTC.
+Only the local update test loads this trust root.

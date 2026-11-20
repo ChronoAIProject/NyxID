@@ -322,6 +322,10 @@ async fn complete_identity(
     if let Some(mut transaction) = ordinary_transaction {
         crate::services::transaction_service::commit(&mut transaction).await?;
     }
+    if row.keep_signed_in {
+        crate::services::billing::schedules::eligibility::after_human_login(&state.db, &actor.id)
+            .await;
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(actor.id),
