@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kind": "stream_seal",
+  "producer_namespace": "cma-example",
+  "stream_id": "00000000-0000-4000-8000-000000000001",
+  "event_id": "00000000-0000-4000-8000-00000000000d",
+  "sequence": "4",
+  "previous_event_digest": "026120297096627e03909470bb5fa306b1417d2f2f780226bb47be05fb43a995",
+  "owner_ref": {
+    "issuer": "nyxid-example",
+    "subject": "owner-example",
+    "kind": "person"
+  },
+  "sandbox_id": "sbx_synthetic",
+  "source_epoch": "00000000-0000-4000-8000-000000000002",
+  "basis": "allocated",
+  "metric_definition_version": "allocated-v1",
+  "algorithm_version": "lifecycle-minute-split-v1",
+  "source_refs": [
+    {
+      "kind": "lifecycle",
+      "id": "synthetic-source-42",
+      "revision": "42",
+      "part": "0"
+    }
+  ],
+  "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observed_at_ms": "1795132860000",
+  "source_cutoff_ms": "1795132860000",
+  "produced_at_ms": "1795132861000",
+  "seal": {
+    "final_source": {
+      "kind": "lifecycle",
+      "id": "synthetic-source-42",
+      "revision": "42",
+      "part": "0"
+    },
+    "sealed_at_ms": "1795132860000",
+    "reason": "home_released"
+  }
+}

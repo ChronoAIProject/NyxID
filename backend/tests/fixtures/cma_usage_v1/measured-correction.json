@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "correction",
+  "producer_namespace": "cma-example",
+  "stream_id": "00000000-0000-4000-8000-000000000003",
+  "event_id": "00000000-0000-4000-8000-000000000016",
+  "sequence": "3",
+  "previous_event_digest": "a0d4bf0e830e5c30317a4dae85366b56aa572048e50eb13c7dcdb0fabf3156ee",
+  "owner_ref": {
+    "issuer": "nyxid-example",
+    "subject": "owner-example",
+    "kind": "person"
+  },
+  "sandbox_id": "sbx_synthetic",
+  "source_epoch": "00000000-0000-4000-8000-000000000002",
+  "basis": "measured",
+  "metric_definition_version": "measured-v1",
+  "algorithm_version": "binding-integral-half-even-v1",
+  "source_refs": [
+    {
+      "kind": "lifecycle",
+      "id": "synthetic-source-42",
+      "revision": "42",
+      "part": "0"
+    }
+  ],
+  "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observed_at_ms": "1795132860000",
+  "source_cutoff_ms": "1795132860000",
+  "produced_at_ms": "1795132861000",
+  "correction": {
+    "fact_id": "00000000-0000-4000-8000-000000000064",
+    "expected_predecessor_event_id": "00000000-0000-4000-8000-000000000015",
+    "expected_predecessor_digest": "a0d4bf0e830e5c30317a4dae85366b56aa572048e50eb13c7dcdb0fabf3156ee",
+    "expected_evidence_revision": "1",
+    "replacement": {
+      "fact_id": "00000000-0000-4000-8000-000000000064",
+      "evidence_revision": "2",
+      "bucket_start_ms": "1795132800000",
+      "start_ms": "1795132800000",
+      "end_ms": "1795132860000",
+      "resource": {
+        "runtime_id": "runtime-example",
+        "runtime_generation": "7",
+        "home_id": "home-example",
+        "home_generation": "2"
+      },
+      "allocation": null,
+      "quantities": {
+        "sandbox_cpu_core_nanoseconds_v1": "60000000000",
+        "sandbox_memory_working_set_byte_milliseconds_v1": null,
+        "sandbox_disk_used_byte_milliseconds_v1": "0"
+      },
+      "audit_time": {
+        "compute_uptime_ms": "60000",
+        "retained_home_ms": "60000"
+      },
+      "coverage": {
+        "cpu": {
+          "covered_binding_ms": "60000",
+          "expected_binding_ms": "120000",
+          "quality": "partial",
+          "missing_reason": "sample_gap"
+        },
+        "memory": {
+          "covered_binding_ms": "0",
+          "expected_binding_ms": "60000",
+          "quality": "missing",
+          "missing_reason": "sample_unavailable"
+        },
+        "disk": {
+          "covered_binding_ms": "60000",
+          "expected_binding_ms": "60000",
+          "quality": "observed",
+          "missing_reason": null
+        }
+      }
+    },
+    "reason": "late_sample"
+  }
+}
