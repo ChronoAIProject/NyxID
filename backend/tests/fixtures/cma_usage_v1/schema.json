@@ -94,16 +94,44 @@
       "type": "object",
       "properties": {
         "runtime_id": {
-          "$ref": "#/$defs/text"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "runtime_generation": {
-          "$ref": "#/$defs/counter"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "home_id": {
-          "$ref": "#/$defs/text"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "home_generation": {
-          "$ref": "#/$defs/counter"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

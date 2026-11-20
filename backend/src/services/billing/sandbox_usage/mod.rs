@@ -22,3 +22,5 @@ mod pricing_store_tests;
 #[cfg(test)]
 mod pricing_tests;
 pub mod tariff_store;
+#[cfg(test)]
+mod resource_tests;
