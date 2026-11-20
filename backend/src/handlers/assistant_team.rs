@@ -174,6 +174,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -1030,6 +1031,7 @@ pub(crate) async fn assign(
             execution_parent: execution_parent
                 .and_then(crate::services::execution_permission_dispatch::tasks::parent),
             channel_context: None,
+            capacity: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3221,6 +3223,15 @@ pub(crate) async fn destroy_agent(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<AssistantAgent> {
+    let target = team::maintained_agent(&state.db, owner, agent_id).await?;
+    if !target.is_nyxbot() && target.destroyed_at.is_none() {
+        super::assistant_nyxagent::survivor::cancel_before_revocation(
+            state,
+            owner,
+            mongodb::bson::doc! {"agent_id":&target.id},
+        )
+        .await;
+    }
     let agent = team::destroy(&state.db, owner, agent_id).await?;
     super::nyxbot::chats::release_agent_chats(state, owner, &agent.id).await?;
     for channel in super::nyxbot::list(state, owner).await? {
@@ -4201,6 +4212,8 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::assistant_nyxagent::survivor::spawn(state.clone());
+    crate::services::assistant_cma_reservation_recovery::spawn_worker(state.clone());
     crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
@@ -4270,6 +4283,12 @@ pub fn spawn_sweeps(state: AppState) {
             if state.shutdown.is_draining() {
                 break;
             }
+            if crate::services::nyxbot_response_read::expire(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel response lifecycle maintenance deferred");
+            }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
                 .is_err()
@@ -4306,11 +4325,22 @@ pub fn spawn_sweeps(state: AppState) {
             match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
                 Ok(rows) => {
                     for row in rows {
+                        let stopped = row
+                            .active_turn
+                            .as_ref()
+                            .is_some_and(|turn| turn.stop_requested);
+                        if stopped {
+                            super::assistant_nyxagent::survivor::cancel(&state, &row).await;
+                        }
                         super::assistant_team::after_turn_boxed(
                             state.clone(),
                             row,
                             String::new(),
-                            Some(TurnError::internal("turn_lost", "sweep")),
+                            Some(if stopped {
+                                TurnError::internal("cancelled", "stop")
+                            } else {
+                                TurnError::internal("turn_lost", "sweep")
+                            }),
                         )
                         .await;
                     }

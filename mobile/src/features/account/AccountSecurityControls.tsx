@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
 import { Alert, Switch } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -22,12 +25,13 @@ export function AccountSecurityControls({
 }: {
   profile: AccountProfile;
 }) {
+  useAppLanguage();
   const client = useQueryClient();
   const { colors } = useTheme();
   const { isConnected } = useNetworkStatus();
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [message, setMessage] = useState<{
+  const [message, setMessage] = useLocalizedState<{
     message: string;
     tone: "success" | "error";
   } | null>(null);
@@ -57,7 +61,7 @@ export function AccountSecurityControls({
       if (ticket.isCurrent()) {
         await refresh();
         if (ticket.isCurrent())
-          setMessage({ message: "Sign-in policy saved", tone: "success" });
+          setMessage(() => ({ message: translateApp("Sign-in policy saved"), tone: "success" }));
       }
     } catch (error) {
       if (
@@ -65,7 +69,7 @@ export function AccountSecurityControls({
         !(await stepUp.handle(error, () => savePolicy(enabled, ticket))) &&
         ticket.isCurrent()
       )
-        setMessage({ message: resolveErrorMessage(error), tone: "error" });
+        setMessage(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -77,19 +81,18 @@ export function AccountSecurityControls({
     <>
       {message ? <Notice {...message} /> : null}
       <SettingsGroup
-        title="Approved sign-ins"
+        title={translateApp("Approved sign-ins")}
         inset={false}
-        footer={`Approve QR or typed sign-in codes without another authenticator code. Only approve codes shown on your own screen.${
-          profile.mfa_enabled
-            ? ""
-            : " Takes effect when two-factor authentication is on."
-        }${policy ? "" : " This server does not support changing this policy yet."}`}
+        footer={(profile.mfa_enabled
+            ? (policy ? translateApp("Approve QR or typed sign-in codes without another authenticator code. Only approve codes shown on your own screen.") : translateApp("Approve QR or typed sign-in codes without another authenticator code. Only approve codes shown on your own screen. This server does not support changing this policy yet.")) : (policy ? translateApp("Approve QR or typed sign-in codes without another authenticator code. Only approve codes shown on your own screen. Takes effect when two-factor authentication is on.") : translateApp("Approve QR or typed sign-in codes without another authenticator code. Only approve codes shown on your own screen. Takes effect when two-factor authentication is on. This server does not support changing this policy yet.")))}
       >
         <SettingsRow
-          label="Skip MFA for NyxID app sign-ins"
+          label={translateApp("Skip MFA for NyxID app sign-ins")}
           accessory={
             <Switch
-              accessibilityLabel="Skip MFA for NyxID app sign-ins"
+              accessibilityLabel={translateApp(
+                "Skip MFA for NyxID app sign-ins",
+              )}
               value={policy?.skip_mfa_for_approved_sign_ins ?? false}
               disabled={!policy || disabled}
               trackColor={{ false: colors.borderSoft, true: colors.success }}
@@ -100,12 +103,14 @@ export function AccountSecurityControls({
                   return;
                 }
                 Alert.alert(
-                  "Skip MFA for app-approved sign-ins?",
-                  "Anyone with access to your signed-in NyxID app or browser could approve sign-ins without another code.",
+                  translateApp("Skip MFA for app-approved sign-ins?"),
+                  translateApp(
+                    "Anyone with access to your signed-in NyxID app or browser could approve sign-ins without another code.",
+                  ),
                   [
-                    { text: "Cancel", style: "cancel" },
+                    { text: translateApp("Cancel"), style: "cancel" },
                     {
-                      text: "Enable",
+                      text: translateApp("Enable"),
                       onPress: () => void savePolicy(true, ticket),
                     },
                   ],

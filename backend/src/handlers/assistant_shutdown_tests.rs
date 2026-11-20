@@ -51,7 +51,7 @@ async fn drain_audit_row(state: &AppState, event_type: &str) -> bson::Document {
         .try_collect()
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 1, "expected one chained {event_type} audit row");
     assert!(rows[0].get("seq").is_some());
     assert_eq!(rows[0].get_str("entry_hash").unwrap().len(), 64);
     assert_eq!(rows[0].get_str("prev_hash").unwrap().len(), 64);

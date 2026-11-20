@@ -330,7 +330,7 @@ impl Fixture {
             heartbeat.abort();
             let _ = heartbeat.await;
         }
-        self.state.db.drop().await.unwrap();
+        test_utils::drop_test_database(&self.state.db).await;
     }
 }
 
@@ -414,6 +414,48 @@ async fn disable_and_account_replacement_fence_an_admitted_reusable_permission()
         )
         .await
         .unwrap();
+    assert!(permit.before_send(&target).await.is_err());
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn consumed_node_permission_stays_not_sent_and_cannot_dispatch_again() {
+    let f = Fixture::new("execution_node_not_sent").await;
+    f.enroll(true).await;
+    let target = f.target().await;
+    let mut grant = f.grant().await;
+    f.store(&grant).await;
+    let context = RequestContext::enrolled(Some(1), &f.owner, &f.key, None).unwrap();
+    let initial = f.prepare(&context, &target).await;
+    assert!(!initial.single_dispatch());
+    let contract = grant.execution.as_mut().unwrap().v1.as_mut().unwrap();
+    contract.validity = Validity::Operation {
+        operation_id: initial.operation_id.clone(),
+        prepared_digest: initial.digest.clone(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+    };
+    grant.expires_at = super::contract::legacy_expiry(&contract.validity);
+    let grants = f.state.db.collection::<ApprovalGrant>("approval_grants");
+    grants
+        .replace_one(doc! {"_id":&grant.id}, &grant)
+        .await
+        .unwrap();
+    let mut context = RequestContext::enrolled(Some(1), &f.owner, &f.key, None).unwrap();
+    Arc::get_mut(&mut context).unwrap().operation_id = initial.operation_id.clone();
+    let permit = f.prepare(&context, &target).await;
+    assert!(permit.single_dispatch());
+    permit.before_send(&target).await.unwrap();
+    permit.node_not_sent().await.unwrap();
+    let terminal = grants
+        .find_one(doc! {"_id":&grant.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.execution_use.unwrap().state,
+        ExecutionUseState::NotSent
+    );
     assert!(permit.before_send(&target).await.is_err());
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
@@ -1120,7 +1162,7 @@ async fn owner_ask_turn_covered_suppresses_risk_card_and_preserves_live_turn_fen
             .unwrap(),
         0
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -1771,7 +1813,7 @@ async fn covered_risk_keeps_webhook_policy_delegation_and_org_instruction_floors
             "{floor} must survive coverage"
         );
     }
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -1921,7 +1963,7 @@ async fn message_root_admission_recovery_and_stop_fence_persistent_permission() 
             .await
             .is_err()
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -2169,7 +2211,7 @@ async fn invocation_admission_has_a_server_root_and_cancel_fences_recovery() {
         .await
         .unwrap();
     assert!(tasks::check(&f.state.db, task).await.is_err());
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[tokio::test]
@@ -2271,7 +2313,7 @@ async fn message_delegation_preserves_root_but_new_human_input_does_not_inherit_
             .await
             .is_err()
     );
-    f.state.db.drop().await.unwrap();
+    test_utils::drop_test_database(&f.state.db).await;
 }
 
 #[test]

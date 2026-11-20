@@ -115,6 +115,7 @@ async fn issue(
         connection,
         Utc::now() + chrono::Duration::days(1),
         example_policy(),
+        None,
     )
     .await
     .unwrap()
@@ -172,17 +173,17 @@ async fn permission_keys_persist_atomically_and_live_pause_revocation_reach_engi
         .await
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-    let paused = set_paused(&state.db, &owner, &key.id, 1, true)
+    let paused = set_paused(&state.db, &owner, &key.id, 1, true, None)
         .await
         .unwrap();
     assert_eq!(paused.revision, 2);
     assert!(
-        set_paused(&state.db, &owner, &key.id, 1, false)
+        set_paused(&state.db, &owner, &key.id, 1, false, None)
             .await
             .is_err()
     );
     assert!(evaluator.execute(request.clone()).await.is_err());
-    let resumed = set_paused(&state.db, &owner, &key.id, 2, false)
+    let resumed = set_paused(&state.db, &owner, &key.id, 2, false, None)
         .await
         .unwrap();
     assert!(
@@ -211,7 +212,8 @@ async fn permission_keys_bind_credential_epoch_and_reject_other_owners() {
             "bad",
             &connection,
             Utc::now() + chrono::Duration::days(1),
-            example_policy()
+            example_policy(),
+            None
         )
         .await
         .is_err()
@@ -410,6 +412,7 @@ async fn permission_keys_pause_after_write_withholds_response_without_replay() {
                     &self.binding.id,
                     self.binding.revision,
                     true,
+                    None,
                 )
                 .await
                 .map_err(|_| Error::Verification)?;
@@ -458,7 +461,8 @@ async fn permission_keys_invalid_creation_leaves_no_key_or_policy() {
                 "Key",
                 &connection,
                 expires,
-                example_policy()
+                example_policy(),
+                None
             )
             .await
             .is_err()
@@ -472,7 +476,8 @@ async fn permission_keys_invalid_creation_leaves_no_key_or_policy() {
             "",
             &connection,
             Utc::now() + chrono::Duration::days(1),
-            example_policy()
+            example_policy(),
+            None
         )
         .await
         .is_err()
@@ -532,6 +537,7 @@ async fn permission_keys_google_workspace_routes_only_to_the_policy_origin() {
         &connection,
         Utc::now() + chrono::Duration::days(1),
         workspace_policy(),
+        None,
     )
     .await
     .unwrap();
@@ -609,7 +615,8 @@ async fn permission_keys_google_workspace_routes_only_to_the_policy_origin() {
             "Wrong recipient",
             &connection,
             Utc::now() + chrono::Duration::days(1),
-            wrong_policy
+            wrong_policy,
+            None
         )
         .await
         .is_err()
@@ -706,6 +713,7 @@ async fn permission_keys_google_supports_registered_apis_and_private_api_keys() 
             &connection,
             Utc::now() + chrono::Duration::days(1),
             serde_json::from_str(source).unwrap(),
+            None,
         )
         .await
         .unwrap();
@@ -789,6 +797,7 @@ async fn permission_keys_google_native_engine_retains_live_pause_hooks() {
             "../../../permissions/examples/google-youtube-policy.json"
         ))
         .unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -799,7 +808,7 @@ async fn permission_keys_google_native_engine_retains_live_pause_hooks() {
         .query
         .insert("part".into(), "snippet,statistics".into());
     evaluator.execute(request.clone()).await.unwrap();
-    set_paused(&state.db, &owner, &binding.id, 1, true)
+    set_paused(&state.db, &owner, &binding.id, 1, true, None)
         .await
         .unwrap();
     assert!(matches!(
@@ -1078,7 +1087,7 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                     .unwrap()
                     .unwrap();
                 assert_eq!(v2::proposal(&sent).unwrap().state, "dispatched");
-                set_paused(&state.db, &owner, &binding.id, binding.revision, true)
+                set_paused(&state.db, &owner, &binding.id, binding.revision, true, None)
                     .await
                     .unwrap();
                 assert!(matches!(
@@ -1114,6 +1123,7 @@ async fn execution_permission_native_rest_and_mcp_gaps_and_denials_exit_before_p
                     "../../../permissions/examples/google-youtube-policy.json"
                 ))
                 .unwrap(),
+                None,
             )
             .await
             .unwrap();

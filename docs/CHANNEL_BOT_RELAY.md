@@ -2750,7 +2750,7 @@ services and an org-paid daily budget. Groups/topics share public transcript
 context while execution keys remain isolated per actor. See
 [the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
 
-### Telegram CommonMark opt-in
+### CommonMark relay replies
 
 For original, unescaped assistant Markdown, use `POST /reply/commonmark`,
 `/thread-reply/commonmark`, or `/reply/update/commonmark` under
@@ -2761,6 +2761,18 @@ available to callers targeting a known upgraded replica. Do not combine it with
 `parse_mode` or `entities`. Send text before Markdown escaping or fragmentation;
 NyxID parses once and applies its shared platform budgets. Interactive metadata
 cannot be duplicated across multipart text; send long text separately.
+
+Lark and Feishu send the original source as plain text. Discord uses the same
+v2 renderer as proactive posts, which keeps URL bytes and formats literal
+punctuation for Discord. Edits must fit one platform message. Thread replies
+still require a negotiated, authorized target. The relay thread contract
+currently negotiates Lark and Feishu. Discord relay sends and edits can opt in
+independently of that contract.
+
+Enable the gateway opt-in for these additional platforms only after every
+serving NyxID replica supports them. Older replicas return HTTP 400. The
+existing Telegram opt-in can roll out independently. Send the complete source
+once so NyxID can plan up to 64 ordered parts.
 
 Opted-in Telegram sends and edits use explicit entities. Unopted legacy callers
 retain their text/default syntax, including this base's historical ignored
@@ -2843,6 +2855,31 @@ ownership observation (bot, platform installation and profile reservation) and
 one loaded scheduled destination. This does not cache authority across effects:
 each attachment upload, text part and subsequent provider effect reads it again.
 A confirmed prefix never authorizes its suffix.
+
+Gateway reply-target receipt polling is the bounded exception to an uncertain
+send: exact `409 routed_reply_in_progress`, any 5xx (including
+`503 routed_reply_unavailable`), no HTTP response, or unreadable/unparseable
+2xx permits the identical same-key re-ask. Only the exact 409 proves admission. The event retains the existing preparation claim; there
+is no new delivery outbox. See the [gateway receipt and lookup contract](CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup).
+
+Bot Health uses the existing outbound diagnostics. `gateway_reply_unconfirmed`
+means the gateway accepted the reply but delivery is unconfirmed; its action is
+`none`, advising no action unless a later reply repeats the problem.
+`gateway_reply_unavailable` records a transient gateway failure without claiming
+acceptance. The closed reasons `gateway_reply_no_response`,
+`gateway_reply_server_error`, `gateway_reply_unreadable_response` and
+`gateway_reply_interrupted` describe the new failures; `_pending` adds that
+NyxBot is still trying with the same reply. Terminal wording says confirmation
+could not be obtained before checking stopped. These have action `none` and
+the same later-reply guidance. Only the first proven admission and the terminal
+outcome produce audit rows; polls do not. The event, diagnostic and chained audit commit
+together. Audit retains the HTTP status class, closed gateway code and failure, never
+answer text, problem prose, keys or reply-target references. Terminal rows retain
+the five image counts from the frozen notice. First admission and terminal
+outcomes emit the Channel trace milestone; its enum has no pending value, so
+first admission uses `unknown`. Local pre-send refusals (missing key, expired
+target or event, changed authority) remain `refused` without a gateway Health
+entry or gateway rejection audit. Only a received status proves gateway refusal.
 
 ### Retrying a retained Discord release (#2323)
 

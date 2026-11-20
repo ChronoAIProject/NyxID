@@ -92,6 +92,12 @@ export interface WebAuthDeviceLoginState {
 const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 const ACTION_THROTTLE_MS = 750;
 const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+// Approval before QR expiry replaces the server deadline with approval + 60s.
+// Start private collection only before the latest possible existing deadline.
+const APPROVED_DELIVERY_WINDOW_MS = 60_000;
+// A read accepted by the server before that deadline may finish afterward.
+// This bounds waiting for its response, without allowing another poll.
+const FINAL_RESPONSE_GRACE_MS = 10_000;
 
 export interface WebAuthDeviceTransport {
   request: (body: ReturnType<typeof requestBodySchema.parse>) => Promise<unknown>;
@@ -133,6 +139,7 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
   readonly generateNew: () => void;
   readonly retryProfile: () => void;
   readonly close: () => void;
+  readonly isRequestActive: (request: AuthDeviceRequestResponse) => boolean;
 } {
   const checkAuth = useAuthStore((state) => state.checkAuth);
   const transportRef = useRef(transport);
@@ -152,6 +159,8 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
   const stoppedRef = useRef(true);
   const consecutiveFailuresRef = useRef(0);
   const requestGenerationRef = useRef(0);
+  const inFlightGenerationRef = useRef<number | null>(null);
+  const nextPollAtRef = useRef(0);
 
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -169,6 +178,43 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
     phaseRef.current = next;
     setPhase(next);
   }, []);
+
+  const finishRequest = useCallback((next: WebAuthDevicePhase, failure: WebAuthDeviceError) => {
+    stopPolling();
+    requestRef.current = null;
+    expiresAtRef.current = null;
+    setRequest(null);
+    setLoginCode(null);
+    setRemainingSeconds(0);
+    setCurrentPhase(next);
+    setError(failure);
+  }, [setCurrentPhase, stopPolling]);
+
+  const updateCountdown = useCallback(() => {
+    const currentPhase = phaseRef.current;
+    const expiresAt = expiresAtRef.current;
+    if ((currentPhase !== "pending" && currentPhase !== "restricted") || expiresAt === null) return;
+    const now = Date.now();
+    const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+    setRemainingSeconds(seconds);
+    if (seconds > 0) return;
+
+    // QR/tap/manual-code UI expires on time. Keep the private request so the
+    // server can distinguish pending expiry from an already approved delivery.
+    // A restricted handoff is already delivered and has its own strict expiry.
+    if (currentPhase === "pending") {
+      setRequest(null);
+      const pollDeadline = expiresAt + APPROVED_DELIVERY_WINDOW_MS;
+      if (now < pollDeadline) return;
+      clearPollTimer();
+      if (inFlightGenerationRef.current === requestGenerationRef.current &&
+        now < pollDeadline + FINAL_RESPONSE_GRACE_MS) return;
+    }
+    finishRequest("expired", {
+      code: 11201,
+      message: AUTH_DEVICE_ERROR_MESSAGES[11201] ?? "This code has expired.",
+    });
+  }, [clearPollTimer, finishRequest]);
 
   const schedulePollRef = useRef<(delaySeconds: number) => void>(() => {});
   const restoreProfile = useCallback(async (
@@ -194,27 +240,42 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
 
   const poll = useCallback(async () => {
     if (stoppedRef.current || phaseRef.current !== "pending") return;
+    updateCountdown();
     const activeRequest = requestRef.current;
     if (!activeRequest) return;
     const generation = requestGenerationRef.current;
+    if (inFlightGenerationRef.current === generation) return;
     const isCurrent = () => requestGenerationRef.current === generation &&
-      requestRef.current === activeRequest && phaseRef.current === "pending";
+      requestRef.current === activeRequest && phaseRef.current === "pending" &&
+      !stoppedRef.current;
+    const canAcceptResponse = () => {
+      if (!isCurrent()) return false;
+      // Enforce the finite response deadline even if the countdown was suspended.
+      // Check generation first so an old read cannot expire a newer request.
+      updateCountdown();
+      return isCurrent();
+    };
 
-    const expiresAt = expiresAtRef.current;
-    if (expiresAt !== null && Date.now() >= expiresAt) {
-      stopPolling();
-      setCurrentPhase("expired");
-      setError({ code: 11201, message: AUTH_DEVICE_ERROR_MESSAGES[11201] ?? "This code has expired." });
+    // Resume events share the timer's deadline, including server backoff. A
+    // backgrounded tab may have missed its timer, but cannot poll early.
+    const remainingWaitMs = nextPollAtRef.current - Date.now();
+    if (remainingWaitMs > 0) {
+      // A wall-clock adjustment can put a fired timer before its deadline.
+      // Re-arm only a consumed timer; early resume events retain the existing one.
+      if (pollTimerRef.current === null) {
+        schedulePollRef.current(remainingWaitMs / 1000);
+      }
       return;
     }
-
+    clearPollTimer();
+    inFlightGenerationRef.current = generation;
     try {
       const body = pollBodySchema.parse({
         device_code: activeRequest.device_code,
       });
       if (transportRef.current) {
-        await transportRef.current.poll(body.device_code, isCurrent);
-        if (!isCurrent()) return;
+        await transportRef.current.poll(body.device_code, canAcceptResponse);
+        if (!canAcceptResponse()) return;
         consecutiveFailuresRef.current = 0;
         stopPolling();
         setCurrentPhase("success");
@@ -226,7 +287,7 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
       // an installed older iOS app can approve this flow without a protocol
       // upgrade and a browser cannot accidentally receive a restricted key.
       const response = await api.post<unknown>("/auth/device/poll-web", body);
-      if (!isCurrent()) return;
+      if (!canAcceptResponse()) return;
       const delivery = pollWebResponseSchema.parse(response);
       consecutiveFailuresRef.current = 0;
       stopPolling();
@@ -245,18 +306,22 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
       setRemainingSeconds(null);
       await restoreProfile(activeRequest, generation);
     } catch (pollError) {
-      if (!isCurrent()) return;
+      if (!canAcceptResponse()) return;
       const code = getApiErrorCode(pollError);
       const terminalPhase = getTerminalPhase(code);
       if (terminalPhase !== null) {
-        stopPolling();
-        setCurrentPhase(terminalPhase);
-        setError({
+        finishRequest(terminalPhase, {
           code,
           message: friendlyAuthDeviceErrorMessage(pollError),
         });
         return;
       }
+
+      // An errored read has settled. Response grace cannot authorize a retry
+      // after the poll-start cutoff, including pending/backoff/network errors.
+      inFlightGenerationRef.current = null;
+      updateCountdown();
+      if (!isCurrent()) return;
 
       if (code === 11202 || code === 11203 || code === 11206) {
         if (code === 11202) {
@@ -274,22 +339,42 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
         return;
       }
 
-      stopPolling();
-      setCurrentPhase("error");
-      setError({ code, message: friendlyAuthDeviceErrorMessage(pollError) });
+      finishRequest("error", { code, message: friendlyAuthDeviceErrorMessage(pollError) });
+    } finally {
+      // A replaced request may already have its own poll in flight.
+      if (inFlightGenerationRef.current === generation) {
+        inFlightGenerationRef.current = null;
+      }
     }
-  }, [restoreProfile, setCurrentPhase, stopPolling]);
+  }, [clearPollTimer, finishRequest, restoreProfile, setCurrentPhase, stopPolling, updateCountdown]);
 
   useEffect(() => {
     schedulePollRef.current = (delaySeconds: number) => {
       clearPollTimer();
       if (stoppedRef.current || phaseRef.current !== "pending") return;
+      const generation = requestGenerationRef.current;
+      nextPollAtRef.current = Date.now() + delaySeconds * 1000;
       pollTimerRef.current = setTimeout(() => {
+        if (requestGenerationRef.current !== generation) return;
         pollTimerRef.current = null;
         void poll();
       }, delaySeconds * 1000);
     };
   }, [clearPollTimer, poll]);
+
+  useEffect(() => {
+    if (phase !== "pending") return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void poll();
+    };
+    const onPageShow = () => { void poll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [phase, poll]);
 
   const begin = useCallback(async () => {
     const now = Date.now();
@@ -345,27 +430,10 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
 
   useEffect(() => {
     if ((phase !== "pending" && phase !== "restricted") || expiresAtRef.current === null) return;
-    const updateCountdown = () => {
-      const expiresAt = expiresAtRef.current;
-      if (expiresAt === null) return;
-      const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
-      setRemainingSeconds(seconds);
-      if (seconds === 0 && (phaseRef.current === "pending" || phaseRef.current === "restricted")) {
-        stopPolling();
-        setLoginCode(null);
-        requestRef.current = null;
-        setRequest(null);
-        setCurrentPhase("expired");
-        setError({
-          code: 11201,
-          message: AUTH_DEVICE_ERROR_MESSAGES[11201] ?? "This code has expired.",
-        });
-      }
-    };
     updateCountdown();
     const timer = setInterval(updateCountdown, 1000);
     return () => clearInterval(timer);
-  }, [phase, setCurrentPhase, stopPolling]);
+  }, [phase, updateCountdown]);
 
   useEffect(
     () => () => {
@@ -400,5 +468,10 @@ export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAu
       void restoreProfile(requestRef.current, requestGenerationRef.current);
     },
     close,
+    // Public handoff UI must keep the original challenge deadline even while
+    // private polling can collect an already approved delivery afterward.
+    isRequestActive: (activeRequest) => requestRef.current === activeRequest &&
+      phaseRef.current === "pending" && !stoppedRef.current &&
+      expiresAtRef.current !== null && Date.now() < expiresAtRef.current,
   };
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
@@ -30,6 +31,7 @@ const row = (id: string, overrides: Record<string, unknown>) =>
 
 function setup(options: {
   enabled?: boolean;
+  cornerWindow?: boolean;
   pages?: unknown[];
   pending?: boolean;
   error?: Error;
@@ -42,6 +44,7 @@ function setup(options: {
   const filters: NotificationFilter[] = [];
   const fetched: string[] = [];
   const h = hookHarness<E>({
+    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceCornerSensorContext:{value:options.cornerWindow ?? false}},
     "react/jsx-runtime": {
       Fragment: "Fragment",
       jsx: (type: unknown, props: unknown) => ({ type, props }),
@@ -349,5 +352,94 @@ test("all filters use per-kind unread counts and the global read action lives af
   assert.deepEqual(JSON.parse(JSON.stringify(segments.props.segments.map((s: any) => s.count))), [21, 3, 6, 12]);
   const all = x.all();
   assert.ok(all.findIndex((n) => n.props.testID === "notifications-mark-all") > all.findIndex((n) => n.type === "FlatList"));
+  x.h.unmount();
+});
+
+test("a Duo row grows with its text: two title lines and three body lines end in an ellipsis, the time always shows", () => {
+  const x = setup({
+    cornerWindow:true,
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("n1", {
+            kind: "automation_problem",
+            title: "Simulator notification check failed",
+            preview: "The assistant could not complete this turn. Try again.",
+            source: { type: "trigger", id: T },
+          }),
+        ],
+      },
+    ],
+    summary: { unread_count: 1, needs_decision_count: 0, by_source: [], by_source_truncated: false },
+  });
+  const [rendered] = x.renderedRows();
+  const style = (n: E) => Object.assign({}, ...[n.props.style].flat(Infinity).filter(Boolean));
+  const rowStyle = style(rendered!);
+  // No fixed or capped height: the row is as tall as its text.
+  assert.equal(rowStyle.height, undefined);
+  assert.equal(rowStyle.maxHeight, undefined);
+  assert.equal(rowStyle.alignItems, "flex-start", "the icon stays top-aligned");
+  const texts = nodes(rendered).filter((n) => n.type === "Text");
+  const title = texts.find((n) => text(n).includes("Simulator notification check failed"))!;
+  assert.equal(title.props.numberOfLines, 2);
+  assert.equal(title.props.ellipsizeMode, "tail");
+  const body = texts.find((n) => n.props.children === "The assistant could not complete this turn. Try again.")!;
+  assert.equal(body.props.numberOfLines, 3);
+  assert.equal(body.props.ellipsizeMode, "tail");
+  const time = nodes(rendered).find((n) => n.props.testID === "notification-time")!;
+  assert.equal(time.props.numberOfLines, 1);
+  assert.ok(text(time).length > 0);
+  // The time may move to its own line but never shrinks away.
+  assert.equal(style(time).flexShrink, 0);
+  for (const n of texts) {
+    assert.equal(style(n).height, undefined);
+    assert.equal(n.props.adjustsFontSizeToFit, undefined);
+  }
+  // The pinned mark-all bar grows less than the feed.
+  const mark = x.all().find((n) => n.props.testID === "notifications-mark-all")!;
+  const label = nodes(mark).find((n) => n.type === "Text")!;
+  assert.equal(label.props.maxFontSizeMultiplier, 1.5);
+  assert.equal(label.props.numberOfLines, 2);
+  x.h.unmount();
+  // Live text-size changes re-measure every row (DynamicTypeText).
+  const source = readFileSync(new URL("./NotificationsScreen.tsx", import.meta.url), "utf8");
+  assert.match(source, /DynamicTypeText as Text/);
+});
+
+
+test("P9 ordinary notifications retain the base title, preview and footer scaling", () => {
+  const x = setup({
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("ordinary", {
+            title: "Ordinary title",
+            preview: "Ordinary preview",
+          }),
+        ],
+      },
+    ],
+  });
+  const [rendered] = x.renderedRows();
+  const texts = nodes(rendered).filter((n) => n.type === "Text");
+  assert.equal(
+    texts.find((n) => text(n).includes("Ordinary title"))!.props.numberOfLines,
+    3,
+  );
+  assert.equal(
+    texts.find((n) => n.props.children === "Ordinary preview")!.props
+      .numberOfLines,
+    2,
+  );
+  const mark = x
+    .all()
+    .find((n) => n.props.testID === "notifications-mark-all")!;
+  const label = nodes(mark).find((n) => n.type === "Text")!;
+  assert.equal(label.props.maxFontSizeMultiplier, undefined);
+  assert.equal(label.props.numberOfLines, undefined);
   x.h.unmount();
 });

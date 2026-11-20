@@ -47,6 +47,9 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+#[path = "proxy_ingress.rs"]
+pub(crate) mod ingress;
+
 #[path = "proxy_shared_connect.rs"]
 mod shared_connect;
 
@@ -342,6 +345,9 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
 /// Constructed only by the NyxAgent turn handler, never from client headers.
 #[derive(Clone)]
 pub(super) struct NyxAgentAdmission;
+
+#[derive(Clone)]
+pub(super) struct NyxAgentSubscriberControl;
 
 /// Only the permission engine's transport can construct this in-process ingress.
 #[derive(Clone)]
@@ -780,6 +786,24 @@ pub async fn proxy_request(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((service_id, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &service_id,
+        request,
+        |request| proxy_request_unthrottled(&state, &auth_user, tele, &service_id, &path, request),
+    )
+    .await
+}
+
+async fn proxy_request_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    service_id: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -796,7 +820,7 @@ pub async fn proxy_request(
             // real slug (never a UUID from the route path) even when the error
             // happens after service resolution. See docs/TELEMETRY.md §5.1.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = std::time::Instant::now();
             let method = request.method().clone();
             request
@@ -814,10 +838,10 @@ pub async fn proxy_request(
             // Keep nested proxy dispatch off the handler frame (also called by
             // assistant operation-scope checks through the full router).
             let mut result = Box::pin(proxy_request_inner(
-                &state,
-                &auth_user,
-                &service_id,
-                &path,
+                state,
+                auth_user,
+                service_id,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -848,7 +872,7 @@ pub async fn proxy_request(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -1152,6 +1176,26 @@ pub async fn proxy_request_by_slug(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((slug, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    ingress::execute(
+        &state.refusal_throttle,
+        &auth_user,
+        &slug,
+        request,
+        |request| {
+            proxy_request_by_slug_unthrottled(&state, &auth_user, tele, &slug, &path, request)
+        },
+    )
+    .await
+}
+
+async fn proxy_request_by_slug_unthrottled(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: TelemetryContext,
+    slug: &str,
+    path: &str,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
     let trace = crate::turn_trace::TurnContext::for_request(
@@ -1169,7 +1213,7 @@ pub async fn proxy_request_by_slug(
             // requires a resolved slug or empty, and the path param is unvalidated
             // user input until resolution succeeds.
             let diagnostic =
-                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+                super::invocation_diagnostics::HttpInvocation::start(state, &mut request);
             let started_at = request
                 .extensions()
                 .get::<ProxyExchangeStartedAt>()
@@ -1188,10 +1232,10 @@ pub async fn proxy_request_by_slug(
             }
             let mut resolved_slug = String::new();
             let mut result = Box::pin(proxy_request_by_slug_inner(
-                &state,
-                &auth_user,
-                &slug,
-                &path,
+                state,
+                auth_user,
+                slug,
+                path,
                 request,
                 &mut resolved_slug,
             ))
@@ -1222,7 +1266,7 @@ pub async fn proxy_request_by_slug(
                 .await;
             }
             super::invocation_diagnostics::HttpInvocation::finish(
-                diagnostic, &state, &auth_user, result,
+                diagnostic, state, auth_user, result,
             )
             .await
         })
@@ -1801,7 +1845,6 @@ async fn proxy_request_through_pool(
             .ok_or_else(|| AppError::ServicePoolDeadlineExceeded {
                 attempts: summaries.clone(),
             })?;
-        let has_backup = attempt_number < plan.candidates.len().min(plan.max_attempts);
         let dispatch_state = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ticket = tokio::time::timeout_at(
             tokio::time::Instant::from_std(attempt_deadline),
@@ -1852,6 +1895,7 @@ async fn proxy_request_through_pool(
             timed_out: Default::default(),
             status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             node_dispatched: Default::default(),
+            single_node_dispatch: Default::default(),
             retry_after: Default::default(),
             prepared_chat: prepared_chat.clone(),
         };
@@ -1926,6 +1970,10 @@ async fn proxy_request_through_pool(
         );
         let (attempt_result, diagnostic_service) =
             crate::services::shutdown::diagnostics::candidate(attempt).await;
+        let has_backup = attempt_number < plan.candidates.len().min(plan.max_attempts)
+            && !accounting
+                .single_node_dispatch
+                .load(std::sync::atomic::Ordering::Acquire);
         let attempt_result = match attempt_result {
             Ok(result) => result,
             Err(_) => {
@@ -3020,7 +3068,7 @@ async fn build_pre_resolved_node_route(
     // instance that doesn't hold the WS connection is routed to the node and
     // surfaces `503 node_offline` to the caller even though `node list` shows
     // the node online globally. See issue #325.
-    let primary_dispatchable = node_routing_service::is_node_id_dispatchable(
+    let mut primary_dispatchable = node_routing_service::is_node_id_dispatchable(
         &state.db,
         explicit_node_id,
         state.node_ws_manager.as_ref(),
@@ -3037,6 +3085,15 @@ async fn build_pre_resolved_node_route(
     .into_iter()
     .filter(|node_id| node_id != explicit_node_id)
     .collect();
+
+    if !primary_dispatchable && fallback_node_ids.is_empty() {
+        primary_dispatchable = crate::services::node_dispatch::NodeHandover::wait_recent_release(
+            &state.db,
+            &state.node_ws_manager,
+            explicit_node_id,
+        )
+        .await;
+    }
 
     if !primary_dispatchable {
         if fallback_node_ids.is_empty() {
@@ -3275,6 +3332,12 @@ async fn execute_proxy_inner(
         )
         .await?;
         crate::services::shutdown::diagnostics::resolved_proxy(&resolved.target);
+        if let Some(destination) = request
+            .extensions()
+            .get::<crate::services::platform_manager_contract::NyxAgentDestination>(
+        ) {
+            destination.verify(&resolved.target.service.id, &resolved.target.base_url)?;
+        }
         super::invocation_diagnostics::Target::record_request(
             &request,
             resolved.resolved_user_service_id.as_deref(),
@@ -4026,6 +4089,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .extensions()
         .get::<super::invocation_diagnostics::Target>()
         .cloned();
+    let invocation_diagnostic_probe = request
+        .extensions()
+        .get::<super::invocation_diagnostics::DiagnosticProbe>()
+        .is_some();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4414,8 +4481,13 @@ async fn execute_resolved_proxy_inner<'a>(
             .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
     // Only the server-authored, exact-connection check can select this lane;
     // no caller header or body can opt ordinary traffic out of billing.
-    let credential_check = crate::services::credential_verification::checking();
-    let platform_metric = if credential_check {
+    let subscriber_control = request
+        .extensions()
+        .get::<NyxAgentSubscriberControl>()
+        .is_some()
+        && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
+    let metering_only = subscriber_control || crate::services::credential_verification::checking();
+    let platform_metric = if metering_only {
         crate::models::service_billing::BillingMetric::Requests
     } else {
         platform_metric_for_target(&target, is_ws_candidate || shared_connect)
@@ -4447,11 +4519,7 @@ async fn execute_resolved_proxy_inner<'a>(
         // Verification records request metadata without catalog prices,
         // components, operation prices or resale funding. Ordinary calls keep
         // their original billing policy, including on this same connection.
-        target
-            .service
-            .billing
-            .as_ref()
-            .filter(|_| !credential_check),
+        target.service.billing.as_ref().filter(|_| !metering_only),
         state.billing.resale_enabled(),
     );
     if nyxagent_admission
@@ -4798,6 +4866,10 @@ async fn execute_resolved_proxy_inner<'a>(
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
+        // A diagnostic probe is secondary evidence for an already failed
+        // invocation. It must never author or dispatch a new execution
+        // permission proposal before the legacy approval guard below runs.
+        && !invocation_diagnostic_probe
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
@@ -5055,6 +5127,14 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Ornn format check skipped: approval required".to_string(),
             ));
         }
+        // A caller-scoped diagnostic is secondary evidence, not a business
+        // operation. It must neither bypass approval nor leave a prompt behind.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if invocation_diagnostic_probe => {
+            request_audit.denied(403);
+            return Err(AppError::Forbidden(
+                "Diagnostic probe skipped: approval required".to_string(),
+            ));
+        }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             request_audit.model_approval_required();
             crate::services::assistant_model_observer::before_approval_request(None)
@@ -5294,6 +5374,32 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
     target.require_credential_materialized()?;
+
+    // Ornn's server-marked lookup supplies a membership capability. Node
+    // WebSocket handshakes do not take a caller credential.
+    let forward_bearer = if is_ws && node_route.is_some() {
+        false
+    } else if assistant_projection.org_skill_lookup {
+        true
+    } else {
+        let server_headers = if is_ws {
+            &[][..]
+        } else {
+            extra_outbound_headers.as_slice()
+        };
+        Box::pin(proxy_service::admit_caller_bearer(
+            &state.db,
+            &user_id_str,
+            resolved_user_service_id.as_deref(),
+            &target,
+            node_route.as_ref(),
+            caller_token.as_deref(),
+            server_headers,
+        ))
+        .await?
+        .is_some()
+    };
+    let caller_bearer = caller_token.filter(|_| forward_bearer);
 
     let body = if body_bytes.is_empty() {
         None
@@ -5899,7 +6005,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         &identity_headers,
                         query.as_deref(),
                         &ws_forward_headers,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         collect_realtime_llm_usage,
                         metered.clone(),
                         billing_egress_permit,
@@ -5932,7 +6038,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     node_forward_headers,
                     &identity_headers,
                     &delegated,
-                    caller_token.as_deref(),
+                    caller_bearer.as_deref(),
                     &extra_outbound_headers,
                 )?;
                 let node_location_context = AsyncLocationContext::new(
@@ -5967,7 +6073,10 @@ async fn execute_resolved_proxy_inner<'a>(
                 let mut first_dispatch_admission_ms = None;
                 let mut node_failure_evidence =
                     crate::services::assistant_service_execution::NodeFailureEvidence::default();
-                for node_id in &all_node_ids {
+                let mut nodes = all_node_ids.iter().peekable();
+                let mut retry = None;
+                let mut waited = false;
+                while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
                     // Generate a new request_id for each attempt to avoid correlation conflicts
                     let mut attempt_request = node_request.clone();
                     attempt_request.request_id = uuid::Uuid::new_v4().to_string();
@@ -6154,7 +6263,15 @@ async fn execute_resolved_proxy_inner<'a>(
                             .await?;
                         return Err(error);
                     }
+                    let single_node_dispatch = durable_reservation.is_some()
+                        || target
+                            .execution_permission
+                            .as_ref()
+                            .is_some_and(|permit| permit.single_dispatch());
                     if let Some(accounting) = &pool_accounting {
+                        accounting
+                            .single_node_dispatch
+                            .store(single_node_dispatch, std::sync::atomic::Ordering::Release);
                         accounting
                             .node_dispatched
                             .store(true, std::sync::atomic::Ordering::Release);
@@ -6260,6 +6377,52 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let Err(failure) = &result
+                        && !failure.dispatched
+                        && !matches!(failure.error, AppError::NodeCredentialMissing(_))
+                    {
+                        if let Some(permit) = target
+                            .execution_permission
+                            .as_ref()
+                            .filter(|permit| permit.single_dispatch())
+                        {
+                            permit.node_not_sent().await?;
+                            if let Some(reservation) = &durable_reservation {
+                                durable_operation_grant_service::mark_unsent(
+                                    &state.db,
+                                    reservation,
+                                    "nothing was sent to the node",
+                                )
+                                .await;
+                            }
+                            destination_audit.denied();
+                            state
+                                .billing
+                                .reject_before_send(
+                                    &metered,
+                                    "node_not_sent",
+                                    had_dispatched_failure,
+                                )
+                                .await?;
+                            return Err(AppError::NodeOffline(
+                                "Nothing was sent to the node".into(),
+                            ));
+                        }
+                        if !stream_upload
+                            && !waited
+                            && !had_dispatched_failure
+                            && nodes.peek().is_none()
+                            && durable_reservation.is_none()
+                            && let Some(handover) = &failure.handover
+                            && handover
+                                .wait(&state.db, &state.node_ws_manager, node_id)
+                                .await
+                        {
+                            waited = true;
+                            retry = Some(node_id);
+                            continue;
+                        }
+                    }
                     if let Some(permit) = &target.execution_permission {
                         permit.complete(result.is_ok()).await?;
                     }
@@ -6632,6 +6795,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         Err(NodeProxyFailure {
                             error: err @ AppError::NodeCredentialMissing(_),
                             dispatched,
+                            ..
                         }) => {
                             if !dispatched {
                                 destination_audit.denied();
@@ -6695,6 +6859,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         Err(NodeProxyFailure {
                             error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
                             dispatched,
+                            ..
                         }) => {
                             if !dispatched {
                                 destination_audit.denied();
@@ -6711,6 +6876,17 @@ async fn execute_resolved_proxy_inner<'a>(
                             });
 
                             if let Some(reservation) = durable_reservation.as_ref() {
+                                if !dispatched {
+                                    durable_operation_grant_service::mark_unsent(
+                                        &state.db,
+                                        reservation,
+                                        "nothing was sent to the node",
+                                    )
+                                    .await;
+                                    return Err(AppError::NodeOffline(
+                                        "Nothing was sent to the node".into(),
+                                    ));
+                                }
                                 box_proxy_future(|| {
                                     finish_durable_operation(
                                         state,
@@ -6725,7 +6901,10 @@ async fn execute_resolved_proxy_inner<'a>(
                                 .await;
                                 return Err(AppError::DurableOperationOutcomeUncertain);
                             }
-                            if stream_upload || !should_retry_node_failure(&method, dispatched) {
+                            if single_node_dispatch
+                                || stream_upload
+                                || !should_retry_node_failure(&method, dispatched)
+                            {
                                 emit_preheader_diagnostics(
                                     exchange_started_at,
                                     target_admission_ms,
@@ -6752,6 +6931,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             let NodeProxyFailure {
                                 error: e,
                                 dispatched,
+                                ..
                             } = failure;
                             if !dispatched {
                                 destination_audit.denied();
@@ -6770,6 +6950,15 @@ async fn execute_resolved_proxy_inner<'a>(
                                 }
                             }
                             if let Some(reservation) = durable_reservation.as_ref() {
+                                if !dispatched {
+                                    durable_operation_grant_service::mark_unsent(
+                                        &state.db,
+                                        reservation,
+                                        "nothing was sent to the node",
+                                    )
+                                    .await;
+                                    return Err(e);
+                                }
                                 box_proxy_future(|| {
                                     finish_durable_operation(
                                         state,
@@ -7364,7 +7553,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         },
                         identity_headers,
                         delegated,
-                        caller_token.as_deref(),
+                        caller_bearer.as_deref(),
                         &state.token_exchange_cache,
                         &state.cloud_response_cache,
                         extra_outbound_headers,
@@ -12130,6 +12319,7 @@ mod proxy_resolution_integration_tests {
     include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
+    include!("proxy_refusal_parity_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
@@ -12498,16 +12688,8 @@ mod proxy_resolution_integration_tests {
             serde_json::from_str(&auth_response).expect("parse node auth response");
         assert_eq!(auth_response["type"], "auth_ok");
 
-        for _ in 0..100 {
-            if state.node_ws_manager.is_connected(&node.id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(
-            state.node_ws_manager.is_connected(&node.id),
-            "authenticated node WebSocket must be registered"
-        );
+        // auth_ok is sent only after the connection has been registered.
+        assert!(state.node_ws_manager.is_connected(&node.id));
 
         let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
             .expect("build node executor credentials");
@@ -12971,6 +13153,190 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn startup_imported_connection_dispatches_by_slug_to_its_binding_node() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::user_service_connection::COLLECTION_NAME as CONNECTIONS;
+        let db = crate::test_utils::connect_transaction_test_database("startup_slug_node").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        let preferred = insert_online_node(&state, &owner, "preferred").await;
+        let secondary = insert_online_node(&state, &owner, "secondary").await;
+        let (base_url, echo) = start_node_echo_downstream().await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "legacy-node-route".into();
+        catalog.base_url = base_url.clone();
+        db.collection::<DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        db.collection::<bson::Document>(CONNECTIONS).insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": &owner, "service_id": &catalog.id,
+            "credential_encrypted": bson::Bson::Null, "is_active": true, "created_at": now, "updated_at": now,
+        }).await.unwrap();
+        crate::services::node_service::create_binding(&db, &owner, &preferred.id, &catalog.id)
+            .await
+            .unwrap();
+        let first =
+            crate::services::node_service::create_binding(&db, &owner, &secondary.id, &catalog.id)
+                .await
+                .unwrap();
+        crate::services::node_service::update_binding_priority(
+            &db,
+            &owner,
+            &secondary.id,
+            &first.id,
+            4,
+        )
+        .await
+        .unwrap();
+        crate::db::migrate_to_unified_collections(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let imported = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"source":"migration_connection"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported.node_id.as_deref(), Some(preferred.id.as_str()));
+        assert_eq!(imported.node_priority, 0);
+        let (executor, server) =
+            start_node_executor(state.clone(), &preferred, &imported.slug, &base_url).await;
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &access_token_auth(&owner),
+            &imported.slug,
+            "commands",
+            proxy_json_request("/proxy/s/legacy-node-route/commands", "{}"),
+            &mut String::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["body"],
+            "{}"
+        );
+        executor.await.unwrap();
+        server.abort();
+        echo.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binding_only_route_depends_on_whether_the_connection_is_pre_resolved() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, test_helpers::dummy_service,
+        };
+        use crate::services::{node_routing_service, node_service, proxy_service};
+
+        let db = crate::test_utils::connect_transaction_test_database("binding_only_route").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let catalog = dummy_service();
+        db.collection::<crate::models::downstream_service::DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let connection = insert_user_service(
+            &db,
+            &owner,
+            "binding-only",
+            "https://example.invalid",
+            Some(&catalog.id),
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connection.id},
+                doc! {"$unset": {"node_id": ""}},
+            )
+            .await
+            .unwrap();
+
+        let first = insert_online_node(&state, &owner, "first").await;
+        let (tx, _first_rx) = tokio::sync::mpsc::channel(8);
+        state.node_ws_manager.register_connection(&first.id, tx);
+        let binding = node_service::create_binding(&db, &owner, &first.id, &catalog.id)
+            .await
+            .unwrap();
+        node_service::update_binding_priority(&db, &owner, &first.id, &binding.id, 9)
+            .await
+            .unwrap();
+        let route = node_routing_service::resolve_node_route(
+            &db,
+            &owner,
+            &catalog.id,
+            &state.node_ws_manager,
+        )
+        .await
+        .unwrap()
+        .expect("the catalog resolver uses its one active binding");
+        assert_eq!(route.node_id, first.id);
+        assert!(route.fallback_node_ids.is_empty());
+
+        let resolved = proxy_service::resolve_proxy_target_from_user_service(
+            &db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &owner,
+            Some(&connection.slug),
+            None,
+            proxy_service::ProxyExecutionContext::new(None, state.platform_user_rate_limit),
+        )
+        .await
+        .unwrap()
+        .expect("resolve the owner's exact connection by slug");
+        assert_eq!(resolved.user_service_id, connection.id);
+        assert!(resolved.node_id.is_none());
+        let route = super::build_pre_resolved_node_route(
+            &state,
+            &super::resolved_user_service_owner(&access_token_auth(&owner), &owner, &resolved),
+            &resolved.target.service.id,
+            resolved.node_id.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            route.is_none(),
+            "selected-connection HTTP skips the binding without an explicit primary"
+        );
+
+        let preferred = insert_online_node(&state, &owner, "preferred").await;
+        let (tx, _preferred_rx) = tokio::sync::mpsc::channel(8);
+        state.node_ws_manager.register_connection(&preferred.id, tx);
+        node_service::create_binding(&db, &owner, &preferred.id, &catalog.id)
+            .await
+            .unwrap();
+        let route = node_routing_service::resolve_node_route(
+            &db,
+            &owner,
+            &catalog.id,
+            &state.node_ws_manager,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(route.node_id, preferred.id);
+        assert_eq!(route.fallback_node_ids, [first.id]);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn legacy_master_ignores_dispatchable_owner_node_binding() {
         use crate::models::downstream_service::{
             COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
@@ -13345,6 +13711,355 @@ mod proxy_resolution_integration_tests {
             }
         }
         echo_server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_waits_for_release_or_retirement_and_delivers_once() {
+        use crate::services::{node_dispatch, node_owner_service as owners};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+        // The same test binary acts as the predecessor so killing it loses both
+        // listeners and the WebSocket without running an owner release.
+        if let (Ok(database), Ok(ready)) = (
+            std::env::var("HANDOVER_TEST_DB"),
+            std::env::var("HANDOVER_TEST_READY"),
+        ) {
+            let client =
+                mongodb::Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+                    .await
+                    .unwrap();
+            let internal = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = crate::test_utils::test_app_config();
+            config.internal_advertise_url = format!("http://{}", internal.local_addr().unwrap());
+            let owner =
+                crate::test_utils::test_app_state_with_config(client.database(&database), config);
+            let private_router = node_dispatch::internal_router(
+                owner.node_dispatch.clone(),
+                1 << 20,
+                Duration::from_secs(2),
+            );
+            let node_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(owner);
+            std::fs::write(ready, public.local_addr().unwrap().to_string()).unwrap();
+            tokio::try_join!(
+                axum::serve(internal, private_router).into_future(),
+                axum::serve(
+                    public,
+                    node_router.into_make_service_with_connect_info::<std::net::SocketAddr>()
+                )
+                .into_future()
+            )
+            .unwrap();
+            return;
+        }
+        for graceful in [false, true] {
+            let db = connect_test_database("proxy_owner_handover").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = crate::test_utils::test_app_config();
+            config.internal_advertise_url = format!("http://{}", listener.local_addr().unwrap());
+            let previous = crate::test_utils::test_app_state_with_config(db.clone(), config);
+            let survivor = test_app_state(db.clone());
+            let principal = Uuid::new_v4().to_string();
+            crate::test_utils::set_test_approval_preference(&db, &principal, false).await;
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&principal, UserType::Person))
+                .await
+                .unwrap();
+            let node = insert_online_node(&survivor, &principal, "handover").await;
+            let service =
+                insert_user_service(&db, &principal, "handover", "https://service.invalid", None)
+                    .await;
+            db.collection::<UserService>(USER_SERVICES)
+                .update_one(
+                    doc! {"_id": &service.id},
+                    doc! {"$set":{"node_id":&node.id}},
+                )
+                .await
+                .unwrap();
+
+            let (release, retired) = if graceful {
+                let owner = owners::claim(
+                    &db,
+                    &node.id,
+                    &previous.replica_identity,
+                    "original",
+                    Duration::from_secs(90),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let fence = owners::NodeOwnerFence::from_owner(&node.id, &owner);
+                db.collection::<Node>(NODES)
+                    .update_one(
+                        fence.filter(),
+                        doc! {"$set":{"connection_owner.handover_pending":true}},
+                    )
+                    .await
+                    .unwrap();
+                let router = node_dispatch::internal_router(
+                    previous.node_dispatch.clone(),
+                    1 << 20,
+                    Duration::from_secs(2),
+                );
+                let server =
+                    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                server.abort();
+                let _ = server.await;
+                (Some(fence), None)
+            } else {
+                drop(listener);
+                let directory = tempfile::tempdir().unwrap();
+                let ready = directory.path().join("ready");
+                let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact","handlers::proxy::proxy_resolution_integration_tests::proxy_waits_for_release_or_retirement_and_delivers_once"])
+                    .env("HANDOVER_TEST_DB",db.name())
+                    .env("NYXID_TEST_DATABASE_URL",crate::test_utils::selected_test_database_uri())
+                    .env("HANDOVER_TEST_READY",&ready)
+                    .kill_on_drop(true).spawn().unwrap();
+                let address = tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let Ok(address) = std::fs::read_to_string(&ready)
+                            && address.parse::<std::net::SocketAddr>().is_ok()
+                        {
+                            break address;
+                        }
+                        assert!(child.try_wait().unwrap().is_none());
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let (mut ws, _) =
+                    tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                        .await
+                        .unwrap();
+                ws.send(Message::Text(
+                    serde_json::json!({"type":"auth","node_id":node.id,
+                    "token":format!("test-node-auth-{}",node.id),"retirement_v1":{}})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+                let frame = ws.next().await.unwrap().unwrap();
+                let offer: serde_json::Value =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(offer["type"], "retirement_offer_v1");
+                ws.send(Message::Text(serde_json::json!({"type":"retirement_confirm_v1","connection_id":offer["connection_id"]}).to_string().into())).await.unwrap();
+                let ack: serde_json::Value =
+                    serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(ack["type"], "auth_ok");
+                // Lose the result of a separate request after the real agent socket received it.
+                let mut slug = String::new();
+                let auth = access_token_auth(&principal);
+                let in_flight = proxy_request_by_slug_inner(
+                    &survivor,
+                    &auth,
+                    &service.slug,
+                    "in-flight",
+                    proxy_json_request("/proxy/s/handover/in-flight", "{}"),
+                    &mut slug,
+                );
+                let kill_after_delivery = async {
+                    loop {
+                        let frame = ws.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = frame {
+                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            if frame["type"] == "proxy_request" {
+                                break;
+                            }
+                        }
+                    }
+                    child.kill().await.unwrap();
+                    assert!(!child.wait().await.unwrap().success());
+                };
+                let (lost, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+                    tokio::join!(in_flight, kill_after_delivery)
+                })
+                .await
+                .expect("a lost owner response must not start the four-second handover wait");
+                assert!(matches!(lost, Err(AppError::NodeOffline(_))));
+                drop(ws);
+                let row = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {"_id":&node.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(owners::live_owner(&row, chrono::Utc::now()).is_some());
+                (
+                    None,
+                    Some(
+                        serde_json::json!({"connection_id":offer["connection_id"],"secret":offer["secret"]}),
+                    ),
+                )
+            };
+            let successor_router = Router::new()
+                .route("/nodes/ws", get(crate::handlers::node_ws::ws_handler))
+                .with_state(survivor.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    successor_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}/nodes/ws"))
+                .await
+                .unwrap();
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let request = node_dispatch::WAITING_FOR_NODE_HANDOVER.scope(waiting.clone(), async {
+                let mut slug = String::new();
+                proxy_request_by_slug_inner(
+                    &survivor,
+                    &access_token_auth(&principal),
+                    &service.slug,
+                    "commands",
+                    proxy_json_request("/proxy/s/handover/commands", "{}"),
+                    &mut slug,
+                )
+                .await
+                .unwrap()
+            });
+            let agent = async {
+                waiting.notified().await;
+                if let Some(fence) = release {
+                    assert!(owners::release(&db, &fence).await.unwrap());
+                }
+                let mut auth = serde_json::json!({"type":"auth","node_id":node.id,"token":format!("test-node-auth-{}",node.id)});
+                if let Some(proof) = retired {
+                    auth["retirement_v1"] = serde_json::json!({"predecessor":proof});
+                }
+                ws.send(Message::Text(auth.to_string().into()))
+                    .await
+                    .unwrap();
+                if !graceful {
+                    let frame = ws.next().await.unwrap().unwrap();
+                    let offer: serde_json::Value =
+                        serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    assert_eq!(offer["type"], "retirement_offer_v1");
+                    ws.send(Message::Text(serde_json::json!({"type":"retirement_confirm_v1","connection_id":offer["connection_id"]}).to_string().into())).await.unwrap();
+                }
+                let read = async |ws: &mut tokio_tungstenite::WebSocketStream<_>| {
+                    loop {
+                        let msg = ws.next().await.unwrap().unwrap();
+                        if let Message::Text(text) = msg {
+                            break serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                        }
+                    }
+                };
+                assert_eq!(read(&mut ws).await["type"], "auth_ok");
+                loop {
+                    let frame = read(&mut ws).await;
+                    if frame["type"] == "proxy_request" {
+                        ws.send(Message::Text(serde_json::json!({"type":"proxy_response","request_id":frame["request_id"],"status":201,"headers":{},"body":""}).to_string().into())).await.unwrap();
+                        break;
+                    }
+                }
+                (ws, server)
+            };
+            let (response, (mut ws, server)) =
+                tokio::time::timeout(Duration::from_secs(6), async {
+                    tokio::join!(request, agent)
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            while let Ok(Some(Ok(Message::Text(text)))) =
+                tokio::time::timeout(Duration::from_millis(50), ws.next()).await
+            {
+                assert_ne!(
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"],
+                    "proxy_request"
+                );
+            }
+            ws.close(None).await.unwrap();
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_get_fails_over_after_primary_reads_the_request_and_disconnects() {
+        use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+        let db = connect_test_database("safe_node_failover").await.unwrap();
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let primary = insert_online_node(&state, &owner, "primary").await;
+        let backup = insert_online_node(&state, &owner, "backup").await;
+        let mut service =
+            insert_user_service(&db, &owner, "safe-read", "https://service.invalid", None).await;
+        service.node_id = Some(primary.id.clone());
+        db.collection::<UserService>(USER_SERVICES)
+            .replace_one(doc! {"_id": &service.id}, &service)
+            .await
+            .unwrap();
+        crate::services::node_service::create_binding(&db, &owner, &backup.id, &service.id)
+            .await
+            .unwrap();
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(8);
+        let (backup_tx, mut backup_rx) = tokio::sync::mpsc::channel(8);
+        crate::test_utils::register_test_node_connection(&state, &primary.id, primary_tx).await;
+        crate::test_utils::register_test_node_connection(&state, &backup.id, backup_tx).await;
+        let agents = async {
+            let NodeOutboundMessage::Text(message) = primary_rx.recv().await.unwrap() else {
+                panic!("expected request");
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["type"], "proxy_request");
+            assert_eq!(request["method"], "GET");
+            state.node_ws_manager.unregister_connection(&primary.id);
+            let NodeOutboundMessage::Text(message) = backup_rx.recv().await.unwrap() else {
+                panic!("expected fallback");
+            };
+            let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+            assert_eq!(request["method"], "GET");
+            state.node_ws_manager.deliver_proxy_response(
+                &backup.id,
+                NodeProxyResponse {
+                    request_id: request["request_id"].as_str().unwrap().into(),
+                    status: 200,
+                    headers: vec![],
+                    body: b"backup".to_vec(),
+                },
+            );
+        };
+        let auth = access_token_auth(&owner);
+        let mut request = proxy_json_request("/api/v1/proxy/s/safe-read/version", "");
+        *request.method_mut() = Method::GET;
+        let mut slug = String::new();
+        let proxy = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &service.slug,
+            "version",
+            request,
+            &mut slug,
+        );
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(proxy, agents)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            axum::body::to_bytes(result.unwrap().into_body(), 64)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"backup"
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

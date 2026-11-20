@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
@@ -38,7 +41,9 @@ type Feedback = { message: string; tone: "error" | "info" | "success" };
 
 function accountError(error: unknown): string {
   if (isApiError(error) && error.errorCode === 2000)
-    return "The password or authenticator code is incorrect. Please try again.";
+    return translateApp(
+      "The password or authenticator code is incorrect. Please try again.",
+    );
   return resolveErrorMessage(error);
 }
 
@@ -56,7 +61,7 @@ export function AccountSecurityScreen() {
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
-  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [feedback, setFeedback] = useLocalizedState<Feedback | null>(null);
 
   // MFA secrets live only in this screen's transient state, never Query's
   // mutation cache, SecureStore, route params, or telemetry.
@@ -202,7 +207,7 @@ export function AccountSecurityScreen() {
       await operation(epoch);
     } catch (error) {
       if (currentEpoch(epoch))
-        setFeedback({ message: accountError(error), tone: "error" });
+        setFeedback(() => ({ message: accountError(error), tone: "error" }));
     } finally {
       privateBusy.current = false;
       setPrivateAction(null);
@@ -223,10 +228,13 @@ export function AccountSecurityScreen() {
   function confirmEnrollment() {
     const result = totpCodeSchema.safeParse(totpCode);
     if (!result.success) {
-      setFeedback({
-        message: result.error.issues[0]?.message ?? "Enter a valid code",
+      setFeedback(() => ({
+        message: (() => {
+          const validation = totpCodeSchema.safeParse(totpCode);
+          return (!validation.success && validation.error.issues[0]?.message) || translateApp("Enter a valid code");
+        })(),
         tone: "error",
-      });
+      }));
       return;
     }
     void runPrivate("confirm", async () => {
@@ -247,17 +255,17 @@ export function AccountSecurityScreen() {
           setTotpCode("");
           setRevealCodes(false);
           setFeedback(
-            isVisible.current
+            () => (isVisible.current
               ? {
-                  message: "Two-factor authentication enabled",
+                  message: translateApp("Two-factor authentication enabled"),
                   tone: "success",
                 }
-              : null,
+              : null),
           );
         }
       } catch (error) {
         if (recoveryLifecycle.finishConfirmation(ticket) && isVisible.current)
-          setFeedback({ message: accountError(error), tone: "error" });
+          setFeedback(() => ({ message: accountError(error), tone: "error" }));
       } finally {
         syncRecovery();
       }
@@ -271,20 +279,23 @@ export function AccountSecurityScreen() {
       ...(passwordAccount ? { password } : {}),
     });
     if (!result.success) {
-      setFeedback({
-        message:
+      setFeedback(() => ({
+        message: translateApp(
           "Enter your authenticator or recovery code and, if required, your current password.",
+        ),
         tone: "error",
-      });
+      }));
       return;
     }
     Alert.alert(
-      "Turn off two-factor authentication?",
-      "Your account will no longer require an authenticator code when you sign in with a password.",
+      translateApp("Turn off two-factor authentication?"),
+      translateApp(
+        "Your account will no longer require an authenticator code when you sign in with a password.",
+      ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: "Turn off",
+          text: translateApp("Turn off"),
           style: "destructive",
           onPress: () => {
             if (!currentEpoch(epoch)) return;
@@ -292,7 +303,7 @@ export function AccountSecurityScreen() {
               await accountApi.disableMfa(result.data, {
                 authorityGuard: () => {
                   if (!currentEpoch(epoch))
-                    throw Object.assign(new Error("Account action cancelled"), {
+                    throw Object.assign(localizedError("Account action cancelled"), {
                       name: "AbortError",
                     });
                 },
@@ -300,10 +311,10 @@ export function AccountSecurityScreen() {
               if (currentEpoch(epoch)) {
                 void refreshProfile();
                 clearPrivateState();
-                setFeedback({
-                  message: "Two-factor authentication turned off",
+                setFeedback(() => ({
+                  message: translateApp("Two-factor authentication turned off"),
                   tone: "success",
-                });
+                }));
               }
             });
           },
@@ -312,25 +323,28 @@ export function AccountSecurityScreen() {
     );
   }
 
-  function copyPrivate(value: string, message: string) {
+  function copyPrivate(value: string, message: () => string) {
     void runPrivate("copy", async (epoch) => {
       await Clipboard.setStringAsync(value);
-      if (currentEpoch(epoch)) setFeedback({ message, tone: "success" });
+      if (currentEpoch(epoch)) setFeedback(() => ({ message: message(), tone: "success" }));
     });
   }
 
   function exportCodes() {
     void runPrivate("share", async (epoch) => {
       const result = await Share.share({
-        title: "NyxID recovery codes",
-        message: `NyxID recovery codes\n\n${recoveryCodes.join("\n")}`,
+        title: translateApp("NyxID recovery codes"),
+        message: translateApp("NyxID recovery codes\n\n{{code}}", {
+          code: recoveryCodes.join("\n"),
+        }),
       });
       if (currentEpoch(epoch) && result.action === Share.sharedAction)
-        setFeedback({
-          message:
+        setFeedback(() => ({
+          message: translateApp(
             "Confirm you saved a private copy before closing. You can export again.",
+          ),
           tone: "info",
-        });
+        }));
     });
   }
 
@@ -424,12 +438,15 @@ export function AccountSecurityScreen() {
                       ? t(
                           "Add a six-digit authenticator code to password sign-in.",
                         )
-                      : `This account uses ${profile.data.social_provider} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.`
+                      : translateApp(
+                          "This account uses {{socialProvider}} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.",
+                          { socialProvider: profile.data.social_provider},
+                        )
             }
           >
             <SettingsRow
               label={t("Two-factor authentication")}
-              value={mfaEnabled ? "On" : "Off"}
+              value={mfaEnabled ? translateApp("On") : translateApp("Off")}
             />
             {recovery.count > 0 && !appActive ? (
               <SettingsRow
@@ -451,7 +468,9 @@ export function AccountSecurityScreen() {
                   label={
                     revealCodes
                       ? recoveryCodes.join("\n")
-                      : `${recoveryCodes.length} private codes · hidden`
+                      : translateApp("{{count}} private codes · hidden", {
+                          count: recoveryCodes.length,
+                        })
                   }
                 />,
                 <SettingsRow
@@ -468,7 +487,9 @@ export function AccountSecurityScreen() {
                   onPress={() =>
                     copyPrivate(
                       recoveryCodes.join("\n"),
-                      "Codes copied. Paste them into a private password manager.",
+                      () => (translateApp(
+                        "Codes copied. Paste them into a private password manager.",
+                      )),
                     )
                   }
                 />,
@@ -517,7 +538,9 @@ export function AccountSecurityScreen() {
                     onPress={() =>
                       copyPrivate(
                         enrollment.secret,
-                        "Setup key copied. Add it to your authenticator.",
+                        () => (translateApp(
+                          "Setup key copied. Add it to your authenticator.",
+                        )),
                       )
                     }
                   />
@@ -532,11 +555,12 @@ export function AccountSecurityScreen() {
                       const url = enrollment.qr_code_url;
                       void Linking.openURL(url).catch(() => {
                         if (isFocused.current)
-                          setFeedback({
-                            message:
+                          setFeedback(() => ({
+                            message: translateApp(
                               "No authenticator opened. Copy the setup key and add the account manually.",
+                            ),
                             tone: "info",
-                          });
+                          }));
                       });
                     }}
                   />
@@ -697,8 +721,10 @@ export function AccountSecurityScreen() {
               <SettingsRow
                 key={session.id}
                 label={sessionDeviceLabel(session.user_agent)}
-                detail={`Signed in ${formatSessionDate(session.created_at)}`}
-                value={session.is_current ? "This session" : undefined}
+                detail={translateApp("Signed in {{date}}", {
+                  date: formatSessionDate(session.created_at),
+                })}
+                value={session.is_current ? translateApp("This session") : undefined}
                 onPress={() =>
                   navigation.navigate("SessionDetail", {
                     sessionId: session.id,

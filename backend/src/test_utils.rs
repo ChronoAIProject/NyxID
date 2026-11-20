@@ -287,6 +287,12 @@ pub(crate) async fn connect_test_database_with_command_handler(
     Some(db)
 }
 
+pub(crate) fn selected_test_database_uri() -> &'static str {
+    TEST_DB_PINNED_URI
+        .get()
+        .expect("fixture pins its selected URI")
+}
+
 /// Concern assertions need replica discovery: the driver's Single topology
 /// legitimately sends primaryPreferred even for an explicitly Primary handle.
 /// Retain the ordinary fixture guard until this discovered client is dropped.
@@ -297,9 +303,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     let fixture = connect_test_database(prefix)
         .await
         .expect("Mongo8 fixture required");
-    let uri = TEST_DB_PINNED_URI
-        .get()
-        .expect("fixture pins its selected URI");
+    let uri = selected_test_database_uri();
     let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
     options.direct_connection = Some(false);
     options.server_selection_timeout = Some(Duration::from_secs(30));
@@ -307,6 +311,7 @@ pub(crate) async fn connect_replica_test_database_with_command_handler(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = Some(handler);
+    crate::pool_starvation_tests::configure(&mut options);
     let keepalive = fixture.clone();
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_| {
         let _ = keepalive.name();
@@ -345,21 +350,124 @@ pub(crate) async fn connect_transaction_test_database_with_command_handler(
     db
 }
 
+pub(crate) trait OAuthAuthorityOutcome {
+    fn authority_unavailable(&self) -> bool;
+}
+
+impl OAuthAuthorityOutcome for (axum::http::StatusCode, serde_json::Value) {
+    fn authority_unavailable(&self) -> bool {
+        self.0 == axum::http::StatusCode::SERVICE_UNAVAILABLE
+            && self.1["error"] == "oauth_authority_unavailable"
+            && self.1["error_code"] == 12900
+    }
+}
+
+impl<T> OAuthAuthorityOutcome for crate::errors::AppResult<T> {
+    fn authority_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Err(crate::errors::AppError::OAuthAuthorityUnavailable)
+        )
+    }
+}
+
+/// Exercise the client contract with the original token and request identity.
+pub(crate) async fn retry_oauth_authority<T: OAuthAuthorityOutcome>(
+    mut request: impl AsyncFnMut() -> T,
+    mut assert_no_effect: impl AsyncFnMut(),
+) -> T {
+    const MAX_ATTEMPTS: usize = 3;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut attempt = 1;
+        loop {
+            let outcome = request().await;
+            if !outcome.authority_unavailable() {
+                return outcome;
+            }
+            assert_no_effect().await;
+            if attempt == MAX_ATTEMPTS {
+                return outcome;
+            }
+            attempt += 1;
+            // The OAuth authority refusal specifies Retry-After: 1.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .expect("protected fixture operation exceeded its 30-second client deadline")
+}
+
+#[tokio::test(start_paused = true)]
+async fn oauth_authority_retry_requires_the_exact_response_and_stops_at_three_attempts() {
+    use axum::http::StatusCode;
+    let unavailable = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error":"oauth_authority_unavailable", "error_code":12900,
+        }),
+    );
+    for (response, expected_attempts) in [
+        (unavailable.clone(), 3),
+        ((StatusCode::FORBIDDEN, unavailable.1.clone()), 1),
+        (
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error":"security_readiness_unavailable", "error_code":12900
+                }),
+            ),
+            1,
+        ),
+        (
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error":"oauth_authority_unavailable", "error_code":1004
+                }),
+            ),
+            1,
+        ),
+    ] {
+        let mut attempts = 0;
+        let mut refusals = 0;
+        let received = retry_oauth_authority(
+            async || {
+                attempts += 1;
+                response.clone()
+            },
+            async || {
+                refusals += 1;
+            },
+        )
+        .await;
+        assert_eq!(received, response);
+        assert_eq!(attempts, expected_attempts);
+        assert_eq!(refusals, if expected_attempts == 3 { 3 } else { 0 });
+    }
+}
+
 /// Wait, within the shared readiness budget, until majority-acknowledged
-/// writes and linearizable reads on this database answer within 100 ms.
+/// writes and linearizable reads on this database answer within 150 ms for
+/// three consecutive probes, including a gap between probes.
 ///
 /// Tests that exercise production admission gates (the 250 ms analytics
 /// dispatch transaction, the 200 ms linearizable consent read) assert those
-/// deadlines as written. A CI runner can start such a test while MongoDB is
-/// still stalled on its own journal flushes and the per-test database drop
-/// backlog, which no nextest slot reservation prevents. This establishes the
-/// healthy-server precondition first; the measured call still runs once
-/// against the unchanged production bounds.
+/// deadlines as written. An idle default-config single-node replica set has a
+/// roughly 100 ms journal cadence: 60 quiet majority-write/linearizable-read
+/// probes measured 102–113 ms (p50 106 ms, p90 111 ms), with none at or below
+/// 100 ms. The 150 ms precondition accommodates that cadence while retaining
+/// margin below both production bounds and rejecting stalls lasting seconds.
+/// A CI runner can start such a test while MongoDB is still stalled on its
+/// own journal flushes and the per-test database drop backlog, which no
+/// nextest slot reservation prevents. This establishes the healthy-server
+/// precondition first; the measured call still runs once against the
+/// unchanged production bounds.
 pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
     const BUDGET: Duration = Duration::from_secs(90);
-    const RESPONSIVE: Duration = Duration::from_millis(100);
+    const RESPONSIVE: Duration = Duration::from_millis(150);
     let started = std::time::Instant::now();
     let probes = db.collection::<Document>("__readiness");
+    let mut responsive_probes = 0;
     loop {
         let id = Uuid::new_v4().to_string();
         let probe = std::time::Instant::now();
@@ -373,7 +481,12 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             .await;
         let elapsed = probe.elapsed();
         if write.is_ok() && matches!(read, Ok(Some(_))) && elapsed <= RESPONSIVE {
-            return;
+            responsive_probes += 1;
+            if responsive_probes == 3 {
+                return;
+            }
+        } else {
+            responsive_probes = 0;
         }
         assert!(
             started.elapsed() < BUDGET,
@@ -382,7 +495,7 @@ pub(crate) async fn await_responsive_majority_io(db: &mongodb::Database) {
             write.is_ok(),
             read.is_ok()
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -582,6 +695,7 @@ async fn probe_test_mongo_uri(
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
     options.command_event_handler = command_event_handler;
+    crate::pool_starvation_tests::configure(&mut options);
     let drop_guard = Arc::new(TestDbDropGuard::new(uri, db_name));
     let guard_keepalive = Arc::clone(&drop_guard);
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_event| {
@@ -1371,6 +1485,17 @@ async fn sweep_stale_test_databases_under_lease(client: &mongodb::Client, now_se
     let _ = tokio::time::timeout_at(deadline, prune_metadata).await;
 }
 
+/// Drop while the fixture runtime can still finish background transactions.
+/// A drop on the application pool can occupy its last socket waiting for a
+/// transaction whose COMMIT needs that socket.
+pub(crate) async fn drop_test_database(db: &mongodb::Database) {
+    let uri = TEST_DB_PINNED_URI.get().expect("connected test database");
+    let client = test_db_cleanup_client(uri)
+        .await
+        .expect("test database cleanup client");
+    client.database(db.name()).drop().await.unwrap();
+}
+
 async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
     let parse = async { mongodb::options::ClientOptions::parse(uri).await };
     let Some(Ok(mut options)) =
@@ -1856,6 +1981,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 /// config's side-effect-free fields (encryption key, limits, feature flags).
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
+        crash_reporting: crate::config::CrashReportingConfig::default(),
         port: 3001,
         shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
         auth_device_eight_char_codes: false,
@@ -1936,6 +2062,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         android_app_package: None,
         android_app_sha256_cert_fingerprints: Vec::new(),
         mobile_app_return_schemes: Vec::new(),
+        mobile_social_redirect_uris: Vec::new(),
         apns_sandbox: true,
         key_provider: "local".to_string(),
         aws_kms_key_arn: None,
@@ -2181,7 +2308,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
             config.proxy_max_body_size,
@@ -2205,7 +2331,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),
+        crash_reports: Arc::new(Default::default()),
         local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
@@ -2242,6 +2370,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             db.clone(),
             "agent",
         )),
+        account_export_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
@@ -2910,6 +3045,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         requires_user_credential: false,
         is_active: true,
         created_by: "system".to_string(),
+        caller_token_approved_destinations: Default::default(),
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,

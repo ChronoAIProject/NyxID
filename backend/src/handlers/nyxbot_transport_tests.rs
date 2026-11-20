@@ -348,6 +348,138 @@ async fn flag_off_returns_personal_and_org_bots_after_their_active_answer() {
 }
 
 #[tokio::test]
+async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap() {
+    use crate::models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage};
+    use crate::services::{
+        channel_adapters, channel_platform::InboundMessage, channel_retry_ingress,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let (mut state, _, agent) = setup("relay_key_swap").await;
+    let first = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&first)
+        .await;
+    state.config.base_url = first.uri();
+    let before = linked(&state, None, "aurinko").await;
+    assert_eq!(before.transport, "direct");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/nyxbot/relay/{id}",
+            axum::routing::post(relay_callback),
+        )
+        .with_state(state.clone());
+    let relay = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let id = Uuid::new_v4().to_string();
+    let inbound = InboundMessage {
+        platform_message_id: "mail-1".into(),
+        conversation_id: "mail-thread".into(),
+        conversation_type: "private".into(),
+        sender_platform_id: "sender@example.test".into(),
+        sender_display_name: None,
+        content_type: "text".into(),
+        text: None,
+        attachments: vec![],
+        embedded_attachments: vec![],
+        embedded_attachments_omitted: 0,
+        reply_to_platform_message_id: None,
+        thread_id: Some("mail-thread".into()),
+        raw_data: json!({}),
+    };
+    let bot = channel_bot_service::get_bot(&state.db, &before.channel_bot_id)
+        .await
+        .unwrap();
+    let adapter =
+        channel_adapters::resolve_adapter("aurinko", &state.token_exchange_cache).unwrap();
+    let context = channel_retry_ingress::IngressContext {
+        db: &state.db,
+        config: &state.config,
+        jwt_keys: &state.jwt_keys,
+        encryption_keys: &state.encryption_keys,
+        http: &state.http_client,
+        rate_limiter: &state.per_channel_event_limiter,
+    };
+    let deliver = || {
+        Box::pin(channel_retry_ingress::deliver(
+            &context,
+            &bot,
+            adapter.as_ref(),
+            &inbound,
+            &id,
+        ))
+    };
+    let messages = state.db.collection::<ChannelMessage>(MESSAGES);
+    let source = || messages.find_one(doc! {"_id": &id});
+    assert!(matches!(
+        deliver().await,
+        Err(AppError::ChannelRelayFailed(_))
+    ));
+    let pending = source().await.unwrap().unwrap();
+    assert_eq!(
+        pending.agent_api_key_id.as_ref(),
+        Some(&before.route_api_key_id)
+    );
+    assert_eq!(pending.callback_status.as_deref(), Some("failed"));
+    let original = first.received_requests().await.unwrap().pop().unwrap();
+
+    let flag = gateway_flag("aurinko").unwrap();
+    let target = FlagTarget::User(OWNER.into());
+    set_platform_override(&state.db, flag, &target, true, OWNER)
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &before.id)
+            .await
+            .unwrap()
+            .transport,
+        "gateway"
+    );
+    set_platform_override(&state.db, flag, &target, false, OWNER)
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    let after = load_channel(&state, OWNER, &before.id).await.unwrap();
+    assert_eq!(after.transport, "direct");
+    assert_eq!(after.route_id, before.route_id);
+    assert_ne!(after.route_api_key_id, before.route_api_key_id);
+
+    let stale = relay_callback(
+        State(state.clone()),
+        Path(after.id.clone()),
+        original.headers,
+        original.body.into(),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    let problem: Value = serde_json::from_str(&body_text(stale).await).unwrap();
+    assert_eq!(problem["code"], "invalid_callback");
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    let count = || events.count_documents(doc! {"channel_id": &after.id});
+    assert_eq!(count().await.unwrap(), 0);
+
+    let (_guard, done) = watch_relay_callback(&after.id, &id);
+    deliver().await.unwrap();
+    done.await.unwrap();
+    let delivered = source().await.unwrap().unwrap();
+    assert_eq!(
+        delivered.agent_api_key_id.as_ref(),
+        Some(&after.route_api_key_id)
+    );
+    assert_eq!(delivered.callback_status.as_deref(), Some("delivered"));
+    assert_eq!(count().await.unwrap(), 1);
+    relay.abort();
+    gateway.abort();
+    agent.abort();
+}
+
+#[tokio::test]
 async fn org_gateway_provider_endpoints_reject_live_admin_loss_before_any_delivery() {
     for endpoint in 0..6 {
         let (mut state, agent_calls, agent) = setup("nyxbot_org_gateway_revoke").await;
@@ -906,6 +1038,43 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
                 PARTITION
             );
         }
+        // A transport switch can return with the remote release queued for the worker.
+        use crate::models::nyxbot_gateway_release::{
+            COLLECTION_NAME, NyxbotGatewayRelease, ReleaseState,
+        };
+        let releases = state.db.collection::<NyxbotGatewayRelease>(COLLECTION_NAME);
+        let release = releases
+            .find_one(doc! {
+                "channel_id": &before.id, "state": {"$in":["due","settled"]},
+                "record_id":{"$type":"string"}, "native_drain_for":null,
+            })
+            .await
+            .unwrap()
+            .expect("remote release for the Discord channel");
+        if release.state == ReleaseState::Due {
+            releases
+                .update_one(
+                    doc! {"_id":&release.id, "state":"due"},
+                    doc! {"$set":{"next_attempt_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            crate::services::nyxbot_gateway_release_service::sweep(&state)
+                .await
+                .unwrap();
+        }
+        let settled = releases
+            .find_one(doc! {"_id":&release.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settled.resolution.as_deref(),
+            Some("released"),
+            "release {:?}, last error {:?}",
+            settled.state,
+            settled.last_error
+        );
         assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
         complete_native_drain(&state, &before).await;
         gateway.abort();

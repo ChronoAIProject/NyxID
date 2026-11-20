@@ -154,13 +154,12 @@ async fn source_authority(
     conversation: &str,
 ) -> AppResult<ChatAuthority> {
     let live = db
-        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
         .find_one(doc! {"_id":key,"user_id":actor,"is_active":true,
         "$or":[{"expires_at":bson::Bson::Null},{"expires_at":{"$gt":bson::DateTime::now()}}]})
-        .await?
-        .is_some();
-    let chat = if live {
-        acks::for_key(db, actor, Some(key))
+        .await?;
+    let chat = if let Some(key) = live {
+        acks::chat_for_authenticated_key(db, &key, None)
             .await?
             .filter(|chat| chat.conversation_id == conversation)
     } else {

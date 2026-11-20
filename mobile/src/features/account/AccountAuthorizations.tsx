@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useRef, useState } from "react";
 import { Alert } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,6 +19,7 @@ import {
 } from "./useAccountSecurityRefresh";
 
 export function AccountAuthorizations({ accountId }: { accountId: string }) {
+  useAppLanguage();
   const client = useQueryClient();
   const { isConnected } = useNetworkStatus();
   const key = ["account", "authorizations", accountId];
@@ -29,7 +33,7 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
   });
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
-  const [feedback, setFeedback] = useState<{
+  const [feedback, setFeedback] = useLocalizedState<{
     message: string;
     tone: "error" | "success";
   } | null>(null);
@@ -60,15 +64,17 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
           () => false,
         );
       if (ticket.isCurrent())
-        setFeedback({
+        setFeedback(() => ({
           message: listed
-            ? "Access revoked. Lists refreshed from NyxID."
-            : "Access revoked. Lists could not reload yet; retry to confirm.",
+            ? translateApp("Access revoked. Lists refreshed from NyxID.")
+            : translateApp(
+                "Access revoked. Lists could not reload yet; retry to confirm.",
+              ),
           tone: "success",
-        });
+        }));
     } catch (error) {
       if (ticket.isCurrent())
-        setFeedback({ message: resolveErrorMessage(error), tone: "error" });
+        setFeedback(() => ({ message: resolveErrorMessage(error), tone: "error" }));
     } finally {
       locked.current = false;
       setBusy(false);
@@ -77,14 +83,18 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
   function confirm(kind: "app" | "binding", id: string, label: string) {
     const ticket = current.capture();
     Alert.alert(
-      `Revoke ${label}?`,
+      translateApp("Revoke {{label}}?", { label: label}),
       kind === "app"
-        ? "This application will need consent again. Related Machine permissions are revoked with this consent."
-        : "This app will need authorization again before it can act on your behalf.",
+        ? translateApp(
+            "This application will need consent again. Related Machine permissions are revoked with this consent.",
+          )
+        : translateApp(
+            "This app will need authorization again before it can act on your behalf.",
+          ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: "Revoke",
+          text: translateApp("Revoke"),
           style: "destructive",
           onPress: () => void revoke(kind, id, ticket),
         },
@@ -95,15 +105,15 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
     !isConnected || busy || apps.isFetching || bindings.isFetching;
   const services = (app: NonNullable<typeof apps.data>[number]) =>
     app.legacy_unrestricted
-      ? "Legacy unrestricted service access"
+      ? translateApp("Legacy unrestricted service access")
       : app.allow_all_services
-        ? "All services"
+        ? translateApp("All services")
         : app.allowed_services
             .map(
               (service) =>
-                `${service.label}${service.deleted ? " (deleted)" : ""}`,
+                (service.deleted ? translateApp("{{service}} (deleted)", { service: service.label}) : service.label),
             )
-            .join(", ") || "No services";
+            .join(", ") || translateApp("No services");
   return (
     <>
       {feedback ? <Notice {...feedback} /> : null}
@@ -112,32 +122,44 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
           rows={2}
           icon={false}
           title
-          accessibilityLabel="Loading authorized apps"
+          accessibilityLabel={translateApp("Loading authorized apps")}
         />
       ) : (
         <SettingsGroup
-          title="Authorized apps"
+          title={translateApp("Authorized apps")}
           inset={false}
-          footer="Apps you signed in to with NyxID. Tap one to revoke it. These are separate from approval grants in Activity."
+          footer={translateApp(
+            "Apps you signed in to with NyxID. Tap one to revoke it. These are separate from approval grants in Activity.",
+          )}
         >
           {apps.isError ? (
             <SettingsRow
-              label="Couldn't load authorized apps"
-              detail="Tap to retry."
+              label={translateApp("Couldn't load authorized apps")}
+              detail={translateApp("Tap to retry.")}
               tone="action"
               onPress={refresh}
             />
           ) : apps.data?.length === 0 ? (
-            <SettingsRow label="No authorized apps" />
+            <SettingsRow label={translateApp("No authorized apps")} />
           ) : (
             apps.data?.map((app) => (
               <SettingsRow
                 key={app.client_id}
                 label={app.client_name}
-                detail={`${services(app)} · ${app.scopes || "No scopes"}\nGranted ${app.granted_at} · Expires ${app.expires_at ?? "never"}`}
-                value="Revoke"
+                detail={translateApp(
+                  "{{services}} · {{details}}\nGranted {{grantedAt}} · Expires {{date}}",
+                  {
+                    services: services(app),
+                    details: app.scopes || "No scopes",
+                    grantedAt: app.granted_at,
+                    date: app.expires_at ?? "never",
+                  },
+                )}
+                value={translateApp("Revoke")}
                 disabled={disabled}
-                accessibilityHint={`Revoke ${app.client_name}`}
+                accessibilityHint={translateApp("Revoke {{service}}", {
+                  service: app.client_name,
+                })}
                 onPress={() => confirm("app", app.client_id, app.client_name)}
               />
             ))
@@ -149,23 +171,23 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
           rows={2}
           icon={false}
           title
-          accessibilityLabel="Loading broker authorizations"
+          accessibilityLabel={translateApp("Loading broker authorizations")}
         />
       ) : (
         <SettingsGroup
-          title="Broker authorizations"
+          title={translateApp("Broker authorizations")}
           inset={false}
-          footer="Apps acting for you through NyxID's broker."
+          footer={translateApp("Apps acting for you through NyxID's broker.")}
         >
           {bindings.isError ? (
             <SettingsRow
-              label="Couldn't load broker authorizations"
-              detail="Tap to retry."
+              label={translateApp("Couldn't load broker authorizations")}
+              detail={translateApp("Tap to retry.")}
               tone="action"
               onPress={refresh}
             />
           ) : bindings.data?.length === 0 ? (
-            <SettingsRow label="No broker authorizations" />
+            <SettingsRow label={translateApp("No broker authorizations")} />
           ) : (
             bindings.data?.map((binding) => {
               const name = binding.client_name ?? binding.client_id;
@@ -173,14 +195,11 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
                 <SettingsRow
                   key={binding.binding_hash}
                   label={name}
-                  detail={`${
-                    binding.external_subject
-                      ? `${binding.external_subject.platform} · ${binding.external_subject.external_user_id}\n`
-                      : ""
-                  }${binding.scopes.join(" ")}\nCreated ${binding.created_at} · Last used ${binding.last_used_at ?? "never"}`}
-                  value="Revoke"
+                  detail={(binding.external_subject
+                      ? translateApp("{{platform}} · {{externalUserId}}\n{{scopes}}\nCreated {{createdAt}} · Last used {{lastUsedAt}}", { platform: binding.external_subject.platform, externalUserId: binding.external_subject.external_user_id, scopes: binding.scopes.join(" "), createdAt: binding.created_at, lastUsedAt: binding.last_used_at ?? "never"}) : translateApp("{{scopes}}\nCreated {{createdAt}} · Last used {{lastUsedAt}}", { scopes: binding.scopes.join(" "), createdAt: binding.created_at, lastUsedAt: binding.last_used_at ?? "never" }))}
+                  value={translateApp("Revoke")}
                   disabled={disabled}
-                  accessibilityHint={`Revoke ${binding.client_name ?? "authorization"}`}
+                  accessibilityHint={translateApp("Revoke {{name}}", { name: binding.client_name ?? translateApp("authorization") })}
                   onPress={() =>
                     confirm(
                       "binding",
@@ -196,8 +215,8 @@ export function AccountAuthorizations({ accountId }: { accountId: string }) {
             tone="action"
             label={
               apps.isFetching || bindings.isFetching
-                ? "Refreshing…"
-                : "Refresh Authorizations"
+                ? translateApp("Refreshing…")
+                : translateApp("Refresh Authorizations")
             }
             disabled={busy || !isConnected}
             onPress={refresh}

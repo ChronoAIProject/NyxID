@@ -54,6 +54,7 @@ struct Inner {
     subscriptions: AtomicUsize,
     changed: Notify,
     intake_stopped: CancellationToken,
+    turn_offer_due: CancellationToken,
     interrupt: CancellationToken,
     stop: CancellationToken,
 }
@@ -366,6 +367,10 @@ impl Runtime {
 
     pub async fn intake_stopped(&self) {
         self.0.intake_stopped.cancelled().await;
+    }
+
+    pub(crate) async fn turn_offer_due(&self) {
+        self.0.turn_offer_due.cancelled().await;
     }
 
     /// Call immediately before a background claim, retaining the guard through

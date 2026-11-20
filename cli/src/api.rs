@@ -939,6 +939,9 @@ impl ApiClient {
             .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
 
         let client = self.client.clone();
+        let default_content_type = body
+            .filter(|_| !has_content_type)
+            .map(proxy_body_content_type);
         let body_vec = body.map(|b| b.to_vec());
         let build_req = |token: &str| {
             let mut req = client
@@ -948,10 +951,8 @@ impl ApiClient {
                 req = req.header(k.as_str(), v.as_str());
             }
             if let Some(ref b) = body_vec {
-                if !has_content_type {
-                    // Default to application/octet-stream for raw bytes;
-                    // callers sending JSON should pass -H 'Content-Type: application/json'.
-                    req = req.header("content-type", "application/octet-stream");
+                if let Some(content_type) = default_content_type {
+                    req = req.header("content-type", content_type);
                 }
                 req = req.body(b.clone());
             }
@@ -1002,6 +1003,17 @@ impl ApiClient {
             let body = resp.text().await.unwrap_or_default();
             Err(ApiError::new(path, status, body).into())
         }
+    }
+}
+
+/// Classify the original UTF-8 wire syntax without constructing JSON values.
+fn proxy_body_content_type(bytes: &[u8]) -> &'static str {
+    if std::str::from_utf8(bytes)
+        .is_ok_and(|text| serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok())
+    {
+        "application/json"
+    } else {
+        "application/octet-stream"
     }
 }
 
@@ -1190,6 +1202,42 @@ mod tests {
                 ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
                 "{address}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_request_preserves_json_syntax_and_explicit_content_types() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_owned()).unwrap();
+        let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
+        let cases: &[(&[u8], Option<&str>, &str)] = &[
+            (b"1e400", None, "application/json"),
+            (nested.as_bytes(), None, "application/json"),
+            (b"true false", None, "application/octet-stream"),
+            (b"\"\xff\"", None, "application/octet-stream"),
+            (
+                b"true",
+                Some("application/octet-stream"),
+                "application/octet-stream",
+            ),
+        ];
+        for &(body, supplied, expected) in cases {
+            let headers: Vec<_> = supplied
+                .map(|value| ("cOnTeNt-TyPe".to_owned(), value.to_owned()))
+                .into_iter()
+                .collect();
+            api.proxy_request("POST", "/proxy/test", &headers, Some(body))
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let request = requests.last().unwrap();
+            assert_eq!(request.headers.get_all("content-type").iter().count(), 1);
+            assert_eq!(request.headers["content-type"], expected);
+            assert_eq!(request.body, body);
         }
     }
 

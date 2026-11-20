@@ -667,6 +667,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/reset-password", post(handlers::auth::reset_password))
         .route("/password/change", post(handlers::auth::change_password))
         .route("/setup", post(handlers::auth::setup))
+        .route(
+            "/social/{provider}/mobile-code",
+            get(handlers::social_auth::authorize_mobile_code),
+        )
+        .route(
+            "/social/mobile-code/redeem",
+            post(handlers::social_auth::redeem_mobile_code),
+        )
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
             "/social/apple/callback",
@@ -680,6 +688,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let user_routes = Router::new()
         .route(
+            "/me/crash-reports",
+            post(handlers::crash_reports::ingest)
+                .layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route(
             "/me/analytics/events",
             post(handlers::users::capture_analytics).layer(handlers::users::analytics_body_limit()),
         )
@@ -687,6 +700,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/me/preferences/analytics",
             get(handlers::users::get_analytics_consent).put(handlers::users::set_analytics_consent),
         )
+        .route("/me/export", post(handlers::users::export_me))
         .route(
             "/me/security",
             put(handlers::users::save_security_preferences),
@@ -701,6 +715,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/me/preferences/service-views",
             put(handlers::users::save_service_views),
+        )
+        .route(
+            "/me/quick-access",
+            get(handlers::users::get_quick_access)
+                .put(handlers::users::save_quick_access)
+                .delete(handlers::users::reset_quick_access),
         )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
@@ -1091,6 +1111,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let admin_routes = model_contract_metadata_routes!(register_billing_routes, Router::new())
         .route(
+            "/personal-erasure/orphans",
+            post(handlers::admin_personal_erasure::orphan_sweep),
+        )
+        .route(
+            "/personal-erasure/orphans/{job_id}",
+            get(handlers::admin_personal_erasure::orphan_sweep_status),
+        )
+        .route(
             "/platform-models/credentials",
             get(handlers::platform_models::credentials::list)
                 .post(handlers::platform_models::credentials::create_request),
@@ -1181,6 +1209,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_feature_flags::list_feature_flags)
                 .post(handlers::admin_feature_flags::create_feature_flag),
         )
+        .route(
+            "/crash-reports/summary",
+            get(handlers::crash_reports::summary),
+        )
+        .route("/crash-reports", get(handlers::crash_reports::list))
+        .route(
+            "/crash-reports/releases",
+            post(handlers::crash_reports::register_release),
+        )
+        .route("/crash-reports/{id}", get(handlers::crash_reports::detail))
         .route(
             "/security-readiness",
             get(handlers::health::security_readiness),
@@ -1597,6 +1635,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::billing_credit_schedules::update_schedule),
         )
         .route(
+            "/credits/schedules/{schedule_id}/seed",
+            post(handlers::billing_credit_schedules::seed_schedule),
+        )
+        .route(
             "/chain-verification",
             get(handlers::admin::get_chain_verification),
         )
@@ -1630,6 +1672,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxbot-gateway-releases/{id}/resolve",
             post(handlers::nyxbot_gateway_releases::resolve),
+        )
+        .route(
+            "/cma-sandbox-reservations",
+            get(handlers::admin_cma_sandbox_reservations::list),
+        )
+        .route(
+            "/cma-sandbox-reservations/{id}/inspect",
+            post(handlers::admin_cma_sandbox_reservations::inspect),
+        )
+        .route(
+            "/cma-sandbox-reservations/{id}/resolve",
+            post(handlers::admin_cma_sandbox_reservations::resolve),
         )
         .route(
             "/platform-credentials",
@@ -2383,6 +2437,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Raw proxy handlers enforce their configured limits while buffering. Disable
     // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
+        .layer(axum::Extension(handlers::proxy::ingress::HttpIngress))
         .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
@@ -3028,6 +3083,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/onboarding/suggestions/hide",
             post(handlers::assistant_onboarding::hide_suggestions),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/show",
+            post(handlers::assistant_onboarding::show_suggestions),
         )
         .route(
             "/nyxagent/channels",
@@ -3851,6 +3910,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/catalog-icons/{id}", get(handlers::catalog_icons::serve))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
+        .route("/login/device", get(handlers::mobile_app_links::device_login))
         .route(
             "/nodes/{node_id}/credentials/pending/{pending_id}/accept",
             get(handlers::credential_accept::accept_page),
@@ -3951,6 +4011,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
                     get(handlers::nyxbot::get_event_context),
                 )
+                .route("/dispatches", get(handlers::nyxbot::dispatches::get))
                 .route("/responses", post(handlers::nyxbot::responses_with_runtime))
                 .route("/responses/{response_id}", get(handlers::nyxbot::native_responses::snapshot))
                 .route("/responses/{response_id}/events", get(handlers::nyxbot::native_responses::events))
@@ -4108,3 +4169,9 @@ mod retirement_tests {
 
 #[cfg(test)]
 mod machine_external_runtime_tests;
+
+#[cfg(test)]
+mod refusal_throttle_tests;
+
+#[cfg(test)]
+mod quick_access_tests;

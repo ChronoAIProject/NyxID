@@ -1,0 +1,19 @@
+{
+  "Add a crew": "添加团队",
+  "Add an agent": "添加智能体",
+  "Add from the menu": "从菜单添加",
+  "Add {{name}}": "添加{{name}}",
+  "Agent unavailable": "智能体不可用",
+  "Couldn't load quick access.": "无法加载快捷访问。",
+  "Couldn't save quick access. Your previous list is back.": "无法保存快捷访问，已恢复之前的列表。",
+  "Crew unavailable": "团队不可用",
+  "Move {{name}} down": "将{{name}}下移",
+  "Move {{name}} up": "将{{name}}上移",
+  "Not shown: it was deleted or you no longer have access": "不显示：已删除或你已无权访问",
+  "Nothing in quick access yet. Add destinations, agents or crews below.": "快捷访问中还没有内容。请在下方添加目的地、智能体或团队。",
+  "Puts New chat, Notifications, Scan QR code, Recent chats and Settings back.": "恢复为新聊天、通知、扫描二维码、最近的聊天和设置。",
+  "Quick access holds up to 12 items. Remove one to add another.": "快捷访问最多可容纳 12 项。请先移除一项再添加。",
+  "Reset to default": "恢复默认",
+  "Shown in the column under the clock, in this order. Saved to your account, so your other devices show the same list.": "按此顺序显示在时钟下方的一栏中。已保存到你的账号，其他设备会显示相同的列表。",
+  "Your shortcuts": "你的快捷方式"
+}

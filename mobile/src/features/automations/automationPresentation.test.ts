@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 import { agentSchema, type AssistantAgent } from "../agents/agentContracts";
 import {
   automationListDetail,
@@ -38,6 +39,40 @@ const run: AutomationRun = {
   thread_id: null,
   duration_ms: null,
 };
+
+test("N13 weekday summaries follow language changes after module initialization", () => {
+  const row = automationSchema.parse({
+    id: run.id,
+    user_id: "owner",
+    label: "Task",
+    user_service_id: null,
+    status: "active",
+    source: "schedule",
+    schedule: { kind: "cron", expression: "0 17 * * 5", timezone: "America/Los_Angeles" },
+    next_run_at: "2026-11-07T01:00:00Z",
+    verification: { mode: "schedule" },
+    delivery: { type: "notification" },
+    inbound_url: null,
+    created_at: run.scheduled_at,
+    updated_at: run.scheduled_at,
+  });
+  try {
+    for (const [language, saturday, range] of [
+      ["zh-CN", "每周六", "周二–周六"],
+      ["zh-TW", "每週六", "週二–週六"],
+      ["en", "Saturdays", "Tue–Sat"],
+    ] as const) {
+      setAppTranslationLanguage(language);
+      assert.ok(automationScheduleSummary(row, "Asia/Singapore").includes(saturday));
+      assert.ok(automationScheduleSummary({
+        ...row,
+        schedule: { kind: "cron", expression: "0 8 * * 1-5", timezone: "America/Los_Angeles" },
+      }, "Asia/Singapore").includes(range));
+    }
+  } finally {
+    setAppTranslationLanguage("en");
+  }
+});
 
 test("history cursor overlap deduplicates by run identity, preserves newest results and keeps simultaneous distinct runs", () => {
   const older = {

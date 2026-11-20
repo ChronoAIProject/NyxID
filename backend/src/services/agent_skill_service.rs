@@ -868,45 +868,22 @@ pub(super) fn safe_path(path: &str) -> bool {
 fn package(bytes: &[u8]) -> AppResult<BTreeMap<String, Vec<u8>>> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid("Invalid skill ZIP"))?;
-    // ZipArchive indexes entries by name and silently collapses duplicates.
-    // Count the raw central-directory records as well, before trusting that
-    // index for either uniqueness or the entry limit. ZIP64 uses the same
-    // fixed record header and variable name/extra/comment lengths.
-    let mut offset = usize::try_from(archive.central_directory_start())
-        .map_err(|_| invalid("Invalid skill ZIP directory"))?;
-    let mut entries = 0;
-    while bytes
-        .get(offset..)
-        .is_some_and(|b| b.starts_with(b"PK\x01\x02"))
-    {
-        let header = bytes
-            .get(offset..)
-            .and_then(|b| b.get(..46))
-            .ok_or_else(|| invalid("Invalid skill ZIP directory"))?;
-        let length = 46
-            + [28, 30, 32]
-                .iter()
-                .map(|&i| usize::from(u16::from_le_bytes([header[i], header[i + 1]])))
-                .sum::<usize>();
-        if length > bytes.len() - offset {
-            return Err(invalid("Invalid skill ZIP directory"));
-        }
-        offset += length;
-        entries += 1;
-        if entries > MAX_FILES {
-            return Err(invalid("Skill ZIP has too many files"));
-        }
+    if archive.len() > MAX_FILES {
+        return Err(invalid("Skill ZIP has too many files"));
     }
-    if entries != archive.len() {
-        return Err(invalid("Duplicate or inconsistent skill ZIP entries"));
-    }
+    archive
+        .validate_header_consistency()
+        .map_err(|_| invalid("Duplicate or inconsistent skill ZIP entries"))?;
     let mut files = BTreeMap::new();
     let mut total = 0usize;
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
             .map_err(|_| invalid("Invalid skill ZIP entry"))?;
-        let name = file.name().trim_end_matches('/').to_owned();
+        let name = file
+            .name()
+            .map_err(|_| invalid("Invalid skill ZIP entry"))?;
+        let name = name.trim_end_matches('/').to_owned();
         if !safe_path(&name) || file.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
             return Err(invalid("Unsafe skill ZIP path"));
         }

@@ -37,7 +37,7 @@ use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, channel_bot_service, channel_media_service,
     channel_platform::{OutboundEdit, OutboundReply},
-    channel_relay_service,
+    channel_relay_service, channel_reply_plan,
     channel_send_service::{self, is_concrete_platform_address},
     org_service,
 };
@@ -322,11 +322,12 @@ fn validate_reply_parts<'a>(
     >,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    if crate::services::channel_reply_plan::commonmark(metadata)
-        && !matches!(adapter.platform_id(), "telegram" | "telegram-new")
+    if channel_reply_plan::commonmark(metadata)
+        && !channel_reply_plan::supports_commonmark(adapter.platform_id())
     {
         return Err(AppError::ValidationError(
-            "CommonMark relay formatting is supported for Telegram".into(),
+            "CommonMark relay formatting is supported for Telegram, Lark, Feishu and Discord"
+                .into(),
         ));
     }
     let count = attachments.len();
@@ -676,9 +677,16 @@ fn reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
     })
 }
 
-fn thread_reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
+fn thread_reply_token_use(
+    claims: &jwt::RelayReplyClaims,
+) -> AppResult<crate::services::channel_thread_service::delivery::ThreadReplyToken<'_>> {
     claims.require_unexpired()?;
-    reply_token_use(claims)
+    Ok(
+        crate::services::channel_thread_service::delivery::ThreadReplyToken {
+            usage: reply_token_use(claims)?,
+            claims,
+        },
+    )
 }
 
 async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult<bool> {
@@ -1596,6 +1604,16 @@ async fn record_thread_preflight_failure(
         && (token_bound || key_bound)
         && let Some(bot) = original.channel_bot_id.as_deref()
     {
+        if failure.class == ReplyFailure::Target
+            && original
+                .nyxbot_admission
+                .as_ref()
+                .is_some_and(|a| a.requires_org_notice)
+            && crate::services::org_thread_notice::record_source_refusal(&state.db, bot, source)
+                .await
+        {
+            return;
+        }
         crate::services::channel_thread_service::gateway::record_failure(
             &state.db,
             bot,
@@ -1708,6 +1726,12 @@ async fn prepare_reply_outbound(
         &mut outbound.metadata,
     );
 
+    if channel_reply_plan::uses_relay_renderer(adapter.platform_id(), outbound.metadata.as_ref())
+        && (!outbound.attachments.is_empty()
+            || channel_reply_plan::has_structured_content(&outbound))
+    {
+        return channel_reply_plan::single_text_part(&outbound, adapter.platform_id());
+    }
     Ok(outbound)
 }
 
@@ -1723,6 +1747,11 @@ async fn deliver_reply(
     let bot_id = context.original.channel_bot_id.clone();
     let owner = context.original.user_id.clone();
     let source = context.original.id.clone();
+    let requires_notice = context
+        .original
+        .nyxbot_admission
+        .as_ref()
+        .is_some_and(|a| a.requires_org_notice);
     let mut failure_class = ReplyFailure::Transient;
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
@@ -1769,8 +1798,14 @@ async fn deliver_reply(
         {
             return Err(AppError::ChannelMediaTooLarge);
         }
-    } else {
-        validate_reply_for_adapter(&body.reply, adapter)?;
+    } else if let Err(error) = validate_reply_for_adapter(&body.reply, adapter) {
+        // Empty or malformed output may itself be a changed notice. The
+        // original credential has already authenticated this inbound UUID.
+        if thread && requires_notice {
+            failure_class = ReplyFailure::Target;
+            return Err(AppError::Conflict("thread_target_unavailable".into()));
+        }
+        return Err(error);
     }
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
@@ -1830,12 +1865,16 @@ async fn deliver_reply(
             platform_bot_id: Some(&bot.platform_bot_id),
             platform_secrets: platform_secrets.as_ref(),
         };
+        // Lark's format marker still describes the original literal notice.
+        // Any other metadata must go through the existing notice refusal.
+        let literal_notice = body.reply.metadata.is_none()
+            || (matches!(adapter.platform_id(), "lark" | "feishu")
+                && body.reply.metadata == Some(serde_json::json!({"text_format":"commonmark"})));
+        let plain_text = if prepared.is_none() && body.reply.attachments.is_empty() && literal_notice {
+            body.reply.text.as_deref()
+        } else { None };
         let target = crate::services::channel_thread_service::gateway::reply_target(
-            &state.db,
-            adapter,
-            &bot,
-            &credentials,
-            &original,
+            &state.db, adapter, &bot, &credentials, &original, plain_text,
         )
         .await.map_err(|failure| { failure_class = failure.class; failure.error })?;
         Some(target)
@@ -1850,7 +1889,7 @@ async fn deliver_reply(
             billing: billing.as_ref(), token: &bot_token,
             platform_bot_id: Some(&bot.platform_bot_id), platform_secrets: platform_secrets.as_ref(),
         };
-        let one_use = if let Some(validated) = reply_claims {
+        let one_use = if let Some(validated) = &reply_claims {
             let claims = &validated.0;
             if claims.inbound_message_id != original.id || claims.api_key_id != attributed_api_key_id
                 || claims.conversation_id != conversation.id || claims.platform != conversation.platform {
@@ -2067,6 +2106,12 @@ async fn deliver_reply(
         && failure_class.reason().is_some()
         && let Some(bot_id) = bot_id
         && let Err(error) = &result
+        && !(requires_notice
+            && failure_class == ReplyFailure::Target
+            && crate::services::org_thread_notice::record_source_refusal(
+                &state.db, &bot_id, &source,
+            )
+            .await)
     {
         crate::services::channel_thread_service::gateway::record_failure(
             &state.db,
@@ -2213,9 +2258,28 @@ async fn edit_resolved_reply(
     } else {
         None
     };
-    let edit = OutboundEdit {
-        text: body.reply.text,
-        metadata: body.reply.metadata,
+    let edit = if channel_reply_plan::uses_relay_renderer(
+        adapter.platform_id(),
+        body.reply.metadata.as_ref(),
+    ) {
+        let part = channel_reply_plan::single_text_part(
+            &OutboundReply {
+                text: body.reply.text,
+                metadata: body.reply.metadata,
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+            },
+            adapter.platform_id(),
+        )?;
+        OutboundEdit {
+            text: part.text,
+            metadata: part.metadata,
+        }
+    } else {
+        OutboundEdit {
+            text: body.reply.text,
+            metadata: body.reply.metadata,
+        }
     };
 
     crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
@@ -4253,14 +4317,25 @@ mod tests {
         .expect("generate relay reply token")
     }
 
-    async fn setup_reply_token_fixture(prefix: &str) -> Option<ReplyTokenFixture> {
+    fn setup_reply_token_fixture(prefix: &str) -> impl Future<Output = Option<ReplyTokenFixture>> {
+        setup_platform_reply_fixture(prefix, "telegram")
+    }
+
+    async fn setup_platform_reply_fixture(
+        prefix: &str,
+        platform: &str,
+    ) -> Option<ReplyTokenFixture> {
         let db = connect_test_database(prefix).await?;
         let state = test_app_state(db.clone());
         let now = Utc::now();
         let user_id = Uuid::new_v4().to_string();
         let bot_token_encrypted = state
             .encryption_keys
-            .encrypt(b"bot-token")
+            .encrypt(if matches!(platform, "lark" | "feishu") {
+                b"app:secret"
+            } else {
+                b"bot-token"
+            })
             .await
             .expect("encrypt test bot token");
 
@@ -4306,7 +4381,7 @@ mod tests {
             ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
-            platform: "telegram".to_string(),
+            platform: platform.to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
             connection_id: None,
@@ -4341,9 +4416,14 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot.id.clone()),
-            platform: "telegram".to_string(),
+            platform: platform.to_string(),
             platform_conversation_id: "chat_123".to_string(),
-            platform_conversation_type: "private".to_string(),
+            platform_conversation_type: if platform == "telegram" {
+                "private"
+            } else {
+                "group"
+            }
+            .into(),
             platform_sender_id: None,
             agent_api_key_id: api_key.id.clone(),
             default_agent: false,

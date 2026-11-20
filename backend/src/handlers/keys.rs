@@ -1295,6 +1295,9 @@ pub async fn list_keys_with_tool_bindings(
     auth_user: AuthUser,
     include_tool_bindings: bool,
 ) -> AppResult<Json<KeyListResponse>> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "keys.list")
+        .await?;
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
@@ -2561,21 +2564,6 @@ pub async fn update_key(
         .await?;
     }
 
-    // Auto-sync NodeServiceBinding when node_id changes. The actor owns
-    // the node, so it must be the one validated -- the binding owner
-    // (`user_id_str`) may be an org.
-    if body.node_id.is_some() {
-        node_service::sync_node_binding_for_user_service(
-            &state.db,
-            &user_id_str,
-            &actor,
-            view.catalog_service_id.as_deref(),
-            body.node_id.as_deref(),
-            view.node_id.as_deref(),
-        )
-        .await?;
-    }
-
     // The service mutation transaction queued the old node's removal. Resolve
     // current state again so a concurrent rebind cannot replay a stale removal.
     if body.node_id.is_some()
@@ -3396,6 +3384,8 @@ mod tests {
     use crate::models::user_service::{
         AUTO_PROVISION_SOURCE, COLLECTION_NAME as USER_SERVICES, UserService,
     };
+    use crate::mw::auth::AuthMethod;
+    use crate::services::assistant_acknowledgement_service::AssistantTurnFence;
     use crate::telemetry::TelemetryContext;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
@@ -3410,6 +3400,66 @@ mod tests {
 
     fn test_encryption_keys() -> EncryptionKeys {
         EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
+    }
+
+    #[tokio::test]
+    async fn conversation_key_inventory_requires_a_live_turn_for_every_projection() {
+        let Some(db) = connect_test_database("keys_conversation_turn_gate").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let mut auth = test_auth_user(&user_id);
+        auth.auth_method = AuthMethod::ApiKey;
+        auth.scope = "proxy".into();
+        auth.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+        auth.assistant_turn_fence = Some(Box::new(AssistantTurnFence {
+            channel_adapter_origin: None,
+            invocation_id: None,
+            invocation_controlled: true,
+            platform_thread: false,
+            platform_origin: None,
+            conversation_id: "conversation".into(),
+            turn_id: Some("turn".into()),
+            turn_live: true,
+            turn_stopped: false,
+        }));
+
+        for include_tool_bindings in [false, true] {
+            assert!(
+                super::list_keys_with_tool_bindings(
+                    state.clone(),
+                    auth.clone(),
+                    include_tool_bindings,
+                )
+                .await
+                .is_ok(),
+                "live conversation key must retain its scoped inventory read"
+            );
+        }
+        for (turn_id, stopped) in [(None, false), (Some("turn".into()), true)] {
+            let mut stale = auth.clone();
+            let fence = stale.assistant_turn_fence.as_mut().unwrap();
+            fence.turn_id = turn_id;
+            fence.turn_live = false;
+            fence.turn_stopped = stopped;
+            for include_tool_bindings in [false, true] {
+                assert!(matches!(
+                    super::list_keys_with_tool_bindings(
+                        state.clone(),
+                        stale.clone(),
+                        include_tool_bindings,
+                    )
+                    .await,
+                    Err(AppError::AssistantTurnRequired)
+                ));
+            }
+        }
+        db.drop().await.unwrap();
     }
 
     fn make_blank_api_key() -> UserApiKey {

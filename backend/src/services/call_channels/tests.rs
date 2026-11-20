@@ -2190,6 +2190,7 @@ impl crate::services::billing::lago_client::LagoApi for FundedLago {
         c: &str,
         s: &str,
     ) -> crate::errors::AppResult<crate::services::billing::lago_client::LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(s)?;
         Ok(crate::services::billing::lago_client::LagoUsage {
             customer_id: c.into(),
             subscription_id: s.into(),
@@ -3191,6 +3192,7 @@ async fn nyxagent_dispatch_after_forwarded_mark_rechecks_turn_and_key_and_settle
                         relative_path: "v1/responses".into(),
                         body: Some(json!({"input":"Read the FAQ"})),
                         idempotency_key: "dispatch-boundary".into(),
+                        destination: None,
                         billing_policy: Some(
                             crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                                 crate::services::billing::BillingIngress::Proxy,

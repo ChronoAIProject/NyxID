@@ -193,6 +193,20 @@ pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> AppResult<Option<GatewayAuthority>> {
+    authenticate_mode(state, headers, false).await
+}
+
+pub(crate) async fn observe_authority(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<Option<GatewayAuthority>> {
+    authenticate_mode(state, headers, true).await
+}
+async fn authenticate_mode(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
+) -> AppResult<Option<GatewayAuthority>> {
     let Some(raw) = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -249,8 +263,11 @@ pub(crate) async fn authenticate(
     if is_child {
         return Err(refused());
     }
-    let (owner, key, child): (String, ApiKey, Option<String>) =
-        super::key_service::validate_api_key(&state.db, &raw).await?;
+    let (owner, key, child): (String, ApiKey, Option<String>) = if observe {
+        super::key_service::observe_api_key(&state.db, &raw).await?
+    } else {
+        super::key_service::validate_api_key(&state.db, &raw).await?
+    };
     if key.id != selected.id {
         return Err(refused());
     }

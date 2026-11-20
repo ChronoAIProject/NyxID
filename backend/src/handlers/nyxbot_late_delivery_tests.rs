@@ -428,7 +428,9 @@ async fn uncertain_dispatch_and_crashed_claim_are_never_reissued() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"reply_target_ref":"cmaeg1.rt.original", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()}))).mount(&f.gateway).await;
     Mock::given(method("POST"))
         .and(path("/reply-targets/cmaeg1.rt.original/messages"))
-        .respond_with(ResponseTemplate::new(503))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"delivery":{"outcome":"unknown"}})),
+        )
         .mount(&f.gateway)
         .await;
     settled(&f, false).await;
@@ -724,6 +726,39 @@ async fn external_bot_delayed_answer_keeps_guest_authority_despite_owner_id_over
 }
 
 #[tokio::test]
+async fn detached_observer_capacity_notice_dispatches_at_settlement_once() {
+    let f = fixture("channel_capacity_detached_observer").await;
+    settled(&f, true).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id": &f.event.conversation_id, "turn_id": &f.event.turn_id},
+            doc! {"$set": {"text": "", "error_code": "capacity_exceeded", "error_detail": {
+                "stage": "upstream_response", "http_status": 503, "attempts": 20,
+                "turn_id": &f.event.turn_id, "occurred_at": bson::DateTime::now(),
+                "continuations": 0, "capacity_wait_ms": 120_098_i64
+            }}},
+        )
+        .await
+        .unwrap();
+
+    // An older replica can disappear between recording observer detach and
+    // giving the late sender ownership. The stream deadline is still ahead.
+    patch(&f, doc! {"gateway_observer_detached": true}).await;
+    late_delivery::settled(&f.state, &f.event.id).await;
+    let requests = sends(&f).await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["text"],
+        crate::services::assistant_turn_observability::capacity_message(Some(120_098))
+    );
+    late_delivery::sweep(&f.state).await.unwrap();
+    assert_eq!(sends(&f).await.len(), 1);
+}
+
+#[tokio::test]
 async fn late_capacity_failure_preserves_complete_partial_reply_and_wait_copy() {
     let f = fixture("channel_late_capacity_complete").await;
     settled(&f, true).await;
@@ -893,6 +928,7 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                continued_after_restart: false,
                 voice_link_publication: None,
                 links_in_chat: None,
                 artifact_recovery_target: None,
@@ -1554,6 +1590,12 @@ async fn late_gateway_acceptance_without_receipt_is_terminal_and_visible() {
     )
     .await;
     assert_eq!(sends(&f).await.len(), 1);
+    // A pre-#2561 sender did not freeze the reply request.
+    patch(
+        &f,
+        doc! {"delivery.preparation.gateway_request_hash":bson::Bson::Null},
+    )
+    .await;
     expire_text_preparation(&f).await;
     let (a, b) = tokio::join!(
         late_delivery::sweep(&f.state),
@@ -1705,6 +1747,12 @@ async fn late_dispatch_marker_without_receipt_never_reopens_preparation() {
     .await;
     assert_eq!(status(&f).await, "sending");
     assert!(sends(&f).await.is_empty());
+    // A pre-#2561 sender did not freeze the reply request.
+    patch(
+        &f,
+        doc! {"delivery.preparation.gateway_request_hash":bson::Bson::Null},
+    )
+    .await;
     expire_text_preparation(&f).await;
     late_delivery::sweep(&f.state).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap();
@@ -1739,3 +1787,9 @@ async fn late_unscoped_direct_reply_uses_only_ordinary_delivery_records() {
     assert!(!counts.keys().any(|key| key.ends_with(":nyxbot_events")));
     assert_eq!(status(&f).await, "waiting");
 }
+
+#[path = "nyxbot_gateway_reply_tests.rs"]
+mod gateway_reply_tests;
+
+#[path = "nyxbot_response_read_delivery_tests.rs"]
+mod response_read_delivery_tests;

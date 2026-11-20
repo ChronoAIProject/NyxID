@@ -62,8 +62,12 @@ pub(crate) fn valid_facts(facts: &ChannelThreadFacts, inbound: &InboundMessage) 
         && (facts.kind != ThreadKind::Unknown || facts.root_id.is_none())
 }
 
-/// The flag belongs to the linked acting person, including for an org-owned bot.
-/// No fallback to gateway/third-party routes, and no credential or provider I/O.
+#[derive(Default)]
+pub(crate) struct InboundContext {
+    pub thread: Option<ChannelThreadFacts>,
+    pub telegram_group: Option<super::channel_inbound_diagnostics::TelegramRoute>,
+}
+
 pub(crate) async fn inbound_facts(
     db: &mongodb::Database,
     bot: &ChannelBot,
@@ -71,22 +75,82 @@ pub(crate) async fn inbound_facts(
     adapter: &dyn PlatformAdapter,
     inbound: &InboundMessage,
 ) -> AppResult<Option<ChannelThreadFacts>> {
+    Ok(
+        inbound_context(db, bot, route_api_key_id, None, adapter, inbound)
+            .await?
+            .thread,
+    )
+}
+
+/// The existing active-channel lookup also identifies the receiver of an addressed
+/// Telegram group message. Only direct links may put thread facts on the callback.
+pub(crate) async fn inbound_context(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    route_api_key_id: &str,
+    route_id: Option<&str>,
+    adapter: &dyn PlatformAdapter,
+    inbound: &InboundMessage,
+) -> AppResult<InboundContext> {
+    use super::channel_inbound_diagnostics::TelegramRoute;
+    use crate::models::channel_thread::{ThreadAddress, ThreadSenderKind};
     let Some(facts) = adapter
         .thread_facts(inbound, bot, None)
         .filter(|facts| valid_facts(facts, inbound))
     else {
-        return Ok(None);
+        return Ok(InboundContext::default());
     };
-    let Some(channel) = db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .find_one(doc! {
-            "channel_bot_id": &bot.id, "route_api_key_id": route_api_key_id,
-            "transport": "direct", "status": "active",
-        })
-        .await?
-    else {
-        return Ok(None);
+    let direct = doc! {"transport":"direct", "route_api_key_id":route_api_key_id};
+    let mut filter = doc! {"channel_bot_id": &bot.id, "status":"active"};
+    let telegram_group = route_id.is_some()
+        && inbound.conversation_type == "group"
+        && super::channel_platform::canonical_platform(&bot.platform) == "telegram";
+    if telegram_group {
+        let gateway = doc! {"transport":"gateway", "gateway_source":null, "route_id":{"$type":"string"},
+        "platform":"telegram", "$or":[{"bot_owner_id":&bot.user_id},
+            {"bot_owner_id":null,"user_id":&bot.user_id}]};
+        filter.insert("$or", vec![direct, gateway]);
+    } else {
+        filter.extend(direct);
+    }
+    #[derive(serde::Deserialize)]
+    struct Link {
+        #[serde(rename = "_id")]
+        id: String,
+        user_id: String,
+        transport: String,
+        route_id: Option<String>,
+        route_api_key_id: String,
+    }
+    let links = db.collection::<Link>(CHANNELS);
+    let mut query = links
+        .find_one(filter)
+        .projection(doc! {"user_id":1,"transport":1,"route_id":1,"route_api_key_id":1});
+    if telegram_group {
+        // A matching direct link retains priority for the existing thread projection.
+        query = query.sort(doc! {"transport":1, "created_at":-1, "_id":-1});
+    }
+    let Some(channel) = query.await? else {
+        return Ok(InboundContext::default());
     };
+    if channel.transport == "gateway" {
+        let directed = facts.sender_kind == ThreadSenderKind::Human
+            && matches!(
+                facts.address,
+                ThreadAddress::Mention | ThreadAddress::ReplyToBot
+            );
+        let route = if channel.route_api_key_id != route_api_key_id {
+            TelegramRoute::OtherAgent { directed }
+        } else if channel.route_id.as_deref() != route_id {
+            TelegramRoute::OutsideSource { directed }
+        } else {
+            TelegramRoute::Bound
+        };
+        return Ok(InboundContext {
+            thread: None,
+            telegram_group: Some(route),
+        });
+    }
     if !feature_flag_service::personal_flag_enabled(
         db,
         &channel.user_id,
@@ -101,9 +165,12 @@ pub(crate) async fn inbound_facts(
             .await?
             .is_none()
     {
-        return Ok(None);
+        return Ok(InboundContext::default());
     }
-    Ok(Some(facts))
+    Ok(InboundContext {
+        thread: Some(facts),
+        telegram_group: None,
+    })
 }
 
 #[cfg(test)]

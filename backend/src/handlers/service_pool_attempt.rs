@@ -16,6 +16,8 @@ pub(super) struct AttemptContext {
     /// Set before completion settles; a renew failing after this is expected.
     pub settling: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+    /// A pool deadline or lost response cannot authorize a second use.
+    pub single_node_dispatch: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub node_dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub retry_after: std::sync::Arc<std::sync::Mutex<Option<std::time::Duration>>>,
 }
@@ -969,6 +971,7 @@ mod tests {
             settling: Default::default(),
             timed_out: Default::default(),
             status: Default::default(),
+            single_node_dispatch: Default::default(),
             node_dispatched: Default::default(),
             retry_after: Default::default(),
         };

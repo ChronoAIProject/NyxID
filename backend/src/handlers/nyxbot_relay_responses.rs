@@ -6,19 +6,25 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[derive(Default)]
+pub(super) struct Prepared {
+    pub stored: Option<GatewayResponse>,
+    pub discovery: Option<bool>,
+}
+
 pub(super) async fn prepare(
     state: &AppState,
     row: &NyxbotChannel,
     event: &NyxbotEvent,
     request: &Value,
     response_id: &str,
-) -> AppResult<Option<GatewayResponse>> {
+) -> AppResult<Prepared> {
     // Old gateways and management probes retain the existing live-stream path.
     if request["metadata"].is_null()
         || row.binding_id.is_none()
         || request["event_context"]["activity"]["source"]["type"] != "nyxid_relay"
     {
-        return Ok(None);
+        return Ok(Prepared::default());
     }
     // Readiness and CMA discovery are compatibility gates, not rollout consent.
     // Resolve for the linking person, including their live org overrides.
@@ -30,10 +36,10 @@ pub(super) async fn prepare(
     )
     .await?
     {
-        return Ok(None);
+        return Ok(Prepared::default());
     }
     let Ok(metadata) = recovery::metadata(&request["metadata"]) else {
-        return Ok(None);
+        return Ok(Prepared::default());
     };
     let activity = &request["event_context"]["activity"];
     if metadata["cmaeg.event"] != event.event_id
@@ -56,18 +62,20 @@ pub(super) async fn prepare(
     .await
     .is_err()
     {
-        return Ok(None);
+        return Ok(Prepared::default());
     }
-    // Thread-follow already has a distinct target-selection contract. Keep its
-    // existing delivery path until the resolved thread choice can be frozen
-    // before the durable created frame, rather than changing it after emission.
+    // Followed answers stay locally delivered. Their separate lifecycle mapping
+    // freezes the created frame only after the thread choice is known.
     if crate::services::channel_thread_service::gateway::candidate(row, activity) {
-        return Ok(None);
+        return Ok(Prepared::default());
     }
     let base = gateway::gateway_base(state).await?;
     let creator = gateway::creator_bearer(state, &row.user_id)?;
     if !advertised(&base, &creator).await {
-        return Ok(None);
+        return Ok(Prepared {
+            discovery: Some(false),
+            ..Prepared::default()
+        });
     }
     let binding = row.binding_id.as_deref().expect("checked binding");
     let identity = format!(
@@ -99,7 +107,7 @@ pub(super) async fn prepare(
             let changed = db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {
                 "_id":&admitted.event_key,"user_id":&admitted.user_id,"turn_id":bson::Bson::Null,
                 "status":{"$in":["running","resuming"]},"gateway_response_id":bson::Bson::Null,
-            },doc! {"$set":{"gateway_response_id":&admitted.response_id}}).session(&mut *session).await?;
+            },doc! {"$set":{"gateway_response_id":&admitted.response_id},"$unset":{"response_read_pending":""}}).session(&mut *session).await?;
             if changed.matched_count != 1 { return Err(AppError::Conflict("Response admission changed".into())) }
             db.collection::<GatewayResponse>(RESPONSES).insert_one(&admitted).session(&mut *session).await?;
             Ok(())
@@ -111,11 +119,55 @@ pub(super) async fn prepare(
         if let Some(saved) = recovery::load(&state.db, row, response_id).await?
             && saved.request_hash == stored.request_hash
         {
-            return Ok(Some(saved));
+            return Ok(Prepared {
+                stored: Some(saved),
+                discovery: Some(true),
+            });
         }
         return Err(error);
     }
-    Ok(Some(stored))
+    Ok(Prepared {
+        stored: Some(stored),
+        discovery: Some(true),
+    })
+}
+
+/// The live prefix is understood by the same gateways that advertise stored recovery.
+/// This runs only after a relay admission has received a metadata-only mapping.
+pub(super) async fn accepts_prefix(
+    state: &AppState,
+    row: &NyxbotChannel,
+    request: &Value,
+    discovery: Option<bool>,
+) -> bool {
+    if row.binding_id.is_none() {
+        return false;
+    }
+    let Ok(metadata) = recovery::metadata(&request["metadata"]) else {
+        return false;
+    };
+    let activity = &request["event_context"]["activity"];
+    if Some(metadata["cmaeg.event"].as_str()) != activity["event_id"].as_str()
+        || Some(metadata["cmaeg.actor"].as_str()) != activity["actor"]["id"].as_str()
+        || metadata["cmaeg.channel"]
+            != sha256_hex(row.gateway_channel_id.as_deref().unwrap_or_default())[..16]
+        || metadata["cmaeg.partition"].len() != 16
+        || !metadata["cmaeg.partition"]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    if let Some(known) = discovery {
+        return known;
+    }
+    let Ok(base) = gateway::gateway_base(state).await else {
+        return false;
+    };
+    let Ok(creator) = gateway::creator_bearer(state, &row.user_id) else {
+        return false;
+    };
+    advertised(&base, &creator).await
 }
 
 pub(super) fn capable(caps: &Value) -> bool {
@@ -222,7 +274,7 @@ pub(super) async fn settle_admission(
     let stored = current.as_ref().unwrap_or(stored);
     let (text, failed) = match result {
         Ok(Inbound::Turn(_)) | Ok(Inbound::Queued) => return,
-        Ok(Inbound::Reply(text)) => (Some(text.as_str()), false),
+        Ok(Inbound::Reply(text)) => (Some(text.text.as_str()), false),
         Ok(Inbound::Silent(_)) => (None, false),
         Ok(Inbound::Busy) => (
             Some("NyxBot is busy. This message was not started. Please try again shortly."),
@@ -254,20 +306,41 @@ pub(super) async fn settle_admission(
 /// Observation is not delivery. An observer disconnect may hand an unclaimed
 /// answer to the old late sender. A successful recovery read claims it first,
 /// fencing that sender atomically (including before turn admission).
-pub(super) async fn claim_replay(state: &AppState, row: &NyxbotChannel, id: &str) -> AppResult<()> {
+pub(super) async fn claim_replay(
+    state: &AppState,
+    row: &NyxbotChannel,
+    id: &str,
+) -> AppResult<bool> {
     if row.gateway_source.is_some() {
-        return Ok(());
+        return Ok(true);
     }
     let Some(stored) = recovery::load(&state.db, row, id).await? else {
-        return Ok(());
+        return Ok(false);
     };
-    state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {
-        "_id":&stored.event_key,"channel_id":&row.id,"user_id":&row.user_id,
-        "delivery.state":{"$in":[bson::Bson::Null,"waiting","pending","streamed","replay"]},
+    claim_event_replay(&state.db, row, &stored.event_key).await
+}
+
+pub(super) async fn claim_event_replay(
+    db: &mongodb::Database,
+    row: &NyxbotChannel,
+    event: &str,
+) -> AppResult<bool> {
+    let changed = db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {
+        "_id":event,"channel_id":&row.id,"user_id":&row.user_id,"response_read_admitted":{"$ne":true},"response_read_pending":bson::Bson::Null,
+        // Only an unaccepted busy request can lose the admission tombstone.
+        // If an old replica resumes it into stored recovery, its stored owner
+        // remains usable. A mapping without that stored owner is never claimed.
+        "$and":[{"$or":[{"response_read":bson::Bson::Null},{"gateway_response_id":{"$type":"string"}}]}],
+        "$or":[
+            {"delivery.state":{"$in":[bson::Bson::Null,"waiting","pending","streamed","replay"]}},
+            {"delivery.state":"preparing_text","delivery.transport":"gateway",
+             "delivery.preparation.version":1,"delivery.preparation.next":{"$in":[bson::Bson::Null,0]},
+             "delivery.preparation.gateway_receipt":bson::Bson::Null}
+        ]
     }, vec![doc! {"$set":{"gateway_replay_claimed":true,
         "delivery":{"$cond":[{"$eq":[{"$ifNull":["$delivery",bson::Bson::Null]},bson::Bson::Null]},
             "$$REMOVE",{"$mergeObjects":["$delivery",{"state":"replay"}]}]}}}]).await?;
-    Ok(())
+    Ok(changed.matched_count == 1)
 }
 
 pub(super) struct Observer {
@@ -291,18 +364,11 @@ impl Drop for Observer {
         let id = self.response.clone();
         crate::services::shutdown::process().spawn_cleanup(async move {
             if let Ok(Some(stored)) = recovery::load(&state.db, &row, &id).await {
-                // Also fence admission which has not created delivery metadata yet.
-                let _ = state
-                    .db
-                    .collection::<NyxbotEvent>(EVENTS)
-                    .update_one(
-                        doc! {"_id":&stored.event_key},
-                        doc! {"$set":{"gateway_observer_detached":true}},
-                    )
-                    .await;
-                let _ =
-                    crate::services::channel_turn_delivery::detach(&state.db, &stored.event_key)
-                        .await;
+                let _ = crate::services::channel_turn_delivery::detach_observer(
+                    &state.db,
+                    &stored.event_key,
+                )
+                .await;
                 if !state.shutdown.is_stopped() {
                     late_delivery::process(&state, &stored.event_key).await;
                 }
@@ -363,32 +429,7 @@ pub(super) async fn stream_output(
     }))
 }
 
-pub(super) fn suppress_output(body: &mut recovery::Payload) {
-    body.snapshot["output"] = json!([]);
-    body.snapshot["status"] = json!("completed");
-    body.snapshot
-        .as_object_mut()
-        .expect("snapshot")
-        .remove("error");
-    body.frames.retain(|frame| {
-        matches!(
-            frame["type"].as_str(),
-            Some(
-                "response.created"
-                    | "response.in_progress"
-                    | "response.completed"
-                    | "response.failed"
-            )
-        )
-    });
-    for (sequence, frame) in body.frames.iter_mut().enumerate() {
-        frame["sequence_number"] = json!(sequence);
-    }
-    if let Some(last) = body.frames.last_mut() {
-        last["type"] = json!("response.completed");
-        last["response"] = body.snapshot.clone();
-    }
-}
+pub(super) use crate::services::nyxbot_response_recovery::suppress_output;
 
 #[cfg(test)]
 mod tests {

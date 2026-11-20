@@ -178,7 +178,7 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
     db: &Database,
     lago: &dyn super::super::lago_client::LagoApi,
     row: &UsageMeterRow,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<super::super::usage_delivery::UsageTarget>> {
     if !METRICS.contains(&row.metric) {
         return Ok(None);
     }
@@ -219,7 +219,10 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
         super::super::sandbox_rates::request_resync(db, &quote.rate_card_id).await?;
         return Err(error);
     }
-    Ok(Some(quote.lago_subscription_id))
+    Ok(Some(super::super::usage_delivery::UsageTarget {
+        customer_id: quote.lago_customer_id,
+        subscription_id: quote.lago_subscription_id,
+    }))
 }
 
 fn validate_evidence_cursor(

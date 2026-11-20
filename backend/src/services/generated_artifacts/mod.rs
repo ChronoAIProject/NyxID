@@ -789,7 +789,13 @@ async fn materialize(
                 && !existing.iter().any(|a| a.id == r.assistant_attachment_id)
         })
         .count();
-    if existing.len() + additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
+    if existing
+        .iter()
+        .filter(|a| !super::assistant_nyxagent::is_tool_file(a))
+        .count()
+        + additional
+        > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS
+    {
         return Ok((Vec::new(), "delivery_capacity_exhausted"));
     }
     let policy = super::assistant_upload_retention::load_in_session(db, session)
@@ -879,6 +885,7 @@ async fn materialize(
             .ok_or_else(invalid)?;
         let bytes = storage::decrypt(keys, &row).await?;
         let mut attachment = AssistantAttachment {
+            chunks: 0,
             artifact: meta.artifact.clone(),
             id: meta.id.clone(),
             origin: meta.origin.clone(),

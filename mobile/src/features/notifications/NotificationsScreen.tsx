@@ -1,3 +1,7 @@
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "../../components/workspace/WorkspaceLayoutContext";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -68,6 +72,7 @@ import {
   useNotificationsLive,
   useNotificationSummary,
 } from "./useNotifications";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 const KIND_ICON: Record<NotificationKind, LucideIcon> = {
   automation_result: CircleCheck,
@@ -79,10 +84,18 @@ const KIND_ICON: Record<NotificationKind, LucideIcon> = {
 };
 
 export const NOTIFICATION_EMPTY_COPY: Record<NotificationFilter, string> = {
-  all: "You're all caught up.",
-  needs_you: "Nothing is waiting for your decision.",
-  automations: "No automation results yet.",
-  chats: "No chat updates yet.",
+  get all() {
+    return translateApp("You're all caught up.");
+  },
+  get needs_you() {
+    return translateApp("Nothing is waiting for your decision.");
+  },
+  get automations() {
+    return translateApp("No automation results yet.");
+  },
+  get chats() {
+    return translateApp("No chat updates yet.");
+  },
 };
 
 /**
@@ -104,7 +117,7 @@ export function notificationError(error: unknown): string {
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === "string" && message.trim()
     ? message
-    : "Could not load notifications. Try again.";
+    : translateApp("Could not load notifications. Try again.");
 }
 
 /** Merge pages, drop duplicates a refetch can repeat, apply the client-side
@@ -134,7 +147,7 @@ function toneColors(colors: ThemeColors, tone: NotificationTone) {
     case "success":
       return colors.successTone;
     default:
-      return { bg: colors.cardSoft, text: colors.textMuted, border: colors.border };
+      return { bg: colors.cardSoft, text: colors.textMuted, border: colors.border, };
   }
 }
 
@@ -149,6 +162,7 @@ function Chip({
   colors: ThemeColors;
   styles: ReturnType<typeof createStyles>;
 }) {
+  useAppLanguage();
   const palette = toneColors(colors, tone);
   return (
     <View style={[styles.chip, { backgroundColor: palette.bg }]}>
@@ -166,6 +180,8 @@ export function NotificationRow({
   now: number;
   onPress: (item: AssistantNotification) => void;
 }) {
+  useAppLanguage();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const tone = notificationTone(item.kind);
@@ -239,16 +255,25 @@ export function NotificationRow({
           ]}
         >
           {item.kind === "chat_update" && item.platform ? (
-            <ChannelPlatformGlyph platform={item.platform} size={12} color={palette.text} />
+            <ChannelPlatformGlyph
+              platform={item.platform}
+              size={12}
+              color={palette.text}
+            />
           ) : (
-            <Icon testID={`notification-kind-icon-${item.kind}`} size={12} color={palette.text} />
+            <Icon
+              testID={`notification-kind-icon-${item.kind}`}
+              size={12}
+              color={palette.text}
+            />
           )}
         </View>
       </View>
       <View style={styles.body}>
         <View style={styles.titleLine}>
           <Text
-            numberOfLines={3}
+            numberOfLines={cornerWindow ? 2 : 3}
+            ellipsizeMode="tail"
             style={[
               styles.title,
               { color: colors.textPrimary },
@@ -274,7 +299,8 @@ export function NotificationRow({
         </View>
         {item.preview ? (
           <Text
-            numberOfLines={2}
+            numberOfLines={cornerWindow ? 3 : 2}
+            ellipsizeMode="tail"
             style={[styles.preview, { color: colors.textSecondary }]}
           >
             {item.preview}
@@ -295,7 +321,12 @@ export function NotificationRow({
             </View>
           ) : null}
           {time ? (
-            <Text style={[styles.time, { color: colors.textMuted }]}>
+            // Never squeezed out: the meta line wraps the time to a new line.
+            <Text
+              testID="notification-time"
+              numberOfLines={cornerWindow ? 1 : undefined}
+              style={[styles.time, { color: colors.textMuted }]}
+            >
               {time}
             </Text>
           ) : null}
@@ -312,7 +343,7 @@ export function NotificationRow({
             ) : null}
             {pending ? (
               <Chip
-                label="Needs you"
+                label={translateApp("Needs you")}
                 tone="warning"
                 colors={colors}
                 styles={styles}
@@ -328,6 +359,9 @@ export function NotificationRow({
 export function NotificationsScreen({
   navigation,
 }: WorkspaceScreenProps<"Notifications">) {
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   useWorkspaceBack({
@@ -428,11 +462,18 @@ export function NotificationsScreen({
   let empty: React.ReactNode;
   if (!enabled) {
     empty = (
-      <Notice message="Notifications are not available for this account yet." />
+      <Notice
+        message={translateApp(
+          "Notifications are not available for this account yet.",
+        )}
+      />
     );
   } else if (feed.isPending) {
     empty = (
-      <SkeletonRows rows={4} accessibilityLabel="Loading notifications" />
+      <SkeletonRows
+        rows={4}
+        accessibilityLabel={translateApp("Loading notifications")}
+      />
     );
   } else if (feed.isError) {
     empty = (
@@ -441,7 +482,7 @@ export function NotificationsScreen({
         <SettingsGroup inset={false}>
           <SettingsRow
             tone="action"
-            label="Retry"
+            label={translateApp("Retry")}
             centered
             onPress={() => void feed.refetch()}
           />
@@ -452,12 +493,15 @@ export function NotificationsScreen({
     // Not exhausted: an automatic hop is running or offered, never "all caught up".
     empty =
       autoHop || feed.isFetchingNextPage ? (
-        <SkeletonRows rows={2} accessibilityLabel="Looking for updates" />
+        <SkeletonRows
+          rows={2}
+          accessibilityLabel={translateApp("Looking for updates")}
+        />
       ) : (
         <SettingsGroup inset={false}>
           <SettingsRow
             tone="action"
-            label="Load more"
+            label={translateApp("Load more")}
             centered
             onPress={() => void feed.fetchNextPage()}
           />
@@ -470,17 +514,19 @@ export function NotificationsScreen({
           {NOTIFICATION_EMPTY_COPY[filter]}
         </Text>
         <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-          Automation results, decisions and updates from your chats appear here.
+          {translateApp(
+            "Automation results, decisions and updates from your chats appear here.",
+          )}
         </Text>
       </View>
     );
   }
   return (
-    <WorkspacePage title="Notifications" scroll={false}>
+    <WorkspacePage title={translateApp("Notifications")} scroll={false}>
       <SegmentControl
         segments={segments}
         activeIndex={NOTIFICATION_FILTERS.indexOf(filter)}
-        accessibilityLabel="Filter notifications"
+        accessibilityLabel={translateApp("Filter notifications")}
         style={styles.filters}
         onPress={(index) => setFilter(NOTIFICATION_FILTERS[index] ?? "all")}
       />
@@ -500,7 +546,7 @@ export function NotificationsScreen({
         ListFooterComponent={
           feed.isFetchingNextPage ? (
             <ActivityIndicator
-              accessibilityLabel="Loading more notifications"
+              accessibilityLabel={translateApp("Loading more notifications")}
               color={colors.primary}
               style={styles.footer}
             />
@@ -510,7 +556,7 @@ export function NotificationsScreen({
         onEndReachedThreshold={0.4}
         refreshControl={
           <RefreshControl
-            accessibilityLabel="Refresh"
+            accessibilityLabel={translateApp("Refresh")}
             refreshing={refreshing}
             onRefresh={onRefresh}
             tintColor={colors.primary}
@@ -520,11 +566,12 @@ export function NotificationsScreen({
         }
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
+        {...railIndicator}
       />
       <View style={[styles.readFooter, { borderTopColor: colors.borderSoft }]}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Mark all notifications as read"
+          accessibilityLabel={translateApp("Mark all notifications as read")}
           accessibilityState={{
             disabled: !enabled || unread === 0 || !asOf || markRead.isPending,
           }}
@@ -533,7 +580,14 @@ export function NotificationsScreen({
           testID="notifications-mark-all"
           style={styles.footer}
         >
+          {/* The pinned bar grows less than the feed so rows keep the
+              screen at the largest text sizes. */}
           <Text
+            numberOfLines={cornerWindow ? 2 : undefined}
+            ellipsizeMode="tail"
+            maxFontSizeMultiplier={
+              cornerWindow ? FEED_FOOTER_MAX_FONT_SCALE : undefined
+            }
             style={[
               styles.footerLabel,
               {
@@ -544,13 +598,17 @@ export function NotificationsScreen({
               },
             ]}
           >
-            Mark all notifications as read
+            {translateApp("Mark all notifications as read")}
           </Text>
         </Pressable>
       </View>
     </WorkspacePage>
   );
 }
+
+// Mark-all stays pinned in the feed footer; its label scales to about the
+// first accessibility size, then stops.
+export const FEED_FOOTER_MAX_FONT_SCALE = 1.5;
 
 function createStyles(colors: ThemeColors) {
   return StyleSheet.create({

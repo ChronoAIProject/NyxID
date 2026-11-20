@@ -48,7 +48,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// org-owned API key as a unit.
 ///
 /// Used by update / delete / rotate / per-key read handlers.
-async fn resolve_api_key_write_owner(
+pub(super) async fn resolve_api_key_write_owner(
     state: &AppState,
     actor: &str,
     key_id: &str,
@@ -1518,6 +1518,7 @@ pub async fn create_key(
             body.platform.as_deref(),
             &body.selected_operations,
             expected_digest,
+            Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
         )
         .await?;
         let receipts = provisioned
@@ -1570,21 +1571,6 @@ pub async fn create_key(
         },
     )
     .await;
-
-    if scheduled {
-        audit_service::log_for_user(
-            state.db.clone(),
-            &auth_user,
-            "durable_grants_provisioned",
-            Some(serde_json::json!({
-                "api_key_id": &created.id,
-                "grant_ids": durable_grants.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
-                "operation_count": durable_grants.len(),
-                "owner_user_id": &user_id_str,
-                "decision": "authorized",
-            })),
-        );
-    }
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
@@ -1691,10 +1677,16 @@ pub async fn delete_key(
     // Look up platform before delete so we can attribute the event. The
     // delete path only carries `key_id`, so the record must be fetched while
     // it still exists.
-    let pre_delete_platform = key_service::get_api_key(&state.db, &user_id_str, &key_id)
+    let pre_delete = key_service::get_api_key(&state.db, &user_id_str, &key_id)
         .await
-        .ok()
-        .and_then(|k| k.platform);
+        .ok();
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id_str,
+        mongodb::bson::doc! {"user_id":&user_id_str,"credential_api_key_id":&key_id},
+    )
+    .await;
+    let pre_delete_platform = pre_delete.and_then(|key| key.platform);
 
     key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
 
@@ -1739,6 +1731,12 @@ pub async fn rotate_key(
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id_str,
+        mongodb::bson::doc! {"user_id":&user_id_str,"credential_api_key_id":&key_id},
+    )
+    .await;
     let created = key_service::rotate_api_key_with_scope_authorization(
         &state.db,
         &state.encryption_keys,
@@ -1848,21 +1846,13 @@ pub async fn revoke_durable_grant(
     let actor = auth_user.user_id.to_string();
     let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let grant = durable_operation_grant_service::revoke_grant(
-        &state.db, &owner, &key_id, &grant_id, &actor,
+        &state.db,
+        &owner,
+        &key_id,
+        &grant_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "durable_grant_revoked",
-        Some(serde_json::json!({
-            "api_key_id": &key_id,
-            "grant_id": &grant_id,
-            "endpoint_id": &grant.endpoint_id,
-            "contract_digest": &grant.contract_digest,
-            "decision": "revoked",
-        })),
-    );
     Ok(Json(grant.into()))
 }
 
@@ -1893,7 +1883,7 @@ pub async fn reauthorize_durable_grants(
     let grants = durable_operation_grant_service::reauthorize_scheduled_key(
         &state.db,
         &state.node_ws_manager,
-        &actor,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
         &owner,
         &key_id,
         &body.selected_operations,
@@ -1902,17 +1892,6 @@ pub async fn reauthorize_durable_grants(
     .await?;
     let receipts: Vec<DurableGrantReceipt> =
         grants.into_iter().map(DurableGrantReceipt::from).collect();
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "durable_grants_reauthorized",
-        Some(serde_json::json!({
-            "api_key_id": &key_id,
-            "grant_ids": receipts.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
-            "operation_count": receipts.len(),
-            "decision": "authorized",
-        })),
-    );
     Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 

@@ -228,6 +228,7 @@ async fn complete_verified_exchange(
         None, // no auth context
     )?;
 
+    super::billing::schedules::eligibility::after_human_login(db, &user.id).await;
     Ok(SocialTokenExchangeInner {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
@@ -420,9 +421,13 @@ mod tests {
             session::{COLLECTION_NAME as SESSIONS, MfaExemption, Session},
             user::{User, UserType},
         };
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
         let db =
             crate::test_utils::connect_transaction_test_database("mobile_exchange_exempt").await;
         let state = crate::test_utils::test_app_state(db.clone());
+        let schedule = login_test_schedule(&db).await;
         for provider in [
             SocialProvider::Google,
             SocialProvider::GitHub,
@@ -455,6 +460,7 @@ mod tests {
             )
             .await
             .unwrap();
+            assert_login_credits(&db, &schedule, &id, true).await;
             let row = db
                 .collection::<Session>(SESSIONS)
                 .find_one(doc! {"user_id": &id})

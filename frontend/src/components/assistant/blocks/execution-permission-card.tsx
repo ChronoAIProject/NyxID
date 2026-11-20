@@ -1,6 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useCardTranslation } from "@/components/assistant/card-language";
 import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -37,7 +35,7 @@ export function ExecutionPermissionCard({
   readonly proposal: ExecutionProposal;
   readonly disabled?: boolean;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const queryClient = useQueryClient();
   const [choiceId, setChoiceId] = useState("operation");
   const [busy, setBusy] = useState(false);
@@ -100,12 +98,12 @@ export function ExecutionPermissionCard({
     }
   }
   return (
-    <section
+    <section lang={language}
       className="max-w-xl space-y-3 rounded-xl border border-border bg-card p-4"
       aria-label={translateUi("Execution permission")}
     >
       <p className="type-card-title">
-        {statusLabel[current.state] ?? translateUi("Permission status unavailable")}
+        {translateUi(statusLabel[current.state] ?? "Permission status unavailable")}
       </p>
       {current.review && (
         <dl className="space-y-1 text-12">
@@ -164,7 +162,7 @@ export function ExecutionPermissionCard({
                 <span>
                   {c.label}
                   {c.valid_until && (
-                    <span className="block text-muted-foreground">{translateUi("Until ")}{new Date(c.valid_until).toLocaleString(getFormattingLocale())}
+                    <span className="block text-muted-foreground">{translateUi("Until ")}{new Date(c.valid_until).toLocaleString(language)}
                     </span>
                   )}
                 </span>
@@ -172,7 +170,7 @@ export function ExecutionPermissionCard({
             ))}
           </fieldset>
           {choice?.context_scope && (
-            <p className="text-12 text-muted-foreground">{translateUi("Applies to: ")}{executionContextLabel(choice.context_scope)}
+            <p className="text-12 text-muted-foreground">{translateUi("Applies to: ")}{translateUi(executionContextLabel(choice.context_scope) ?? "")}
             </p>
           )}
           {current.review?.reusable_unavailable && (
@@ -207,7 +205,7 @@ export function ExecutionPermissionCard({
       )}
       {error && (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
       {query.isError && (

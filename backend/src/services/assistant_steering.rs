@@ -57,8 +57,8 @@ pub async fn set_running_response(
     row: &AssistantConversation,
     response: Option<&RunningResponse>,
 ) -> AppResult<bool> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
-    let mut filter = doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": false};
+    let mut filter = super::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+    filter.insert("active_turn.stop_requested", false);
     if let Some(response) = response {
         filter.insert("credential_api_key_id", &response.credential_api_key_id);
     }

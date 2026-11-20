@@ -289,6 +289,33 @@ async fn custom_event_retries_share_one_turn_and_preserve_the_pinned_chat_anchor
         .await
         .unwrap();
     assert_eq!(messages_after, messages_before);
+    let alias = respond(&state, &agent_key, &body, "custom-second-key").await;
+    assert!(alias.status().is_success() || alias.status() == StatusCode::CONFLICT);
+    let _ = body_text(alias).await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    for dispatch_key in ["event-delivery-idempotency", "custom-second-key"] {
+        let mut headers = bearer(&agent_key);
+        headers.insert("idempotency-key", dispatch_key.parse().unwrap());
+        let response = dispatches::get(
+            State(state.clone()),
+            headers,
+            axum::extract::Query(dispatches::Query {
+                dispatched_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert!(matches!(
+            result["state"].as_str(),
+            Some("in_progress" | "finished")
+        ));
+        assert_eq!(
+            result["response_id"],
+            dispatch_identity::custom_response(&event.id)
+        );
+    }
+
     assert_eq!(
         state
             .db

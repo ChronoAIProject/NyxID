@@ -475,6 +475,7 @@ async fn run_member_with_work(
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -537,6 +538,7 @@ async fn run_member_with_work(
         attempt.await
     };
     let started = match result {
+        Err(AppError::AssistantTurnRequired) if work.is_some() => return Ok(()),
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
             if durable {
                 crate::services::assistant_wake_service::group::retire(

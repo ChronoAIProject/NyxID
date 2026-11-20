@@ -229,6 +229,7 @@ feature flags requires deployment readiness:
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
+| `billing:recipient-schedules-v1` | Recipient-cycle schedule readers and billing workers. New authoring, resuming a paused recipient schedule and the overview capability require this readiness plus allocation authoring. Pause every recipient schedule and drain upgraded workers before any binary rollback. |
 | `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
 | `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Every live writer must advertise support before activation. |
@@ -455,3 +456,23 @@ floor above still applies. Rollback disables guests and drains/settles work on u
 binaries before downgrade. Cap-free spend and all legacy settings remain retained;
 old code may refuse above-cap admissions or changed digests. Never reset spend or
 silently regenerate legacy authority to make rollback permissive.
+
+## Billing usage receipt continuity
+
+`billing:usage-receipts-v1` gates observational comparison only. The lease holder
+checks its durable activation and retained generation heartbeat rows once per
+comparison pass; the heartbeat itself adds no command. An unsupported capability
+or unknown protocol observed since the interval began resets its generation,
+even if that process stopped between checks. A new interval starts only when
+activation exists and no unsupported generation is live. Heartbeat rows expire
+after seven days, so a successful-check gap of six days also resets the interval,
+with a one-day safety margin. Short deployment gaps do not reset it. Failed or
+unreadable checks compare nothing and leave the interval unchanged.
+
+Only provider periods beginning strictly after this interval may be compared.
+Rollback to an observed build without capture invalidates the overlapping period;
+roll-forward must establish a new interval, even when activation survives. A failed
+look is not evidence of rollback. Initial heartbeat publication precedes workers
+and HTTP serving. The observation-floor limitations above still apply to invisible
+pre-protocol builds. No lease checkpoint, manual activation or provider total can
+certify missing history. Delivery, admission and money are unaffected.

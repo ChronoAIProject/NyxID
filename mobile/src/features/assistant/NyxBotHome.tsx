@@ -1,7 +1,16 @@
-import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "../../components/workspace/WorkspaceLayoutContext";
+import {
+  WORKSPACE_TITLE_MAX_FONT_SCALE,
+  WORKSPACE_TITLE_MAX_LINES,
+} from "../../components/workspace/workspaceHeaderMetrics";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
+import { retryAgentRead, agentReadRetryDelay, } from "../../lib/api/agentReadRetry";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import { useRef, useState, type PropsWithChildren } from "react";
 import {
+  Text,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,6 +29,7 @@ import { agentsApi } from "../../lib/api/agentsApi";
 // import { NextStepList } from "../onboarding/NextStepList";
 // import { onboardingKey } from "../onboarding/onboardingContracts";
 import type { NextStep } from "../onboarding/onboardingContracts";
+import type { AssistantAgent } from "../agents/agentContracts";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getCurrentUserProfileRequest } from "../../lib/api/http";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -35,9 +45,11 @@ import {
   awayItems,
   greetingFor,
 } from "./nyxBotHomeModel";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 type Props = {
   scrollProps?: ScrollViewProps;
+  widePanel?: boolean;
   onChat: (
     agentId: string,
     conversationId?: string,
@@ -53,12 +65,16 @@ type Props = {
 /** The empty primary NyxBot chat uses the same reads as the workspace lists. */
 export function NyxBotHome({
   scrollProps,
+  widePanel = false,
   onChat,
   onOpenCrew,
   onNewAgent,
   onNewCrew,
   onStartNextStep,
 }: Props) {
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
   const { colors } = useTheme();
   const { epoch, active, online, available } = useGroupAvailability();
   const live = useGroupsLive(epoch, active, available);
@@ -150,10 +166,12 @@ export function NyxBotHome({
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       {...scrollProps}
+      style={[{ flex: 1, minHeight: 0 }, scrollProps?.style]}
       contentContainerStyle={[
         styles.content,
         scrollProps?.contentContainerStyle,
       ]}
+      {...railIndicator}
     >
       <View style={styles.greeting}>
         <AgentAvatar
@@ -161,18 +179,31 @@ export function NyxBotHome({
           size="lg"
         />
         <View style={styles.greetingText}>
-          <Label accessibilityRole="header" style={styles.title}>
-            {greetingFor(now)}
-            {firstName ? `, ${firstName}` : ""}
+          {/* A large title like every page's: capped growth so a word never
+              breaks mid-word at the largest text size, two lines, then an
+              ellipsis. */}
+          <Label
+            accessibilityRole="header"
+            maxFontSizeMultiplier={
+              cornerWindow ?WORKSPACE_TITLE_MAX_FONT_SCALE : undefined}
+            numberOfLines={cornerWindow ?WORKSPACE_TITLE_MAX_LINES : undefined}
+            ellipsizeMode="tail"
+            style={styles.title}
+          >
+            {greetingFor(now, firstName)}
           </Label>
           <Label muted style={styles.lead}>
-            NyxBot is your personal agent. Ask it anything below, or check in on
-            your team.
+            {translateApp(
+              "NyxBot is your personal agent. Ask it anything below, or check in on your team.",
+            )}
           </Label>
         </View>
       </View>
       {!online ? (
-        <Notice message="You're offline. Reconnect to refresh your agents and crews." />
+        <Notice message={translateApp(
+            "You're offline. Reconnect to refresh your agents and crews.",
+          )}
+        />
       ) : null}
       {/* TODO(onboarding): disabled on mobile by user decision 2026-11-06; restore together.
       {onStartNextStep && onboarding.isError ? (
@@ -244,17 +275,21 @@ export function NyxBotHome({
       !agents.isError &&
       !crews.isError ? (
         <HomeGroup>
-          <Quiet title="Hi, I'm NyxBot.">
-            I'm here to help you use NyxID, manage your NyxID services and
-            automate them.
+          <Quiet title={translateApp("Hi, I'm NyxBot.")}>
+            {translateApp(
+              "I'm here to help you use NyxID, manage your NyxID services and automate them.",
+            )}
           </Quiet>
         </HomeGroup>
       ) : null}
-      <HomeGroup title="While you were away">
+      {!widePanel ? (
+        <HomeGroup title={translateApp("While you were away")}>
         {agents.isError ? (
           <HomeAction
-            label="Couldn’t refresh your agents. Tap to retry."
-            danger
+            label={translateApp(
+                "Couldn’t refresh your agents. Tap to retry.",
+              )}
+              danger
             disabled={!active}
             onPress={() => {
               if (available()) void agents.refetch();
@@ -262,7 +297,7 @@ export function NyxBotHome({
           />
         ) : null}
         {agents.isPending ? (
-          <Quiet>Loading your agents…</Quiet>
+          <Quiet>{translateApp("Loading your agents…")}</Quiet>
         ) : items.length ? (
           [
             ...items.slice(0, shown).map((item) => {
@@ -277,16 +312,18 @@ export function NyxBotHome({
                   title={name}
                   badge={
                     request ? (
-                      <SectionBadge label="Needs a decision" tone="warning" />
+                      <SectionBadge label={translateApp("Needs a decision")}
+                          tone="warning" />
                     ) : failed && item.agent.status !== "running" ? (
-                      <StatusBadge label="Failed" variant="decisionDenied" />
+                      <StatusBadge label={translateApp("Failed")}
+                          variant="decisionDenied" />
                     ) : (
                       <SectionBadge
                         label={
                           item.agent.status === "running"
-                            ? "Running"
-                            : "Replied"
-                        }
+                            ? translateApp("Running")
+                              : translateApp("Replied")
+                          }
                         tone={
                           item.agent.status === "running" ? "info" : "success"
                         }
@@ -303,9 +340,14 @@ export function NyxBotHome({
                   }
                   accessibilityLabel={
                     request
-                      ? `Review ${name}'s request: ${request.summary}`
-                      : `Open ${name}'s latest work`
-                  }
+                      ? translateApp(
+                            "Review {{name}}'s request: {{summary}}",
+                            { name: name, summary: request.summary },
+                          )
+                        : translateApp("Open {{name}}'s latest work", {
+                            name: name,
+                          })
+                    }
                   disabled={!active || item.agent.can_use === false}
                   onPress={() =>
                     openAgent(
@@ -324,9 +366,11 @@ export function NyxBotHome({
                 key="more"
                 label={
                   shown < items.length
-                    ? `Show More (${items.length - shown})`
-                    : "Show Less"
-                }
+                    ? translateApp("Show More ({{count}})", {
+                          count: items.length - shown,
+                        })
+                      : translateApp("Show Less")
+                  }
                 onPress={() =>
                   setShown((value) =>
                     value < items.length ? value + AWAY_PREVIEW : AWAY_PREVIEW,
@@ -337,21 +381,24 @@ export function NyxBotHome({
           ]
         ) : !agents.isError ? (
           <Quiet>
-            All caught up. Replies and requests from your specialists show up
-            here.
-          </Quiet>
+              {translateApp(
+                "All caught up. Replies and requests from your specialists show up here.",
+              )}
+            </Quiet>
         ) : null}
       </HomeGroup>
-      {agentOwnerSections(roster).map((section, index) => (
+      ) : null}
+      {!widePanel
+        ? agentOwnerSections(roster).map((section, index) => (
         <HomeGroup
           key={section.id}
-          title={index === 0 ? "Your agents" : undefined}
+          title={index === 0 ? translateApp("Your agents") : undefined}
           subtitle={section.label}
           action={
             index === 0 ? (
               <HeaderAction
-                label="New agent"
-                disabled={!active}
+                label={translateApp("New agent")}
+                    disabled={!active}
                 onPress={() => {
                   if (available()) onNewAgent();
                 }}
@@ -367,10 +414,13 @@ export function NyxBotHome({
               badge={
                 agent.kind !== "nyxbot" ? (
                   agent.pending_acknowledgements > 0 ? (
-                    <SectionBadge label="Needs you" tone="warning" />
+                    <SectionBadge label={translateApp("Needs you")}
+                          tone="warning" />
                   ) : (
                     <StatusBadge
-                      label={agent.status === "running" ? "Running" : "Idle"}
+                      label={agent.status === "running" ? translateApp("Running")
+                              : translateApp("Idle")
+                          }
                       variant={
                         agent.status === "running"
                           ? "modeChip"
@@ -380,29 +430,37 @@ export function NyxBotHome({
                   )
                 ) : undefined
               }
-              detail={`${
-                agent.kind === "nyxbot"
-                  ? "Your personal agent"
-                  : `@${agent.name}`
-              }${agent.can_use === false ? " · View only" : ""} · ${
-                agent.description ||
+              detail={translateApp(
+                    agent.kind === "nyxbot"
+                  ? agent.can_use === false ? "Your personal agent · View only · {{description}}"
+                        : "Your personal agent · {{description}}"
+                      : agent.can_use === false
+                        ? "@{{name}} · View only · {{description}}"
+                        : "@{{name}} · {{description}}",
+                    {
+                      name: agent.name,
+                      description: agent.description ||
                 (agent.kind === "nyxbot"
-                  ? "Full access to your services and account. Delegates to your specialists."
-                  : "No role described yet.")
-              }`}
-              accessibilityLabel={`Chat with ${chatAgentLabel(agent)}`}
+                  ? translateApp("Full access to your services and account. Delegates to your specialists.",)
+                        : translateApp("No role described yet.")),
+                    },
+                  )}
+              accessibilityLabel={translateApp("Chat with {{label}}", {
+                    label: chatAgentLabel(agent),
+                  })}
               disabled={!active || agent.can_use === false}
               onPress={() => openAgent(agent.id)}
             />
           ))}
         </HomeGroup>
-      ))}
-      {!roster.some((agent) => agent.status !== "destroyed") ? (
+      ))
+        : null}
+      {!widePanel && !roster.some((agent) => agent.status !== "destroyed") ? (
         <HomeGroup
-          title="Your agents"
+          title={translateApp("Your agents")}
           action={
             <HeaderAction
-              label="New agent"
+              label={translateApp("New agent")}
               disabled={!active}
               onPress={() => {
                 if (available()) onNewAgent();
@@ -412,18 +470,18 @@ export function NyxBotHome({
         >
           <Quiet>
             {agents.isPending
-              ? "Loading your agents…"
+              ? translateApp("Loading your agents…")
               : agents.isError
-                ? "Your agents are unavailable. Try again above."
-                : "No agents yet."}
+                ? translateApp("Your agents are unavailable. Try again above.")
+                : translateApp("No agents yet.")}
           </Quiet>
         </HomeGroup>
       ) : null}
       <HomeGroup
-        title="Crews"
+        title={translateApp("Crews")}
         action={
           <HeaderAction
-            label="New crew"
+            label={translateApp("New crew")}
             disabled={!active}
             onPress={() => {
               if (available()) onNewCrew();
@@ -433,7 +491,7 @@ export function NyxBotHome({
       >
         {crews.isError ? (
           <HomeAction
-            label="Couldn’t refresh your crews. Tap to retry."
+            label={translateApp("Couldn’t refresh your crews. Tap to retry.")}
             danger
             disabled={!active}
             onPress={() => {
@@ -449,7 +507,9 @@ export function NyxBotHome({
             badge={
               group.working_agent_ids.length ? (
                 <SectionBadge
-                  label={`${group.working_agent_ids.length} working`}
+                  label={translateApp("{{count}} working", {
+                    count: group.working_agent_ids.length,
+                  })}
                   tone="info"
                 />
               ) : undefined
@@ -460,7 +520,9 @@ export function NyxBotHome({
                 ? formatRelativeTimeFromMs(Date.parse(group.last_message_at))
                 : undefined
             }
-            accessibilityLabel={`Open crew ${group.name}`}
+            accessibilityLabel={translateApp("Open crew {{name}}", {
+              name: group.name,
+            })}
             disabled={!active}
             onPress={() => {
               if (
@@ -474,11 +536,172 @@ export function NyxBotHome({
         {!groups.length ? (
           <Quiet>
             {crews.isPending
-              ? "Loading crews…"
+              ? translateApp("Loading crews…")
               : crews.isError
-                ? "Your crews are unavailable. Try again above."
-                : "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest."}
+                ? translateApp("Your crews are unavailable. Try again above.")
+                : translateApp(
+                    "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest.",
+                  )}
           </Quiet>
+        ) : null}
+      </HomeGroup>
+    </ScrollView>
+  );
+}
+
+/** Wide-window companion column; the home transcript omits these same groups. */
+export function NyxBotHomePanel({
+  onChat,
+  onNewAgent,
+}: {
+  onChat: (
+    agentId: string,
+    conversationId?: string,
+    requestId?: string,
+  ) => void;
+  onNewAgent: () => void;
+}) {
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const railIndicator = useRailScrollIndicator();
+  useAppLanguage();
+  const { active, available, online } = useGroupAvailability();
+  const agents = useQuery({
+    queryKey: ["workspace", "agents", "list"],
+    queryFn: ({ signal }) => agentsApi.list(signal),
+    enabled: active,
+    staleTime: 0,
+    refetchInterval: active ? 30_000 : false,
+    retry: false,
+  });
+  const roster = agents.data?.agents ?? [];
+  const settled = !!agents.data && !agents.isError && online;
+  const updates = awayItems(roster).filter((item) => item.kind === "update");
+  const requests = awayItems(roster).filter((item) => item.kind === "request");
+  const open = (
+    agent: AssistantAgent,
+    conversationId?: string,
+    requestId?: string,
+  ) => {
+    if (!available() || agent.can_use === false || agent.status === "destroyed")
+      return;
+    onChat(
+      agent.id,
+      conversationId ?? agent.home_conversation_id ?? undefined,
+      requestId,
+    );
+  };
+  return (
+    <ScrollView
+      testID="nyxbot-home-right-panel"
+      style={styles.panelScroll}
+      contentContainerStyle={styles.panelContent}
+      keyboardShouldPersistTaps="handled"
+      {...railIndicator}
+    >
+      <Label accessibilityRole="header" style={styles.panelTitle}>
+        {translateApp("While you were away")}
+      </Label>
+      {!online ? (
+        <Notice
+          message={translateApp("You’re offline. Showing saved activity.")}
+        />
+      ) : null}
+      {agents.isPending ? (
+        <Quiet>{translateApp("Loading your agents…")}</Quiet>
+      ) : null}
+      {agents.isError ? (
+        <HomeAction
+          label={translateApp("Your agents are unavailable. Tap to retry.")}
+          danger
+          disabled={!active}
+          onPress={() => {
+            if (available()) void agents.refetch();
+          }}
+        />
+      ) : null}
+      <HomeGroup title={translateApp("Recent updates")}>
+        {updates.slice(0, 3).map((item) => (
+          <HomeRow
+            key={item.key}
+            leading={<AgentAvatar agent={item.agent} size="lg" />}
+            title={chatAgentLabel(item.agent)}
+            detail={item.kind === "update" ? item.text : undefined}
+            meta={
+              item.kind === "update" && item.at
+                ? formatRelativeTimeFromMs(Date.parse(item.at))
+                : undefined
+            }
+            accessibilityLabel={translateApp("Open {{name}}'s latest work", {
+              name: chatAgentLabel(item.agent),
+            })}
+            disabled={!active || item.agent.can_use === false}
+            onPress={() => open(item.agent)}
+          />
+        ))}
+        {settled && !updates.length ? (
+          <Quiet>{translateApp("All caught up.")}</Quiet>
+        ) : null}
+      </HomeGroup>
+      <HomeGroup title={translateApp("Pending approvals")}>
+        {requests.map((item) => (
+          <HomeRow
+            key={item.key}
+            leading={<AgentAvatar agent={item.agent} size="lg" />}
+            title={chatAgentLabel(item.agent)}
+            badge={
+              <SectionBadge
+                label={translateApp("Needs a decision")}
+                tone="warning"
+              />
+            }
+            detail={item.kind === "request" ? item.request.summary : undefined}
+            accessibilityLabel={translateApp("Review {{label}}'s request", {
+              label: chatAgentLabel(item.agent),
+            })}
+            disabled={!active || item.agent.can_use === false}
+            onPress={() =>
+              item.kind === "request" &&
+              open(
+                item.agent,
+                item.request.conversation_id,
+                item.request.request_id,
+              )
+            }
+          />
+        ))}
+        {settled && !requests.length ? (
+          <Quiet>{translateApp("No pending approvals.")}</Quiet>
+        ) : null}
+      </HomeGroup>
+      <HomeGroup
+        title={translateApp("Your agents")}
+        action={
+          <HeaderAction
+            label={translateApp("New agent")}
+            disabled={!active}
+            onPress={() => {
+              if (available()) onNewAgent();
+            }}
+          />
+        }
+      >
+        {roster
+          .filter((agent) => agent.status !== "destroyed")
+          .map((agent) => (
+            <HomeRow
+              key={agent.id}
+              leading={<AgentAvatar agent={agent} size="lg" />}
+              title={chatAgentLabel(agent)}
+              detail={agent.description || agent.name}
+              accessibilityLabel={translateApp("Chat with {{label}}", {
+                label: chatAgentLabel(agent),
+              })}
+              disabled={!active || agent.can_use === false}
+              onPress={() => open(agent)}
+            />
+          ))}
+        {settled && !roster.some((agent) => agent.status !== "destroyed") ? (
+          <Quiet>{translateApp("No agents yet.")}</Quiet>
         ) : null}
       </HomeGroup>
     </ScrollView>
@@ -499,6 +722,7 @@ function HomeGroup({
   subtitle?: string;
   action?: React.ReactNode;
 }>) {
+  useAppLanguage();
   const { colors } = useTheme();
   const rows = [children]
     .flat(Infinity as 1)
@@ -564,6 +788,7 @@ function HomeRow({
   disabled?: boolean;
   accessibilityLabel: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -614,6 +839,7 @@ function HomeAction({
   disabled?: boolean;
   danger?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -647,6 +873,7 @@ function HeaderAction({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -672,6 +899,7 @@ function HeaderAction({
 }
 
 function Quiet({ title, children }: PropsWithChildren<{ title?: string }>) {
+  useAppLanguage();
   return (
     <View style={styles.quiet}>
       {title ? <Label style={styles.name}>{title}</Label> : null}
@@ -683,6 +911,14 @@ function Quiet({ title, children }: PropsWithChildren<{ title?: string }>) {
 }
 
 const styles = StyleSheet.create({
+  panelScroll: { flex: 1, minWidth: 0 },
+  panelContent: { padding: 16, gap: 4, paddingBottom: 32 },
+  panelTitle: {
+    fontFamily: fonts.displaySemi,
+    fontSize: 18,
+    lineHeight: 24,
+    paddingBottom: 4,
+  },
   suggestionActions: { flexDirection: "row", gap: 8 },
   content: { paddingTop: 24, paddingBottom: 24, gap: 28 },
   greeting: { flexDirection: "row", alignItems: "center", gap: 12 },

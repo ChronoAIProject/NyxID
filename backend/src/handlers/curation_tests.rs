@@ -74,7 +74,7 @@ pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     .await
     .unwrap();
     if curated {
-        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id))
+        sa = grants::issue(&db, &sa.id, &owner, grant_input(&service.id), None)
             .await
             .unwrap();
     }
@@ -261,12 +261,12 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         router(&f.state).oneshot(req).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
-    assert_eq!(
-        request(&f.state, "GET", &path, &f.human_token, None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
+    let (status, denied) = test_utils::retry_oauth_authority(
+        async || request(&f.state, "GET", &path, &f.human_token, None).await,
+        async || {},
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
     let readonly = token(&f, Some("catalog:skills:read")).await;
     assert_eq!(request(&f.state, "PUT", &path, &readonly, Some(json!({"base_revision":1,"request_id":Uuid::new_v4().to_string(),"recommended_skills":[]}))).await.0, StatusCode::FORBIDDEN);
     let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &bearer).unwrap();
@@ -630,7 +630,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             false,
-            None
+            None,
+            None,
         )
         .await
         .is_err()
@@ -655,7 +656,7 @@ async fn curation_late_old_generation_issuance_fails_real_extractor_and_legacy_f
     );
     let rotate = async {
         before.wait().await;
-        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+        let result = accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
             .await
             .unwrap();
         resume.wait().await;
@@ -1174,9 +1175,15 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         StatusCode::FORBIDDEN
     );
     assert!(
-        grants::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
-            .await
-            .is_err()
+        grants::issue(
+            &f.state.db,
+            &f.sa.id,
+            &f.owner,
+            grant_input(&f.service.id),
+            None
+        )
+        .await
+        .is_err()
     );
     f.state.db.collection::<Document>(SERVICES).update_one(doc! {"_id": &f.service.id}, doc! {"$set": {"proxy_operation_policy": bson::to_bson(&f.service.proxy_operation_policy).unwrap()}}).await.unwrap();
     // A missing SA credential must not fall back to either owner or master.
@@ -1348,7 +1355,7 @@ async fn curation_introspection_requires_current_persisted_token() {
         false
     );
     let fresh = token(&f, None).await;
-    accounts::rotate_secret(&f.state.db, &f.sa.id, true)
+    accounts::rotate_secret(&f.state.db, &f.sa.id, true, None)
         .await
         .unwrap();
     assert_eq!(

@@ -172,7 +172,41 @@ fn failed_sse_preserves_partial_but_never_forwards_raw_error() {
 }
 
 #[test]
+fn cancelled_stream_preserves_partial_answer_and_uses_stop_outcome() {
+    let mut event = terminal("response.cancelled", 7, "Partial answer");
+    let mut stream = ResponseStream::default();
+    assert!(stream.push(&frame(event.clone())).is_err());
+    event["response"]["status"] = json!("cancelled");
+    let mut stream = ResponseStream::default();
+    stream.push(&frame(event)).unwrap();
+    let saved = stream.terminal.unwrap();
+    assert_eq!(saved.text, "Partial answer");
+    assert_eq!(saved.error.unwrap().code, "cancelled");
+}
+
+#[test]
+fn credential_watch_terminal_preserves_partial_and_redacts_upstream_details() {
+    let mut failed = terminal("response.failed", 1, "partial");
+    failed["response"]["error"] = json!({"code":"credential_revoked","message":"private"});
+    let mut stream = ResponseStream::default();
+    stream.push(&frame(failed)).unwrap();
+    let saved = stream.terminal.unwrap();
+    assert_eq!(saved.text, "partial");
+    let error = saved.error.unwrap();
+    assert_eq!(error.code, "credential_revoked");
+    assert_eq!(error.upstream_code.as_deref(), Some("credential_revoked"));
+    assert!(!error.message.contains("private"));
+}
+
+#[test]
 fn recovery_is_bounded_and_never_retries_uncertain_effects() {
+    assert!(!admission_refusal(429, "capacity_exceeded"));
+    for status in [400, 401, 403, 404, 503] {
+        assert_eq!(
+            Recovery::default().decide(status, "model_unavailable", true),
+            RecoveryAction::Fail
+        );
+    }
     let mut recovery = Recovery::default();
     assert_eq!(
         recovery.decide(404, "not_found", true),
@@ -1274,6 +1308,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
+        stopped_window: None,
+        thread_secret_fence: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
@@ -1295,6 +1331,10 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            restart_offer: None,
+            restart_eligibility: None,
+            restart_admission: None,
+            execution_attempt: None,
             group_reply_in_settlement: false,
             platform_model_context: None,
             automation_work: None,
@@ -2081,6 +2121,537 @@ async fn dead_worker_stop_is_forced_within_grace_and_late_settlement_is_fenced()
     )
     .await;
     assert!(matches!(late, Err(AppError::NotFound(_))));
+}
+
+fn watched_deployment() -> crate::models::assistant_conversation::ReattachDeployment {
+    crate::models::assistant_conversation::ReattachDeployment {
+        destination_hash: "test-route".into(),
+        limits: serde_json::from_value(json!({"protocol":"nyxagent-reattach-v1", "credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15}, "max_events":64,"recent_events":32,"max_event_bytes":65536,"absence_retention_seconds":604800,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32})).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn credential_watch_terminal_attributes_a_local_revoke_and_audits_an_unexpected_refusal_once()
+{
+    let db = connect_transaction_test_database("watch_terminal_attribution").await;
+    let state = test_app_state(db.clone());
+    for revoked in [false, true] {
+        let input = request(None, "original request");
+        let mut start = TurnStart::from(&input);
+        start.owner_instruction_source = Some(OwnerInstructionSource::FirstPartyOwner);
+        let mut row = begin_turn(&db, "owner", &input, &state.encryption_keys)
+            .await
+            .unwrap();
+        enroll_restart(&mut row, &start, "input", watched_deployment(), false);
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .replace_one(doc! {"_id": &row.id}, &row)
+            .await
+            .unwrap();
+        let source = row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .restart_admission
+            .as_ref()
+            .unwrap();
+        if revoked {
+            crate::services::key_service::delete_api_key(&db, "owner", &source.credential_id)
+                .await
+                .unwrap();
+        }
+        let expected = if revoked {
+            "credential_invalid"
+        } else {
+            "credential_revoked"
+        };
+        let terminal = TurnResult {
+            text: "partial".into(),
+            session_id: None,
+            response_id: None,
+            error: Some(TurnError::new("credential_revoked")),
+        };
+        for _ in 0..2 {
+            let error = finish_turn(
+                &db,
+                &row,
+                &source.credential_id,
+                &source.reply_id,
+                &terminal,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(error.code, expected);
+        }
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {
+                    "event_type":"assistant_turn_failed", "event_data.conversation_id":&row.id,
+                    "event_data.code":expected,"event_data.upstream_code":"credential_revoked"
+                })
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn restart_offer_keeps_one_logical_turn_and_fences_competing_survivors_and_stop() {
+    use crate::models::assistant_conversation::{EngineWorkerInstance, RestartSource};
+    use crate::services::assistant_turn_restart::{self as restart, Loss};
+    let deployment = watched_deployment();
+
+    let db = connect_transaction_test_database("nyxa_restart_offer").await;
+    let state = test_app_state(db.clone());
+    let input = request(None, "original message");
+    let mut start = TurnStart::from(&input);
+    let mut row = begin_turn(&db, "owner", &input, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert!(
+        row.active_turn
+            .as_ref()
+            .unwrap()
+            .restart_admission
+            .is_none()
+    );
+    assert!(
+        !restart::offer(&db, &row, Loss::Stale(Utc::now()))
+            .await
+            .unwrap()
+    );
+    enroll_restart(&mut row, &start, "input", deployment.clone(), true);
+    assert!(
+        row.active_turn
+            .as_ref()
+            .unwrap()
+            .restart_admission
+            .is_none()
+    );
+    start.owner_instruction_source = Some(OwnerInstructionSource::FirstPartyOwner);
+    for kind in [
+        TurnOrigin::Group,
+        TurnOrigin::Event,
+        TurnOrigin::Channel,
+        TurnOrigin::Orchestrator,
+        TurnOrigin::Trigger,
+    ] {
+        row.active_turn.as_mut().unwrap().origin = kind;
+        enroll_restart(&mut row, &start, "input", deployment.clone(), true);
+        assert!(
+            row.active_turn
+                .as_ref()
+                .unwrap()
+                .restart_admission
+                .is_none()
+        );
+    }
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    let mut draining = row.clone();
+    enroll_restart(&mut draining, &start, "input", deployment.clone(), true);
+    let parked = draining.active_turn.as_ref().unwrap();
+    let offer = parked.restart_offer.as_ref().unwrap();
+    assert_eq!(
+        offer.from_worker,
+        parked.worker_instance.as_ref().unwrap().id
+    );
+    assert!(offer.claimed_by.is_none());
+    assert!(parked.restart_admission.as_ref().unwrap().window.is_none());
+    let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
+        &db,
+        &state.encryption_keys,
+        &row.user_id,
+        &row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let permit = state
+        .direct_chat_limiter
+        .try_acquire(&row.user_id)
+        .await
+        .unwrap();
+    let (sender, mut receiver) = tokio::sync::broadcast::channel(1);
+    assert!(
+        Box::pin(crate::services::assistant_nyxagent_runtime::run_owner_turn(
+            state.clone(),
+            crate::services::assistant_nyxagent_egress::model_setup(state.clone()),
+            draining,
+            "original message".into(),
+            credential,
+            None,
+            permit,
+            crate::services::assistant_nyxagent_runtime::Events {
+                sender,
+                cursor: 0,
+                reset_notified: false,
+                checkpoint: None
+            },
+        ))
+        .await
+        .is_none()
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+    ));
+    enroll_restart(&mut row, &start, "input", deployment, false);
+    let turn = row.active_turn.as_ref().unwrap();
+    let admission = turn.restart_admission.as_ref().unwrap();
+    assert_eq!(admission.source, RestartSource::FirstPartyOwner);
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    collection
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    let window_key = format!("{}:images:1", turn.turn_id);
+    let window_deadline = Utc::now() + chrono::Duration::minutes(1);
+    crate::services::assistant_turn_observability::attempt(
+        &db,
+        &row,
+        &window_key,
+        window_deadline,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = collection
+        .find_one(doc! {"_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = row.active_turn.as_ref().unwrap();
+    let window = turn
+        .restart_admission
+        .as_ref()
+        .unwrap()
+        .window
+        .as_ref()
+        .unwrap();
+    assert_eq!(window.key, window_key);
+    assert_eq!(
+        window.capacity_deadline.timestamp_millis(),
+        window_deadline.timestamp_millis()
+    );
+    assert_eq!(
+        window.absence_retry_before.unwrap() - turn.started_at,
+        chrono::Duration::days(7) - chrono::Duration::minutes(5)
+    );
+    let owner = turn.worker_instance.as_ref().unwrap();
+    let survivor = EngineWorkerInstance {
+        id: Uuid::new_v4().to_string(),
+        hostname: None,
+    };
+    let other = EngineWorkerInstance {
+        id: Uuid::new_v4().to_string(),
+        hostname: None,
+    };
+    assert!(
+        !restart::offer(&db, &row, Loss::Shutdown(&survivor.id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !restart::offer(
+            &db,
+            &row,
+            Loss::Stale(Utc::now() - chrono::Duration::seconds(75))
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        restart::offer(&db, &row, Loss::Shutdown(&owner.id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !heartbeat(&db, &WorkerFence::capture(&row).unwrap())
+            .await
+            .unwrap()
+    );
+    let parked = get(&db, &row.user_id, &row.id).await.unwrap();
+    assert!(
+        !crate::services::assistant_steering::set_running_response(&db, &row, None)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        clear_binding(&db, &row, "stale_driver").await,
+        Err(AppError::AssistantTurnRequired)
+    ));
+    let chat = crate::services::assistant_acknowledgement_service::for_key(
+        &db,
+        &row.user_id,
+        Some(&row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    chat.turn_fence().require_live().unwrap();
+    let pending = parked.active_turn.as_ref().unwrap();
+    assert_eq!(pending.turn_id, turn.turn_id);
+    assert_eq!(pending.restart_admission, turn.restart_admission);
+    assert!(
+        restart::yield_on_shutdown(&db, &row, &owner.id)
+            .await
+            .unwrap()
+    );
+    assert!(restart::claim(&db, &parked, owner).await.unwrap().is_none());
+    collection
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"active_turn.stop_requested":true}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        restart::claim(&db, &parked, &survivor)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stopped = crate::services::assistant_acknowledgement_service::for_key(
+        &db,
+        &row.user_id,
+        Some(&row.credential_api_key_id),
+    )
+    .await;
+    assert!(matches!(stopped, Err(AppError::AssistantTurnRequired)));
+    collection
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"active_turn.stop_requested":false}},
+        )
+        .await
+        .unwrap();
+    let (left, right) = tokio::join!(
+        restart::claim(&db, &parked, &survivor),
+        restart::claim(&db, &parked, &other)
+    );
+    let winners: Vec<_> = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(winners.len(), 1);
+    let mut expected_admission = turn.restart_admission.clone().unwrap();
+    expected_admission.continued_after_restart = true;
+    assert_eq!(
+        winners[0].active_turn.as_ref().unwrap().restart_admission,
+        Some(expected_admission)
+    );
+    let winner = &winners[0];
+    let admitted_key = crate::services::assistant_agent_credential_service::load_for_conversation(
+        &db,
+        &state.encryption_keys,
+        &winner.user_id,
+        &winner.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    crate::services::assistant_agent_credential_service::validate_claimed(
+        &db,
+        winner,
+        &admitted_key,
+    )
+    .await
+    .unwrap();
+    for stale in [&row, &parked] {
+        assert!(matches!(
+            crate::services::assistant_agent_credential_service::validate_claimed(
+                &db,
+                stale,
+                &admitted_key
+            )
+            .await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+    }
+    let winning_worker = winner
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .worker_instance
+        .as_ref()
+        .unwrap();
+    assert!(
+        restart::offer(&db, winner, Loss::Shutdown(&winning_worker.id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !restart::offer(&db, winner, Loss::Shutdown(&winning_worker.id))
+            .await
+            .unwrap()
+    );
+    let offered_again = get(&db, &row.user_id, &row.id).await.unwrap();
+    assert!(
+        restart::claim(&db, &offered_again, winning_worker)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let next = if winning_worker.id == survivor.id {
+        &other
+    } else {
+        &survivor
+    };
+    assert!(
+        restart::claim(&db, &offered_again, next)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_worker_cannot_renew_checkpoint_replace_or_finish_successor_attempt() {
+    let db = connect_transaction_test_database("nyxa_worker_attempt_fence").await;
+    let state = test_app_state(db.clone());
+    let claim = claim_turn(
+        &db,
+        "owner",
+        &request(None, "question"),
+        &state.encryption_keys,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = &claim.conversation;
+    let predecessor = WorkerFence::capture(row).unwrap();
+    let collection = db.collection::<bson::Document>(CONVERSATIONS);
+    let advance = |epoch: i64, claim: &str| doc! {"$set": {"active_turn.execution_attempt": {"epoch": epoch, "claim_id": claim}}};
+    assert_eq!(
+        collection
+            .update_one(predecessor.filter(), advance(1, "first"))
+            .await
+            .unwrap()
+            .matched_count,
+        1
+    );
+    assert!(!heartbeat(&db, &predecessor).await.unwrap());
+    let first = get(&db, &row.user_id, &row.id).await.unwrap();
+    let first_fence = WorkerFence::capture(&first).unwrap();
+    assert!(heartbeat(&db, &first_fence).await.unwrap());
+    assert_eq!(
+        collection
+            .update_one(first_fence.filter(), advance(2, "second"))
+            .await
+            .unwrap()
+            .matched_count,
+        1
+    );
+    assert!(!heartbeat(&db, &first_fence).await.unwrap());
+    let (reply, task) = crate::services::assistant_stream_checkpoint::start(
+        db.clone(),
+        first_fence.filter(),
+        "reply".into(),
+        "block".into(),
+    );
+    reply.send_modify(|reply| {
+        reply.cursor = 1;
+        reply.text = "late".into();
+    });
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::services::assistant_agent_credential_service::replace_for_turn(
+            &db,
+            &state.encryption_keys,
+            &first,
+            &claim.credential
+        )
+        .await
+        .is_err()
+    );
+    let denied = finish_turn(
+        &db,
+        &first,
+        &claim.credential.api_key_id,
+        "late-reply",
+        &TurnResult {
+            text: "late".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::NotFound(_))));
+    let current = get(&db, &row.user_id, &row.id).await.unwrap();
+    assert!(current.active_turn.as_ref().unwrap().reply.is_none());
+    use crate::services::assistant_turn_observability as observation;
+    let now = Utc::now();
+    let deadline = now + chrono::Duration::seconds(60);
+    assert!(
+        observation::attempt(&db, &first, "old-window", deadline, None)
+            .await
+            .is_err()
+    );
+    observation::request_started(&db, &first, now, deadline)
+        .await
+        .unwrap();
+    waiting_for_capacity(&db, &first, now, deadline)
+        .await
+        .unwrap();
+    observation::first_output(&db, &first).await.unwrap();
+    observation::accepted(&db, &first).await.unwrap();
+    assert!(!mark_queued(&db, &first, now, deadline).await.unwrap());
+    assert!(mark_queued(&db, &current, now, deadline).await.unwrap());
+    mark_dequeued(&db, &first).await.unwrap();
+    let untouched = get(&db, &row.user_id, &row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap();
+    assert!(untouched.engine_request_started_at.is_none());
+    assert_eq!(
+        untouched.queue_deadline.unwrap().timestamp_millis(),
+        deadline.timestamp_millis()
+    );
+    assert!(!untouched.waiting_for_capacity);
+    assert!(untouched.timing.first_output_ms.is_none());
+    assert!(untouched.capacity_accepted_at.is_none());
+    assert!(
+        heartbeat(&db, &WorkerFence::capture(&current).unwrap())
+            .await
+            .unwrap()
+    );
+    let result = TurnResult {
+        text: "winner".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    for _ in 0..2 {
+        finish_turn(
+            &db,
+            &current,
+            &claim.credential.api_key_id,
+            "shared-reply",
+            &result,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+        finish_turn(
+            &db,
+            &first,
+            &claim.credential.api_key_id,
+            "shared-reply",
+            &result
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -7036,7 +7607,9 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
                 .capacity_wait_note_origin
                 .is_none()
         );
-        let first_attempt = observed::attempt(&db, &row).await.unwrap();
+        let first_attempt = observed::attempt(&db, &row, "first-window", Utc::now(), None)
+            .await
+            .unwrap();
         assert_eq!(first_attempt, 1);
         let run_id = Uuid::new_v4().to_string();
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
@@ -7111,7 +7684,12 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
                 observed::claim_notice(&db, &row, Utc::now())
             );
             assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
-            assert_eq!(observed::attempt(&db, &row).await.unwrap(), 2);
+            assert_eq!(
+                observed::attempt(&db, &row, "first-window", Utc::now(), None)
+                    .await
+                    .unwrap(),
+                2
+            );
             if !fail {
                 observed::accepted(&db, &row).await.unwrap();
                 observed::accepted(&db, &row).await.unwrap();
@@ -7656,7 +8234,7 @@ async fn channel_turn_timings_count_model_tools_and_preserve_legacy_defaults() {
         .insert_one(&row)
         .await
         .unwrap();
-    mark_dequeued(&db, &row, &turn).await.unwrap();
+    mark_dequeued(&db, &row).await.unwrap();
     let model = ModelRequest::capture(&db, &row.id, "key", &turn)
         .await
         .unwrap()

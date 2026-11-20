@@ -1,3 +1,4 @@
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type {
   Automation,
@@ -16,20 +17,24 @@ export function automationTarget(
     return agent?.display_name || agent?.name || id;
   }
   return row.delivery.type === "notification"
-    ? "Reminder"
+    ? translateApp("Reminder")
     : row.delivery.type === "agent"
-      ? "Device agent"
-      : "HTTPS webhook";
+      ? translateApp("Device agent")
+      : translateApp("HTTPS webhook");
 }
 
 export function automationPauseReason(reason: string | null | undefined) {
   switch (reason) {
     case "target_unavailable":
-      return "The target agent is unavailable. Review Agent access before resuming.";
+      return translateApp(
+        "The target agent is unavailable. Review Agent access before resuming.",
+      );
     case "assistant_disabled":
-      return "NyxBot is disabled. Review your NyxBot settings before resuming.";
+      return translateApp(
+        "NyxBot is disabled. Review your NyxBot settings before resuming.",
+      );
     case "owner_unavailable":
-      return "The owner account is unavailable.";
+      return translateApp("The owner account is unavailable.");
     default:
       return reason?.replaceAll("_", " ");
   }
@@ -54,12 +59,12 @@ export function uniqueAutomationRuns(pages: AutomationRunsPage[]) {
 export function automationScheduleSummary(row: Automation, zone: string): string {
   const schedule = row.schedule;
   if (!schedule || (row.source ?? "webhook") === "webhook")
-    return "Webhook event";
+    return translateApp("Webhook event");
   if (schedule.kind === "every")
-    return `Every ${schedule.amount} ${schedule.amount === 1 ? schedule.unit.replace(/s$/, "") : schedule.unit}`;
-  if (schedule.kind !== "cron") return "One time";
+    return (schedule.amount === 1 ? translateApp("Every {{amount}} {{unit}}", { amount: schedule.amount, unit: schedule.unit.replace(/s$/, "") }) : translateApp("Every {{amount}} {{unit}}", { amount: schedule.amount, unit: schedule.unit}));
+  if (schedule.kind !== "cron") return translateApp("One time");
   const parsed = parseCron(schedule.expression);
-  if (!parsed) return "Custom calendar schedule";
+  if (!parsed) return translateApp("Custom calendar schedule");
   const local = toLocalClock(
     parsed.hour,
     parsed.minute,
@@ -71,13 +76,26 @@ export function automationScheduleSummary(row: Automation, zone: string): string
   if (parsed.kind === "monthly") {
     // A day-of-month cannot move across midnight without changing meaning.
     if (local.shift !== 0)
-      return `Monthly on day ${parsed.day} at ${clock(parsed.hour, parsed.minute)} ${schedule.timezone} time`;
-    return `Monthly on day ${parsed.day} at ${at}`;
+      return translateApp(
+        "Monthly on day {{day}} at {{clock}} {{timezone}} time",
+        {
+          day: parsed.day,
+          clock: clock(parsed.hour, parsed.minute),
+          timezone: schedule.timezone,
+        },
+      );
+    return translateApp("Monthly on day {{day}} at {{at}}", {
+      day: parsed.day,
+      at: at,
+    });
   }
   const days = new Set(
     [...parsed.days].map((day) => (((day + local.shift) % 7) + 7) % 7),
   );
-  return `${describeDays(days)} at ${at}`;
+  return translateApp("{{days}} at {{at}}", {
+    days: describeDays(days),
+    at: at,
+  });
 }
 
 type ParsedCron =
@@ -110,24 +128,40 @@ function parseCron(expression: string): ParsedCron | null {
   return days ? { kind: "days", hour: h, minute: m, days: new Set(days) } : null;
 }
 
-const DAY_PLURAL = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
-const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
 function describeDays(days: Set<number>) {
   const list = [...days].sort((a, b) => a - b);
-  if (list.length === 7) return "Every day";
-  if (list.join() === "1,2,3,4,5") return "Weekdays";
-  if (list.join() === "0,6") return "Weekends";
-  if (list.length === 1) return DAY_PLURAL[list[0]!]!;
+  if (list.length === 7) return translateApp("Every day");
+  if (list.join() === "1,2,3,4,5") return translateApp("Weekdays");
+  if (list.join() === "0,6") return translateApp("Weekends");
+  const dayPlural = [
+    translateApp("Sundays"),
+    translateApp("Mondays"),
+    translateApp("Tuesdays"),
+    translateApp("Wednesdays"),
+    translateApp("Thursdays"),
+    translateApp("Fridays"),
+    translateApp("Saturdays"),
+  ];
+  const dayShort = [
+    translateApp("Sun"),
+    translateApp("Mon"),
+    translateApp("Tue"),
+    translateApp("Wed"),
+    translateApp("Thu"),
+    translateApp("Fri"),
+    translateApp("Sat"),
+  ];
+
+  if (list.length === 1) return dayPlural[list[0]!]!;
   // A run that may wrap past Saturday (e.g. Tue–Sat, Sat–Wed).
   const start = list.find((day) => !days.has((day + 6) % 7));
   if (start !== undefined) {
     let end = start;
     while (days.has((end + 1) % 7) && (end + 1) % 7 !== start) end = (end + 1) % 7;
     if ((((end - start) % 7) + 7) % 7 === list.length - 1)
-      return `${DAY_SHORT[start]}–${DAY_SHORT[end]}`;
+      return `${dayShort[start]}–${dayShort[end]}`;
   }
-  return list.map((day) => DAY_SHORT[day]).join(", ");
+  return list.map((day) => dayShort[day]).join(", ");
 }
 
 function clock(hour: number, minute: number) {
@@ -136,7 +170,7 @@ function clock(hour: number, minute: number) {
 
 function wall(instant: number, zone: string) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
+    new Intl.DateTimeFormat(appLocale(), {
       timeZone: zone,
       hourCycle: "h23",
       year: "numeric",
@@ -186,12 +220,13 @@ function toLocalClock(
 
 /** Status and run outcomes read as Title Case values ("Paused" for disabled). */
 export function automationStatusLabel(value: string) {
-  const text = value === "disabled" ? "Paused" : value.replaceAll("_", " ");
+  const text = value === "disabled" ? translateApp("Paused") : value.replaceAll("_", " ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 export function automationSourceLabel(row: Automation) {
-  return (row.source ?? "webhook") === "schedule" ? "Scheduled" : "Webhook";
+  return (row.source ?? "webhook") === "schedule" ? translateApp("Scheduled")
+    : translateApp("Webhook");
 }
 
 /** Server reason codes read as words ("confirmation_required" -> "confirmation required"). */
@@ -210,8 +245,10 @@ export function automationListDetail(
     automationScheduleSummary(row, zone),
     row.source === "schedule"
       ? row.status === "disabled"
-        ? "Paused · no new scheduled runs"
-        : `Next: ${formatAutomationTime(row.next_run_at, zone)}`
+        ? translateApp("Paused · no new scheduled runs")
+        : translateApp("Next: {{date}}", {
+            date: formatAutomationTime(row.next_run_at, zone),
+          })
       : undefined,
     automationPauseReason(row.pause_reason),
   ]
@@ -222,14 +259,19 @@ export function automationListDetail(
 export function automationRunDuration(run: AutomationRun) {
   return run.duration_ms == null
     ? undefined
-    : `${(run.duration_ms / 1000).toFixed(1)} seconds`;
+    : translateApp("{{seconds}} seconds", {
+        seconds: (run.duration_ms / 1000).toFixed(1),
+      });
 }
 
 /** The detail line of a run's history row. */
 export function automationRunDetail(run: AutomationRun) {
   return [
     automationReason(run.reason),
-    run.missed ? `Missed ${run.missed.count} occurrences` : undefined,
+    run.missed ? translateApp("Missed {{count}} occurrences", {
+          count: run.missed.count,
+        })
+      : undefined,
     automationRunDuration(run),
   ]
     .filter(Boolean)

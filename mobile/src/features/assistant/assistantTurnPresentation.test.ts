@@ -100,6 +100,7 @@ test("resumed active turns retain reply checkpoints and capacity timing", () => 
     active_turn: {
       turn_id: "turn-1",
       started_at: at,
+      continued_after_restart: true,
       queued: true,
       waiting_for_capacity: true,
       activity_total: 100,
@@ -116,6 +117,12 @@ test("resumed active turns retain reply checkpoints and capacity timing", () => 
   assert.equal(c.active_turn?.reply?.text, "Resumed partial");
   assert.equal(c.active_turn?.queued, true);
   assert.equal(c.active_turn?.activity_total, 100);
+  const reply = messageSchema.parse({ ...failedMessage(), continued_after_restart: true });
+  for (const snapshot of [c, conversationSchema.parse(c)]) {
+    assert.equal(snapshot.active_turn?.continued_after_restart, true);
+    assert.equal(snapshot.active_turn?.turn_id, reply.turn_id);
+  }
+  assert.equal(messageSchema.parse(reply).continued_after_restart, true);
 });
 
 test("SSE carries capacity, continuation, retry notices and terminal diagnostics through the real reducer", () => {
@@ -286,6 +293,7 @@ test("context reset, steering, model interruption and billing notices match web 
     "Guidance applied to this reply.",
   );
   assert.match(steeringNotice("stop_pending"), /stopping/);
+  assert.match(storedError("credential_revoked"), /Review completed actions before retrying/);
   assert.match(
     storedError("model_interrupted"),
     /Some actions may already have completed/,

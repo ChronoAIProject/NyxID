@@ -12,6 +12,9 @@ use mongodb::event::{EventHandler, command::CommandEvent};
 use serde_json::json;
 use std::sync::Mutex;
 
+#[path = "tax_refresh_budget_tests.rs"]
+mod tax_refresh_budget_tests;
+
 #[derive(Default)]
 struct Provider {
     calls: Mutex<Vec<String>>,
@@ -90,6 +93,7 @@ impl LagoApi for Provider {
         unreachable!()
     }
     async fn current_usage(&self, c: &str, s: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(s)?;
         self.call("usage", c)?;
         Ok(LagoUsage {
             customer_id: c.into(),
@@ -107,6 +111,7 @@ impl LagoApi for Provider {
     }
     async fn tax_config(&self, c: &str, _: &str) -> AppResult<LagoTaxConfig> {
         self.call("tax", c)?;
+        tax_refresh_budget_tests::on_tax_read(c).await;
         self.race(Step::Taxes).await;
         Ok(billing::taxes::zero_config())
     }
@@ -153,12 +158,11 @@ enum Step {
     Rates,
 }
 impl Step {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Taxes,
         Self::Prices,
         Self::Machine,
         Self::Push,
-        Self::Compare,
         Self::Wallet,
         Self::Rates,
     ];
@@ -191,9 +195,17 @@ impl Step {
                     .await
             }
             Self::Compare => {
-                f.reconciler
-                    .compare_finalized_usage(f.provider.as_ref(), &mut stats)
-                    .await
+                let runtime = crate::services::coordination_service::cluster_lease_runtime();
+                let token =
+                    LeaseStore::acquire(&f.db, RECONCILE_LEASE, &runtime.holder, runtime.ttl)
+                        .await?
+                        .expect("fixture lease");
+                let result = f
+                    .reconciler
+                    .compare_finalized_usage(f.provider.as_ref(), &mut stats, &token)
+                    .await;
+                LeaseStore::release(&f.db, &token).await?;
+                result
             }
             Self::Wallet => {
                 f.reconciler
@@ -366,14 +378,7 @@ impl Fixture {
                 doc! {"_id":id,"sync_status":"synced"},
             ),
             Step::Push => (USAGE_METER, doc! {"_id":id,"lago_acked":true}),
-            Step::Compare => {
-                return self
-                    .provider
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .contains(&format!("usage:{id}"));
-            }
+            Step::Compare => return self.provider.calls.lock().unwrap().is_empty(),
             Step::Wallet => (
                 BILLING_WALLET,
                 doc! {"_id":id,"balance_synced_at":{"$gt":bson::DateTime::from_millis(0)}},
@@ -459,12 +464,35 @@ regression!(provider_step_tax_isolates_bad_wallet, Taxes);
 regression!(provider_step_price_isolates_bad_service, Prices);
 regression!(provider_step_machine_isolates_bad_claim, Machine);
 regression!(provider_step_push_isolates_bad_row, Push);
-regression!(provider_step_comparison_isolates_bad_group, Compare);
+#[tokio::test]
+async fn provider_step_comparison_warms_without_reading_usage() {
+    let f = Fixture::new().await;
+    f.poison(Step::Compare).await;
+    f.healthy(Step::Compare).await;
+    f.commands.lock().unwrap().clear();
+    Step::Compare.run(&f).await.unwrap();
+    assert!(f.provider.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        f.commands.lock().unwrap().as_slice(),
+        [
+            "findAndModify:coordination_leases",
+            "aggregate:billing_usage_comparison_control",
+            "find:security_rollouts",
+            "find:security_replicas",
+            "findAndModify:billing_usage_comparison_control",
+            "find:billing_usage_comparison_control",
+            "find:billing_wallet",
+            "delete:coordination_leases",
+        ],
+        "coverage and discovery never read the old aggregate's poisoned meter row"
+    );
+    f.db.drop().await.unwrap();
+}
 regression!(provider_step_wallet_isolates_bad_wallet, Wallet);
 regression!(provider_step_rate_isolates_failed_publication, Rates);
 #[tokio::test]
 async fn provider_step_clean_command_counts() {
-    for step in Step::ALL {
+    for step in Step::ALL.into_iter().chain([Step::Compare]) {
         let f = Fixture::new().await;
         f.commands.lock().unwrap().clear();
         step.run(&f).await.unwrap();
@@ -477,8 +505,8 @@ async fn provider_step_clean_command_counts() {
             Step::Taxes => (1, 8),
             Step::Prices => (2, 18),
             Step::Machine => (1, 17),
-            Step::Push => (1, 5),
-            Step::Compare => (1, 1),
+            Step::Push => (2, 9),
+            Step::Compare => (8, 8), // Six coverage/discovery commands plus the test lease.
             Step::Wallet => (1, 11),
             Step::Rates => (4, 8),
         };
@@ -586,7 +614,7 @@ async fn provider_step_publication_races_are_waits() {
 }
 #[tokio::test]
 async fn provider_step_processing_failure_keeps_retry_and_visits_later_wallet() {
-    for step in [Step::Taxes, Step::Wallet, Step::Push, Step::Compare] {
+    for step in [Step::Taxes, Step::Wallet, Step::Push] {
         let f = Fixture::new().await;
         match step {
             Step::Taxes | Step::Wallet => f.wallet("a-bad").await,

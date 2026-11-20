@@ -56,7 +56,7 @@ test("grants stay in Balance while allowances group under their service with one
   });
   t.after(screen.harness.unmount);
   const titles = screen.all().filter((item) => item.type === "SettingsGroup").map((item) => item.props.title);
-  assert.deepEqual(titles, ["Balance", "Included · example · this month"]);
+  assert.deepEqual(titles, ["Balance", "Included · example · This month"]);
   assert.ok(rows(screen).some((row) => /Included credits · example · service limits apply/.test(row.label)));
   assert.ok(rows(screen).some((row) => /^Expiring .*2026/.test(row.label)));
   assert.deepEqual(

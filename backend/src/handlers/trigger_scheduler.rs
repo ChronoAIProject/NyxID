@@ -188,8 +188,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             };
             if row.active_turn.as_ref().is_some_and(|active| {
                 active.turn_id == *turn
-                    && active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
-                        > Utc::now()
+                    && (active.restart_admission.is_some()
+                        || active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
+                            > Utc::now())
             }) {
                 return schedules::reschedule(&state.db, job, Some(recheck_at(&run, job))).await;
             }
@@ -520,6 +521,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -968,87 +970,15 @@ pub(super) async fn settle_result(
         }
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
-    if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
-        return settle_chat_result(state, row, run, text, error).await;
-    }
-    if matches!(run.deliver_to, DeliverTo::Notification) {
-        return settle_notification_result(state, row, run, text, error).await;
-    }
-    // One settlement owns the outbound attempt. Recovery never duplicates an
-    // ambiguous network send; the thread remains the durable final result.
-    if run.result_claimed {
-        return schedules::finish(
-            &state.db,
-            &run.id,
-            RunOutcome::Failed,
-            Some("result_delivery_interrupted"),
-            &state.config.frontend_url,
-        )
-        .await;
-    }
-    let Some(run) = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .find_one_and_update(
-            doc! {
-                "_id": &run.id,
-                "outcome": RunOutcome::Started.as_str(),
-                "turn_id": &run.turn_id,
-                "result_claimed": { "$ne": true },
-            },
-            doc! { "$set": {"result_claimed":true} },
-        )
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-    else {
-        return Ok(());
-    };
-    let failure_text = error.map(|code| {
-        if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
-        } else {
-            engine::TurnError::new(code).message
+    match run.deliver_to {
+        DeliverTo::Chat { .. } => settle_chat_result(state, row, run, text, error).await,
+        DeliverTo::Notification => settle_notification_result(state, row, run, text, error).await,
+        // The saved reply is the delivery for Thread, including legacy rows
+        // whose former finalizer claimed the result before stopping.
+        DeliverTo::Thread => {
+            schedules::finish_thread_result(&state.db, run, error, &state.config.frontend_url).await
         }
-    });
-    let final_text = failure_text.as_deref().unwrap_or(text);
-    let outcome = match &run.deliver_to {
-        DeliverTo::Thread => Ok(()),
-        DeliverTo::Notification => unreachable!("notification uses leased settlement"),
-        DeliverTo::Chat { chat_id } => {
-            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
-            if error.is_none() {
-                Box::pin(super::nyxbot::chats::post_automation_images(
-                    state, &run, chat_id, agent_id, &row.id, final_text,
-                ))
-                .await
-                .map(|_| ())
-            } else {
-                Box::pin(super::nyxbot::chats::post_automation(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    final_text,
-                    agent_id,
-                    &row.id,
-                    &run.id,
-                ))
-                .await
-                .map(|_| ())
-            }
-        }
-    };
-    schedules::finish(
-        &state.db,
-        &run.id,
-        if error.is_some() || outcome.is_err() {
-            RunOutcome::Failed
-        } else {
-            RunOutcome::Completed
-        },
-        error.or(outcome.err().map(|_| "result_delivery_failed")),
-        &state.config.frontend_url,
-    )
-    .await
+    }
 }
 
 async fn settle_notification_result(
@@ -1514,6 +1444,14 @@ pub(crate) async fn cancel_transports(
 ) -> AppResult<()> {
     for row in targets {
         if let Some(turn) = &row.active_turn {
+            if turn.stop_requested && turn.restart_admission.is_some() {
+                engine::force_stop(&state.db, &row.user_id, &row.id, &turn.turn_id).await?;
+                let state = state.clone();
+                let stopped = row.clone();
+                state.shutdown.clone().spawn(async move {
+                    super::assistant_nyxagent::survivor::cancel(&state, &stopped).await;
+                });
+            }
             crate::services::machine_service::cancel_turn(state, &row.user_id, &row.id, turn)
                 .await?;
         }

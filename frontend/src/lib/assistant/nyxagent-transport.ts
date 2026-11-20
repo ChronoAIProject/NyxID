@@ -145,6 +145,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
+  if (code === "credential_revoked") return translateUi("NyxID rejected the assistant credential during this turn. Review completed actions before retrying.");
   if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
   if (code === "model_policy_denied") return translateUi("An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.");
@@ -683,6 +684,7 @@ export class NyxAgentTransport {
         voice: message.voice,
         via: message.via ?? (message.platform_origin ? "telegram" : null),
         activityTotal: message.activity_total,
+        continuedAfterRestart: message.continued_after_restart,
         steering: message.steering,
         continuation_of: message.continuation_of,
         origin: message.origin,
@@ -699,7 +701,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total, continuedAfterRestart: polledTurn.continued_after_restart }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),

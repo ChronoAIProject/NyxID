@@ -22,6 +22,8 @@ pub mod billing_target;
 pub mod billing_tax_plan_epoch;
 pub mod billing_tax_profile;
 pub mod billing_topup_session;
+pub mod billing_usage_comparison;
+pub mod billing_usage_delivery;
 pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
@@ -48,6 +50,7 @@ pub mod credential_verification;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
+pub mod credit_schedule_recipient;
 pub mod default_request_header;
 pub mod device_code;
 pub mod device_onboard_credential;
@@ -74,6 +77,7 @@ pub mod managed_execution;
 pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
+pub mod mobile_social;
 pub mod node;
 pub mod node_credential_desired;
 pub mod node_pending_credential;
@@ -284,3 +288,11 @@ pub mod assistant_system_skills;
 pub mod assistant_tool_result;
 
 pub mod channel_turn_preparation;
+
+pub mod gateway_reply;
+
+pub mod client_error_report;
+
+pub mod client_release_registry;
+
+pub mod nyxbot_response_read;

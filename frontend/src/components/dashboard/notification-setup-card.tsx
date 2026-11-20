@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { MOBILE_APP_LINK } from "@/lib/mobile-app-link";
 import {
   useNotificationSettings,
   useUpdateNotificationSettings,
@@ -31,7 +32,6 @@ import {
   usePushDevices,
 } from "@/hooks/use-approvals";
 
-const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 const DISMISSED_KEY = "nyxid:notification-setup-dismissed";
 
 export function NotificationSetupCard() {

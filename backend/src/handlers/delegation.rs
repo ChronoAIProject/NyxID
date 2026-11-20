@@ -503,20 +503,40 @@ mod tests {
             Some(&reference),
         )
         .expect("mint full-router source token");
-        let exchanged = token_exchange_service::exchange_token_with_authority(
-            &db,
-            &state.config,
-            &state.jwt_keys,
-            &receiver_client_id,
-            &receiver_secret,
-            &source_token,
-            "urn:ietf:params:oauth:token-type:access_token",
-            Some(&delegated_scope),
-            &[],
-            Some(false),
-            &requested_service_ids,
-            Some(false),
-            &requested_node_ids,
+        let exchanged = crate::test_utils::retry_oauth_authority(
+            async || {
+                token_exchange_service::exchange_token_with_authority(
+                    &db,
+                    &state.config,
+                    &state.jwt_keys,
+                    &receiver_client_id,
+                    &receiver_secret,
+                    &source_token,
+                    "urn:ietf:params:oauth:token-type:access_token",
+                    Some(&delegated_scope),
+                    &[],
+                    Some(false),
+                    &requested_service_ids,
+                    Some(false),
+                    &requested_node_ids,
+                )
+                .await
+            },
+            async || {
+                for collection in [
+                    crate::models::catalog_delegation_grant::COLLECTION_NAME,
+                    crate::models::oauth_delegation_authority::COLLECTION_NAME,
+                ] {
+                    assert_eq!(
+                        db.collection::<mongodb::bson::Document>(collection)
+                            .count_documents(doc! {"receiving_client_id": &receiver_client_id})
+                            .await
+                            .unwrap(),
+                        0,
+                        "refused exchange wrote to {collection}"
+                    );
+                }
+            },
         )
         .await
         .expect("exchange full-router delegated token");

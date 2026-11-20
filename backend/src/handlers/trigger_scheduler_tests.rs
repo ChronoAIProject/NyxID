@@ -43,12 +43,6 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
 
 async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let reply = reply.to_owned();
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
@@ -57,6 +51,7 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
             let sink = sink.clone();
             let reply = reply.clone();
             async move {
+                let background = body["background"] == true;
                 sink.lock().await.push(Call {
                     authorization: headers["authorization"].to_str().unwrap().into(),
                     body,
@@ -64,6 +59,11 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
+                    if background {
+                        let created = json!({"type":"response.created", "sequence_number":0,
+                            "response":{"id":response,"conversation":{"id":session}}});
+                        yield Ok::<_, Infallible>(Event::default().data(created.to_string()));
+                    }
                     let completed = json!({
                         "type": "response.completed",
                         "sequence_number": 1,
@@ -86,6 +86,20 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
             }
         }),
     );
+    let (state, _, server) = setup_with_response_router(name, upstream).await;
+    (state, calls, server)
+}
+
+async fn setup_with_response_router(
+    name: &str,
+    upstream: Router,
+) -> (AppState, String, tokio::task::JoinHandle<()>) {
+    let db = connect_transaction_test_database(name).await;
+    engine::ensure_indexes(&db).await.unwrap();
+    db.collection(USERS)
+        .insert_one(test_user(OWNER, UserType::Person))
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -94,7 +108,8 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
     let mut row = crate::models::downstream_service::test_helpers::dummy_service();
     row.id = Uuid::new_v4().to_string();
     row.slug = engine::SERVICE_SLUG.into();
-    row.base_url = format!("http://{address}");
+    let base_url = format!("http://{address}");
+    row.base_url = base_url.clone();
     row.service_category = "internal".into();
     row.auth_method = "none".into();
     row.requires_user_credential = false;
@@ -106,10 +121,19 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
         .await
         .unwrap();
     schedules::indexes(&db).await.unwrap();
-    (test_app_state(db), calls, server)
+    (test_app_state(db), base_url, server)
 }
 
 async fn automation(state: &AppState, agent_id: &str, policy: Option<ThreadPolicy>) -> Trigger {
+    automation_with_instruction(state, agent_id, policy, "Summarise my GitHub notifications").await
+}
+
+async fn automation_with_instruction(
+    state: &AppState,
+    agent_id: &str,
+    policy: Option<ThreadPolicy>,
+    instruction: &str,
+) -> Trigger {
     crate::services::trigger_service::create(
         &state.db,
         &state.encryption_keys,
@@ -136,7 +160,7 @@ async fn automation(state: &AppState, agent_id: &str, policy: Option<ThreadPolic
                 confirmation_policy: Default::default(),
                 agent_id: agent_id.into(),
                 thread_policy: policy,
-                instruction: "Summarise my GitHub notifications".into(),
+                instruction: instruction.into(),
                 deliver_to: DeliverTo::Thread,
             },
         },
@@ -213,6 +237,62 @@ async fn completed(state: &AppState, trigger: &Trigger) -> TriggerRun {
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
+    use crate::services::{assistant_agent_credential_service as credentials, key_service};
+
+    let (state, calls, server) = setup("schedule_stopped_home").await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let home = team::home_thread(&state.db, &state.encryption_keys, &agent)
+        .await
+        .unwrap();
+    let old =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &home.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let stopped = crate::models::assistant_conversation::StoppedWindow {
+        turn_id: Uuid::new_v4().to_string(),
+        window_key: Uuid::new_v4().to_string(),
+        credential_id: old.api_key_id.clone(),
+        destination_hash: None,
+    };
+    let updated = state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home.id, "active_turn": mongodb::bson::Bson::Null},
+            doc! {"$set": {"stopped_window": mongodb::bson::to_document(&stopped).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.modified_count, 1);
+    let trigger = automation(&state, &agent.id, Some(ThreadPolicy::Home)).await;
+    make_due(&state, &trigger).await;
+    tick(&state).await.unwrap();
+    let run = completed(&state, &trigger).await;
+    assert_eq!(run.outcome, RunOutcome::Completed);
+    assert_eq!(run.thread_id.as_ref(), Some(&home.id));
+    let next =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &home.id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(next.api_key_id, old.api_key_id);
+    assert!(next.raw_key != old.raw_key);
+    assert!(matches!(
+        key_service::validate_api_key(&state.db, &old.raw_key).await,
+        Err(AppError::Unauthorized(_))
+    ));
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].authorization.strip_prefix("Bearer ") == Some(next.raw_key.as_str()));
+    drop(calls);
+    server.abort();
+    let _ = server.await;
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -656,6 +736,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
@@ -697,6 +778,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        key_version: 0,
         voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
@@ -1970,7 +2052,9 @@ async fn schedule_long_downtime_records_skips_without_a_catchup_burst() {
     let (state, calls, server) = setup("schedule_downtime").await;
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let mut trigger = automation(&state, &agent.id, None).await;
-    let anchor = Utc::now() - Duration::days(3) - Duration::seconds(1);
+    // Recover inside the latest occurrence's two-minute grace period, after
+    // its dispatch offset (at most one quarter of the grace period).
+    let anchor = Utc::now() - Duration::days(3) - Duration::minutes(1);
     let spec = ScheduleSpec {
         timing: ScheduleKind::Every {
             amount: 5,
@@ -2006,31 +2090,57 @@ async fn schedule_long_downtime_records_skips_without_a_catchup_burst() {
         )
         .await
         .unwrap();
+    let now = Utc::now();
+    let due = schedules::due(&state.db, now).await.unwrap();
+    let [work] = due.as_slice() else {
+        panic!("expected one due schedule, found {}", due.len());
+    };
+    let id = work.get_str("_id").unwrap();
+    assert_eq!(id, format!("schedule:{}", trigger.id));
+    let job = schedules::claim(&state.db, id, now).await.unwrap().unwrap();
+
     let started = std::time::Instant::now();
-    tick(&state).await.unwrap();
+    let latest = schedules::claim_occurrence(&state.db, &job, now)
+        .await
+        .unwrap()
+        .expect("coalesce the backlog and enqueue its latest occurrence");
     let claim_elapsed = started.elapsed();
-    eprintln!("S7 3-day 5-minute catch-up: {claim_elapsed:?}");
-    assert!(claim_elapsed < std::time::Duration::from_secs(5));
+    assert!(
+        claim_elapsed < std::time::Duration::from_secs(5),
+        "coalescing 864 missed occurrences took {claim_elapsed:?}"
+    );
+    assert_eq!(latest.trigger_id, trigger.id);
+    assert!(latest.dispatch_at.expect("recurring dispatch time") <= now);
+    assert!(now < latest.deadline);
+    assert_eq!(
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .count_documents(doc! {"trigger_id": &trigger.id})
+            .await
+            .unwrap(),
+        2,
+        "the claim must write only the latest run and its missed-window summary"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        assert_eq!(tick(&state).await.unwrap(), 1, "expected one due run");
         loop {
-            tick(&state).await.unwrap();
-            if state
+            let run = state
                 .db
                 .collection::<TriggerRun>(RUNS)
-                .count_documents(
-                    doc! { "trigger_id": &trigger.id, "outcome": RunOutcome::Completed.as_str() },
-                )
+                .find_one(doc! { "_id": &latest.id })
                 .await
                 .unwrap()
-                == 1
-            {
+                .expect("latest occurrence must remain in history");
+            if !matches!(run.outcome, RunOutcome::Pending | RunOutcome::Started) {
+                assert_eq!(run.outcome, RunOutcome::Completed, "{:?}", run.reason);
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("latest run did not complete within 40 seconds of the catch-up claim");
     assert_eq!(calls.lock().await.len(), 1);
     assert_eq!(
         state

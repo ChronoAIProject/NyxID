@@ -24,6 +24,7 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
             amount_credits: 10,
             amount: crate::models::credits::Credits::from_micros(10_000_000),
             recurrence: request.recurrence,
+            timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
             expiry: request.expiry,
             target_kind: request.target_kind,
             target_user_ids: request.target_user_ids,
@@ -84,4 +85,23 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
         serde_json::from_value(json!({ "is_active": false })).unwrap();
     assert!(patch.target_org_ids.is_none());
     assert!(patch.target_group_ids.is_none());
+}
+
+#[test]
+fn schedule_timing_is_additive_and_immutable() {
+    let base = json!({ "amount_credits": 100, "recurrence": "monthly",
+        "expiry": { "kind": "end_of_period" }, "target_kind": "groups",
+        "target_group_ids": ["group"], "all_services": true });
+    let calendar: CreateCreditScheduleRequest = serde_json::from_value(base.clone()).unwrap();
+    assert_eq!(calendar.timing, ScheduleTiming::Calendar);
+    let mut recipient = base;
+    recipient["timing"] = json!("recipient");
+    let request: CreateCreditScheduleRequest = serde_json::from_value(recipient.clone()).unwrap();
+    assert_eq!(request.timing, ScheduleTiming::Recipient);
+    recipient["timing"] = json!("unknown");
+    assert!(serde_json::from_value::<CreateCreditScheduleRequest>(recipient).is_err());
+    assert!(
+        serde_json::from_value::<UpdateCreditScheduleRequest>(json!({"timing":"recipient"}))
+            .is_err()
+    );
 }

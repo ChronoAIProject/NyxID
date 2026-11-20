@@ -184,6 +184,23 @@ test("native legacy page keeps the preservation notice and admin-only switch", (
     true,
   );
 });
+test("native admin sees model-only access and where to review the frozen list", () => {
+  const e = setup(true);
+  Object.assign(e.query.data, {
+    guest_enabled: true,
+    binding_limits_guest_services: true,
+    effective_guest_services: [],
+  });
+  e.harness.mount(() => e.module.OrgGuestChannel({
+    agent,
+    channel: { id: "bot", bot_label: "Office helper", platform: "discord", status: "active" },
+  }));
+  elements(e.harness.flush()).find((r) => r.props.label === "Office helper")!.props.onPress();
+  const rows = elements(e.harness.flush());
+  assert.ok(rows.some((r) => r.props.detail === "Model-only chat"));
+  assert.ok(rows.some((r) => r.props.label?.startsWith("This bot's saved limits exclude services listed for guests")));
+  assert.equal(e.writes.length, 0);
+});
 test("native handoff needs explicit confirmation and rejects a stale account callback", async () => {
   const e = setup();
   e.query.data = e.review;

@@ -1,5 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
 import { assistantConnection } from "./connectionState";
-import { createSessionRefresh } from "../auth/sessionRefresh";
+import { createSessionRefresh, isRefreshRefusal } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
 import { fetch as expoFetch } from "expo/fetch";
 import { executeAuthenticatedRequest, type RequestOptions } from "./authenticatedTransport";
@@ -305,12 +306,16 @@ async function requestRefreshAccessToken(
         if (__DEV__) {
           console.warn("[auth] refresh failed", response.status, payload);
         }
-        return null;
+        // Only the server's refusal of this refresh token ends the session.
+        // Outages, rate limits and exhausted conflict retries keep the stored
+        // credentials; callers surface the error and a later attempt retries.
+        if (isRefreshRefusal(response.status)) return null;
+        throw buildApiError(payload, response.status, response.headers);
       }
 
       if (payload && typeof payload === "object") {
         const data = payload as Partial<RefreshResponse>;
-        if (typeof data.access_token === "string" && data.access_token.length > 0) {
+        if (typeof data.access_token === "string" && data.access_token.trim().length > 0) {
           return {
             access_token: data.access_token,
             expires_in:
@@ -325,10 +330,10 @@ async function requestRefreshAccessToken(
         }
       }
 
-      return null;
+      throw buildApiError(null, response.status, response.headers);
     }
 
-    return null;
+    throw buildApiError(null, 409);
   };
 
   try {
@@ -362,6 +367,7 @@ export async function refreshAccessTokenIfNeeded(force = false): Promise<boolean
   }
 
   const refreshed = await refreshAccessTokenWithSingleFlight();
+  if (!refreshed && session.sessionGeneration === authSessionGeneration()) await invalidateSession();
   return Boolean(refreshed);
 }
 
@@ -380,14 +386,17 @@ async function invalidateSession() {
 
 /** Expo's native fetch exposes a ReadableStream on iOS/Android; RN's global
  * fetch can buffer the entire response. Both paths share secure admission. */
-export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
-  const { response } = await executeAuthenticatedRequest({
+export async function requestBoundAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  return executeAuthenticatedRequest({
     url: buildApiUrl(path), options, clientHeaders: clientHeaders(),
     transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init).catch((cause: unknown) => { throw networkApiError(cause); }), init.signal ?? undefined), loadSession: loadStoredAuthSession,
     refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
     toError: buildApiError, getAuthEpoch,
   });
-  return response;
+}
+
+export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  return (await requestBoundAuthenticatedResponse(path, options)).response;
 }
 
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -398,7 +407,7 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const expectedSessionGeneration = authSessionGeneration();
   const guard = () => {
     options.authorityGuard?.();
-    if (options.signal?.aborted) throw Object.assign(new Error("Request cancelled"), { name: "AbortError" });
+    if (options.signal?.aborted) throw Object.assign(localizedError("Request cancelled"), { name: "AbortError" });
     if (requiresAuth && getAuthEpoch() !== expectedEpoch) throw new Error("auth_session_changed");
     if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
     if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
@@ -488,7 +497,8 @@ export async function requestBinaryJson<T>(
     },
     clientHeaders: clientHeaders(),
     transport: (url, init) =>
-      new Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string> }>(
+      new Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string>;
+      }>(
         (resolve, reject) => {
           const xhr = new XMLHttpRequest();
           const abort = () => xhr.abort();
@@ -507,17 +517,17 @@ export async function requestBinaryJson<T>(
           xhr.onerror = () => {
             cleanup();
             reject(
-              new Error("Upload failed. Check your connection and try again."),
+              localizedError("Upload failed. Check your connection and try again."),
             );
           };
           xhr.ontimeout = () => {
             cleanup();
-            reject(new Error("Upload timed out. Try a smaller file."));
+            reject(localizedError("Upload timed out. Try a smaller file."));
           };
           xhr.onabort = () => {
             cleanup();
             reject(
-              Object.assign(new Error("Upload cancelled."), {
+              Object.assign(localizedError("Upload cancelled."), {
                 name: "AbortError",
               }),
             );
@@ -534,7 +544,7 @@ export async function requestBinaryJson<T>(
           if (init.signal?.aborted) {
             cleanup();
             reject(
-              Object.assign(new Error("Upload cancelled."), {
+              Object.assign(localizedError("Upload cancelled."), {
                 name: "AbortError",
               }),
             );
@@ -611,7 +621,8 @@ export async function telegramLinkRequest(): Promise<TelegramLinkInfo> {
   });
 }
 
-export async function telegramDisconnectRequest(): Promise<{ message: string }> {
+export async function telegramDisconnectRequest(): Promise<{ message: string;
+}> {
   return requestJson<{ message: string }>("/notifications/telegram", {
     method: "DELETE",
   });
@@ -625,7 +636,8 @@ export async function loginWithPasswordRequest(payload: LoginRequest): Promise<L
   });
 }
 
-export async function verifyMfaRequest(body: { code: string; mfa_token: string }): Promise<LoginResponse> {
+export async function verifyMfaRequest(body: { code: string; mfa_token: string;
+}): Promise<LoginResponse> {
   return requestJson<LoginResponse>("/auth/mfa/verify", { method: "POST", body: { ...body, client: "mobile" }, requiresAuth: false, retryOnAuthFailure: false });
 }
 
@@ -742,8 +754,8 @@ export async function listApprovalsRequest(
         granted_at: item.granted_at,
         expires_at: item.expires_at,
         org_scoped: orgScoped,
-        org_id: orgScoped ? item.org_id ?? null : undefined,
-        org_name: orgScoped ? item.org_name ?? null : undefined,
+        org_id: orgScoped ? (item.org_id ?? null) : undefined,
+        org_name: orgScoped ? (item.org_name ?? null) : undefined,
       };
     }),
     total: response.total,
@@ -801,9 +813,11 @@ export async function rotatePushTokenRequest(
 }
 
 export async function unregisterPushTokenRequest(
-  payload: PushTokenRegisterRequest
+  payload: PushTokenRegisterRequest,
+  capturedAccessToken?: string,
 ): Promise<void> {
   await requestJson<MessageResponse>("/notifications/devices/current", {
+    ...(capturedAccessToken ? { requiresAuth: false, headers: { Authorization: `Bearer ${capturedAccessToken}` } } : {}),
     method: "DELETE",
     body: buildPushDevicePayload(payload),
   });

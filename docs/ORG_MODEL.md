@@ -194,7 +194,7 @@ pub enum MemberScopeSource {
 }
 ```
 
-`COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles.
+`COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles. The founder, admin-added members and invite recipients can receive matching scheduled credits in their personal wallets after the membership commits. An exit preserves issued grants and recipient-cycle anchors. Later issuance checks active membership, and rejoining retains the original anchor. See [scheduled credit eligibility](BILLING_EXACT_ACCOUNTING.md#scheduled-credits-at-signup-sign-in-and-membership-changes).
 
 **Legacy rows.** Membership rows written before this feature don't have a `scope_source` field. Serde deserializes missing values as `Override` to preserve behavior (null `allowed_service_ids` = full access, previously), and a startup backfill in `db::ensure_indexes` idempotently writes `scope_source = "override"` on any row still missing the field. New memberships created through `create_membership` default to `Inherit`.
 
@@ -703,7 +703,7 @@ Scope lists — on `OrgRoleScope`, on `OrgMembership`, and on the effective list
 
 ### Node-routed services
 
-An org-shared service can route through a member's personal node. The node itself stays personally owned (no need to re-register it under the org). The check is **actor-based**, not "service owner == node owner": when an org admin creates an org-owned service with `--via-node my-laptop-node`, `node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)` validates that the actor has `OwnerAccess::can_write` on the node. The same helper is used by `sync_node_binding_for_user_service`, so `NodeServiceBinding.user_id` ends up as the org's user_id (where proxy routing looks it up) while node ownership is validated against the actor.
+An org-shared service can route through a member's personal node. The node itself stays personally owned (no need to re-register it under the org). The check is **actor-based**, not "service owner == node owner": when an org admin creates an org-owned service with `--via-node my-laptop-node`, `node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)` validates that the actor has `OwnerAccess::can_write` on the node. The route transaction checks that the authorized node still has the same owner and writes the binding under the service's org ID, which proxy routing uses for lookup.
 
 **Why nodes stay personal (design rationale).** A node agent runs on a specific piece of physical hardware that someone installed, has root on, and holds the auth token for. Making the database say "the org owns it" doesn't change who can `sudo systemctl stop nyxid-node`, so org ownership at the DB layer would be a fiction that doesn't match operational reality. Personal ownership also gives three concrete wins:
 

@@ -371,6 +371,24 @@ fn validate_outbound_injection(
     Ok(())
 }
 
+tokio::task_local! {
+    static HTTP_DISPATCHED: std::cell::Cell<bool>;
+}
+
+/// Observe the same conservative dispatch boundary used by DestinationAudit.
+/// The scope spans all pool attempts; a later refusal cannot erase an earlier send.
+/// HTTP dispatch is marked before any forwarding/settlement task is detached.
+pub(crate) async fn observe_http_dispatch<T>(
+    future: impl std::future::Future<Output = T>,
+) -> (T, bool) {
+    HTTP_DISPATCHED
+        .scope(std::cell::Cell::new(false), async {
+            let result = future.await;
+            (result, HTTP_DISPATCHED.with(std::cell::Cell::get))
+        })
+        .await
+}
+
 /// Metadata-only lifecycle events use the ordinary chained audit append path.
 pub struct DestinationAudit {
     context: Option<(
@@ -437,6 +455,7 @@ impl DestinationAudit {
     pub fn dispatch(&mut self) {
         self.completed = false;
         self.dispatched = true;
+        let _ = HTTP_DISPATCHED.try_with(|dispatched| dispatched.set(true));
         self.record("proxy_target_dispatch", None, "dispatch_requested");
     }
 
@@ -503,3 +522,42 @@ pub fn workspace_editor_operation(method: &str, path: &CanonicalPath) -> bool {
 #[cfg(test)]
 #[path = "destination_routing_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod refusal_throttle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_observation_remembers_any_attempt_even_after_a_later_denial() {
+        let (_, dispatched) = observe_http_dispatch(async {
+            let mut audit = DestinationAudit {
+                context: None,
+                dispatched: false,
+                completed: false,
+            };
+            audit.dispatch();
+            audit.denied();
+            let error = AppError::NotFound("synthetic later failure".into());
+            assert!(error.counts_for_refusal_throttle());
+            error
+        })
+        .await;
+        assert!(
+            dispatched,
+            "a later typed error cannot make a sent request eligible"
+        );
+        let (_, dispatched) = observe_http_dispatch(async {
+            let mut audit = DestinationAudit {
+                context: None,
+                dispatched: false,
+                completed: false,
+            };
+            audit.denied();
+        })
+        .await;
+        assert!(
+            !dispatched,
+            "independent requests do not share dispatch state"
+        );
+    }
+}

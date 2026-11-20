@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "assistant_attachments";
 
-/// An image a tool returned during a chat turn. The bytes are envelope-encrypted
+/// A file a tool returned during a chat turn. The bytes are envelope-encrypted
 /// and follow the runtime tool-image policy (conversation lifetime by default).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAttachment {
@@ -21,6 +21,9 @@ pub struct AssistantAttachment {
     pub artifact: super::generated_artifact::Metadata,
 
     pub size: i64,
+    /// Zero keeps the complete encrypted payload in the legacy root.
+    #[serde(default)]
+    pub chunks: usize,
     #[serde(with = "super::bson_bytes::required")]
     pub data_encrypted: Vec<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

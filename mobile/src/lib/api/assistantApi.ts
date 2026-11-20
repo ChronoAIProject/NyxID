@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { parseHistoryResponse } from "../../features/assistant/assistantHistoryCompat";
 import { assistantTitleLanguage } from "../../features/assistant/titleLanguage";
 import {
@@ -52,7 +53,7 @@ export const assistantApi = {
       }),
     );
     if (result.client_request_id !== clientRequestId)
-      throw new Error("The guidance response could not be confirmed.");
+      throw localizedError("The guidance response could not be confirmed.");
     return result;
   },
   async settings(signal?: AbortSignal) {
@@ -76,7 +77,7 @@ export const assistantApi = {
       idempotencyKey,
     );
     if (result.challenge_id !== id)
-      throw new Error("Approval request mismatch.");
+      throw localizedError("Approval request mismatch.");
     return result;
   },
   async list(cursor?: string, agentId?: string, signal?: AbortSignal) {
@@ -100,7 +101,7 @@ export const assistantApi = {
       ),
     );
     if (result.conversation.id !== id)
-      throw new Error("Assistant conversation mismatch.");
+      throw localizedError("Assistant conversation mismatch.");
     return result;
   },
   async recovery(id: string, messageId: string) {
@@ -115,7 +116,7 @@ export const assistantApi = {
       await requestJson(`${path(id)}/context`, { signal }),
     );
     if (value.conversation_id !== id)
-      throw new Error("Assistant context mismatch.");
+      throw localizedError("Assistant context mismatch.");
     return value;
   },
   async resetContext(id: string) {
@@ -123,13 +124,13 @@ export const assistantApi = {
       await requestJson(`${path(id)}/context/reset`, { method: "POST" }),
     );
     if (value.conversation_id !== id)
-      throw new Error("Assistant context mismatch.");
+      throw localizedError("Assistant context mismatch.");
     return value;
   },
   async rename(id: string, title: string) {
     const clean = title.trim();
     if (!clean || [...clean].length > 200)
-      throw new Error("Use a title between 1 and 200 characters.");
+      throw localizedError("Use a title between 1 and 200 characters.");
     return conversationSchema.parse(
       await requestJson(path(id), { method: "PATCH", body: { title: clean } }),
     );
@@ -152,7 +153,7 @@ export const assistantApi = {
       ),
     );
     if (result.id !== acknowledgementId)
-      throw new Error("Assistant acknowledgement mismatch.");
+      throw localizedError("Assistant acknowledgement mismatch.");
     return result;
   },
 };
@@ -182,9 +183,7 @@ export async function streamAssistantTurn(
     !response.headers.get("content-type")?.includes("text/event-stream") ||
     !response.body
   ) {
-    throw new Error(
-      "The connection was interrupted. Refresh history before sending again.",
-    );
+    throw localizedError("The connection was interrupted. Refresh history before sending again.");
   }
   await readAssistantResponse(response.body, onEvent, controller);
 }
@@ -202,9 +201,7 @@ async function withDeadline<T>(
         timer = setTimeout(() => {
           controller.abort();
           reject(
-            new Error(
-              "The connection was interrupted. Refresh history before sending again.",
-            ),
+            localizedError("The connection was interrupted. Refresh history before sending again."),
           );
         }, milliseconds);
       }),

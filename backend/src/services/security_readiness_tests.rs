@@ -3,6 +3,7 @@ use crate::services::feature_flag_service as flags;
 
 pub(super) fn local(name: &str, generation: &str, roster: &[&str], required: bool) -> Runtime {
     Runtime {
+        turn_restart_ready_until: Default::default(),
         identity: ReplicaIdentity {
             instance_name: name.into(),
             generation_id: generation.into(),

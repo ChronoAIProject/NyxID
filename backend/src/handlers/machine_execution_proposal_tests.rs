@@ -465,6 +465,14 @@ async fn machine_proposal_unmarked_negotiation_adds_zero_database_commands() {
     let mut samples = Vec::new();
     for mode in [None, Some("connected"), None, Some("connected")] {
         let request = s.request(mode, 100, "/s/b2-test/upload").await;
+        let audits = [
+            "proxy_routed_via_personal",
+            "proxy_request",
+            "service_request",
+        ]
+        .map(|event| {
+            crate::services::audit_service::notify_on_audit_write_for_user(event, &s.f.owner)
+        });
         commands.lock().unwrap().clear();
         capturing.store(true, Ordering::Relaxed);
         let (call, _) = s.start(request).await;
@@ -473,6 +481,15 @@ async fn machine_proposal_unmarked_negotiation_adds_zero_database_commands() {
         axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
+        // The response completes before its three ordinary audit appends.
+        // Include every command through their durable completion in each sample.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for audit in audits {
+                audit.await.expect("proxy audit completed");
+            }
+        })
+        .await
+        .expect("proxy audit completion watchdog");
         capturing.store(false, Ordering::Relaxed);
         let mut sample = commands.lock().unwrap().clone();
         sample.sort();
@@ -869,14 +886,43 @@ async fn machine_proposal_connected_timeout_is_terminal_and_worker_cannot_send()
         .start(s.request(Some("connected"), 25, "/s/b2-test/upload").await)
         .await;
     let row = s.proposal().await;
-    let error = tokio::time::timeout(Duration::from_secs(30), call)
-        .await
+    let deadline = row
+        .execution_proposal
+        .as_ref()
         .unwrap()
+        .v2
+        .as_ref()
+        .unwrap()
+        .waiter_until
+        .expect("connected proposal has a waiter deadline");
+    assert_eq!(row.status, "pending");
+    // The signed wait elapses before the abandonment transaction can begin.
+    let until_expiry = (deadline - chrono::Utc::now()).to_std().unwrap_or_default();
+    let error = tokio::time::timeout(until_expiry + Duration::from_secs(30), call)
+        .await
+        .expect("connected call did not settle within 30 seconds of its waiter deadline")
         .unwrap()
         .unwrap_err();
     assert!(
         matches!(error,AppError::ApprovalFailed{reason,..} if reason=="Approval request timed out")
     );
+    assert!(chrono::Utc::now() >= deadline);
+    let expired =
+        s.f.state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(expired.status, "expired");
+    let terminal = expired.execution_proposal.unwrap().v2.unwrap();
+    assert_eq!(terminal.state, "not_sent");
+    assert_eq!(
+        terminal.failure_code.as_deref(),
+        Some("approval_wait_timed_out")
+    );
+    assert!(terminal.payload.is_none());
     assert!(s.approve(&row).await.is_err());
     assert!(
         proposals::v2::execute(&s.f.state, &row)

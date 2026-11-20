@@ -47,6 +47,12 @@ fn malformed() -> AppError {
     bad("Malformed or unsupported attachment. Use PDF, DOCX, UTF-8 text, PNG, JPEG, GIF or WebP.")
 }
 
+/// PDFs can consist entirely of UTF-8 bytes; recognize their structure before
+/// treating a tool download as generic text.
+pub(crate) fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
+}
+
 /// Filename is only a hint for text dialects; every hinted structure is validated.
 fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
     if bytes.is_empty() || bytes.len() > MAX_BYTES {
@@ -77,7 +83,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             sections: vec![],
         });
     }
-    if bytes.starts_with(b"%PDF-") {
+    if is_pdf(bytes) {
         let document = lopdf::Document::load_mem(bytes).map_err(|_| malformed())?;
         if document.is_encrypted() {
             return Err(bad(
@@ -114,6 +120,9 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
         if archive.len() > 1000 {
             return Err(bad("DOCX contains too many ZIP entries."));
         }
+        archive
+            .validate_header_consistency()
+            .map_err(|_| malformed())?;
         let mut remaining = MAX_EXPANDED;
         let mut word = None;
         let mut types = None;
@@ -127,7 +136,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             if file.size() > remaining {
                 return Err(bad("DOCX exceeds the 40 MiB decompression limit."));
             }
-            let name = file.name().to_owned();
+            let name = file.name().map_err(|_| malformed())?.into_owned();
             let mut expanded = Vec::new();
             (&mut file)
                 .take(remaining + 1)

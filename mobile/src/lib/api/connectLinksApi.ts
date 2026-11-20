@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import {
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
@@ -61,9 +62,7 @@ export const connectLinksApi = {
       await requestJson(`/connect-links/${encodeURIComponent(id)}`, { signal }),
     );
     if (result.id !== id)
-      throw new Error(
-        "The server returned a different connection request. Please reload.",
-      );
+      throw localizedError("The server returned a different connection request. Please reload.");
     return result;
   },
 };

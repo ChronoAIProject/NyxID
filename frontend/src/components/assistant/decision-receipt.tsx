@@ -1,20 +1,8 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import { formatRelativeTime } from "@/lib/utils";
 import { Check, Clock, X } from "lucide-react";
-import { ACTION_RISK_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { actionRiskLabel } from "@/lib/assistant/nyxbot-labels";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
-
-function relativeTime(value: string): string {
-  const minutes = Math.max(
-    0,
-    Math.floor((Date.now() - Date.parse(value)) / 60_000),
-  );
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
-  return `${Math.floor(minutes / 1440)}d ago`;
-}
 
 /** A durable decision in the transcript, without interactive card chrome. */
 export function DecisionReceipt({
@@ -26,38 +14,40 @@ export function DecisionReceipt({
   readonly summary?: string;
   readonly retired?: boolean;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const automatic = row.decided_by === "access_mode";
   const bypass = automatic
     ? (
         {
           get webhook() { return translateUi("automation confirmation"); },
-          policy: "policy confirmation",
-          org_connection: "organization instruction",
-          delegation: "delegation confirmation",
+          get policy() { return translateUi("policy confirmation"); },
+          get org_connection() { return translateUi("organization instruction"); },
+          get delegation() { return translateUi("delegation confirmation"); },
           get approval() { return translateUi("service approval"); },
           access_mode: "",
         } as const
       )[row.confirmation?.reason ?? "access_mode"]
     : "";
-  const by = row.decided_by === "orchestrator" ? "NyxBot" : row.decided_by === "user" ? "You" : undefined;
   const label = retired
-    ? "No longer needed · Full access"
+    ? translateUi("No longer needed · Full access")
     : automatic
-    ? "Allowed automatically · Full access"
+    ? translateUi("Allowed automatically · Full access")
     : row.status === "allowed"
-      ? by ? translateUi("{{name}} allowed", { name: by }) : "Allowed"
+      ? row.decided_by === "user" ? translateUi("You allowed")
+        : row.decided_by === "orchestrator" ? translateUi("NyxBot allowed") : translateUi("Allowed")
       : row.status === "denied"
-        ? by ? translateUi("{{name}} denied", { name: by }) : "Denied"
+        ? row.decided_by === "user" ? translateUi("You denied")
+          : row.decided_by === "orchestrator" ? translateUi("NyxBot denied") : translateUi("Denied")
         : row.status === "used"
-          ? "Used"
-          : "Expired";
+          ? translateUi("Used")
+          : translateUi("Expired");
   const Glyph =
     row.status === "denied" ? X : retired || row.status === "expired" ? Clock : Check;
   const text = summary ?? row.summary;
   const time = row.decided_at ?? row.created_at;
   return (
     <p
+      lang={language}
       role="status"
       className="flex items-start gap-1.5 text-13 text-muted-foreground"
     >
@@ -71,14 +61,14 @@ export function DecisionReceipt({
             <a className="underline" href={row.link}>{translateUi("Inspect or discard proposal")}</a>
           </>
         ) : null}
-        {row.confirmation ? ` · ${ACTION_RISK_LABEL[row.confirmation.risk]}` : ""}
+        {row.confirmation ? ` · ${actionRiskLabel(row.confirmation.risk, translateUi)}` : ""}
         {row.reason?.trim() ? ` · ${row.reason}` : ""}
         <time
           dateTime={time}
-          title={new Date(time).toLocaleString(getFormattingLocale())}
+          title={new Date(time).toLocaleString(language)}
           className="text-13 text-text-tertiary"
         >
-          {" · "}{relativeTime(time)}
+          {" · "}{formatRelativeTime(time, translateUi, language)}
         </time>
       </span>
     </p>

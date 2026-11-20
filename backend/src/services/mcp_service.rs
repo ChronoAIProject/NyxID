@@ -174,6 +174,9 @@ impl McpBillingRouteContextBuilder {
 pub struct McpExecContext<'a> {
     pub(crate) execution_permission:
         Option<&'a std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
+    /// Verified direct API-key authentication, required for generic chat file
+    /// capabilities. Relay lineage can carry chat authority but grants no bytes.
+    pub attachment_owner_key: bool,
     /// Original authenticated turn fence. Credential/catalog awaits must never
     /// downgrade a live foreground request to legacy idle compatibility.
     pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
@@ -936,6 +939,14 @@ pub fn caller_service_scope<'a>(
     allow_all_services: bool,
     allowed_service_ids: &'a [String],
 ) -> ServiceScope<'a> {
+    // An org guest acts as the org itself. Its authenticated service IDs
+    // already include the live binding check and are a discovery boundary.
+    if request_access
+        .and_then(|access| access.channel())
+        .is_some_and(|channel| channel.execution().guest)
+    {
+        return ServiceScope::Allowed(allowed_service_ids);
+    }
     if let Some(owner) = bound_owner.filter(|owner| *owner != actor) {
         if let Some(access) = request_access.filter(|access| access.matches(actor, owner))
             && chat.is_some()
@@ -2984,6 +2995,25 @@ pub fn generate_tool_definitions(
     });
 
     tools.push(McpToolDefinition {
+        name: "nyx__diagnose_invocation".to_string(),
+        description: "Redeem one short-lived NyxID invocation-diagnostic handle using this exact current identity. The original tool error remains authoritative. Call at most once, except one retry when the result explicitly reports diagnostic_not_ready; never retry the failed business operation automatically."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Opaque nyx_diag_ handle returned by the immediately preceding failed NyxID invocation"
+                }
+            },
+            "required": ["handle"],
+            "additionalProperties": false
+        }),
+    });
+
+    tools.push(McpToolDefinition {
         name: "nyx__ssh_exec".to_string(),
         description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
             and exit code. The command runs on the remote machine authenticated via NyxID \
@@ -3075,6 +3105,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         "nyx__search_tools"
         | "nyx__discover_services"
         | "nyx__list_connected_services"
+        | "nyx__diagnose_invocation"
         | "nyx__wait_for_connection"
         | "nyx__ssh_list_services"
         | "nyx__oracle_pools"
@@ -3131,6 +3162,7 @@ pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
         "nyx__wait_for_connection" => "Wait for a connection",
         "nyx__discover_services" => "Discover services",
         "nyx__list_connected_services" => "List connected services",
+        "nyx__diagnose_invocation" => "Diagnose a failed invocation",
         "nyx__ssh_list_services" => "List SSH services",
         "nyx__ssh_exec" => "Run an SSH command",
         "nyx__oracle_pools" => "List oracle pools",
@@ -3453,14 +3485,14 @@ pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Valu
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RequestBodyMode {
+pub(super) enum RequestBodyMode {
     Json,
     Raw,
     Binary,
     Multipart,
 }
 
-fn request_body_mode(endpoint: &McpToolEndpoint) -> RequestBodyMode {
+pub(super) fn request_body_mode(endpoint: &McpToolEndpoint) -> RequestBodyMode {
     request_body_mode_for(
         endpoint.request_content_type.as_deref(),
         endpoint.request_body_schema.as_ref(),
@@ -3627,7 +3659,7 @@ fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
     }
 }
 
-fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
+pub(super) fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
     for candidate in REQUEST_BODY_FIELD_CANDIDATES {
         let has_collision = endpoint
             .parameters
@@ -4215,18 +4247,67 @@ impl PreparedProxyCall {
         endpoint: &McpToolEndpoint,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        self.attachment_binding.as_ref()?;
+        let binding = self.attachment_binding.as_ref()?;
         use sha2::Digest;
         let body_sha256 = hex::encode(sha2::Sha256::digest(
             self.body.as_deref().unwrap_or_default(),
         ));
-        Some(serde_json::json!({
+        let mut arguments = serde_json::json!({
             "endpoint_contract": endpoint_contract_digest(endpoint),
             "method": self.method.as_str(), "path": self.path, "query": self.query,
             "body_sha256": body_sha256,
             "content_type": self.body_content_type,
             "acknowledgement_id": args.get("acknowledgement_id"),
-        }))
+        });
+        if binding.is_raw() {
+            arguments["attachment"] = serde_json::json!(binding.display());
+            arguments["parameters"] = serde_json::json!(args.as_object().map(|args| {
+                args.iter()
+                    .filter(|(name, _)| name.as_str() != "acknowledgement_id")
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            }));
+            arguments["headers"] = serde_json::json!(self.parameter_headers);
+        }
+        Some(arguments)
+    }
+
+    pub(crate) fn attachment_policy_floor(&self) -> bool {
+        self.attachment_binding
+            .as_ref()
+            .is_some_and(super::lark_attachment_tool::Binding::is_raw)
+    }
+
+    pub(crate) fn attachment_summary(
+        &self,
+        endpoint: &McpToolEndpoint,
+        args: &serde_json::Value,
+    ) -> Option<String> {
+        let display = self.attachment_binding.as_ref()?.display()?;
+        let parameters = args
+            .as_object()
+            .filter(|args| !args.is_empty())
+            .map(|args| {
+                args.iter()
+                    .filter(|(key, _)| {
+                        key.as_str() != "acknowledgement_id" && key.as_str() != "attachment_id"
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            });
+        Some(format!(
+            "Upload {} ({} bytes) with {}. Parameters: {}",
+            display["name"],
+            display["size"],
+            endpoint.name,
+            serde_json::to_string(
+                &parameters
+                    .map(|params| serde_json::json!(params))
+                    .unwrap_or_else(|| display["parameters"].clone())
+            )
+            .unwrap_or_default()
+            .chars()
+            .take(1600)
+            .collect::<String>()
+        ))
     }
 
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
@@ -4249,6 +4330,38 @@ impl PreparedProxyCall {
         service: &McpToolService,
         endpoint: &McpToolEndpoint,
     ) -> AppResult<()> {
+        let (body, mime) = self.scope_input();
+        self.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            super::agent_operation_scope_service::InputBody::Request(body, mime),
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn scope_input(&self) -> (&[u8], Option<&str>) {
+        if let Some(json) = self
+            .attachment_binding
+            .as_ref()
+            .and_then(|b| b.scope_json())
+        {
+            (json, Some("application/json"))
+        } else {
+            (
+                self.body.as_deref().unwrap_or_default(),
+                self.body_content_type.as_deref(),
+            )
+        }
+    }
+
+    fn authorize_operation_inputs(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+        input: super::agent_operation_scope_service::InputBody<'_>,
+    ) -> AppResult<bool> {
         use super::agent_operation_scope_service as operations;
         if operations::applicable(
             scopes,
@@ -4258,7 +4371,7 @@ impl PreparedProxyCall {
         .next()
         .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let path = if self.is_generic_proxy_endpoint {
             super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
@@ -4278,7 +4391,7 @@ impl PreparedProxyCall {
             self.carries_override(true),
             false,
         )?;
-        operations::check_inputs(
+        operations::evaluate_inputs(
             scopes,
             &service.service_id,
             operations::mcp_catalog_id(service),
@@ -4286,8 +4399,7 @@ impl PreparedProxyCall {
             self.method.as_str(),
             &path,
             self.query.as_deref(),
-            self.body.as_deref().unwrap_or_default(),
-            self.body_content_type.as_deref(),
+            input,
         )
     }
 
@@ -4596,11 +4708,36 @@ pub fn prepare_chat_proxy_tool_call<'a>(
     db: &'a mongodb::Database,
     keys: &'a EncryptionKeys,
     chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    scopes: &'a crate::models::agent_operation_scope::OperationScopes,
     service: &'a McpToolService,
     endpoint: &'a McpToolEndpoint,
     args: &'a serde_json::Value,
 ) -> futures::future::BoxFuture<'a, AppResult<PreparedProxyCall>> {
     Box::pin(async move {
+        if let Some(validated) =
+            super::raw_attachment_tool::uses_handle(db, chat, service, endpoint, args).await?
+        {
+            let materialized = super::raw_attachment_tool::materialize(db, keys, validated).await?;
+            let mut route = endpoint.clone();
+            route.request_content_type = None;
+            route.request_body_schema = None;
+            route.request_body_required = false;
+            let mut route_args = args.clone();
+            route_args
+                .as_object_mut()
+                .ok_or_else(super::lark_attachment_tool::refused)?
+                .remove("attachment_id");
+            let mut prepared = prepare_proxy_tool_call_inner(service, &route, &route_args)?;
+            // The MIME bound on the card is the final outbound MIME, including
+            // when catalog or connection defaults declare another header.
+            prepared
+                .server_owned_headers
+                .push(("content-type".into(), materialized.content_type.clone()));
+            prepared.body = Some(materialized.body);
+            prepared.body_content_type = Some(materialized.content_type);
+            prepared.attachment_binding = Some(materialized.binding);
+            return Ok(prepared);
+        }
         if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
             return prepare_proxy_tool_call(service, endpoint, args);
         }
@@ -4648,10 +4785,8 @@ pub fn prepare_chat_proxy_tool_call<'a>(
             );
             return Ok(prepared);
         }
-        let materialized = Box::pin(super::lark_attachment_tool::materialize(
-            db, keys, chat, service, endpoint, args,
-        ))
-        .await?;
+        let chat =
+            super::lark_attachment_tool::require_upload_chat(db, chat, service, endpoint).await?;
         // Reuse route/policy preparation with no caller body. This private copy
         // changes only body construction; consent and identity keep the real endpoint.
         let mut route = endpoint.clone();
@@ -4659,6 +4794,31 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         route.request_body_schema = None;
         route.request_body_required = false;
         let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        use super::agent_operation_scope_service::InputBody;
+        let body_limited = prepared.authorize_operation_inputs(
+            scopes,
+            service,
+            endpoint,
+            InputBody::BeforeUpload,
+        )?;
+        let upload = super::lark_attachment_tool::UploadArguments::new(args, body_limited)?;
+        if let Some(body) = upload.scope_json() {
+            prepared.authorize_operation_inputs(
+                scopes,
+                service,
+                endpoint,
+                InputBody::Request(body, Some("application/json")),
+            )?;
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, upload,
+        ))
+        .await?;
+        if body_limited {
+            prepared
+                .server_owned_headers
+                .push(("content-type".into(), materialized.content_type.clone()));
+        }
         prepared.body = Some(materialized.body);
         prepared.body_content_type = Some(materialized.content_type);
         prepared.attachment_binding = Some(materialized.binding);
@@ -5646,9 +5806,9 @@ impl std::fmt::Debug for ToolMedia {
     }
 }
 
-/// Ordinary responses retain their existing text/media decoding. Admitted
-/// artifact results carry a private failure when bounded strict decoding fails;
-/// status and downstream provenance remain independent of body validity.
+/// Ordinary responses retain their existing text/media and strict artifact decoding.
+/// Live owner-turn binary files return short attachment metadata instead;
+/// downstream status and provenance stay independent of body validity.
 #[derive(Debug)]
 pub struct ToolResponse {
     pub resources: Option<Box<super::resource_adapter::ResourceRead>>,
@@ -5715,7 +5875,7 @@ impl ToolResponse {
 /// Only raster formats browsers render without script (never SVG).
 const TOOL_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-fn tool_image_type(content_type: Option<&str>) -> Option<&'static str> {
+pub(super) fn tool_image_type(content_type: Option<&str>) -> Option<&'static str> {
     let normalized =
         crate::services::content_type::normalize_content_type(content_type.unwrap_or_default());
     TOOL_IMAGE_TYPES
@@ -5896,6 +6056,83 @@ async fn collect_node_stream_response(
 
     Err(AppError::Internal(
         "Node stream closed before its terminal frame".to_string(),
+    ))
+}
+
+/// Re-enter reqwest's original text decoder after inspecting a candidate body.
+/// This preserves its charset/BOM behavior under the exact enabled features.
+async fn legacy_buffered_response_text(
+    headers: reqwest::header::HeaderMap,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+) -> Result<String, reqwest::Error> {
+    let mut response = http::Response::new(bytes::Bytes::from_owner(bytes));
+    *response.headers_mut() = headers;
+    reqwest::Response::from(response).text().await
+}
+
+struct NodeFileResponse {
+    received: usize,
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    reservation: Option<super::assistant_upload_service::byte_budget::ByteReservation>,
+}
+
+async fn collect_file_node_stream_response(
+    stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
+    ordinary_limit: Option<usize>,
+) -> AppResult<NodeFileResponse> {
+    use crate::services::node_ws_manager::StreamChunk;
+    let mut stream = stream.into();
+    let mut result = NodeFileResponse {
+        received: 0,
+        status: 200,
+        headers: Vec::new(),
+        body: Vec::new(),
+        reservation: None,
+    };
+    while let Some(chunk) = stream.recv().await {
+        match chunk {
+            StreamChunk::Start { status, headers } => {
+                result.status = status;
+                result.headers = headers;
+                let mime = header_value(&result.headers, "content-type").unwrap_or_default();
+                if super::assistant_tool_files::candidate(status, mime)
+                    && !header_value(&result.headers, "content-length")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some_and(|size| size > super::attachment_extraction::MAX_BYTES as u64)
+                {
+                    result.reservation = super::assistant_tool_files::reserve().await;
+                }
+            }
+            StreamChunk::Data(data) => {
+                result.received = result.received.saturating_add(data.len());
+                let take = ordinary_limit.map_or(data.len(), |n| {
+                    data.len()
+                        .min(n.saturating_add(1).saturating_sub(result.body.len()))
+                });
+                result.body.extend_from_slice(&data[..take]);
+                if result.body.len() > super::attachment_extraction::MAX_BYTES {
+                    // It may be mislabeled text. Release the file budget and
+                    // finish with exactly the ordinary node reader's behavior.
+                    result.reservation = None;
+                }
+                if ordinary_limit.is_some_and(|n| result.body.len() > n) {
+                    result.reservation = None;
+                    return Ok(result);
+                }
+            }
+            StreamChunk::End => return Ok(result),
+            StreamChunk::Error(error) => {
+                tracing::error!(%error,"Node stream failed after provider dispatch");
+                return Err(AppError::Internal(
+                    "Node stream failed after provider dispatch".into(),
+                ));
+            }
+        }
+    }
+    Err(AppError::Internal(
+        "Node stream closed before its terminal frame".into(),
     ))
 }
 
@@ -6169,7 +6406,8 @@ async fn execute_tool_resolved_inner(
             "Message image uploads require hosted MCP execution".into(),
         ));
     }
-    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+    if (super::lark_attachment_tool::is_attachment_operation(endpoint)
+        || prepared.attachment_binding.is_some())
         && prepared.managed_base.is_none()
     {
         let binding = prepared.attachment_binding.as_ref().ok_or_else(|| {
@@ -6180,6 +6418,21 @@ async fn execute_tool_resolved_inner(
         }
         if prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
             return Err(super::lark_attachment_tool::eligibility::Reason::AsyncUnsupported.error());
+        }
+        if binding.is_raw()
+            && (!exec_ctx.attachment_owner_key
+                || node_route.is_some()
+                || attested_delegated_credentials.is_some())
+        {
+            return Err(super::lark_attachment_tool::refused());
+        }
+        if binding.scope_json().is_some()
+            && proxy_service::credential_header_name(&target)
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "The credential conflicts with the scoped upload content type".into(),
+            ));
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
@@ -6256,7 +6509,14 @@ async fn execute_tool_resolved_inner(
     let assistant_chat = if let Some(chat) = exec_ctx.assistant_chat {
         Some(chat.clone())
     } else {
-        super::assistant_acknowledgement_service::for_key(db, user_id, exec_ctx.api_key_id).await?
+        super::assistant_acknowledgement_service::chat_for_key_version(
+            db,
+            user_id,
+            exec_ctx.api_key_id,
+            0,
+            None,
+        )
+        .await?
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
@@ -6290,6 +6550,16 @@ async fn execute_tool_resolved_inner(
         );
         operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
         operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+        if prepared.attachment_policy_floor()
+            && let Some(mut attachment) =
+                prepared.attachment_confirmation_arguments(endpoint, &serde_json::json!({}))
+        {
+            attachment
+                .as_object_mut()
+                .expect("attachment arguments")
+                .remove("acknowledgement_id");
+            operation["attachment_upload"] = attachment;
+        }
         if endpoint.async_operation.is_some() {
             operation["async_contract"] = serde_json::json!(
                 super::assistant_service_execution::async_contract_binding(service, endpoint)?
@@ -6317,10 +6587,20 @@ async fn execute_tool_resolved_inner(
             format!(
                 "{} {} on {}",
                 prepared.method(),
-                endpoint.name,
+                prepared
+                    .attachment_summary(endpoint, &serde_json::json!({}))
+                    .unwrap_or_else(|| endpoint.name.clone()),
                 service.service_slug
             )
         });
+        let semantic_input = if prepared.attachment_binding.is_some() {
+            prepared.scope_input()
+        } else {
+            (
+                prepared.body.as_deref().unwrap_or_default(),
+                Some("application/json"),
+            )
+        };
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6342,14 +6622,7 @@ async fn execute_tool_resolved_inner(
                 prepared.acknowledgement_id.as_deref(),
                 &summary,
                 &target,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         } else {
@@ -6371,14 +6644,7 @@ async fn execute_tool_resolved_inner(
                 false,
                 Some(&target),
                 false,
-                Some((
-                    prepared.body.as_deref().unwrap_or_default(),
-                    if prepared.attachment_binding.is_some() {
-                        prepared.body_content_type.as_deref()
-                    } else {
-                        Some("application/json")
-                    },
-                )),
+                Some(semantic_input),
             )
             .await?
         };
@@ -6410,6 +6676,16 @@ async fn execute_tool_resolved_inner(
     }
 
     target.require_credential_materialized()?;
+    let caller_bearer = Box::pin(proxy_service::admit_caller_bearer(
+        db,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+        billing_context_builder.user_service_id.as_deref(),
+        &target,
+        node_route.as_ref(),
+        exec_ctx.caller_token,
+        &prepared.server_owned_headers,
+    ))
+    .await?;
     box_mcp_forwarding(move || async move {
         if let Some(permit) = &target.execution_permission {
             let mut headers = axum::http::HeaderMap::new();
@@ -6824,6 +7100,8 @@ async fn execute_tool_resolved_inner(
             .await
             .inspect_err(|error| request_audit.admission_error(error))?;
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
+        let node_file_chat = super::assistant_tool_files::eligible(assistant_chat.as_ref())
+            .filter(|_| exec_ctx.attachment_owner_key && node_route.is_some());
 
         if let Some(base)=managed_base.as_ref() {
             return box_mcp_forwarding(|| async move {
@@ -6836,7 +7114,7 @@ async fn execute_tool_resolved_inner(
             let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
                 super::lark_base_writes::transport::Transport {
                     target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
-                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:caller_bearer,
                 }).await;
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
@@ -6889,7 +7167,7 @@ async fn execute_tool_resolved_inner(
                 base_headers,
                 &identity_headers,
                 &delegated,
-                exec_ctx.caller_token,
+                caller_bearer,
                 &server_owned_headers,
             )?;
             let node_request = NodeProxyRequest {
@@ -6912,7 +7190,10 @@ async fn execute_tool_resolved_inner(
             let mut last_error: Option<AppError> = None;
             let mut node_failure_evidence =
                 super::assistant_service_execution::NodeFailureEvidence::default();
-            for nid in &all_node_ids {
+            let mut nodes = all_node_ids.iter().peekable();
+            let mut retry = None;
+            let mut waited = false;
+            while let Some(nid) = retry.take().or_else(|| nodes.next()) {
                 let mut attempt = node_request.clone();
                 attempt.request_id = uuid::Uuid::new_v4().to_string();
 
@@ -6991,6 +7272,21 @@ async fn execute_tool_resolved_inner(
                         billing_egress_permit,
                     )
                     .await;
+                if let Err(failure) = &node_result
+                    && !failure.dispatched && !matches!(failure.error, AppError::NodeCredentialMissing(_)) {
+                    if let Some(permit) = target.execution_permission.as_ref().filter(|permit| permit.single_dispatch()) {
+                        permit.node_not_sent().await?;
+                        destination_audit.denied();
+                        billing.reject_before_send(&metered, "node_not_sent", false).await?;
+                        return Err(AppError::NodeOffline("Nothing was sent to the node".into()));
+                    }
+                    if !waited && nodes.peek().is_none() && let Some(handover) = &failure.handover
+                        && handover.wait(db, node_ws_manager, nid).await {
+                        waited = true;
+                        retry = Some(nid);
+                        continue;
+                    }
+                }
                 if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
                 match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {
@@ -7020,6 +7316,24 @@ async fn execute_tool_resolved_inner(
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
                         }
+                        // Complete replies already passed the legacy frame buffer.
+                        let mime = header_value(&resp.headers,"content-type").unwrap_or_default();
+                        if let Some(chat) = node_file_chat.filter(|_| super::assistant_tool_files::candidate(resp.status,mime)) {
+                            let reservation = if resp.body.len() <= super::attachment_extraction::MAX_BYTES
+                                && !header_value(&resp.headers,"content-length").and_then(|n|n.parse::<u64>().ok())
+                                    .is_some_and(|n| n > super::attachment_extraction::MAX_BYTES as u64) {
+                                super::assistant_tool_files::reserve().await
+                            } else { None };
+                            let text = if reservation.is_some() && !response_body_limit.is_some_and(|n| resp.body.len() > n) {
+                                let legacy_text = std::str::from_utf8(&resp.body).ok();
+                                super::assistant_tool_files::response_text(db,encryption_keys,chat,resp.status,
+                                    mime,header_value(&resp.headers,"content-disposition"),&endpoint.name,
+                                    legacy_text,&resp.body).await
+                            } else { None };
+                            if let Some(text) = text {
+                                return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(resp.status, text)));
+                            }
+                        }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             resp.status,
                             header_value(&resp.headers, "content-type"),
@@ -7029,16 +7343,18 @@ async fn execute_tool_resolved_inner(
                         )));
                     }
                     Ok(ProxyResponseType::Streaming(rx)) => {
-                        let (status, headers, body_buf, received) = match collect_node_stream_response(
-                            rx,
-                            response_body_limit,
-                        )
-                        .await
-                        {
+                        let collected = if node_file_chat.is_some() {
+                            collect_file_node_stream_response(rx, response_body_limit).await
+                        } else {
+                            collect_node_stream_response(rx, response_body_limit).await
+                                .map(|(status, headers, body, received)| NodeFileResponse {
+                                    status, headers, body, received, reservation: None,
+                                })
+                        };
+                        let NodeFileResponse { status, headers, body: body_buf, received,
+                            reservation: file_reservation } = match collected {
                             Ok(response) => response,
-                            Err(error) => {
-                                return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
-                            }
+                            Err(error) => return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error)),
                         };
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
@@ -7062,6 +7378,14 @@ async fn execute_tool_resolved_inner(
                             } else {
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
+                        }
+                        if file_reservation.is_some()
+                            && let Some(chat) = node_file_chat
+                            && let Some(text) = super::assistant_tool_files::response_text(db,encryption_keys,chat,status,
+                                header_value(&headers,"content-type").unwrap_or_default(),
+                                header_value(&headers,"content-disposition"),&endpoint.name,
+                                std::str::from_utf8(&body_buf).ok(),&body_buf).await {
+                            return Ok(McpToolExecutionOutcome::Response(ToolResponse::execution_receipt(status, text)));
                         }
                         return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             status,
@@ -7167,7 +7491,7 @@ async fn execute_tool_resolved_inner(
             proxy_service::ProxyBody::Buffered(body),
             identity_headers,
             delegated,
-            exec_ctx.caller_token,
+            caller_bearer,
             token_exchange_cache,
             cloud_response_cache,
             server_owned_headers,
@@ -7247,7 +7571,19 @@ async fn execute_tool_resolved_inner(
         if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
             admission.response(db, chat, status).await?;
         }
-        // Images are read as bytes; everything else keeps charset-aware decoding.
+        let response_mime = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
+        let disposition = response.headers().get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok()).map(str::to_owned);
+        let file_chat = super::assistant_tool_files::eligible(assistant_chat.as_ref())
+            .filter(|_| exec_ctx.attachment_owner_key && super::assistant_tool_files::candidate(status,&response_mime));
+        let mut file_reservation = if file_chat.is_some()
+            && !response.content_length().is_some_and(|size| size > super::attachment_extraction::MAX_BYTES as u64) {
+            super::assistant_tool_files::reserve().await
+        } else { None };
+        // Select candidates before reading, but retain only confirmed files.
+        // If capture cannot be budgeted, preserve the original reader exactly.
+
         let image_type = tool_image_type(
             response
                 .headers()
@@ -7273,6 +7609,69 @@ async fn execute_tool_resolved_inner(
                     ));
                 }
             }
+        } else if let Some(chat) = file_chat.filter(|_| file_reservation.is_some()) {
+            let mut response = response;
+            let headers = response.headers().clone();
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            let mut received = 0usize;
+            let result: Result<_, reqwest::Error> = async {
+                while let Some(chunk) = response.chunk().await? {
+                    received = received.saturating_add(chunk.len());
+                    let take = response_body_limit.map_or(chunk.len(), |limit| {
+                        chunk.len().min(limit.saturating_add(1).saturating_sub(bytes.len()))
+                    });
+                    bytes.extend_from_slice(&chunk[..take]);
+                    if bytes.len() > super::attachment_extraction::MAX_BYTES {
+                        file_reservation = None;
+                    }
+                    if response_body_limit.is_some_and(|limit| bytes.len() > limit) {
+                        file_reservation = None;
+                        break;
+                    }
+                }
+                if file_reservation.is_some() {
+                    let legacy_text = if std::str::from_utf8(&bytes).is_ok()
+                        && super::assistant_tool_files::is_file(status, &response_mime, disposition.as_deref(), &bytes) {
+                        // Large text remains readable from the attachment; drop
+                        // its temporary decoder allocation before encryption.
+                        Some(legacy_buffered_response_text(headers.clone(), bytes.clone()).await?)
+                            .filter(|text| text.chars().take(8_001).count() <= 8_000)
+                    } else {
+                        None
+                    };
+                    if let Some(text) = super::assistant_tool_files::response_text(
+                        db,
+                        encryption_keys,
+                        chat,
+                        status,
+                        &response_mime,
+                        disposition.as_deref(),
+                        &endpoint.name,
+                        legacy_text.as_deref(),
+                        &bytes,
+                    )
+                    .await
+                    {
+                        let usage = mcp_platform_usage_for_path(
+                            &bytes, request_len, &target.service, &path, status,
+                        );
+                        return Ok((ToolResponse::execution_receipt(status, text), Some(usage)));
+                    }
+                }
+                // Non-files keep the bounded/strict decoder and accounting,
+                // or reqwest's exact original charset/BOM decoder when unbounded.
+                let raw_usage = exec_ctx.strict_response_utf8.then(|| {
+                    mcp_artifact_usage(&bytes, received, request_len, &target.service, &path, status)
+                });
+                let response = if response_body_limit.is_some() || exec_ctx.strict_response_utf8 {
+                    owned_tool_response(status, None, std::mem::take(&mut *bytes),
+                        response_body_limit, exec_ctx.strict_response_utf8)
+                } else {
+                    ToolResponse::execution_receipt(status, legacy_buffered_response_text(headers, bytes).await?)
+                };
+                Ok((response, raw_usage))
+            }.await;
+            result
         } else if let Some(limit) = response_body_limit {
             let result: Result<_, reqwest::Error> = async {
                 let (bytes, received) = read_bounded_tool_body(response, limit).await?;
@@ -8106,6 +8505,7 @@ pub async fn connect_service_with_binding(
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    super::catalog_service::require_connection_access(db, user_id, &catalog).await?;
     let created = crate::services::unified_key_service::create_platform_key(
         db,
         user_id,
@@ -8143,6 +8543,7 @@ pub async fn connect_service(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    super::catalog_service::require_connection_access(db, user_id, &service).await?;
     let has_credential = credential.is_some_and(|value| !value.trim().is_empty());
     if !scopes.is_empty() && has_credential {
         return Err(AppError::ValidationError(
@@ -8540,6 +8941,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_retained_file_usage_counts_original_bytes_for_token_services() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::models::service_billing::ServiceBilling;
+
+        let mut service = dummy_service();
+        service.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(
+                    serde_json::json!({"metric": "tokens", "credits_per_unit": "1"}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let file = vec![b'x'; 10 * 1024 * 1024];
+        let handle = br#"{"attachment_id":"id","name":"large.bin","type":"application/octet-stream","size":10485760}"#;
+        let file_usage = mcp_platform_usage_for_path(&file, 17, &service, "/files", 200);
+        let handle_usage = mcp_platform_usage_for_path(handle, 17, &service, "/files", 200);
+        assert_eq!(file_usage.bytes, 17 + file.len() as i64);
+        assert_eq!(handle_usage.bytes, 17 + handle.len() as i64);
+        assert!(file_usage.tokens > handle_usage.tokens);
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -8702,6 +9127,7 @@ mod tests {
                     &McpExecContext {
                         strict_response_utf8: false,
                         execution_permission: None,
+                        attachment_owner_key: false,
                         assistant_chat: None,
                         response_body_limit: None,
                         actor_user_id: None,
@@ -10442,6 +10868,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
             voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
@@ -12604,8 +13031,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 8 meta-tools (6 core + 2 SSH)
-        assert_eq!(tools.len(), 8);
+        // Should only have the 9 meta-tools (7 core + 2 SSH)
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -12630,8 +13057,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 8 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 9);
+        // 9 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12655,8 +13082,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 8 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 10);
+        // 9 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -12677,6 +13104,12 @@ mod tests {
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
         let tools = generate_tool_definitions(&[], None);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.name == "nyx__diagnose_invocation"),
+            "diagnostic redemption must be available to MCP callers"
+        );
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")
@@ -15794,6 +16227,202 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn mcp_node_file_reader_preserves_unlimited_text_and_images_under_budget_pressure() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
+        use crate::services::{
+            assistant_upload_service::byte_budget, node_ws_manager::StreamChunk,
+        };
+        let budget = byte_budget::reserve(byte_budget::CAPACITY / 2)
+            .await
+            .unwrap();
+        let bytes = vec![b'x'; super::super::attachment_extraction::MAX_BYTES + 1];
+        for mime in [
+            "",
+            "text/plain",
+            "application/json",
+            "image/png",
+            "image/svg+xml",
+            "application/pdf",
+        ] {
+            let (tx, rx) = tokio::sync::mpsc::channel(3);
+            tx.send(StreamChunk::Start {
+                status: 200,
+                headers: vec![("content-type".into(), mime.into())],
+            })
+            .await
+            .unwrap();
+            tx.send(StreamChunk::Data(bytes.clone())).await.unwrap();
+            tx.send(StreamChunk::End).await.unwrap();
+            drop(tx);
+            let response = collect_file_node_stream_response(rx, None).await.unwrap();
+            assert!(response.reservation.is_none());
+            assert_eq!(response.body, bytes);
+        }
+        drop(budget);
+        let (tx, rx) = tokio::sync::mpsc::channel(3);
+        tx.send(StreamChunk::Start {
+            status: 200,
+            headers: vec![("content-type".into(), "application/pdf".into())],
+        })
+        .await
+        .unwrap();
+        tx.send(StreamChunk::Data(bytes)).await.unwrap();
+        tx.send(StreamChunk::End).await.unwrap();
+        drop(tx);
+        let response = collect_file_node_stream_response(rx, None).await.unwrap();
+        assert!(response.reservation.is_none());
+        assert_eq!(
+            response.body.len(),
+            super::super::attachment_extraction::MAX_BYTES + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_node_file_reader_preserves_legacy_text_decoding_and_content_disposition() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
+        use crate::services::{
+            assistant_tool_files as files, assistant_upload_service::byte_budget,
+            node_ws_manager::StreamChunk,
+        };
+        for budget_full in [false, true] {
+            let budget = if budget_full {
+                Some(
+                    byte_budget::reserve(byte_budget::CAPACITY / 2)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            for (mime, bytes) in [
+                ("application/x-amz-json-1.0", b"{\"data\":true}".as_slice()),
+                ("application/x-amz-json-1.1", b"{\"data\":true}".as_slice()),
+                ("application/jwt", b"e30.e30.signature".as_slice()),
+                ("application/x-javascript", b"alert(1);".as_slice()),
+                ("application/octet-stream", b"{\"data\":true}".as_slice()),
+                ("application/octet-stream", b"\xef\xbb\xbfhello".as_slice()),
+                (
+                    "application/octet-stream; charset=windows-1252",
+                    b"caf\xe9".as_slice(),
+                ),
+                (
+                    "application/octet-stream; charset=utf-16le",
+                    b"\xff\xfeh\0i\0".as_slice(),
+                ),
+            ] {
+                for disposition in [
+                    None,
+                    Some("attachment"),
+                    Some("inline; filename=message.json"),
+                ] {
+                    let mut headers = vec![("content-type".into(), mime.into())];
+                    if let Some(disposition) = disposition {
+                        headers.push(("content-disposition".into(), disposition.into()));
+                    }
+                    let (tx, rx) = tokio::sync::mpsc::channel(4);
+                    tx.send(StreamChunk::Start {
+                        status: 200,
+                        headers,
+                    })
+                    .await
+                    .unwrap();
+                    tx.send(StreamChunk::Data(bytes[..2].to_vec()))
+                        .await
+                        .unwrap();
+                    tx.send(StreamChunk::Data(bytes[2..].to_vec()))
+                        .await
+                        .unwrap();
+                    tx.send(StreamChunk::End).await.unwrap();
+                    drop(tx);
+                    let result = collect_file_node_stream_response(rx, None).await.unwrap();
+                    assert_eq!(result.body, bytes);
+                    if budget_full {
+                        assert!(result.reservation.is_none());
+                    }
+                    if result.reservation.is_none()
+                        || !files::is_file(result.status, mime, disposition, &result.body)
+                    {
+                        let before = tool_response(200, Some(mime), bytes);
+                        let after = tool_response(
+                            result.status,
+                            header_value(&result.headers, "content-type"),
+                            &result.body,
+                        );
+                        assert_eq!(before.text, after.text);
+                        assert_eq!(after.text, String::from_utf8_lossy(bytes));
+                    } else {
+                        assert!(disposition.is_some() || std::str::from_utf8(bytes).is_err());
+                    }
+                }
+            }
+            drop(budget);
+        }
+        // Unknown-length candidate: cross the capture limit, then keep reading
+        // additional frames just like the old unlimited text reader.
+        let bytes = vec![b'x'; super::super::attachment_extraction::MAX_BYTES + 1];
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(StreamChunk::Start {
+            status: 200,
+            headers: vec![("content-type".into(), "application/octet-stream".into())],
+        })
+        .await
+        .unwrap();
+        tx.send(StreamChunk::Data(bytes.clone())).await.unwrap();
+        tx.send(StreamChunk::Data(b"tail".to_vec())).await.unwrap();
+        tx.send(StreamChunk::End).await.unwrap();
+        drop(tx);
+        let result = collect_file_node_stream_response(rx, None).await.unwrap();
+        assert!(result.reservation.is_none());
+        assert_eq!(&result.body[..bytes.len()], bytes);
+        assert_eq!(&result.body[bytes.len()..], b"tail");
+    }
+
+    #[tokio::test]
+    async fn mcp_node_file_collector_keeps_main_received_accounting_and_strict_limits() {
+        let _budget_guard = super::super::assistant_upload_service::byte_budget::test_guard().await;
+        use crate::services::node_ws_manager::StreamChunk;
+        for limit in [None, Some(4), Some(100)] {
+            for mime in ["application/octet-stream", "text/plain"] {
+                let mut outputs = Vec::new();
+                for files in [false, true] {
+                    let (tx, rx) = tokio::sync::mpsc::channel(4);
+                    tx.send(StreamChunk::Start {
+                        status: 200,
+                        headers: vec![("content-type".into(), mime.into())],
+                    })
+                    .await
+                    .unwrap();
+                    tx.send(StreamChunk::Data(
+                        [b"    ".as_slice(), "€".as_bytes(), &[b'x'; 57]].concat(),
+                    ))
+                    .await
+                    .unwrap();
+                    tx.send(StreamChunk::Data(b"tail".to_vec())).await.unwrap();
+                    tx.send(StreamChunk::End).await.unwrap();
+                    drop(tx);
+                    let (status, headers, body, received) = if files {
+                        let result = collect_file_node_stream_response(rx, limit).await.unwrap();
+                        (result.status, result.headers, result.body, result.received)
+                    } else {
+                        collect_node_stream_response(rx, limit).await.unwrap()
+                    };
+                    let response = owned_tool_response(
+                        status,
+                        header_value(&headers, "content-type"),
+                        body.clone(),
+                        limit,
+                        true,
+                    );
+                    outputs.push((body, received, response.text, response.body_error));
+                }
+                assert_eq!(outputs[0], outputs[1]);
+            }
+        }
+    }
+
     mod public_tools {
         use crate::models::downstream_service::{
             AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -15839,6 +16468,7 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,

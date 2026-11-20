@@ -7,7 +7,7 @@ use mongodb::{
 use serde_json::json;
 
 use super::{
-    assistant_nyxagent::TurnError,
+    assistant_nyxagent::{TurnError, WorkerFence},
     audit_service::{self, AuditActor},
 };
 use crate::{
@@ -46,6 +46,10 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (accepted - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        continued_after_restart: turn
+            .restart_admission
+            .as_ref()
+            .is_some_and(|source| source.continued_after_restart),
         voice_link_publication: None,
         links_in_chat: None,
         artifact_recovery_target: None,
@@ -59,15 +63,64 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
     }
 }
 
-pub async fn attempt(db: &Database, row: &AssistantConversation) -> AppResult<u32> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
-    let saved = db.collection::<bson::Document>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": {"$ne": true}},
-            doc! {"$inc": {"active_turn.engine_attempts": 1}},
-        )
+pub async fn attempt(
+    db: &Database,
+    row: &AssistantConversation,
+    request_key: &str,
+    capacity_deadline: DateTime<Utc>,
+    input: Option<bson::Binary>,
+) -> AppResult<u32> {
+    let mut update = doc! {"$inc": {"active_turn.engine_attempts": 1}};
+    let mut filter =
+        WorkerFence::matching(row, doc! {"active_turn.stop_requested": {"$ne": true}})?;
+    let mut enrolled = false;
+    if let Some(turn) = &row.active_turn
+        && let Some(admission) = &turn.restart_admission
+        && let Some(deployment) = &admission.reattach
+    {
+        let window = crate::models::assistant_conversation::ReattachWindow {
+            refusal: None,
+            accepted: false,
+            next_continuation: None,
+            input,
+            key: request_key.to_owned(),
+            terminal: false,
+            capacity_deadline,
+            absence_retry_before: super::assistant_turn_restart::absence_retry_before(
+                turn.started_at,
+                Utc::now(),
+                deployment.limits.absence_retention_seconds,
+            ),
+        };
+        filter.insert("credential_api_key_id", &admission.credential_id);
+        filter.insert(
+            "$or",
+            vec![
+                doc! {"active_turn.restart_admission.window": bson::Bson::Null},
+                doc! {"active_turn.restart_admission.window.key": request_key,
+                "active_turn.restart_admission.window.accepted": {"$ne":true},
+                "active_turn.restart_admission.window.terminal": {"$ne":true}},
+                doc! {"active_turn.restart_admission.window.key": {"$ne":request_key},
+                "active_turn.restart_admission.window.terminal": true},
+            ],
+        );
+        filter.insert(
+            "active_turn.restart_admission.credential_ended",
+            doc! {"$ne":true},
+        );
+        update.insert("$set", doc! {"active_turn.restart_admission.window": bson::to_bson(&window)
+            .map_err(|_| crate::errors::AppError::Internal("Cannot encode assistant request window".into()))?});
+        enrolled = true;
+    }
+    let collection = db.collection::<bson::Document>(COLLECTION_NAME);
+    let mut command = collection
+        .find_one_and_update(filter, update)
         .return_document(mongodb::options::ReturnDocument::After)
-        .projection(doc! {"active_turn.engine_attempts": 1})
+        .projection(doc! {"active_turn.engine_attempts": 1});
+    if enrolled {
+        command = command.write_concern(mongodb::options::WriteConcern::majority());
+    }
+    let saved = command
         .await?
         .ok_or_else(|| crate::errors::AppError::Conflict("Assistant turn ended".into()))?;
     Ok(saved
@@ -96,17 +149,29 @@ pub fn accepted<'a>(
         let accepted_at = bson::DateTime::now();
         // The common acceptance path needs no audit or transaction. Read the
         // persisted wait flag: the executor's conversation snapshot is stale.
-        let accepted = doc! {"$set": {
+        let mut accepted = doc! {"$set": {
             "active_turn.waiting_for_capacity": false,
             "active_turn.capacity_accepted_at": {"$ifNull": ["$active_turn.capacity_accepted_at", accepted_at]},
             "active_turn.capacity_wait_note_origin": bson::Bson::Null,
         }};
+        if row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.restart_admission.is_some())
+        {
+            accepted
+                .get_document_mut("$set")
+                .expect("acceptance fields")
+                .insert("active_turn.restart_admission.window.accepted", true);
+        }
         if db
             .collection::<bson::Document>(COLLECTION_NAME)
             .update_one(
-                doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn_id,
-                "$or": [{"active_turn.capacity_wait_started_at": bson::Bson::Null},
+                WorkerFence::matching(
+                    row,
+                    doc! {"$or": [{"active_turn.capacity_wait_started_at": bson::Bson::Null},
                     {"active_turn.waiting_for_capacity": {"$ne": true}}]},
+                )?,
                 vec![accepted.clone()],
             )
             .await?
@@ -122,8 +187,7 @@ pub fn accepted<'a>(
         let result: AppResult<()> = async {
             let Some(saved) = db.collection::<AssistantConversation>(COLLECTION_NAME)
                 .find_one_and_update(
-                    doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn_id,
-                        "active_turn.waiting_for_capacity": true, "active_turn.capacity_wait_started_at": {"$ne": bson::Bson::Null}},
+                    WorkerFence::matching(&row, doc! {"active_turn.waiting_for_capacity": true, "active_turn.capacity_wait_started_at": {"$ne": bson::Bson::Null}})?,
                     vec![doc! {"$set": {"active_turn.capacity_wait_ms": {"$add": [
                         {"$ifNull": ["$active_turn.capacity_wait_ms", 0]},
                         {"$max": [0, {"$subtract": [accepted_at, "$active_turn.capacity_wait_started_at"]}]},
@@ -264,9 +328,8 @@ pub async fn request_started(
     started: DateTime<Utc>,
     deadline: DateTime<Utc>,
 ) -> AppResult<()> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
     db.collection::<bson::Document>(COLLECTION_NAME).update_one(
-        doc! {"_id": &row.id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": {"$ne": true}},
+        WorkerFence::matching(row, doc! {"active_turn.stop_requested": {"$ne": true}})?,
         vec![
             doc! {"$set": {
                 "active_turn.engine_request_started_at": {"$ifNull": ["$active_turn.engine_request_started_at", bson::DateTime::from_chrono(started)]},
@@ -285,14 +348,12 @@ pub async fn acknowledge(
     row: &AssistantConversation,
     now: DateTime<Utc>,
 ) -> AppResult<Option<ActiveTurn>> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
     Ok(db.collection::<AssistantConversation>(COLLECTION_NAME).find_one_and_update(
-        doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id,
-            "active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
+        WorkerFence::matching(row, doc! {"active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
             "active_turn.capacity_accepted_at": bson::Bson::Null, "active_turn.stop_requested": {"$ne": true},
             "active_turn.engine_request_started_at": {"$lte": bson::DateTime::from_chrono(now - chrono::Duration::from_std(policy::ACK_DELAY).expect("bounded acknowledgement delay"))},
             "active_turn.capacity_wait_deadline": {"$gt": bson::DateTime::from_chrono(now)},
-        },
+        })?,
         doc! {"$set": {"active_turn.capacity_wait_note_origin": "nyxid_system"}},
     ).return_document(mongodb::options::ReturnDocument::After).await?.and_then(|row| row.active_turn))
 }
@@ -302,15 +363,13 @@ pub async fn claim_notice(
     row: &AssistantConversation,
     now: DateTime<Utc>,
 ) -> AppResult<bool> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
     Ok(db.collection::<AssistantConversation>(COLLECTION_NAME).update_one(
-        doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id,
-            "active_turn.capacity_wait_note_origin": "nyxid_system", "active_turn.stop_requested": {"$ne": true},
+        WorkerFence::matching(row, doc! {"active_turn.capacity_wait_note_origin": "nyxid_system", "active_turn.stop_requested": {"$ne": true},
             "active_turn.capacity_accepted_at": bson::Bson::Null,
             "active_turn.origin": {"$ne": "trigger"}, "active_turn.trigger_run_id": bson::Bson::Null,
             "active_turn.engine_request_started_at": {"$lte": bson::DateTime::from_chrono(now - chrono::Duration::from_std(policy::ACK_DELAY).expect("bounded acknowledgement delay"))},
             "active_turn.capacity_notice_claimed": {"$ne": true},
-            "active_turn.checking_notice_claimed": {"$ne": true}},
+            "active_turn.checking_notice_claimed": {"$ne": true}})?,
         doc! {"$set": {"active_turn.capacity_notice_claimed": true}},
     ).await?.modified_count == 1)
 }
@@ -347,10 +406,16 @@ pub fn capacity_message(wait_ms: Option<u64>) -> String {
 pub async fn first_output(db: &Database, row: &AssistantConversation) -> AppResult<()> {
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let elapsed = (Utc::now() - turn.started_at).num_milliseconds().max(0);
-    let saved = db.collection::<bson::Document>(COLLECTION_NAME).update_one(
-        doc! {"_id":&row.id,"active_turn.turn_id":&turn.turn_id,"active_turn.timing.first_output_ms":bson::Bson::Null},
-        doc! {"$set":{"active_turn.timing.first_output_ms":elapsed}},
-    ).await?;
+    let saved = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            WorkerFence::matching(
+                row,
+                doc! {"active_turn.timing.first_output_ms":bson::Bson::Null},
+            )?,
+            doc! {"$set":{"active_turn.timing.first_output_ms":elapsed}},
+        )
+        .await?;
     if saved.modified_count == 1 {
         crate::turn_trace::milestone(
             &turn.turn_id,

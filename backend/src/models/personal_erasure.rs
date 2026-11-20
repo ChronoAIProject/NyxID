@@ -34,6 +34,9 @@ pub struct DomainCheckpoint {
     /// Consecutive failed adapter passes; normal durable progress resets it.
     #[serde(default)]
     pub consecutive_failures: u32,
+    /// Server time at the start of a continuous remote-cleanup wait.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub remote_wait_started_at: Option<DateTime<Utc>>,
     pub domain: String,
     pub status: DomainStatus,
     /// Finite service-owned reason code, never a provider response/error body.
@@ -54,6 +57,11 @@ pub struct PersonalErasureJob {
     pub owner_deletion_policy: Option<String>,
     pub status: ErasureStatus,
     pub inventory_version: u32,
+    /// Revision that actually completed local cleanup. Old replicas omit this
+    /// field; both in-flight and completed jobs then rerun the bounded local
+    /// pass before advancing or stamping the current revision.
+    #[serde(default)]
+    pub local_inventory_revision: u32,
     pub domains: Vec<DomainCheckpoint>,
     pub lease_token: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

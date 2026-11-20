@@ -679,6 +679,52 @@ pub async fn get_message(db: &mongodb::Database, message_id: &str) -> AppResult<
         .ok_or_else(|| AppError::NotFound(format!("Message not found: {message_id}")))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct StoredRelaySender {
+    pub sender_platform_id: String,
+    pub sender_display_name: Option<String>,
+}
+
+/// Resolve the sender recorded at ingress for this direct channel and signed callback.
+pub(crate) async fn direct_callback_sender(
+    db: &mongodb::Database,
+    channel: &crate::models::nyxbot_channel::NyxbotChannel,
+    claims: &crate::crypto::jwt::RelayCallbackClaims,
+    payload: &serde_json::Value,
+) -> AppResult<Option<StoredRelaySender>> {
+    let (Some(route), Some(chat), Some(sender)) = (
+        channel.route_id.as_deref(),
+        payload["conversation"]["platform_id"].as_str(),
+        payload["sender"]["platform_id"].as_str(),
+    ) else {
+        return Ok(None);
+    };
+    if payload["conversation"]["id"] != route
+        || super::channel_platform::canonical_platform(&claims.platform)
+            != super::channel_platform::canonical_platform(&channel.platform)
+    {
+        return Ok(None);
+    }
+    let collection = if payload["activity"]["reply_supported"] == false {
+        crate::models::channel_activity::NOTIFICATIONS_COLLECTION
+    } else {
+        COLLECTION_NAME
+    };
+    let filter = doc! {
+        "_id": &claims.message_id, "direction": "inbound", "platform": &claims.platform,
+        "channel_bot_id": &channel.channel_bot_id,
+        "user_id": channel.bot_owner_id.as_deref().unwrap_or(&channel.user_id),
+        "agent_api_key_id": &channel.route_api_key_id, "conversation_id": route,
+        "platform_conversation_id": chat, "sender_platform_id": sender,
+        "thread_id": payload["thread_id"].as_str(),
+    };
+    Ok(db
+        .collection::<StoredRelaySender>(collection)
+        .find_one(filter)
+        .projection(doc! {"_id": 0, "sender_platform_id": 1, "sender_display_name": 1})
+        .await?)
+}
+
 /// Resolve the outbound row an agent API key may edit: rows the key sent.
 ///
 /// Platform message IDs are not globally unique (Telegram numbers messages
@@ -1814,6 +1860,7 @@ mod tests {
         // Only fields touched by forward_to_agent matter. The rest are
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
+            crash_reporting: Default::default(),
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             port: 0,
@@ -1897,6 +1944,7 @@ mod tests {
             android_app_package: None,
             android_app_sha256_cert_fingerprints: Vec::new(),
             mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,

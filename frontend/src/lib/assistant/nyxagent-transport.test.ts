@@ -191,6 +191,27 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("shows one restart notice after reconnecting to a running or settled reply", async () => {
+    const page = history();
+    const answer = page.messages.pop()!;
+    page.conversation.active_turn = {
+      turn_id: answer.turn_id, started_at: start, activities: [], attachments: [], continued_after_restart: true,
+    };
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    for (const settled of [false, false, true]) {
+      if (settled) {
+        page.conversation.active_turn = null;
+        page.messages.push({ ...answer, continued_after_restart: true });
+      }
+      const transport = new NyxAgentTransport();
+      await transport.history(id);
+      const session = transport.session(id);
+      const view = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+      expect(screen.getAllByText("Continued after a restart.")).toHaveLength(1);
+      view.unmount();
+    }
+  });
+
   it("renders a shielded voice link publication as a completed message without pending UI", async () => {
     const page = history();
     const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
@@ -2157,6 +2178,7 @@ it.each([
   ["model_org_approval_required", "organization requires approval"],
   ["plan_entitlement_required", "Check your plan"],
   ["model_interrupted", "Some actions may already have completed"],
+  ["credential_revoked", "Review completed actions before retrying"],
   ["model_unavailable", "Choose another model"],
 ])("provides specific remedy copy for %s", (code, copy) => expect(storedError(code)).toContain(copy));
 

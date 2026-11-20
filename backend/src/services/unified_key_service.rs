@@ -1027,10 +1027,9 @@ async fn create_key_inner(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
-        if crate::services::retired_service_service::is_retired(&svc) {
-            return Err(AppError::NotFound(format!(
-                "Catalog service '{slug}' not found"
-            )));
+        super::catalog_service::require_connection_access(db, user_id, &svc).await?;
+        if user_id != actor_user_id {
+            super::catalog_service::require_connection_access(db, actor_user_id, &svc).await?;
         }
 
         if matches!(
@@ -1414,21 +1413,6 @@ async fn create_key_inner(
             }
         };
 
-        // Auto-sync NodeServiceBinding for the catalog service. The binding
-        // is owned by the org (when target_org_id is set), but the node is
-        // owned by the actor making the request -- pass both so the node
-        // permission check uses the actor while the binding row is created
-        // under the org.
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            Some(&svc.id),
-            node_id,
-            None,
-        )
-        .await?;
-
         let (
             ssh_host,
             ssh_port,
@@ -1537,6 +1521,7 @@ async fn create_key_inner(
             requires_user_credential: false,
             is_active: true,
             created_by: user_id.to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -1660,19 +1645,6 @@ async fn create_key_inner(
                 Err(error) => return Err(error),
             }
         };
-
-        // Auto-sync NodeServiceBinding for the custom SSH service. See
-        // comment in the catalog branch above for why both user_id and
-        // actor_user_id are passed.
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            Some(&ds_id),
-            node_id,
-            None,
-        )
-        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -1826,17 +1798,6 @@ async fn create_key_inner(
                 Err(error) => return Err(error),
             }
         };
-
-        // Auto-sync NodeServiceBinding (no-op for custom HTTP without catalog_service_id).
-        node_service::sync_node_binding_for_user_service(
-            db,
-            user_id,
-            actor_user_id,
-            None,
-            node_id,
-            None,
-        )
-        .await?;
 
         Ok(CreateKeyResult {
             endpoint,
@@ -3655,6 +3616,30 @@ pub async fn disconnect_credentials_with_expected_siblings(
     options: DisconnectOptions,
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectResult> {
+    disconnect_credentials_with_audit(
+        db,
+        encryption_keys,
+        owner_id,
+        actor,
+        target,
+        options,
+        expected_siblings,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn disconnect_credentials_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    actor: &AuditActor,
+    target: DisconnectTarget<'_>,
+    options: DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
+    audit: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<DisconnectResult> {
     options.validate()?;
     let plan = build_disconnect_plan(
         db,
@@ -3681,10 +3666,13 @@ pub async fn disconnect_credentials_with_expected_siblings(
         .await?;
     }
 
-    for service in &plan.services {
-        user_service_service::deactivate_user_service(db, owner_id, &actor.user_id, &service.id)
-            .await?;
-    }
+    user_service_service::deactivate_user_services(
+        db,
+        owner_id,
+        &actor.user_id,
+        &excluded_service_ids,
+    )
+    .await?;
 
     let grant_effect_id = (plan.scope == oauth_revocation::RevocationScope::Grant)
         .then(|| uuid::Uuid::new_v4().to_string());
@@ -3692,6 +3680,7 @@ pub async fn disconnect_credentials_with_expected_siblings(
         db,
         keys: encryption_keys,
         owner: owner_id,
+        audit: plan.initiating_provider_token_id.as_deref().zip(audit),
         provider: plan.provider.as_ref(),
         scope: plan.scope,
         actor,
@@ -3775,7 +3764,7 @@ pub async fn disconnect_credentials_with_expected_siblings(
         })
         && let Some(provider_id) = initiating_key.provider_config_id.as_deref()
         && let Some(token) =
-            find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?
+            find_legacy_provider_token_if_last_key(db, owner_id, provider_id, None).await?
         && let Some((claimed, effect)) =
             claim_disconnect_source(&claim_context, USER_PROVIDER_TOKENS, &token.id, None).await?
     {
@@ -3814,18 +3803,6 @@ pub async fn disconnect_credentials_with_expected_siblings(
             .await?;
         }
     }
-    for service in &plan.services {
-        node_service::sync_node_binding_for_user_service(
-            db,
-            owner_id,
-            &actor.user_id,
-            service.catalog_service_id.as_deref(),
-            None,
-            service.node_id.as_deref(),
-        )
-        .await?;
-    }
-
     let deleted_services: Vec<DeletedKeyEvent> = plan
         .services
         .iter()
@@ -4292,41 +4269,33 @@ async fn find_legacy_provider_token_if_last_key(
     db: &mongodb::Database,
     owner_id: &str,
     provider_id: &str,
+    mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Option<UserProviderToken>> {
-    let remaining = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
-        .count_documents(doc! {
-            "user_id": owner_id,
-            "provider_config_id": provider_id,
-            "connection_id": null,
-            "status": { "$nin": ["revoked", "failed"] },
-            "credential_type": { "$ne": "node_managed" },
-        })
-        .await?;
+    let keys = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS);
+    let count = keys.count_documents(doc! {
+        "user_id": owner_id,
+        "provider_config_id": provider_id,
+        "connection_id": null,
+        "status": { "$nin": ["revoked", "failed"] },
+        "credential_type": { "$ne": "node_managed" },
+    });
+    let remaining = match session.as_deref_mut() {
+        Some(tx) => count.session(tx).await?,
+        None => count.await?,
+    };
     if remaining > 0 {
         return Ok(None);
     }
-    let token = db
-        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-        .find_one(doc! {
-            "user_id": owner_id,
-            "provider_config_id": provider_id,
-            "status": { "$ne": "revoked" },
-        })
-        .await?;
-    Ok(token)
-}
-
-async fn claim_legacy_provider_token_if_last_key(
-    db: &mongodb::Database,
-    owner_id: &str,
-    provider_id: &str,
-) -> AppResult<Option<UserProviderToken>> {
-    match find_legacy_provider_token_if_last_key(db, owner_id, provider_id).await? {
-        Some(token) => {
-            user_token_service::claim_provider_token_by_id(db, owner_id, &token.id).await
-        }
-        None => Ok(None),
-    }
+    let tokens = db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS);
+    let find = tokens.find_one(doc! {
+        "user_id": owner_id,
+        "provider_config_id": provider_id,
+        "status": { "$ne": "revoked" },
+    });
+    Ok(match session {
+        Some(tx) => find.session(tx).await?,
+        None => find.await?,
+    })
 }
 
 /// Authenticate outside the retry transaction; exact BSON CAS makes the
@@ -4341,6 +4310,10 @@ struct DisconnectClaim<'a> {
     cascade_record_count: usize,
     grant_effect_id: Option<&'a str>,
     remote_key_id: Option<&'a str>,
+    audit: Option<(
+        &'a str,
+        &'a crate::models::security_effect_intent::SecurityEffectIntent,
+    )>,
 }
 async fn claim_disconnect_source(
     context: &DisconnectClaim<'_>,
@@ -4358,6 +4331,7 @@ async fn claim_disconnect_source(
         cascade_record_count,
         grant_effect_id,
         remote_key_id,
+        audit,
     } = *context;
     let collection = match collection {
         USER_API_KEYS => USER_API_KEYS,
@@ -4468,34 +4442,15 @@ async fn claim_disconnect_source(
     } else {
         None
     };
-    let context = (db, collection, &raw, &effect);
+    let audit = audit
+        .filter(|(target, _)| collection == USER_PROVIDER_TOKENS && *target == id)
+        .map(|(_, audit)| audit);
+    let context = (db, collection, &raw, &effect, audit);
     let result = super::service_history::transaction::run_send(db, &context, |tx, context| {
-        let &(db, collection, raw, effect) = context;
-        Box::pin(async move {
-            let filter = doc! {"_id":raw.get("_id").cloned().unwrap_or(bson::Bson::Null),
-                "$expr":{"$eq":["$$ROOT",{"$literal":raw}]}};
-            let claimed = if collection == USER_API_KEYS {
-                super::service_history::collection::<bson::Document>(db, collection)
-                    .find_one_and_delete(filter).session(tx).await?
-            } else {
-                db.collection::<bson::Document>(collection).find_one_and_update(filter, vec![doc! {"$set":{
-                    "status":"revoked","api_key_encrypted":bson::Bson::Null,
-                    "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
-                    "secret_context_versions":{"$literal":{}},"updated_at":"$$NOW",
-                    "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
-                }}]).return_document(mongodb::options::ReturnDocument::Before).session(&mut **tx).await?
-            };
-            if claimed.is_none() {
-                return Err(super::api_key_mutation_service::abort_transaction(AppError::Conflict("Disconnect credential changed before removal".into())));
-            }
-            if let Some(effect) = effect {
-                db.collection::<bson::Document>(super::personal_erasure_service::provider::EFFECTS)
-                    .update_one(doc! {"_id":effect.get("_id").cloned()}, doc! {"$setOnInsert":effect})
-                    .upsert(true).session(&mut **tx).await?;
-            }
-            Ok(claimed)
-        })
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+        Box::pin(claim_disconnect_in_session(tx, context))
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(result.map(|row| {
         (
             row,
@@ -4505,6 +4460,57 @@ async fn claim_disconnect_source(
                 .map(str::to_owned),
         )
     }))
+}
+
+type DisconnectSource<'a> = (
+    &'a mongodb::Database,
+    &'a str,
+    &'a bson::Document,
+    &'a Option<bson::Document>,
+    Option<&'a crate::models::security_effect_intent::SecurityEffectIntent>,
+);
+async fn claim_disconnect_in_session(
+    tx: &mut super::service_history::transaction::Transaction,
+    context: &DisconnectSource<'_>,
+) -> mongodb::error::Result<Option<bson::Document>> {
+    let &(db, collection, raw, effect, audit) = context;
+    let filter = doc! {"_id":raw.get("_id").cloned().unwrap_or(bson::Bson::Null),
+    "$expr":{"$eq":["$$ROOT",{"$literal":raw}]}};
+    let claimed = if collection == USER_API_KEYS {
+        super::service_history::collection::<bson::Document>(db, collection)
+            .find_one_and_delete(filter)
+            .session(tx)
+            .await?
+    } else {
+        db.collection::<bson::Document>(collection).find_one_and_update(filter, vec![doc! {"$set":{
+                    "status":"revoked","api_key_encrypted":bson::Bson::Null,
+                    "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
+                    "secret_context_versions":{"$literal":{}},"updated_at":"$$NOW",
+                    "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
+                }}]).return_document(mongodb::options::ReturnDocument::Before).session(&mut **tx).await?
+    };
+    if claimed.is_none() {
+        return Err(super::api_key_mutation_service::abort_transaction(
+            AppError::Conflict("Disconnect credential changed before removal".into()),
+        ));
+    }
+    if let Some(effect) = effect {
+        db.collection::<bson::Document>(super::personal_erasure_service::provider::EFFECTS)
+            .update_one(
+                doc! {"_id":effect.get("_id").cloned()},
+                doc! {"$setOnInsert":effect},
+            )
+            .upsert(true)
+            .session(&mut **tx)
+            .await?;
+    }
+    if let Some(audit) = audit {
+        super::api_key_mutation_service::transaction_result(
+            super::security_effect_service::enqueue_in_session(db, tx, std::slice::from_ref(audit))
+                .await,
+        )?;
+    }
+    Ok(claimed)
 }
 
 enum RemoteCredentialSource<'a> {
@@ -4919,36 +4925,50 @@ pub async fn revoke_key_if_pending(
     let Some(api_key) = user_api_key_service::find_api_key(db, user_id, ak_id).await? else {
         return Ok(false);
     };
-    let api_key_provider_config_id = api_key.provider_config_id;
-
-    // Atomic gate: flips pending_auth -> revoked in one write. If
-    // the provider callback already flipped to `active`, the filter
-    // misses and we report `false` without touching anything else.
-    let flipped = user_api_key_service::revoke_api_key_if_pending(db, user_id, ak_id).await?;
+    if api_key.status != "pending_auth" {
+        return Ok(false);
+    }
+    let mut edit =
+        user_service_service::prepare_service_deactivation(db, user_id, actor_user_id, service_id)
+            .await?;
+    edit.require_api_key(ak_id);
+    let context = (db, user_id, ak_id, edit);
+    let flipped = super::service_history::transaction::run_send(
+        db,
+        &context,
+        |tx, &(db, user_id, ak_id, ref edit)| {
+            Box::pin(async move {
+                let claim = async {
+                    let Some(key) =
+                        user_api_key_service::claim_api_key_if_pending(db, user_id, ak_id, tx)
+                            .await?
+                    else {
+                        return Ok(false);
+                    };
+                    if let Some(provider) = key.provider_config_id.as_deref()
+                        && let Some(token) =
+                            find_legacy_provider_token_if_last_key(db, user_id, provider, Some(tx))
+                                .await?
+                    {
+                        user_token_service::claim_provider_token_in_session(
+                            db, user_id, &token.id, None, tx,
+                        )
+                        .await?;
+                    }
+                    edit.deactivate_in_transaction(db, tx).await?;
+                    Ok(true)
+                }
+                .await;
+                super::api_key_mutation_service::transaction_result(claim)
+            })
+        },
+    )
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)?;
     if !flipped {
         return Ok(false);
     }
-    if let Some(provider_id) = api_key_provider_config_id.as_deref() {
-        // Pending cleanup remains local-only. Claiming the legacy token here
-        // preserves the previous last-copy cleanup without scheduling remote
-        // work, while retaining the exact-row claim semantics.
-        let _ = claim_legacy_provider_token_if_last_key(db, user_id, provider_id).await?;
-    }
-
-    // API key was in pending_auth and is now revoked (by the atomic
-    // status-filter update above). Tear down the owning UserService
-    // and any node binding to keep the records consistent.
-    user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
-    node_service::sync_node_binding_for_user_service(
-        db,
-        user_id,
-        actor_user_id,
-        svc.catalog_service_id.as_deref(),
-        None,
-        svc.node_id.as_deref(),
-    )
-    .await?;
-
+    user_service_service::cleanup_deactivated_service(db, user_id, service_id).await?;
     Ok(true)
 }
 
@@ -5611,6 +5631,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -6131,6 +6152,129 @@ mod tests {
         .expect("user B lookup by backing downstream_service should exist");
         assert_eq!(owner_service_a.slug, "shared-label");
         assert_eq!(owner_service_b.slug, "shared-label");
+    }
+
+    #[tokio::test]
+    async fn catalog_connection_paths_require_current_access() {
+        use crate::services::{assistant_connection_service, connect_link_service, mcp_service};
+        use crate::test_utils::{connect_transaction_test_database, test_user_service};
+
+        let db = connect_transaction_test_database("catalog_connection_access").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &actor,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let nodes = crate::services::node_ws_manager::NodeWsManager::new(30, 100);
+        let mut catalog = sample_catalog_service();
+        catalog.visibility = "private".into();
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &actor).await.unwrap();
+        let connections = db.collection::<UserService>(USER_SERVICES);
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            0
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                "endpoint",
+                &actor,
+                "Existing",
+                &catalog.base_url,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        connections
+            .insert_one(test_user_service(
+                "existing",
+                &actor,
+                "existing",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let unified = create_catalog_key(&db, &keys, &actor, &catalog.slug, "Catalog").await;
+        let hosted = connect_link_service::create(
+            &db,
+            connect_link_service::CreateInput {
+                user_id: actor.clone(),
+                service_slug: catalog.slug.clone(),
+                use_platform_key: None,
+                scopes: vec![],
+                label: None,
+                endpoint_url: None,
+                requested_by: None,
+                callback_url: None,
+                ttl_secs: None,
+                oauth_client_id: None,
+                assistant_intent_locked: false,
+            },
+        )
+        .await;
+        let mcp = mcp_service::connect_service(
+            &db,
+            &keys,
+            &nodes,
+            &actor,
+            &catalog.id,
+            None,
+            None,
+            "https://example.test",
+            None,
+            &[],
+        )
+        .await;
+        let assistant =
+            assistant_connection_service::resolve_catalog(&db, &actor, Some(&catalog.id), None)
+                .await;
+        let existing =
+            crate::services::proxy_service::read_connection_authority(&db, &actor, "existing")
+                .await;
+        let errors = [
+            unified.err(),
+            hosted.err(),
+            mcp.err(),
+            assistant.err(),
+            existing.err(),
+        ];
+        let outcomes = errors
+            .each_ref()
+            .map(|err| err.as_ref().map(AppError::error_code));
+        assert!(
+            errors
+                .iter()
+                .all(|err| matches!(err, Some(AppError::NotFound(_)))),
+            "unified, hosted, MCP, assistant, existing connection error codes: {outcomes:?}"
+        );
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -7906,6 +8050,7 @@ mod tests {
             .unwrap();
         let actor = test_audit_actor(&owner);
         let context = super::DisconnectClaim {
+            audit: None,
             db: &db,
             keys: &keys,
             owner: &owner,

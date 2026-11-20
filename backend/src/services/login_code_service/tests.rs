@@ -53,8 +53,12 @@ async fn redeem_code(state: &AppState, code: &str, ip: &str) -> AppResult<Delive
 
 #[tokio::test]
 async fn concurrent_redemption_commits_exactly_one_grant_of_either_kind() {
+    use crate::services::billing::schedules::eligibility::tests::{
+        assert_login_credits, login_test_schedule,
+    };
     let (state, actor) = fixture("login_code_atomic").await;
-    for restricted in [false, true] {
+    let schedule = login_test_schedule(&state.db).await;
+    for restricted in [true, false] {
         let code = mint(
             &state.db,
             KEY,
@@ -95,6 +99,7 @@ async fn concurrent_redemption_commits_exactly_one_grant_of_either_kind() {
         assert!(row.redeemed_at.is_some());
         assert_eq!(row.credential_id.is_some(), restricted);
         assert_eq!(row.session_id.is_some(), !restricted);
+        assert_login_credits(&state.db, &schedule, &actor, !restricted).await;
     }
     assert_eq!(
         state
@@ -786,4 +791,66 @@ async fn mfa_browser_handoff_inherits_device_assurance_and_rejects_unassured_del
         );
     }
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_code_delivers_when_scheduled_credit_posting_stalls() {
+    use crate::models::credit_grant::{COLLECTION_NAME as GRANTS, CreditGrant};
+    use crate::services::billing::{
+        grants,
+        schedules::{
+            eligibility::tests::{assert_login_credits, login_test_schedule},
+            recipients::STALL_BEFORE_POSTING,
+        },
+    };
+
+    let (state, actor) = fixture("login_code_credit_timeout").await;
+    let schedule = login_test_schedule(&state.db).await;
+    let code = mint(
+        &state.db,
+        KEY,
+        &actor,
+        None,
+        None,
+        crate::services::session_authority::DerivedMfaAuthority::new(false, false),
+    )
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        STALL_BEFORE_POSTING.scope((), redeem_code(&state, &code.code, "192.0.2.1")),
+    )
+    .await
+    .expect("account delivery must return even when billing stalls")
+    .unwrap();
+    assert!(matches!(result, Delivery::Account(_)));
+    assert_eq!(
+        status(&state.db, &actor, &code.id).await.unwrap().status,
+        Status::Redeemed,
+    );
+    let grant = state
+        .db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! { "recipient_user_id": &actor, "schedule_origin.schedule_id": &schedule.id })
+        .await
+        .unwrap()
+        .expect("the hook stalled after the durable insert");
+    assert!(grant.issued_ledgered_at.is_none());
+    assert_login_credits(&state.db, &schedule, &actor, false).await;
+    assert_eq!(
+        grants::recover_unledgered_events(&state.db, Utc::now())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_login_credits(&state.db, &schedule, &actor, true).await;
+    assert_eq!(
+        state
+            .db
+            .collection::<CreditGrant>(GRANTS)
+            .count_documents(doc! { "recipient_user_id": &actor })
+            .await
+            .unwrap(),
+        1
+    );
 }

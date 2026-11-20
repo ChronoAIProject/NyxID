@@ -7,29 +7,107 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0A2251127A6B6228B9AE20BE /* UnreadPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247AB95041F991AF60F839D5 /* UnreadPage.swift */; };
+		0D6B7E7E8435CAB53AB7C80E /* WatchAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B590E96E008EA03EE0EE5206 /* WatchAPI.swift */; };
+		0EC4B7E3C9F743D777521410 /* AgentAvatarModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3DBA33D27DF3607D22805B /* AgentAvatarModel.swift */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
+		2422F37C662074854DDE09CD /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9CF25D832F438665541A50B /* RootView.swift */; };
+		32411F73359394A5571F1DAC /* WatchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 482CD9DA34943CF412D83196 /* WatchService.swift */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
+		430F2BEFEC9C8CA7CA6E3038 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80A408DACAF1114EA079899B /* Models.swift */; };
+		45E5FA33581E3AD51C21D084 /* WatchHTTP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D192064D8125BFECED0391 /* WatchHTTP.swift */; };
+		48A83EB61C6336AAEE759D57 /* SpokenText.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCEA27E5DB37A01A616EA61D /* SpokenText.swift */; };
+		54B911F11E9A06E63D2084FC /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 071D9FE57F424545E6F07F1D /* Theme.swift */; };
+		5E041BF942D0F88844BC08D3 /* PhoneMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B017481B73A93C24C06DECB9 /* PhoneMessage.swift */; };
 		756C617AEC422F40C4E75146 /* libPods-NyxIDMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7E31828899F0F68B8C304B9E /* libPods-NyxIDMobile.a */; };
+		76A605E813E9A4774661D482 /* NyxIDWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 608A91A531479F51DC7E4700 /* NyxIDWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		78549F3CADFD6390E3DA5803 /* WatchAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C0075806D9120DE372797A /* WatchAppModel.swift */; };
+		8050CC002D1ED680B6A03532 /* AskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 067E2D4A594AD63059DACAF0 /* AskView.swift */; };
+		858BE226DB20C2C3CEEEFB11 /* WatchPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 712F4ACEE58F04ABDC1FA184 /* WatchPresentation.swift */; };
 		8F46C44AA20CB7A917E11B47 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0883AD8DCAB46793CFC0DF34 /* ExpoModulesProvider.swift */; };
+		8FE9FE26B43BFE6D6421CB12 /* ToolActivityText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 465E5F1A7EB13B9EDAB2809B /* ToolActivityText.swift */; };
+		957EC59CFFB9D11D16A4A532 /* ApprovalQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEFF8D4AA258D991C3894FB /* ApprovalQueueView.swift */; };
+		9BA8055B8A00D114B023C451 /* ReplySpeaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71823A5966644279159DA62 /* ReplySpeaker.swift */; };
+		9F1D82EFADE5799CB801B6BD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CF19927878FA60C21D99E901 /* Assets.xcassets */; };
+		A14B2773CF6A75A977A0030A /* NyxIDWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C85D66AF6A582C91D49246AD /* NyxIDWatchApp.swift */; };
 		AF4C328CC3407B0CFD1299A4 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E4EB3A82F6D3E951D04142E5 /* PrivacyInfo.xcprivacy */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
+		C9F717B1F66B9D324CBB086D /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7291C3C71A684E00813095FA /* ChatView.swift */; };
+		D0D1ED8A1A7727CD3F60B742 /* PhoneLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30C3FB86ABB75EDC73A625A4 /* PhoneLink.swift */; };
+		DB133645971A640C6FD80220 /* SessionStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B201598481805B1A17F8F211 /* SessionStorage.swift */; };
+		DC49D433F5AD05C24F72FB2D /* ApprovalNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537D260E72CB327D4D9AEF39 /* ApprovalNotification.swift */; };
+		EACE96617E4372D4AE2FA736 /* AgentsPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D6CBA8A12FBB2EB2683922 /* AgentsPage.swift */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
+		F69D7E64A212BD62D8987A7B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E4EB3A82F6D3E951D04142E5 /* PrivacyInfo.xcprivacy */; };
+		80B50DDEEB13451DAE3ABDF5 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */; };
+		601F2615F9D84B78BC32160C /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 8431C337599549608023513A /* InfoPlist.strings */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		06BEC7BC80EFC36339AF2F6F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D5FB2834C8D776DE28496F35;
+			remoteInfo = NyxIDWatch;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		BED471E2424BCA13F405537B /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				76A605E813E9A4774661D482 /* NyxIDWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		067E2D4A594AD63059DACAF0 /* AskView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AskView.swift; sourceTree = "<group>"; };
+		071D9FE57F424545E6F07F1D /* Theme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		0883AD8DCAB46793CFC0DF34 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-NyxIDMobile/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* NyxIDMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NyxIDMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = NyxIDMobile/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = NyxIDMobile/Info.plist; sourceTree = "<group>"; };
+		1F3DBA33D27DF3607D22805B /* AgentAvatarModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentAvatarModel.swift; sourceTree = "<group>"; };
+		247AB95041F991AF60F839D5 /* UnreadPage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UnreadPage.swift; sourceTree = "<group>"; };
+		30C3FB86ABB75EDC73A625A4 /* PhoneLink.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhoneLink.swift; sourceTree = "<group>"; };
+		429AFD0C10BA7BE61CA3EF9E /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		465E5F1A7EB13B9EDAB2809B /* ToolActivityText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ToolActivityText.swift; sourceTree = "<group>"; };
+		482CD9DA34943CF412D83196 /* WatchService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchService.swift; sourceTree = "<group>"; };
+		4EEFF8D4AA258D991C3894FB /* ApprovalQueueView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApprovalQueueView.swift; sourceTree = "<group>"; };
+		537D260E72CB327D4D9AEF39 /* ApprovalNotification.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApprovalNotification.swift; sourceTree = "<group>"; };
+		608A91A531479F51DC7E4700 /* NyxIDWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NyxIDWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		712F4ACEE58F04ABDC1FA184 /* WatchPresentation.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchPresentation.swift; sourceTree = "<group>"; };
+		7291C3C71A684E00813095FA /* ChatView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		7E31828899F0F68B8C304B9E /* libPods-NyxIDMobile.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-NyxIDMobile.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		80A408DACAF1114EA079899B /* Models.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		81C0075806D9120DE372797A /* WatchAppModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchAppModel.swift; sourceTree = "<group>"; };
+		A0D6CBA8A12FBB2EB2683922 /* AgentsPage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentsPage.swift; sourceTree = "<group>"; };
+		A9CF25D832F438665541A50B /* RootView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = NyxIDMobile/SplashScreen.storyboard; sourceTree = "<group>"; };
+		B017481B73A93C24C06DECB9 /* PhoneMessage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PhoneMessage.swift; sourceTree = "<group>"; };
+		B201598481805B1A17F8F211 /* SessionStorage.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SessionStorage.swift; sourceTree = "<group>"; };
+		B590E96E008EA03EE0EE5206 /* WatchAPI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchAPI.swift; sourceTree = "<group>"; };
 		BA556C864B947730B608AC37 /* Pods-NyxIDMobile.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-NyxIDMobile.release.xcconfig"; path = "Target Support Files/Pods-NyxIDMobile/Pods-NyxIDMobile.release.xcconfig"; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		BCEA27E5DB37A01A616EA61D /* SpokenText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpokenText.swift; sourceTree = "<group>"; };
+		C0D192064D8125BFECED0391 /* WatchHTTP.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchHTTP.swift; sourceTree = "<group>"; };
+		C85D66AF6A582C91D49246AD /* NyxIDWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NyxIDWatchApp.swift; sourceTree = "<group>"; };
+		CF19927878FA60C21D99E901 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		D7BE326CB8526E7B9932C460 /* Pods-NyxIDMobile.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-NyxIDMobile.debug.xcconfig"; path = "Target Support Files/Pods-NyxIDMobile/Pods-NyxIDMobile.debug.xcconfig"; sourceTree = "<group>"; };
 		E4EB3A82F6D3E951D04142E5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = NyxIDMobile/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		E71823A5966644279159DA62 /* ReplySpeaker.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReplySpeaker.swift; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = NyxIDMobile/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* NyxIDMobile-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "NyxIDMobile-Bridging-Header.h"; path = "NyxIDMobile/NyxIDMobile-Bridging-Header.h"; sourceTree = "<group>"; };
+		19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */ = {isa = PBXFileReference; name = "InfoPlist.strings"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = text.plist.strings; explicitFileType = undefined; includeInIndex = 0; };
+		8431C337599549608023513A /* InfoPlist.strings */ = {isa = PBXFileReference; name = "InfoPlist.strings"; path = "zh-Hant.lproj/InfoPlist.strings"; sourceTree = "<group>"; fileEncoding = 4; lastKnownFileType = text.plist.strings; explicitFileType = undefined; includeInIndex = 0; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -38,6 +116,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				756C617AEC422F40C4E75146 /* libPods-NyxIDMobile.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D2C6362E5C6DAF917E9232D8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -56,6 +141,38 @@
 				E4EB3A82F6D3E951D04142E5 /* PrivacyInfo.xcprivacy */,
 			);
 			name = NyxIDMobile;
+			sourceTree = "<group>";
+		};
+		160DE7DAE6FD587497575F68 /* NyxIDWatch */ = {
+			isa = PBXGroup;
+			children = (
+				A8E2472826C1E34EFD982802 /* Core */,
+				2BF139B91B2142FB331D2D06 /* App */,
+			);
+			name = NyxIDWatch;
+			path = NyxIDWatch;
+			sourceTree = "<group>";
+		};
+		2BF139B91B2142FB331D2D06 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				537D260E72CB327D4D9AEF39 /* ApprovalNotification.swift */,
+				CF19927878FA60C21D99E901 /* Assets.xcassets */,
+				7291C3C71A684E00813095FA /* ChatView.swift */,
+				429AFD0C10BA7BE61CA3EF9E /* Info.plist */,
+				C85D66AF6A582C91D49246AD /* NyxIDWatchApp.swift */,
+				30C3FB86ABB75EDC73A625A4 /* PhoneLink.swift */,
+				E71823A5966644279159DA62 /* ReplySpeaker.swift */,
+				A9CF25D832F438665541A50B /* RootView.swift */,
+				81C0075806D9120DE372797A /* WatchAppModel.swift */,
+				A0D6CBA8A12FBB2EB2683922 /* AgentsPage.swift */,
+				4EEFF8D4AA258D991C3894FB /* ApprovalQueueView.swift */,
+				067E2D4A594AD63059DACAF0 /* AskView.swift */,
+				247AB95041F991AF60F839D5 /* UnreadPage.swift */,
+				071D9FE57F424545E6F07F1D /* Theme.swift */,
+			);
+			name = App;
+			path = App;
 			sourceTree = "<group>";
 		};
 		2D16E6871FA4F8E400B85C8A /* Frameworks */ = {
@@ -99,6 +216,7 @@
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				D89479F599DD1227E99E9E13 /* Pods */,
 				6BE5E699A5D03987E0E630D3 /* ExpoModulesProviders */,
+				160DE7DAE6FD587497575F68 /* NyxIDWatch */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -109,14 +227,35 @@
 			isa = PBXGroup;
 			children = (
 				13B07F961A680F5B00A75B9A /* NyxIDMobile.app */,
+				608A91A531479F51DC7E4700 /* NyxIDWatch.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A8E2472826C1E34EFD982802 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				80A408DACAF1114EA079899B /* Models.swift */,
+				B017481B73A93C24C06DECB9 /* PhoneMessage.swift */,
+				B201598481805B1A17F8F211 /* SessionStorage.swift */,
+				BCEA27E5DB37A01A616EA61D /* SpokenText.swift */,
+				B590E96E008EA03EE0EE5206 /* WatchAPI.swift */,
+				C0D192064D8125BFECED0391 /* WatchHTTP.swift */,
+				482CD9DA34943CF412D83196 /* WatchService.swift */,
+				1F3DBA33D27DF3607D22805B /* AgentAvatarModel.swift */,
+				465E5F1A7EB13B9EDAB2809B /* ToolActivityText.swift */,
+				712F4ACEE58F04ABDC1FA184 /* WatchPresentation.swift */,
+			);
+			name = Core;
+			path = Core;
 			sourceTree = "<group>";
 		};
 		BB2F792B24A3F905000567C9 /* Supporting */ = {
 			isa = PBXGroup;
 			children = (
 				BB2F792C24A3F905000567C9 /* Expo.plist */,
+				55708E10090C4FFB9FB1790D /* zh-Hans.lproj */,
+				7F09710C92914B4DB1CCBFE1 /* zh-Hant.lproj */,
 			);
 			name = Supporting;
 			path = NyxIDMobile/Supporting;
@@ -131,6 +270,24 @@
 			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
+		};
+		55708E10090C4FFB9FB1790D /* zh-Hans.lproj */ = {
+			isa = "PBXGroup";
+			children = (
+				19FB0FFCD2A649D98892D1FD /* InfoPlist.strings */,
+			);
+			name = zh-Hans.lproj;
+			sourceTree = "<group>";
+			path = "";
+		};
+		7F09710C92914B4DB1CCBFE1 /* zh-Hant.lproj */ = {
+			isa = "PBXGroup";
+			children = (
+				8431C337599549608023513A /* InfoPlist.strings */,
+			);
+			name = zh-Hant.lproj;
+			sourceTree = "<group>";
+			path = "";
 		};
 /* End PBXGroup section */
 
@@ -148,14 +305,33 @@
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
 				A9E0F2FE5CD8467ABD737302 /* [Expo Dev Launcher] Strip Local Network Keys for Release */,
 				E3A45A5219641624B2E00C34 /* [CP] Embed Pods Frameworks */,
+				BED471E2424BCA13F405537B /* Embed Watch Content */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				21C8F47F173FDE62B1121230 /* PBXTargetDependency */,
+			);
+			name = NyxIDMobile;
+			productName = NyxIDMobile;
+			productReference = 13B07F961A680F5B00A75B9A /* NyxIDMobile.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D5FB2834C8D776DE28496F35 /* NyxIDWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D187E29C61F41045E7271BBC /* Build configuration list for PBXNativeTarget "NyxIDWatch" */;
+			buildPhases = (
+				5903D2606C18028C40F0E46C /* Sources */,
+				D2C6362E5C6DAF917E9232D8 /* Frameworks */,
+				6D6AD2DB236ECB9FD1AF68CB /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
-			name = NyxIDMobile;
-			productName = NyxIDMobile;
-			productReference = 13B07F961A680F5B00A75B9A /* NyxIDMobile.app */;
+			name = NyxIDWatch;
+			productName = NyxIDWatch;
+			productReference = 608A91A531479F51DC7E4700 /* NyxIDWatch.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -169,6 +345,11 @@
 					13B07F861A680F5B00A75B9A = {
 						DevelopmentTeam = 56DKXVFJS2;
 						LastSwiftMigration = 1250;
+						ProvisioningStyle = Automatic;
+					};
+					D5FB2834C8D776DE28496F35 = {
+						CreatedOnToolsVersion = 27.2;
+						DevelopmentTeam = 56DKXVFJS2;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -187,6 +368,7 @@
 			projectRoot = "";
 			targets = (
 				13B07F861A680F5B00A75B9A /* NyxIDMobile */,
+				D5FB2834C8D776DE28496F35 /* NyxIDWatch */,
 			);
 		};
 /* End PBXProject section */
@@ -200,6 +382,17 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				AF4C328CC3407B0CFD1299A4 /* PrivacyInfo.xcprivacy in Resources */,
+				80B50DDEEB13451DAE3ABDF5 /* InfoPlist.strings in Resources */,
+				601F2615F9D84B78BC32160C /* InfoPlist.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6D6AD2DB236ECB9FD1AF68CB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9F1D82EFADE5799CB801B6BD /* Assets.xcassets in Resources */,
+				F69D7E64A212BD62D8987A7B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -361,7 +554,45 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5903D2606C18028C40F0E46C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				430F2BEFEC9C8CA7CA6E3038 /* Models.swift in Sources */,
+				5E041BF942D0F88844BC08D3 /* PhoneMessage.swift in Sources */,
+				DB133645971A640C6FD80220 /* SessionStorage.swift in Sources */,
+				48A83EB61C6336AAEE759D57 /* SpokenText.swift in Sources */,
+				0D6B7E7E8435CAB53AB7C80E /* WatchAPI.swift in Sources */,
+				45E5FA33581E3AD51C21D084 /* WatchHTTP.swift in Sources */,
+				32411F73359394A5571F1DAC /* WatchService.swift in Sources */,
+				DC49D433F5AD05C24F72FB2D /* ApprovalNotification.swift in Sources */,
+				C9F717B1F66B9D324CBB086D /* ChatView.swift in Sources */,
+				A14B2773CF6A75A977A0030A /* NyxIDWatchApp.swift in Sources */,
+				D0D1ED8A1A7727CD3F60B742 /* PhoneLink.swift in Sources */,
+				9BA8055B8A00D114B023C451 /* ReplySpeaker.swift in Sources */,
+				2422F37C662074854DDE09CD /* RootView.swift in Sources */,
+				78549F3CADFD6390E3DA5803 /* WatchAppModel.swift in Sources */,
+				EACE96617E4372D4AE2FA736 /* AgentsPage.swift in Sources */,
+				0EC4B7E3C9F743D777521410 /* AgentAvatarModel.swift in Sources */,
+				8FE9FE26B43BFE6D6421CB12 /* ToolActivityText.swift in Sources */,
+				858BE226DB20C2C3CEEEFB11 /* WatchPresentation.swift in Sources */,
+				957EC59CFFB9D11D16A4A532 /* ApprovalQueueView.swift in Sources */,
+				8050CC002D1ED680B6A03532 /* AskView.swift in Sources */,
+				0A2251127A6B6228B9AE20BE /* UnreadPage.swift in Sources */,
+				54B911F11E9A06E63D2084FC /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		21C8F47F173FDE62B1121230 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = NyxIDWatch;
+			target = D5FB2834C8D776DE28496F35 /* NyxIDWatch */;
+			targetProxy = 06BEC7BC80EFC36339AF2F6F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
@@ -435,6 +666,73 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Release;
+		};
+		5E130B155BD045EFA287BF2B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 45;
+				DEVELOPMENT_TEAM = 56DKXVFJS2;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NyxIDWatch/App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = NyxID;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "fun.chrono-ai.nyxid";
+				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.4;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
+				PRODUCT_BUNDLE_IDENTIFIER = "fun.chrono-ai.nyxid.watchkitapp";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				VALIDATE_PRODUCT = YES;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		6CF12E129A7F24F6CB82D9D3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 45;
+				DEVELOPMENT_TEAM = 56DKXVFJS2;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NyxIDWatch/App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = NyxID;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "fun.chrono-ai.nyxid";
+				INFOPLIST_KEY_WKRunsIndependentlyOfCompanionApp = NO;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.4;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
+				PRODUCT_BUNDLE_IDENTIFIER = "fun.chrono-ai.nyxid.watchkitapp";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
 		};
 		83CBBA201A601CBA00E9B192 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -575,6 +873,15 @@
 			buildConfigurations = (
 				83CBBA201A601CBA00E9B192 /* Debug */,
 				83CBBA211A601CBA00E9B192 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D187E29C61F41045E7271BBC /* Build configuration list for PBXNativeTarget "NyxIDWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5E130B155BD045EFA287BF2B /* Release */,
+				6CF12E129A7F24F6CB82D9D3 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

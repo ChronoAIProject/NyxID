@@ -46,6 +46,7 @@ impl LagoApi for Entitled {
         customer: &str,
         subscription: &str,
     ) -> crate::errors::AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),

@@ -17,43 +17,42 @@ use crate::models::coordination::{
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     let leases = db.collection::<Document>(LEASE_COLLECTION_NAME);
-    for index_name in [
-        format!("{LEASE_COLLECTION_NAME}_expiry_ttl"),
-        format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
-    ] {
-        // Concurrent startup drops are harmless; another replica may have
-        // removed a superseded definition first.
-        let _ = leases.drop_index(index_name).await;
-    }
-    leases
-        .update_many(
-            doc! {
-                "record_kind": { "$exists": false },
-                "checkpoint": { "$exists": true },
-            },
-            doc! { "$set": { "record_kind": "checkpoint" } },
-        )
-        .await?;
-    leases
-        .update_many(
-            doc! { "record_kind": { "$exists": false } },
-            doc! { "$set": { "record_kind": "ephemeral" } },
-        )
-        .await?;
-    leases
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name(format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"))
-                        .expire_after(Duration::from_secs(0))
-                        .partial_filter_expression(doc! { "record_kind": "ephemeral" })
-                        .build(),
-                )
+    let _ = leases
+        .drop_index(format!("{LEASE_COLLECTION_NAME}_expiry_ttl"))
+        .await;
+    let index = IndexModel::builder()
+        .keys(doc! { "expires_at": 1 })
+        .options(
+            IndexOptions::builder()
+                .expire_after(Duration::from_secs(0))
+                .partial_filter_expression(doc! { "record_kind": "ephemeral" })
                 .build(),
         )
-        .await?;
+        .build();
+    crate::db::ensure_named_index_with_retry(
+        &leases,
+        &format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
+        index,
+        || async {
+            leases
+                .update_many(
+                    doc! {
+                        "record_kind": { "$exists": false },
+                        "checkpoint": { "$exists": true },
+                    },
+                    doc! { "$set": { "record_kind": "checkpoint" } },
+                )
+                .await?;
+            leases
+                .update_many(
+                    doc! { "record_kind": { "$exists": false } },
+                    doc! { "$set": { "record_kind": "ephemeral" } },
+                )
+                .await?;
+            Ok(())
+        },
+    )
+    .await?;
 
     for collection_name in [
         REPLAY_COLLECTION_NAME,
@@ -470,6 +469,24 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// Refund only the exact fixed window originally reserved. The consumed
+    /// reservation token is owned by the caller, so it cannot refund twice.
+    pub(crate) async fn refund(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        reset_at: chrono::DateTime<chrono::Utc>,
+        window: Duration,
+    ) -> AppResult<()> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let start = reset_at - chrono::Duration::milliseconds(window_ms);
+        db.collection::<Document>(RATE_WINDOW_COLLECTION_NAME).update_one(
+            doc! {"_id": hash_parts(&[namespace, key]), "window_start": DateTime::from_chrono(start), "count": {"$gt": 0}},
+            doc! {"$inc": {"count": -1_i64}},
+        ).await?;
+        Ok(())
+    }
+
     /// A read-only shortcut; callers must still claim capacity with admit.
     pub async fn is_exhausted(
         db: &mongodb::Database,
@@ -661,15 +678,7 @@ impl TokenBucketStore {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SlotToken {
-    pub id: String,
-    pub namespace: String,
-    pub scope_hash: String,
-    pub slot: u32,
-    pub holder: CoordinationHolder,
-    pub lease_id: String,
-}
+pub use crate::models::coordination::SlotToken;
 
 pub struct SlotStore;
 
@@ -707,6 +716,7 @@ impl SlotStore {
                             "$cond": ["$__claimable", &scope_hash, "$scope_hash"]
                         },
                         "slot": { "$cond": ["$__claimable", i64::from(slot), "$slot"] },
+                        "order_id": { "$cond": ["$__claimable", &lease_id, "$order_id"] },
                         "holder": {
                             "$cond": ["$__claimable", holder_bson.clone(), "$holder"]
                         },
@@ -740,6 +750,8 @@ impl SlotStore {
                         scope_hash,
                         slot,
                         holder: holder.clone(),
+                        acquired_at: record.acquired_at,
+                        order_id: lease_id.clone(),
                         lease_id,
                     }));
                 }
@@ -804,13 +816,73 @@ impl SlotStore {
     /// and scope, so slots can be granted in the order they were taken.
     /// Same-millisecond claims are ordered by their time-ordered lease IDs.
     pub async fn is_oldest_live(db: &mongodb::Database, token: &SlotToken) -> AppResult<bool> {
-        let oldest = db
-            .collection::<Document>(SLOT_COLLECTION_NAME)
-            .find_one(live_slot_filter(&token.namespace, &token.scope_hash))
-            .sort(doc! { "acquired_at": 1, "lease_id": 1 })
-            .projection(doc! { "lease_id": 1 })
-            .await?;
+        use futures::TryStreamExt;
+        let oldest = db.collection::<Document>(SLOT_COLLECTION_NAME).aggregate([
+            doc! {"$match": live_slot_filter(&token.namespace, &token.scope_hash)},
+            doc! {"$project": {"acquired_at":1,"lease_id":1,"order_id":{"$ifNull":["$order_id","$lease_id"]}}},
+            doc! {"$sort":{"acquired_at":1,"order_id":1}}, doc! {"$limit":1},
+        ]).await?.try_next().await?;
         Ok(oldest.is_some_and(|row| row.get_str("lease_id") == Ok(token.lease_id.as_str())))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn transfer(
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        token: &SlotToken,
+        namespace: &str,
+        scope: &str,
+        holder: &CoordinationHolder,
+        ttl: Duration,
+        limit: u32,
+    ) -> AppResult<Option<SlotToken>> {
+        if token.namespace != namespace
+            || token.scope_hash != hash_parts(&[scope])
+            || token.id != hash_parts(&[namespace, scope, &token.slot.to_string()])
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let mut next = token.clone();
+        next.holder = holder.clone();
+        next.lease_id = uuid::Uuid::now_v7().to_string();
+        let slots = db.collection::<Document>(SLOT_COLLECTION_NAME);
+        let update = doc! {"holder":bson::to_bson(holder).map_err(|error| AppError::Internal(error.to_string()))?,
+        "namespace":namespace,"scope_hash":&token.scope_hash,"lease_id":&next.lease_id,"order_id":&next.order_id,
+        "acquired_at":DateTime::from_chrono(token.acquired_at),"updated_at":"$$NOW","expires_at":date_add_now(duration_millis(ttl,"slot TTL")?)};
+        for slot in std::iter::once(token.slot).chain((0..limit).filter(|slot| *slot != token.slot))
+        {
+            let id = hash_parts(&[namespace, scope, &slot.to_string()]);
+            let current = slots
+                .find_one(doc! {"_id":&id})
+                .session(&mut *session)
+                .await?;
+            let mut filter = doc! {"_id":&id};
+            if let Some(current) = &current {
+                if slot == token.slot && current.get_str("lease_id") == Ok(token.lease_id.as_str())
+                {
+                    filter = exact_lease_filter(&id, &token.holder, &token.lease_id);
+                } else if slot >= limit {
+                    continue;
+                } else {
+                    filter.insert("$expr", doc! {"$lte":["$expires_at","$$NOW"]});
+                }
+            } else if slot >= limit {
+                continue;
+            }
+            let mut values = update.clone();
+            values.insert("slot", i64::from(slot));
+            let saved = slots
+                .update_one(filter, vec![doc! {"$set":values}])
+                .session(&mut *session)
+                .upsert(current.is_none())
+                .await?;
+            if saved.matched_count == 1 || saved.upserted_id.is_some() {
+                next.id = id;
+                next.slot = slot;
+                return Ok(Some(next));
+            }
+        }
+        Ok(None)
     }
 }
 

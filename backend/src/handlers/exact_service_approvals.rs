@@ -100,6 +100,7 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
             AuthMethod::Session => ("session", actor_user_id.clone()),
         };
     Ok(ExactServiceApprovalCaller {
+        key_version: auth_user.thread_key_version(),
         delegation_restrictions: Box::new(
             crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user),
         ),

@@ -122,6 +122,13 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    pub(crate) fn thread_key_version(&self) -> i64 {
+        self.assistant_chat
+            .as_deref()
+            .filter(|chat| Some(chat.api_key_id.as_str()) == self.api_key_id.as_deref())
+            .map_or(0, |chat| chat.key_version)
+    }
+
     pub fn derived_mfa_authority(&self) -> crate::services::session_authority::DerivedMfaAuthority {
         crate::services::session_authority::DerivedMfaAuthority {
             mfa_enabled: self.mfa_enabled,
@@ -205,9 +212,10 @@ impl AuthUser {
     /// channels, groups) are refused to conversation keys regardless of the
     /// flag: an agent must never widen its own or a peer's authority through
     /// the REST API.
-    pub async fn ensure_conversation_key_route_if_enabled(
+    pub async fn ensure_conversation_key_route_if_enabled_with_method(
         &self,
         db: &mongodb::Database,
+        method: &Method,
         path: &str,
     ) -> AppResult<()> {
         if self.assistant_turn_fence.is_some()
@@ -216,7 +224,7 @@ impl AuthUser {
                 .unwrap_or(path)
                 .starts_with("/assistant/")
         {
-            return self.ensure_conversation_key_route(path);
+            return self.ensure_conversation_key_route_with_method(method, path);
         }
         if self.assistant_turn_fence.is_none()
             || (!self
@@ -232,10 +240,14 @@ impl AuthUser {
         {
             return Ok(());
         }
-        self.ensure_conversation_key_route(path)
+        self.ensure_conversation_key_route_with_method(method, path)
     }
 
-    pub fn ensure_conversation_key_route(&self, path: &str) -> AppResult<()> {
+    pub fn ensure_conversation_key_route_with_method(
+        &self,
+        method: &Method,
+        path: &str,
+    ) -> AppResult<()> {
         if self.assistant_turn_fence.is_none() {
             return Ok(());
         }
@@ -244,6 +256,8 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
+            || (path == "/keys" && *method == Method::GET)
+            || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
                 && (path.ends_with("/tasks")
@@ -578,6 +592,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
+        return false;
+    }
+    // Diagnostic redemption is an operational follow-up to a failed proxy
+    // call. The handler still enforces proxy scope, caller identity, exact
+    // service authorization, and handle binding.
+    if *method == Method::POST && path == "/api/v1/monitoring/invocation-diagnostics" {
         return false;
     }
     if !matches!(
@@ -983,10 +1003,9 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let mut assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access(
+        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
             db,
-            &key.user_id,
-            Some(&key.id),
+            key,
             org_agent_access.as_ref(),
         )
         .await
@@ -994,7 +1013,9 @@ async fn api_key_auth_user_inner(
             // An unavailable live turn lookup is not credential revocation.
             // Preserve the retryable authority distinction for every caller,
             // including Ornn's purpose-limited membership callback.
-            if error.status_code().is_server_error() {
+            if matches!(error, AppError::AssistantTurnRequired) {
+                error
+            } else if error.status_code().is_server_error() {
                 AppError::OAuthAuthorityUnavailable
             } else {
                 AppError::Unauthorized("Invalid authentication credentials".to_string())
@@ -1265,8 +1286,9 @@ impl FromRequestParts<AppState> for AuthUser {
                                         return Err(AppError::NotFound("Execution request unavailable".into()));
                                     }
                                     auth_user
-                                        .ensure_conversation_key_route_if_enabled(
+                                        .ensure_conversation_key_route_if_enabled_with_method(
                                             &state.db,
+                                            &parts.method,
                                             request_path,
                                         )
                                         .await?;
@@ -1568,10 +1590,10 @@ impl FromRequestParts<AppState> for AuthUser {
                     let assistant_chat = if let Some(key) = relay_key.as_ref()
                         && is_assistant_conversation_key_candidate(key)
                     {
-                        crate::services::assistant_acknowledgement_service::for_key(
+                        crate::services::assistant_acknowledgement_service::chat_for_authenticated_key(
                             &state.db,
-                            &key.user_id,
-                            Some(&key.id),
+                            key,
+                            None,
                         )
                         .await?
                         .map(std::sync::Arc::new)
@@ -1750,7 +1772,11 @@ impl FromRequestParts<AppState> for AuthUser {
                     return Err(AppError::NotFound("Execution request unavailable".into()));
                 }
                 auth_user
-                    .ensure_conversation_key_route_if_enabled(&state.db, request_path)
+                    .ensure_conversation_key_route_if_enabled_with_method(
+                        &state.db,
+                        &parts.method,
+                        request_path,
+                    )
                     .await?;
                 auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
@@ -2599,6 +2625,8 @@ mod tests {
             "/api/v1/remote-machines/?page=2",
             "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
+            "/api/v1/auth/social/google/mobile-code",
+            "/login/device",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
             "/api/v1/services",
@@ -4132,8 +4160,12 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    auth.ensure_conversation_key_route_if_enabled(&db, path)
-                        .await,
+                    auth.ensure_conversation_key_route_if_enabled_with_method(
+                        &db,
+                        &Method::GET,
+                        path,
+                    )
+                    .await,
                     Err(AppError::Forbidden(_))
                 ),
                 "{path}"
@@ -4142,24 +4174,30 @@ mod tests {
         // Attachment reads stay available, and other routes keep their
         // flag-off behavior.
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant/nyxagent/conversations/c/attachments/a",
             )
             .await
             .is_ok()
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok()
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok()
         );
         // Ordinary keys are not conversation keys.
         let ordinary = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
             ordinary
-                .ensure_conversation_key_route_if_enabled(
+                .ensure_conversation_key_route_if_enabled_with_method(
                     &db,
+                    &Method::GET,
                     "/api/v1/assistant/nyxagent/settings"
                 )
                 .await
@@ -4208,9 +4246,13 @@ mod tests {
             "the rollout flag is off by default"
         );
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await
-                .is_ok(),
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await
+            .is_ok(),
             "route restrictions must preserve legacy behavior while the flag is off"
         );
         crate::services::security_readiness_service::ready_test_replica(&db).await;
@@ -4224,13 +4266,18 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
-                .await,
+            auth.ensure_conversation_key_route_if_enabled_with_method(
+                &db,
+                &Method::GET,
+                "/api/v1/users/me",
+            )
+            .await,
             Err(AppError::Forbidden(_))
         ));
         assert!(
-            auth.ensure_conversation_key_route_if_enabled(
+            auth.ensure_conversation_key_route_if_enabled_with_method(
                 &db,
+                &Method::GET,
                 "/api/v1/assistant-attachments/attachment/content",
             )
             .await
@@ -4249,7 +4296,7 @@ mod tests {
             "/api/v1/assistant-attachments/attachment/content",
         ] {
             assert!(
-                auth.ensure_conversation_key_route_if_enabled(&db, path)
+                auth.ensure_conversation_key_route_if_enabled_with_method(&db, &Method::GET, path)
                     .await
                     .is_ok(),
                 "NyxAgent endpoint must remain reachable with a live turn: {path}"
@@ -4376,6 +4423,8 @@ mod tests {
         for path in [
             "/api/v1/proxy/service/path",
             "/api/v1/llm/provider",
+            "/api/v1/keys",
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/oracle/pools/pool/tasks",
             "/api/v1/approvals/exact-service/requests/request/redeem",
             "/api/v1/assistant-attachments/attachment/content",
@@ -4385,12 +4434,20 @@ mod tests {
             "/mcp",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_ok(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_ok(),
                 "execution route should remain available: {path}"
             );
         }
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/keys")
+                .is_ok()
+        );
+        assert!(
+            user.ensure_conversation_key_route_with_method(&Method::POST, "/api/v1/keys")
+                .is_err()
+        );
         for path in [
-            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/users/me",
             "/api/v1/assistant/agents",
             "/api/v1/channel-relay/conversations",
@@ -4398,7 +4455,8 @@ mod tests {
             "/api/v1/channel-events",
         ] {
             assert!(
-                user.ensure_conversation_key_route(path).is_err(),
+                user.ensure_conversation_key_route_with_method(&Method::GET, path)
+                    .is_err(),
                 "management/channel route must reject conversation keys: {path}"
             );
         }
@@ -4408,7 +4466,7 @@ mod tests {
     fn ordinary_keys_have_no_conversation_route_restriction() {
         let user = test_auth_user(AuthMethod::ApiKey, "proxy");
         assert!(
-            user.ensure_conversation_key_route("/api/v1/users/me")
+            user.ensure_conversation_key_route_with_method(&Method::GET, "/api/v1/users/me")
                 .is_ok()
         );
     }
@@ -4674,7 +4732,6 @@ mod tests {
     fn api_key_management_write_routes_require_write_scope() {
         let user = test_auth_user(AuthMethod::ApiKey, "read proxy");
         let write_routes = [
-            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/api/v1/api-keys"),
             (Method::POST, "/api/v1/api-keys/key-1/rotate"),
             (Method::POST, "/api/v1/keys"),
@@ -4728,6 +4785,7 @@ mod tests {
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/oauth/token"),
         ];
 
@@ -5378,4 +5436,26 @@ pub(crate) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> App
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_management_boundary_tests {
+    #[test]
+    fn delegated_reads_cannot_open_crash_report_routes() {
+        for path in [
+            "/api/v1/admin/crash-reports",
+            "/api/v1/admin/crash-reports/summary",
+            "/api/v1/admin/crash-reports/123",
+            "/api/v1/admin/crash-reports/releases",
+        ] {
+            assert!(super::delegated_read_denied_path(path));
+        }
+        assert!(!super::delegated_read_denied_path(
+            "/api/v1/administer/crash-reportsX"
+        ));
+        // The existing entire admin segment also denies adjacent admin resources.
+        assert!(super::delegated_read_denied_path(
+            "/api/v1/admin/crash-reportsX"
+        ));
+    }
 }

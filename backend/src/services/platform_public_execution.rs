@@ -30,6 +30,7 @@ pub(crate) async fn execute(
             relative_path: "v1/responses".into(),
             body: Some(request.clone()),
             idempotency_key: context.turn.turn_id.clone(),
+            destination: None,
             billing_policy: Some(
                 super::billing::route_inventory::BillingRoutePolicy::Metered(
                     super::billing::BillingIngress::Proxy,

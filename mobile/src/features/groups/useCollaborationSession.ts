@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { groupsApi } from "../../lib/api/groupsApi";
@@ -10,6 +13,7 @@ export function useCollaborationSession(
   requiredFeature?: string,
   requireCapability = false,
 ) {
+  useAppLanguage();
   const live = useGroupAvailability();
   const client = useQueryClient();
   const mounted = useRef(true);
@@ -17,7 +21,7 @@ export function useCollaborationSession(
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{
     generation: number;
-    message: string;
+    message: () => string;
   }>();
   const activation = useRef({
     active: live.active,
@@ -80,9 +84,7 @@ export function useCollaborationSession(
     live.available();
   const guard = () => {
     if (!valid())
-      throw new Error(
-        "This view is inactive or the account changed. Reopen it before continuing.",
-      );
+      throw localizedError("This view is inactive or the account changed. Reopen it before continuing.");
   };
   async function run<T>(
     action: () => Promise<T>,
@@ -96,21 +98,17 @@ export function useCollaborationSession(
     try {
       const actor = await groupsApi.identity();
       if (!valid())
-        throw new Error("Keep this view open and connected to continue.");
+        throw localizedError("Keep this view open and connected to continue.");
       // null explicitly drops only the feature admission gate for revocation.
       // Omitted/undefined keeps the caller's default gate in place.
       const feature =
         authority?.feature === undefined ? requiredFeature : authority.feature;
       if (feature && !actor.enabled_features.includes(feature))
-        throw new Error(
-          "This feature is no longer enabled for your account. Reload to review availability.",
-        );
+        throw localizedError("This feature is no longer enabled for your account. Reload to review availability.");
       if (authority?.capability ?? requireCapability) {
         const ready = await collaborationApi.available();
         if (!valid() || !ready)
-          throw new Error(
-            "Collaboration is unavailable until the server rollout is ready.",
-          );
+          throw localizedError("Collaboration is unavailable until the server rollout is ready.");
       }
       const result = await action();
       if (valid()) {
@@ -126,10 +124,10 @@ export function useCollaborationSession(
       if (valid())
         setFailure({
           generation,
-          message:
+          message: () =>
             cause instanceof Error
               ? cause.message
-              : "Could not save. Reload and try again.",
+              : translateApp("Could not save. Reload and try again."),
         });
       if (valid()) void client.invalidateQueries({ queryKey: key });
       return undefined;
@@ -150,7 +148,7 @@ export function useCollaborationSession(
     valid,
     guard,
     busy,
-    error: failure?.generation === generation ? failure.message : undefined,
+    error: failure?.generation === generation ? failure.message() : undefined,
     clearError,
     run,
   };

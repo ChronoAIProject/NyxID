@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantAttachment } from "./assistantTypes";
 import { attachmentKind, type AttachmentKind } from "./assistantMentions";
 import {
@@ -114,10 +116,10 @@ export class AssistantUploadSession {
   /** Dictation and attachments share the same durable unsent private thread. */
   async ensureConversation() {
     if (!this.available())
-      throw new Error("This composer is no longer available.");
+      throw localizedError("This composer is no longer available.");
     const id = await this.ensureDraft();
     if (!this.available())
-      throw new Error("This composer is no longer available.");
+      throw localizedError("This composer is no longer available.");
     return id;
   }
   private async ensureDraft() {
@@ -154,8 +156,9 @@ export class AssistantUploadSession {
     this.notice = undefined;
     for (const file of files) {
       if (this.entries.size >= MAX_ASSISTANT_ATTACHMENTS) {
-        this.notice =
-          "Up to 10 files fit in one message. Send the remaining files in another message.";
+        this.notice = translateApp(
+          "Up to 10 files fit in one message. Send the remaining files in another message.",
+        );
         this.disposeFile(file);
         continue;
       }
@@ -212,7 +215,7 @@ export class AssistantUploadSession {
             !row.item &&
             !row.error
           )
-            row.error = INTERRUPTED;
+            row.error = translateApp(INTERRUPTED);
           this.notify();
         }
       });
@@ -233,7 +236,7 @@ export class AssistantUploadSession {
     for (const row of this.entries.values()) {
       if (!row.item && !row.error) {
         row.controller.abort();
-        row.error = INTERRUPTED;
+        row.error = translateApp(INTERRUPTED);
       }
     }
     this.notify();
@@ -257,20 +260,20 @@ export class AssistantUploadSession {
     send: (uploads?: AssistantUploadedMessage) => Promise<boolean>,
   ): Promise<boolean> {
     if (!this.available())
-      throw new Error("Reconnect and keep this chat open to send.");
-    if (this.sending) throw new Error("A message is already being sent.");
+      throw localizedError("Reconnect and keep this chat open to send.");
+    if (this.sending) throw localizedError("A message is already being sent.");
     if (this.blocked)
-      throw new Error("Wait for uploads to finish or remove failed files.");
+      throw localizedError("Wait for uploads to finish or remove failed files.");
     const rows = [...this.entries.values()];
     if (rows.length && !this.id)
-      throw new Error("The upload draft is unavailable.");
+      throw localizedError("The upload draft is unavailable.");
     this.sending = true;
     this.notify();
     let detached = false;
     let restore = true;
     try {
       if (!this.available())
-        throw new Error("Reconnect and keep this chat open to send.");
+        throw localizedError("Reconnect and keep this chat open to send.");
       const payload = rows.length
         ? {
             conversationId: this.id!,

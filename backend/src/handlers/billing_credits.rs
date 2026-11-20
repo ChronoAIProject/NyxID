@@ -1351,6 +1351,8 @@ pub(super) fn require_allocation_capability(state: &AppState) -> AppResult<()> {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AllocationOverviewResponse {
     pub allocations_v1: bool,
+    pub recipient_schedules: bool,
+    pub schedule_seeding: bool,
     pub summary: billing::summaries::AllocationSummary,
 }
 #[utoipa::path(get, path = "/api/v1/admin/credits/allocations/summary", tag = "Admin Credits", responses((status = 200, body = AllocationOverviewResponse)), security(("bearer_auth" = [])))]
@@ -1361,6 +1363,14 @@ pub async fn allocation_summary(
     require_admin_or_operator(&state, &auth, "admin.credits.allocations.summary").await?;
     Ok(Json(AllocationOverviewResponse {
         allocations_v1: state.config.billing_allocations_enabled,
+        recipient_schedules: state.config.billing_allocations_enabled
+            && crate::services::security_readiness_service::require_serving(
+                &state.db,
+                billing::schedules::recipients::READINESS,
+            )
+            .await
+            .is_ok(),
+        schedule_seeding: true,
         summary: billing::summaries::allocations(&state.db, None, Utc::now()).await?,
     }))
 }

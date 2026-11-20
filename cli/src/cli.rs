@@ -528,6 +528,22 @@ pub struct ManifestArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCatalogCommands {
+    /// Approve or revoke caller-token forwarding to one exact catalog destination.
+    CallerTokenDestination {
+        /// Catalog service ID or slug.
+        service: String,
+        /// Exact current URL of the catalog base or selected target.
+        #[arg(long)]
+        destination_url: String,
+        /// Select a named destination target. Omit to select the base URL.
+        #[arg(long)]
+        target_id: Option<String>,
+        /// Revoke the existing approval.
+        #[arg(long)]
+        revoke: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Upload a static SVG and set the linked provider's catalog icon
     Icon {
         /// Provider ID or slug (all linked services inherit this icon)

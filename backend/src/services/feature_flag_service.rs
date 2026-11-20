@@ -105,6 +105,13 @@ const REMOTE_MACHINES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const CRASH_REPORTS_FLAG_KEY: &str = "diagnostics:crash-reports";
+const CRASH_REPORTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CRASH_REPORTS_FLAG_KEY,
+    description: "Enable policy-2 crash diagnostics for the acting person.",
+    default_enabled: false,
+};
+
 /// Acting-person rollout for connected-service health and readiness monitoring.
 pub const SERVICE_MONITORING_FLAG_KEY: &str = "services:monitoring";
 const SERVICE_MONITORING_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -278,6 +285,12 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
 };
 
 pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
+pub const TURN_HANDOFF_FLAG_KEY: &str = "assistant:turn-handoff";
+const TURN_HANDOFF_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: TURN_HANDOFF_FLAG_KEY,
+    description: "Allow eligible assistant turns to reattach across replicas when the fleet and model support it.",
+    default_enabled: false,
+};
 const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
     description: "Admit generated Sandbox files for Web user turns once capability support is recorded and every live API and async worker supports it.",
@@ -488,6 +501,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
@@ -516,6 +530,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",
@@ -552,6 +567,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
@@ -580,6 +596,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
+    CRASH_REPORTS_FLAG,
     FeatureFlagDef {
         key: super::platform_model_service::FLAG,
         description: "Platform model catalog; activation requires complete model execution and billing readiness.",
@@ -1090,6 +1107,49 @@ pub async fn resolve_personal_features(
     ))
 }
 
+/// Resolve just the built-in diagnostics flag, sharing its override snapshot
+/// with the global kill switch. No definition inventory or per-org fan-out.
+pub(crate) async fn resolve_crash_reporting(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<(bool, bool)> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    let mut scopes = vec![bson::Bson::Null];
+    scopes.extend(
+        memberships
+            .iter()
+            .map(|m| bson::Bson::String(m.org_user_id.clone())),
+    );
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection(COLLECTION_NAME)
+        .find(doc! {
+            "flag_key": CRASH_REPORTS_FLAG_KEY,
+            "definition_id": null,
+            "org_user_id": {"$in": scopes}
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let (org, platform): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.org_user_id.is_some());
+    let killed = platform
+        .iter()
+        .any(|r| r.target_kind == FlagTargetKind::Global && r.target_key.is_none() && !r.enabled);
+    let roles: Vec<_> = memberships
+        .into_iter()
+        .map(|m| (m.org_user_id, m.role))
+        .collect();
+    let enabled = resolve_personal_definitions(
+        [(CRASH_REPORTS_FLAG_KEY, false, None)],
+        &platform,
+        &org,
+        &roles,
+        user_id,
+    )
+    .iter()
+    .any(|k| k == CRASH_REPORTS_FLAG_KEY);
+    Ok((enabled, killed))
+}
+
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &INVITATION_CODE_FLAG).await
@@ -1594,6 +1654,9 @@ async fn upsert_override_row(
             AppError::Internal("feature flag override upsert did not return the row".to_string())
         })?;
 
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1677,6 +1740,9 @@ pub async fn set_platform_override(
                 "platform feature flag override upsert did not return the row".to_string(),
             )
         })?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1702,6 +1768,9 @@ pub async fn clear_platform_override(
             "target_key": target_key,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -1756,6 +1825,9 @@ pub async fn clear_platform_org_override(
             "target_key": bson::Bson::Null,
         })
         .await?;
+    if flag_key == CRASH_REPORTS_FLAG_KEY {
+        super::crash_report_service::invalidate_rollout_cache(db).await;
+    }
     Ok(row)
 }
 
@@ -3424,6 +3496,7 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:turn-handoff",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
@@ -3452,6 +3525,7 @@ mod tests {
                 "experimental:cma-sandbox-rate-sync",
                 "experimental:remote-machines",
                 "services:monitoring",
+                "diagnostics:crash-reports",
                 "inference:platform-models",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
@@ -3464,6 +3538,12 @@ mod tests {
                 "nyxbot:gateway-aurinko",
                 "nyxbot:gateway-custom-event",
             ]
+        );
+        assert!(
+            !find_flag(CRASH_REPORTS_FLAG_KEY)
+                .expect("crash reporting flag is registered")
+                .default_enabled,
+            "crash reporting must default to off"
         );
         assert!(
             !find_flag(NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY)
@@ -4142,6 +4222,7 @@ mod tests {
     #[test]
     fn channel_media_attachment_writes_and_generated_artifacts_are_registered_default_off() {
         for key in [
+            TURN_HANDOFF_FLAG_KEY,
             ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
             ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,

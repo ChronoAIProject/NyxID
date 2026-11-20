@@ -12,6 +12,165 @@ use crate::{
 use futures::TryStreamExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
+#[tokio::test]
+async fn gateway_dispatch_native_group_and_followed_aliases_are_recorded_by_post() {
+    let f = Box::pin(Fixture::new("gateway_dispatch_group_post")).await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+    let (body, id) = f
+        .input("group lookup", ThreadAddress::Mention, false, true)
+        .await;
+    let response = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = body_text(response).await;
+    let calls = f.calls.lock().await.len();
+    let duplicate = Box::pin(respond(&f.state, &f.key, &body, "new-dispatch-key")).await;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let _ = body_text(duplicate).await;
+    assert_eq!(f.calls.lock().await.len(), calls);
+    let row = f
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&f.row.id,"event_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(row.id, dispatch_identity::dispatch_key(&f.row.id, &id));
+    assert!(
+        row.dispatch_identity
+            .as_ref()
+            .unwrap()
+            .keys
+            .contains(&dispatch_identity::dispatch_key(&f.row.id, &id))
+    );
+    assert!(row.dispatch_identity.as_ref().unwrap().keys.contains(
+        &dispatch_identity::dispatch_key(&f.row.id, "new-dispatch-key")
+    ));
+    for n in 2..32 {
+        let duplicate = Box::pin(respond(&f.state, &f.key, &body, &format!("alias-{n}"))).await;
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let _ = body_text(duplicate).await;
+    }
+    let overflow = Box::pin(respond(&f.state, &f.key, &body, "alias-overflow")).await;
+    assert_eq!(overflow.status(), StatusCode::CONFLICT);
+    assert!(body_text(overflow).await.contains("dispatch_alias_limit"));
+    let repeated = Box::pin(respond(&f.state, &f.key, &body, &id)).await;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let _ = body_text(repeated).await;
+    assert_eq!(f.calls.lock().await.len(), calls);
+    for key in [&id, "new-dispatch-key"] {
+        let mut headers = bearer(&f.key);
+        headers.insert("idempotency-key", key.parse().unwrap());
+        let response = dispatches::get(
+            State(f.state.clone()),
+            headers,
+            axum::extract::Query(dispatches::Query {
+                dispatched_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert!(matches!(
+            body["state"].as_str(),
+            Some("in_progress" | "finished")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn gateway_dispatch_alias_conflicts_never_start_or_replay_other_events() {
+    let f = Box::pin(Fixture::new("gateway_dispatch_alias_conflict")).await;
+    for native_source in [true, false] {
+        let (body_a, id_a) = f
+            .input("answer A", ThreadAddress::Mention, false, true)
+            .await;
+        let (body_b, id_b) = f
+            .input("answer B", ThreadAddress::Mention, false, true)
+            .await;
+        if !native_source {
+            // Without a retained native source, admission uses the thread-follow
+            // event identity. Both identities must obey the HTTP alias fence.
+            f.state
+                .db
+                .collection::<ChannelMessage>(MESSAGES)
+                .delete_many(doc! {"_id":{"$in":[&id_a,&id_b]}})
+                .await
+                .unwrap();
+        }
+        let key_a = format!("key-a-{native_source}");
+        let key_b = format!("key-b-{native_source}");
+        let response = Box::pin(respond(&f.state, &f.key, &body_a, &key_a)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = body_text(response).await;
+        let events = f.state.db.collection::<bson::Document>(EVENTS);
+        let event_a = events
+            .find_one(doc! {"channel_id":&f.row.id,"event_id":&id_a})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            event_a.get_str("_id").unwrap(),
+            dispatch_identity::dispatch_key(&f.row.id, &key_a)
+        );
+        let calls = f.calls.lock().await.len();
+        let response = Box::pin(respond(&f.state, &f.key, &body_b, &key_a)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_text(response).await;
+        assert!(body.contains("dispatch_identity_conflict"), "{body}");
+        assert!(!body.contains("response.created") && !body.contains("Here is your answer"));
+        assert_eq!(f.calls.lock().await.len(), calls);
+        assert_eq!(
+            events
+                .count_documents(doc! {"channel_id":&f.row.id,"event_id":&id_b})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_a.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_a
+        );
+
+        // Admit B under its own key, then try to attach B's alias to A.
+        let response = Box::pin(respond(&f.state, &f.key, &body_b, &key_b)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = body_text(response).await;
+        let event_b = events
+            .find_one(doc! {"channel_id":&f.row.id,"event_id":&id_b})
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = f.calls.lock().await.len();
+        let response = Box::pin(respond(&f.state, &f.key, &body_a, &key_b)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_text(response).await;
+        assert!(body.contains("dispatch_identity_conflict"), "{body}");
+        assert!(!body.contains("response.created") && !body.contains("Here is your answer"));
+        assert_eq!(f.calls.lock().await.len(), calls);
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_a.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_a
+        );
+        assert_eq!(
+            events
+                .find_one(doc! {"_id":event_b.get_str("_id").unwrap()})
+                .await
+                .unwrap()
+                .unwrap(),
+            event_b
+        );
+    }
+}
+
 struct Fixture {
     state: AppState,
     row: NyxbotChannel,
@@ -35,7 +194,10 @@ impl Fixture {
         Box::pin(Self::with_org(name, false)).await
     }
     async fn with_org(name: &str, org: bool) -> Self {
-        let (state, calls, model) = setup(name).await;
+        Box::pin(Self::with_reply(name, org, "Here is your answer")).await
+    }
+    async fn with_reply(name: &str, org: bool, reply: &'static str) -> Self {
+        let (state, calls, model) = setup_with_reply(name, reply).await;
         let (mut row, key) = if org {
             let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
             (row, key)
@@ -692,6 +854,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 turn_id: turn_id.clone(),
                 content_type: "image/png".into(),
                 size: 6,
+                chunks: 0,
                 data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
                 created_at: Utc::now(),
             };
@@ -1060,7 +1223,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         } else {
             let signed = |id: &str| {
                 let payload = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
-                    "conversation":{"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
+                    "conversation":{"id":f.row.route_id,"platform_id":"oc_chat","type":"group"},"thread_id":"omt_thread",
                     "sender":{"platform_id":"human"},"content":{"type":"image","text":"receipt with caption"},
                     "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"human"}}}}});
                 let bytes = serde_json::to_vec(&payload).unwrap();
@@ -1312,17 +1475,6 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
                 let response=axum::Router::new().route(endpoint,route).with_state(f.state.clone()).oneshot(Request::builder().method("POST").uri(endpoint).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(json!({"message_id":id,"reply":{"text":"中文 English မြန်မာစာ\n".repeat(8000)}}).to_string())).unwrap()).await.unwrap();
                 let status=response.status();
                 let bytes=axum::body::to_bytes(response.into_body(),8192).await.unwrap();
-                if commonmark {
-                    // Current gateway thread negotiation supports Lark/Feishu;
-                    // CommonMark callback routes support Telegram only.
-                    assert_eq!(status,StatusCode::BAD_REQUEST);
-                    assert!(String::from_utf8_lossy(&bytes).contains("CommonMark relay formatting is supported for Telegram"));
-                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),0);
-                    assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),usize::from(notice));
-                    assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
-                    f.state.db.drop().await.unwrap();
-                    continue;
-                }
                 assert_eq!(status,StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
                 let reply:Value=serde_json::from_slice(&bytes).unwrap();
                 let requests:Vec<Value>=f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).map(|r|serde_json::from_slice(&r.body).unwrap()).collect();
@@ -2883,3 +3035,6 @@ async fn supplemental_result_window_followed_original_event_and_retention() {
         }
     }).await;
 }
+
+#[path = "nyxbot_response_read_tests.rs"]
+mod response_read_tests;

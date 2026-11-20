@@ -105,7 +105,8 @@ impl LagoApi for Provider {
     async fn record_events_batch(&self, _: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
         unreachable!()
     }
-    async fn current_usage(&self, _: &str, _: &str) -> AppResult<LagoUsage> {
+    async fn current_usage(&self, _: &str, subscription_id: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
         unreachable!()
     }
     async fn wallet_balance(&self, _: &str) -> AppResult<i64> {

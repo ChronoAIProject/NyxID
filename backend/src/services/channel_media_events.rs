@@ -246,9 +246,24 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
 /// Media acceptance contends with the durable owner-erasure fence. A held
 /// callback cannot recreate a media source after local inventory has drained.
 pub async fn insert_event(db: &Database, event: &NyxbotEvent) -> mongodb::error::Result<()> {
+    insert_response_event(db, event, None).await
+}
+
+pub async fn insert_response_event(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::ResponseRead>,
+) -> mongodb::error::Result<()> {
+    let mut document = bson::to_document(event).map_err(mongodb::error::Error::custom)?;
+    if let Some(response) = response {
+        document.insert(
+            "response_read_pending",
+            bson::to_bson(response).map_err(mongodb::error::Error::custom)?,
+        );
+    }
     if event.media.is_none() {
-        db.collection::<NyxbotEvent>(EVENTS)
-            .insert_one(event)
+        db.collection::<bson::Document>(EVENTS)
+            .insert_one(&document)
             .await?;
         return Ok(());
     }
@@ -261,8 +276,8 @@ pub async fn insert_event(db: &Database, event: &NyxbotEvent) -> mongodb::error:
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
                 super::erasure_admission::fence_in_session(&db, &event.user_id, session).await?;
-                db.collection::<NyxbotEvent>(EVENTS)
-                    .insert_one(&event)
+                db.collection::<bson::Document>(EVENTS)
+                    .insert_one(&document)
                     .session(session)
                     .await?;
                 Ok(())
@@ -304,33 +319,66 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// A different relay UUID lost the native-media insert race. Store one bounded
-/// alias only on the exact scoped source row; same-ID provider replays continue
-/// through the old replay/resume contract.
+/// Register a duplicate against the native-media winner, including a new HTTP
+/// key for the same relay source. Only a different source needs a duplicate
+/// marker; matching event IDs continue through the existing replay/resume path.
 pub async fn record_duplicate(db: &Database, event: &NyxbotEvent) -> AppResult<bool> {
+    Ok(record_response_duplicate(db, event, None).await?.is_some())
+}
+
+pub async fn record_response_duplicate(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::Command>,
+) -> AppResult<Option<String>> {
     let Some(media) = &event.media else {
-        return Ok(false);
+        return Ok(None);
     };
     let winner = db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"media.key":&media.key})
         .await?;
     let Some(winner) = winner else {
-        return Ok(false);
+        return Ok(None);
     };
-    if winner.relay_message_id == event.relay_message_id {
-        return Ok(false);
+    if winner.relay_message_id == event.relay_message_id && winner.id == event.id {
+        return Ok(None);
     }
     let Some(source) = &event.relay_message_id else {
-        return Ok(false);
+        return Ok(None);
     };
-    db.collection::<ChannelMessage>(MESSAGES)
-        .update_one(
-            doc! {"_id":source,"direction":"inbound"},
-            doc! {"$set":{"duplicate_of_media_key":&media.key}},
+    if let Some(key) = event
+        .dispatch_identity
+        .as_ref()
+        .and_then(|d| d.keys.first())
+    {
+        match super::nyxbot_dispatch_identity::alias_response(
+            db,
+            &winner.id,
+            &winner.channel_id,
+            key,
+            response,
         )
-        .await?;
-    Ok(true)
+        .await?
+        {
+            super::nyxbot_dispatch_identity::AliasOutcome::Added => {}
+            super::nyxbot_dispatch_identity::AliasOutcome::Limit => {
+                return Err(AppError::Conflict("dispatch_alias_limit".into()));
+            }
+            super::nyxbot_dispatch_identity::AliasOutcome::Missing => {
+                return Err(AppError::Conflict("dispatch_identity_conflict".into()));
+            }
+        }
+    }
+    if winner.relay_message_id != event.relay_message_id {
+        db.collection::<ChannelMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id":source,"direction":"inbound"},
+                doc! {"$set":{"duplicate_of_media_key":&media.key}},
+            )
+            .await?;
+    }
+    Ok(Some(winner.id))
 }
 
 /// The conditional write conflicts with both transactional turn and queue

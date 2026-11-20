@@ -232,6 +232,7 @@ async fn text_only_tool_images_continue_with_a_notice_and_no_image_url() {
             Some(vec![ModelInfo {
                 id: engine::DEFAULT_MODEL.into(),
                 label: "Text model".into(),
+                inference_credential: None,
                 available: true,
                 description: None,
                 input_modalities: Some(vec!["text".into()]),

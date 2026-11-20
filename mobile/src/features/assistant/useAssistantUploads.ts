@@ -1,3 +1,6 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { assistantDraftStore } from "./assistantDraftStore";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -39,14 +42,14 @@ function disposeFile(file: PickedAssistantFile) {
 }
 function nativeFile(file: PickedAssistantFile) {
   if (!file.uri.startsWith("file://"))
-    throw new Error("The file could not be copied. Choose it again.");
+    throw localizedError("The file could not be copied. Choose it again.");
   const source = new File(file.uri);
   if (!source.exists)
-    throw new Error("This file is no longer available. Choose it again.");
+    throw localizedError("This file is no longer available. Choose it again.");
   return source;
 }
 function cancelled() {
-  return Object.assign(new Error("Upload cancelled."), { name: "AbortError" });
+  return Object.assign(localizedError("Upload cancelled."), { name: "AbortError" });
 }
 export function useAssistantUploads({
   conversationId,
@@ -74,7 +77,7 @@ export function useAssistantUploads({
   );
   const [, setVersion] = useState(0);
   const [picking, setPicking] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const live = useRef({
     enabled,
     focused,
@@ -132,14 +135,14 @@ export function useAssistantUploads({
           );
           if (signal.aborted) throw cancelled();
           if (bytes.byteLength !== size)
-            throw new Error("The file changed. Choose it again.");
+            throw localizedError("The file changed. Choose it again.");
           return bytes;
         } finally {
           handle.close();
         }
       },
       createDraft: (signal) => {
-        if (groupId) throw new Error("Open a saved crew to attach files.");
+        if (groupId) throw localizedError("Open a saved crew to attach files.");
         return assistantUploadsApi.createDraft(agentId, signal);
       },
       upload: (id, file, bytes, signal, onProgress) =>
@@ -285,7 +288,7 @@ export function useAssistantUploads({
       if (source === "photos" || source === "camera") {
         if (!requireOptionalNativeModule("ExponentImagePicker"))
           throw new Error(
-            `${source === "camera" ? "Camera" : "Photos"} needs the updated NyxID app. You can still attach images using Files.`,
+            (source === "camera" ? translateApp("Camera needs the updated NyxID app. You can still attach images using Files.") : translateApp("Photos needs the updated NyxID app. You can still attach images using Files.")),
           );
         const ImagePicker = await import("expo-image-picker");
         if (
@@ -321,15 +324,19 @@ export function useAssistantUploads({
             return;
           if (!permission.granted) {
             setError(
-              "Camera access is off. Allow NyxID to use the camera in Settings, or choose Photos or Files.",
+              () => (translateApp(
+                "Camera access is off. Allow NyxID to use the camera in Settings, or choose Photos or Files.",
+              )),
             );
             Alert.alert(
-              "Allow camera access",
-              "NyxID needs camera access to take photos to attach in chats. You can allow access in Settings.",
+              translateApp("Allow camera access"),
+              translateApp(
+                "NyxID needs camera access to take photos to attach in chats. You can allow access in Settings.",
+              ),
               [
-                { text: "Not now", style: "cancel" },
+                { text: translateApp("Not now"), style: "cancel" },
                 {
-                  text: "Open Settings",
+                  text: translateApp("Open Settings"),
                   onPress: () => {
                     if (current.current !== session || epoch !== getAuthEpoch())
                       return;
@@ -339,7 +346,9 @@ export function useAssistantUploads({
                         epoch === getAuthEpoch()
                       )
                         setError(
-                          "Couldn't open Settings. Open your device's Settings and allow camera access for NyxID.",
+                          () => (translateApp(
+                            "Couldn't open Settings. Open your device's Settings and allow camera access for NyxID.",
+                          )),
                         );
                     });
                   },
@@ -387,9 +396,7 @@ export function useAssistantUploads({
           )
             continue;
           if (!requireOptionalNativeModule("ExpoImageManipulator"))
-            throw new Error(
-              "This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.",
-            );
+            throw localizedError("This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.");
           const { ImageManipulator, SaveFormat } =
             await import("expo-image-manipulator");
           const context = ImageManipulator.manipulate(file.uri);
@@ -444,11 +451,13 @@ export function useAssistantUploads({
     } catch (cause) {
       if (current.current === session && epoch === getAuthEpoch())
         setError(
-          source === "camera"
-            ? "The camera couldn't open. It may be unavailable on this device. Try again, or choose Photos or Files."
+          () => (source === "camera"
+            ? translateApp(
+                "The camera couldn't open. It may be unavailable on this device. Try again, or choose Photos or Files.",
+              )
             : cause instanceof Error
               ? cause.message
-              : "The file picker could not open.",
+              : translateApp("The file picker could not open.")),
         );
     } finally {
       if (!transferred) pickedCopies.forEach(disposeFile);
@@ -491,13 +500,13 @@ export function useAssistantUploads({
     if (Platform.OS === "ios") {
       ActionSheetIOS.showActionSheetWithOptions(
         {
-          title: "Add attachments",
+          title: translateApp("Add attachments"),
           options: [
-            "Camera",
-            "Photos",
-            "Files",
+            translateApp("Camera"),
+            translateApp("Photos"),
+            translateApp("Files"),
             ...extra.map((action) => action.text),
-            "Cancel",
+            translateApp("Cancel"),
           ],
           cancelButtonIndex: 3 + extra.length,
         },
@@ -512,18 +521,18 @@ export function useAssistantUploads({
       // Android Alert supports at most three buttons. Back/outside dismisses
       // this first menu; the second menu keeps Files and connection reachable.
       Alert.alert(
-        "Add attachments",
+        translateApp("Add attachments"),
         undefined,
         [
-          { text: "Camera", onPress: () => void pick("camera") },
-          { text: "Photos", onPress: () => void pick("photos") },
+          { text: translateApp("Camera"), onPress: () => void pick("camera") },
+          { text: translateApp("Photos"), onPress: () => void pick("photos") },
           {
-            text: "More options…",
+            text: translateApp("More options…"),
             onPress: () =>
-              Alert.alert("More attachment options", undefined, [
-                { text: "Files", onPress: () => void pick("files") },
+              Alert.alert(translateApp("More attachment options"), undefined, [
+                { text: translateApp("Files"), onPress: () => void pick("files") },
                 ...extra,
-                { text: "Cancel", style: "cancel" },
+                { text: translateApp("Cancel"), style: "cancel" },
               ]),
           },
         ],

@@ -102,9 +102,11 @@ pub(super) async fn inbound_impl(
     if payload["conversation"]["type"] != "private" {
         match &result {
             Ok(Some(outcome)) => {
-                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?
+                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?;
             }
-            Err(_) => admission_diagnostics::outcome(state, row, message, Err(())).await?,
+            Err(_) => {
+                admission_diagnostics::outcome(state, row, message, Err(())).await?;
+            }
             Ok(None) => {
                 crate::services::nyxbot_admission_service::selection(
                     &state.db, row, message, "legacy", None,
@@ -199,7 +201,11 @@ async fn inbound_impl_inner(
         kind: facts.sender_kind,
         owner_eligible: facts.sender_kind == ThreadSenderKind::Human,
         id: sender_id,
-        display_name: payload["sender"]["display_name"].as_str(),
+        display_name: if gateway {
+            payload["sender"]["display_name"].as_str()
+        } else {
+            source.sender_display_name.as_deref()
+        },
     };
     let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
     if stop_requested && !sender.original_message {
@@ -410,7 +416,9 @@ async fn inbound_impl_inner(
                     metadata: None,
                 };
                 if gateway {
-                    return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                    return Ok(Some(Inbound::Reply(
+                        reply.text.clone().unwrap_or_default().into(),
+                    )));
                 }
                 threads::delivery::send_reply(
                     &state.db,
@@ -469,7 +477,9 @@ async fn inbound_impl_inner(
                 metadata: None,
             };
             if gateway {
-                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                return Ok(Some(Inbound::Reply(
+                    reply.text.clone().unwrap_or_default().into(),
+                )));
             }
             threads::delivery::send_reply(
                 &state.db,
@@ -532,7 +542,9 @@ async fn inbound_impl_inner(
                 metadata: None,
             };
             if gateway {
-                return Ok(Some(Inbound::Reply(reply.text.clone().unwrap_or_default())));
+                return Ok(Some(Inbound::Reply(
+                    reply.text.clone().unwrap_or_default().into(),
+                )));
             }
             threads::delivery::send_reply(
                 &state.db,
@@ -587,9 +599,9 @@ async fn inbound_impl_inner(
         .collection::<NyxbotEvent>(EVENTS)
         .update_one(
             if row.gateway_source.is_some() {
-                doc! {"channel_id":&row.id,"_id":event_key}
+                doc! {"channel_id":&row.id,"_id":event_key,"org_notice":null}
             } else {
-                doc! {"channel_id":&row.id,"event_id":message}
+                doc! {"channel_id":&row.id,"event_id":message,"org_notice":null}
             },
             doc! {"$set":{"resolved_thread_id":&child.id,"resolved_conversation_id":conversation}},
         )
@@ -638,16 +650,35 @@ async fn inbound_impl_inner(
             .await?;
     }
     if gateway {
-        return Ok(Some(match result {
-            Ok(Inbound::Busy) => {
-                Inbound::Reply("I'm busy right now. Please try again in a moment.".into())
-            }
+        let mut result = match result {
+            Ok(Inbound::Busy) => Inbound::Reply(InboundReply::fixed(
+                NoticeKind::FollowBusy,
+                "I'm busy right now. Please try again in a moment.",
+            )),
             Ok(value) => value,
-            Err(_) => Inbound::Reply("I could not start that. Please try again.".into()),
-        }));
+            Err(_) => Inbound::Reply(InboundReply::fixed(
+                NoticeKind::StartFailure,
+                "I could not start that. Please try again.",
+            )),
+        };
+        if let Inbound::Reply(reply) = &mut result
+            && reply.kind.is_some()
+            && row.org_specialist.is_some()
+            && row.gateway_source.is_none()
+            && threads::gateway::negotiated(row)
+            && let Some(binding_id) = &row.binding_id
+        {
+            reply.followed = Some(Box::new(response_read::SelectedThread {
+                binding,
+                binding_id: binding_id.clone(),
+                partition: child.partition,
+                target_sha256: crate::services::nyxbot_response_read::notice_target_digest(facts),
+            }));
+        }
+        return Ok(Some(result));
     }
     let reply = match result {
-        Ok(Inbound::Reply(reply)) => Some(reply),
+        Ok(Inbound::Reply(reply)) => Some(reply.text),
         Ok(Inbound::Queued) => {
             late_delivery::process(state, event_key).await;
             None

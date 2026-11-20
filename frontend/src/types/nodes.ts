@@ -97,6 +97,7 @@ export type NodePendingCredentialInjectionMethod =
 
 export type NodePendingCredentialRemoteState =
   | "pubkey_posted"
+  | "delivery_unknown"
   | "ciphertext_received"
   | "ciphertext_queued"
   | "consumed"
@@ -138,7 +139,7 @@ export interface NodePendingCredentialPubkeyResponse {
 }
 
 export interface NodePendingCredentialCiphertextResponse {
-  readonly delivery_status: "sent" | "queued";
+  readonly delivery_status: "sent" | "queued" | "unknown";
   readonly remote_state: NodePendingCredentialRemoteState;
   readonly error_code?: number;
 }
@@ -147,12 +148,13 @@ export interface FanOutTargetInfo {
   readonly node_id: string;
   readonly generation: number;
   readonly remote_state?: NodePendingCredentialRemoteState | null;
-  readonly delivery_status?: "sent" | "queued" | null;
+  readonly delivery_status?: "sent" | "queued" | "unknown" | null;
   readonly error_code?: number | null;
   readonly error_kind?: string | null;
 }
 
 export interface FanOutPendingCredentialResponse {
+  readonly expires_at?: string;
   readonly fanout_id: string;
   readonly fan_out_revision: number;
   readonly target_count: number;

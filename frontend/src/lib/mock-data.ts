@@ -641,7 +641,7 @@ const MOCK_NODES = [
       id: MOCK_USER.id,
       display_name: "Dannick Young",
     },
-    status: "Online",
+    status: "online",
     is_connected: true,
     last_heartbeat_at: "2026-05-06T14:30:00Z",
     connected_at: "2026-05-01T08:00:00Z",
@@ -672,7 +672,7 @@ const MOCK_NODES = [
       id: MOCK_USER.id,
       display_name: "Dannick Young",
     },
-    status: "Online",
+    status: "online",
     is_connected: true,
     last_heartbeat_at: "2026-05-06T14:28:00Z",
     connected_at: "2026-05-03T10:00:00Z",
@@ -2186,7 +2186,7 @@ const MOCK_ADMIN_NODES = [
     name: "prod-us-east",
     user_id: MOCK_ADMIN_USERS[0]!.id,
     user_email: "dannick@nyxid.dev",
-    status: "Online",
+    status: "online",
     is_connected: true,
     last_heartbeat_at: "2026-05-14T09:30:00Z",
     connected_at: "2026-05-12T08:00:00Z",
@@ -2214,7 +2214,7 @@ const MOCK_ADMIN_NODES = [
     name: "staging-eu",
     user_id: MOCK_ADMIN_USERS[0]!.id,
     user_email: "dannick@nyxid.dev",
-    status: "Online",
+    status: "online",
     is_connected: true,
     last_heartbeat_at: "2026-05-14T09:28:00Z",
     connected_at: "2026-05-10T10:00:00Z",
@@ -2242,7 +2242,7 @@ const MOCK_ADMIN_NODES = [
     name: "alex-dev-local",
     user_id: MOCK_ADMIN_USERS[1]!.id,
     user_email: "alex@chronoai.dev",
-    status: "Offline",
+    status: "offline",
     is_connected: false,
     last_heartbeat_at: "2026-05-13T18:00:00Z",
     connected_at: null,
@@ -2270,7 +2270,7 @@ const MOCK_ADMIN_NODES = [
     name: "prod-drain-test",
     user_id: MOCK_ADMIN_USERS[0]!.id,
     user_email: "dannick@nyxid.dev",
-    status: "Draining",
+    status: "draining",
     is_connected: true,
     last_heartbeat_at: "2026-05-14T09:29:00Z",
     connected_at: "2026-05-14T06:00:00Z",
@@ -3165,7 +3165,7 @@ export function isMockMode(): boolean {
   return _mockLatched;
 }
 
-let mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: false, revision: "", changed_at: null as string | null };
+let mockAnalyticsConsent = { account_id: MOCK_USER.id, prompt_seen: false, enabled: false, revision: "", changed_at: null as string | null };
 
 export function getMockResponse(
   endpoint: string,
@@ -3196,7 +3196,7 @@ export function getMockResponse(
       const request = body as { account_id?: string; enabled?: boolean } | undefined;
       if (request?.account_id !== MOCK_USER.id || typeof request.enabled !== "boolean")
         throw new ApiError(403, { error: "forbidden", error_code: 1000, message: "Analytics account changed" });
-      mockAnalyticsConsent = { account_id: MOCK_USER.id, enabled: request.enabled, revision: crypto.randomUUID(), changed_at: new Date().toISOString() };
+      mockAnalyticsConsent = { account_id: MOCK_USER.id, prompt_seen: true, enabled: request.enabled, revision: crypto.randomUUID(), changed_at: new Date().toISOString() };
       return { ...mockAnalyticsConsent };
     }
   }

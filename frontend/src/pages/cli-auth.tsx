@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { AlertCircle } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { buildCliAuthReturnPath, type CliAuthSearch } from "./cli-auth.helpers";
+import { buildCliAuthReturnPath, cliCallbackUrl, type CliAuthSearch } from "./cli-auth.helpers";
 
 interface TokenResponse {
   readonly access_token: string;
@@ -28,48 +28,40 @@ export function CliAuthPage() {
     `${user?.id ?? ""}:${port}:${state}`,
     () => setError("Verification cancelled. Run nyxid login again."),
   );
+  const callback = cliCallbackUrl(port)?.href;
+  const [sending, setSending] = useState(false);
   const callbackSent = useRef(false);
 
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || isAuthenticated || !callback) return;
 
     // Not authenticated -- redirect to login, then back here.
     // Use window.location.assign (not TanStack navigate) so that
     // return_to lands in the real URL search params where the login
     // page reads it via window.location.search.
-    if (!isAuthenticated) {
-      const returnPath = buildCliAuthReturnPath({ port, state, client_ua });
-      const returnTo = `${window.location.origin}${returnPath}`;
-      window.location.assign(
-        `/login?return_to=${encodeURIComponent(returnTo)}`,
-      );
-      return;
-    }
+    const returnPath = buildCliAuthReturnPath({ port, state, client_ua });
+    const returnTo = `${window.location.origin}${returnPath}`;
+    window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
+  }, [isAuthenticated, isLoading, callback, port, state, client_ua]);
 
-    // Authenticated and we have a CLI callback port -- send the token
-    if (port && !callbackSent.current) {
-      callbackSent.current = true;
-      const send = async () => {
-        try {
-          await sendTokenToCliCallback(port, state, client_ua);
-        } catch (failure) {
-          if (handleStepUp(failure, send)) return;
-          setError(
-            `Failed to send token to CLI. ${failure instanceof Error ? failure.message : "Please try again."}`,
-          );
-        }
-      };
-      void send();
+  async function send() {
+    if (!callback || !isAuthenticated) return;
+    try {
+      await sendTokenToCliCallback(new URL(callback), state, client_ua);
+    } catch (failure) {
+      if (handleStepUp(failure, send)) return;
+      setError(
+        `Failed to send token to CLI. ${failure instanceof Error ? failure.message : "Please try again."}`,
+      );
     }
-  }, [
-    isAuthenticated,
-    isLoading,
-    port,
-    state,
-    client_ua,
-    navigate,
-    handleStepUp,
-  ]);
+  }
+
+  function confirm() {
+    if (callbackSent.current) return;
+    callbackSent.current = true;
+    setSending(true);
+    void send();
+  }
 
   if (isLoading) {
     return (
@@ -79,7 +71,7 @@ export function CliAuthPage() {
     );
   }
 
-  if (!port) {
+  if (!callback) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="flex max-w-sm flex-col items-center gap-4 text-center">
@@ -106,7 +98,14 @@ export function CliAuthPage() {
           </p>
         )}
         <h2 className="text-lg font-semibold">{translateUi("CLI Authentication")}</h2>
-        {!error && (
+        {!sending && isAuthenticated && (
+          <>
+            <p className="text-12 text-muted-foreground">{translateUi("Authorize full account access for the CLI you started on this computer?")}</p>
+            <code className="text-xs">{callback}</code>
+            <Button onClick={confirm}>{translateUi("Authorize CLI sign-in")}</Button>
+          </>
+        )}
+        {sending && !error && !stepUpPrompt && (
           <>
             <p className="text-12 text-muted-foreground">{translateUi("Sending credentials to the NyxID CLI...")}</p>
             <p className="text-xs text-muted-foreground">{translateUi("You can close this tab after you see a success message in your terminal.")}</p>
@@ -118,7 +117,7 @@ export function CliAuthPage() {
 }
 
 async function sendTokenToCliCallback(
-  port: string,
+  callbackUrl: URL,
   state?: string,
   clientUa?: string,
 ) {
@@ -127,7 +126,6 @@ async function sendTokenToCliCallback(
   const response = await api.post<TokenResponse>("/auth/cli-token", {
     client_ua: clientUa,
   });
-  const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
   callbackUrl.searchParams.set("access_token", response.access_token);
   callbackUrl.searchParams.set("refresh_token", response.refresh_token);
   if (state) {

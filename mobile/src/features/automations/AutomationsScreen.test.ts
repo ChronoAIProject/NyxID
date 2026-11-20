@@ -441,7 +441,7 @@ test("Ask NyxBot opens a new main NyxBot chat whose composer holds a one-blank s
       assert.equal(chat.conversationId, undefined);
       assert.equal(
         env.drafts.get(`text:${JSON.stringify(["private", "nyxbot", chat.draftId])}`),
-        "Hi NyxBot, I'd like help setting up an automation that runs every ",
+        "Hi NyxBot, help me set up a recurring automation.",
       );
     }
     assert.notEqual(params[0].draftId, params[1].draftId);
@@ -464,7 +464,7 @@ test("Ask NyxBot on a detail page names the automation in its starter message", 
     const chat = env.dispatched[0].target.params;
     assert.equal(
       env.drafts.get(`text:${JSON.stringify(["private", "nyxbot", chat.draftId])}`),
-      'Hi NyxBot, I\'d like to change my automation "Morning release check": ',
+      'Hi NyxBot, I\'d like to change my automation "Morning release check".',
     );
   } finally {
     env.harness.unmount();

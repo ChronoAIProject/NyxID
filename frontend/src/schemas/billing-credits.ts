@@ -26,6 +26,7 @@ export const allowanceRecurrenceSchema = z.enum([
   "monthly",
 ]);
 export const scheduleRecurrenceSchema = z.enum(["daily", "weekly", "monthly"]);
+export const scheduleTimingSchema = z.enum(["calendar", "recipient"]);
 export const creditExpiryPolicySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("end_of_period") }),
   z.object({
@@ -135,6 +136,7 @@ export const creditScheduleSchema = z.object({
   amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
   recurrence: scheduleRecurrenceSchema,
+  timing: scheduleTimingSchema.optional(),
   expiry: creditExpiryPolicySchema,
   target_kind: billingTargetKindSchema,
   target_org_ids: z.array(z.string()).optional(),
@@ -183,6 +185,7 @@ export const scheduleFormSchema = z
     service_limits: z.array(serviceLimitInputSchema).optional(),
     amount_credits: z.number().int().min(0).max(1_000_000),
     recurrence: scheduleRecurrenceSchema,
+    timing: scheduleTimingSchema.optional(),
     expiry: scheduleFormExpiryPolicySchema,
     target_kind: billingTargetKindSchema,
     target_org_ids: z.array(z.string()).optional(),
@@ -448,6 +451,7 @@ export const allocationFormSchema = z
       "Enter more than zero and at most 1,000,000 credits",
     ),
     recurrence: z.enum(["one_time", "daily", "weekly", "monthly"]),
+    timing: scheduleTimingSchema.optional(),
     expires_at: z.string(),
     expiry: scheduleFormExpiryPolicySchema,
     target_kind: billingTargetKindSchema,
@@ -534,6 +538,8 @@ function refineServiceLimits(
 }
 export const allocationSummarySchema = z.object({
   allocations_v1: z.boolean(),
+  recipient_schedules: z.boolean().optional(),
+  schedule_seeding: z.boolean().optional(),
   summary: z.object({
     remaining: creditsSchema,
     unreserved: creditsSchema,
@@ -544,6 +550,14 @@ export const allocationSummarySchema = z.object({
     restricted: creditsSchema,
     generated_at: z.string(),
   }),
+});
+
+export const seedScheduleResponseSchema = z.object({
+  period_start: z.string(),
+  created_count: z.number().int().nonnegative(),
+  existing_count: z.number().int().nonnegative(),
+  pending_activation_count: z.number().int().nonnegative(),
+  next_user_id: z.string().nullable(),
 });
 
 export const billingBenefitsSchema = z.object({
