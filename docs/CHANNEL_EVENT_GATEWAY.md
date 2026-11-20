@@ -858,6 +858,21 @@ never prove addressing. Native edits, reactions and controls are not accepted
 as replacement original messages. Incoming media receives explicit unavailable
 feedback; tool images cannot use old relay anchors and report unavailable.
 
+A retained native edit, deletion, reaction or control submission gets its own
+durable empty completion. The gateway routes a change to the original partition.
+Discord reports the deleting actor as unknown. NyxID keeps the response ID and
+the four command metadata values for the ordinary 24-hour replay window.
+The original turn can finish normally. No sender, reply target or turn is
+derived from the change. Private native WhatsApp notifications use the same
+completion under live callback custody.
+
+CMA routes a dispatch with a valid acceptance prefix to response GET and SSE
+replay. A 400 validation_error before acceptance can instead leave a FIFO head
+in `unknown` without a response ID. The routed CMA adapter at `01e30c8e`
+disables exact-body re-POST. Existing heads in that state require CMA-side
+resolution. During rollout, an old NyxID replica can still refuse a new
+notification. See [CMA's dispatcher](https://github.com/ChronoAIProject/cma/blob/01e30c8e9eb9ad2805ea6ba3d03a9a7070499d00/api/crates/cmaeg/src/turns/routed/dispatcher.rs).
+
 Status exposes `gateway_native_phase`, `gateway_native_activation` and
 `gateway_native_delivery`. A rejected native setup also exposes the optional
 `gateway_native_activation_detail`: CMA's problem `code`, restricted to

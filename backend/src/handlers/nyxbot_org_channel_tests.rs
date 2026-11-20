@@ -428,10 +428,24 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
+    cold_guest_model_setup(false).await;
+}
+
+#[tokio::test]
+async fn native_discord_notification_releases_org_guest_for_next_paid_answer() {
+    cold_guest_model_setup(true).await;
+}
+
+async fn cold_guest_model_setup(native: bool) {
     use tower::ServiceExt;
-    let (mut state, _, old) = setup("org_channel_cold_model").await;
+    let db_name = if native {
+        "org_guest_discord_deleted"
+    } else {
+        "org_channel_cold_model"
+    };
+    let (mut state, _, old) = setup(db_name).await;
     old.abort();
-    let (row, key, agent, org_id) = org_channel(&state, false).await;
+    let (row, key, agent, org_id) = org_channel(&state, native).await;
     crate::test_utils::set_test_approval_preference(&state.db, &org_id, false).await;
     crate::billing_integration_tests::create_usage_index(&state.db).await;
     state.billing = Arc::new(crate::billing_integration_tests::billing_service(
@@ -539,18 +553,20 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         )
         .await
         .unwrap();
-    assert_eq!(
-        put_binding(
-            State(state.clone()),
-            Path("bnd_turns".into()),
-            bearer(&key),
-            Json(binding_body(&key, OWNER))
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    ensure_org_partition(&state, &key).await;
+    if !native {
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_turns".into()),
+                bearer(&key),
+                Json(binding_body(&key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        ensure_org_partition(&state, &key).await;
+    }
     // A historical untouched binding is enabled without requiring a wallet.
     state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&row.id},
         doc! {"$set":{"org_specialist.guests.enabled":false,"org_specialist.guests.revision":""}}).await.unwrap();
@@ -563,7 +579,17 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         .await
         .unwrap();
     assert_eq!(settings["health"]["action"], "enable_billing");
-    let unavailable = event("Hello without billing", "7", "org-default-no-wallet");
+    let message = |id: &str, text: &str| {
+        if native {
+            let mut request = native_tests::native_event(&row, id, text);
+            request["event_context"]["activity"]["actor"]["id"] = json!("8");
+            request["metadata"]["cmaeg.actor"] = json!("8");
+            request
+        } else {
+            event(text, "7", id)
+        }
+    };
+    let unavailable = message("501", "Hello without billing");
     let reply = body_text(respond(&state, &key, &unavailable, "org-default-no-wallet").await).await;
     assert!(reply.contains(org::UNAVAILABLE), "{reply}");
     assert!(observations.lock().await.is_empty());
@@ -583,7 +609,23 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         );
     }
     state.billing.ensure_wallet(&org_id).await.unwrap();
-    let body = event("Hello, first visitor", "7", "org-cold-first");
+    if native {
+        let delete = native_tests::deletion(&row, "501", "8");
+        let accepted = respond(&state, &key, &delete, "guest-delete").await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let id = accepted.headers()["x-cma-response-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        drop(accepted); // CMA releases the POST observer and resumes by response ID.
+        let response =
+            native_responses::snapshot(State(state.clone()), Path(id), bearer(&key)).await;
+        let snapshot: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(snapshot["status"], "completed");
+        assert_eq!(snapshot["output"], json!([]));
+        assert!(observations.lock().await.is_empty());
+    }
+    let body = message("502", "Hello, first visitor");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
     assert!(
         response.contains("Organization answer"),
