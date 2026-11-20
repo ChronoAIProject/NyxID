@@ -114,6 +114,7 @@ describe("feature flag catalog", () => {
       INVITATION_CODE: "auth:invitation-code",
       MOBILE_NEW_DOMAINS: "mobile:new-domains",
       MOBILE_MFA: "auth:mobile-mfa",
+      STAGING_QR_LOGIN: "auth:staging-qr-login",
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
       VOICE_AGENT_KEY: "assistant:voice-agent-key",

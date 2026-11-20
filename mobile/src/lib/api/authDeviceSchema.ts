@@ -96,7 +96,15 @@ export const authDevicePreviewSchema = z.object({
   status: z.enum(["pending", "approved", "denied", "expired", "delivered"]),
 });
 
-export type AuthDevicePreview = z.infer<typeof authDevicePreviewSchema>;
+export const stagingQrBindingSchema = z.object({
+  request_id: z.uuid(),
+  production_user: z.uuid(),
+  staging_user: z.uuid(),
+});
+export type StagingQrBinding = z.infer<typeof stagingQrBindingSchema>;
+export type AuthDevicePreview = z.infer<typeof authDevicePreviewSchema> & {
+  stagingBinding?: StagingQrBinding;
+};
 
 export function parseAuthDevicePreview(value: unknown): AuthDevicePreview {
   return authDevicePreviewSchema.parse(value);
