@@ -80,6 +80,12 @@ Endpoints marked **Auth: None** may still require a grant-specific credential in
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
 
+### Registered apps and account management
+
+The global rollout flag `auth:app-token-management-v1` defaults to off. Each server replica logs the first request that would require designation for a registered client ID, HTTP method and matched route template with `count=1`. It then logs the number of additional matching requests at most once per minute while the caller is active, including the final nonempty interval. When enforcement is enabled, an ordinary registered-app access token needs an admin-designated client for account management. An undesignated client receives HTTP 403 with `error_code=1002`, `details.reason="credential_type_unsupported"` and `details.credential_type="oauth_client"`. The admin OAuth client PATCH controls designation. Each handler still applies its scopes, ownership checks and first-party session requirements.
+
+Apps retain access to the organization metadata and AI-service inventory GETs available to general Agent Keys, and to the two channel lists below. OAuth userinfo, creator-side connect links, token exchange, broker client authentication and execution routes retain their own authorization contracts.
+
 ### Channel management and agent discovery
 
 `GET /api/v1/channel-bots` (`nyxid channel-bot list`) and `GET /api/v1/channel-conversations` (`nyxid channel-event channel list`, filtered to device channels) are human account management lists. Use a human session cookie or account access token. Personal lists are owner-scoped; `org_id` / CLI `--org` requires org-admin access. API keys (including Agent Key logins), delegated, relay and service-account tokens cannot use these lists. Existing OAuth-client account access remains subject to the route's current policy; separate first-party-only routes also reject OAuth-client tokens.
@@ -7082,6 +7088,7 @@ Update an OAuth client by `_id` as a platform admin, including ownerless Dynamic
 
 | Field                       | Type     | Description                                                  |
 |-----------------------------|----------|--------------------------------------------------------------|
+| `first_party_management`    | boolean  | A first-party platform-admin session can designate the client for management access. Defaults to false. |
 | `broker_capability_enabled` | boolean  | Grants or removes admin-provisioned OAuth broker capability  |
 | `is_active`                 | boolean  | Activates or deactivates the client                          |
 | `redirect_uris`             | string[] | Replacement redirect URI list                                |

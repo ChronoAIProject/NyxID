@@ -327,6 +327,7 @@ async fn service_preference_http_scopes_stale_slug_config_and_validation() {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec![],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

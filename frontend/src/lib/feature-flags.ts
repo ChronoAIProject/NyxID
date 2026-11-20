@@ -21,6 +21,7 @@ export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
   INVITATION_CODE: "auth:invitation-code",
+  APP_TOKEN_MANAGEMENT: "auth:app-token-management-v1",
   // Global only: mobile builds with both domain sets read it at launch.
   MOBILE_NEW_DOMAINS: "mobile:new-domains",
   AI_ASSISTANT: "experimental:ai-assistant",
@@ -96,6 +97,7 @@ export function userHasFeature(
 /** Resolved without a user or organization; only a global override applies. */
 const GLOBAL_ONLY_FLAGS: readonly string[] = [
   FEATURE_FLAG.INVITATION_CODE,
+  FEATURE_FLAG.APP_TOKEN_MANAGEMENT,
   FEATURE_FLAG.MOBILE_NEW_DOMAINS,
   FEATURE_FLAG.CMA_SANDBOX_RATE_SYNC,
 ];

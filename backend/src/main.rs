@@ -150,6 +150,8 @@ impl From<BrokerPolicy> for CachedBrokerPolicy {
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) app_management_observations:
+        Arc<mw::app_management_observations::AppManagementObservations>,
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
     pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
@@ -1200,6 +1202,7 @@ async fn server_run(cli: Cli) {
             .expect("Invalid crash reporting configuration"),
     );
     let state = AppState {
+        app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
         crash_reports: crash_reports.clone(),
