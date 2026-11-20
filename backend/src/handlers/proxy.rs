@@ -304,6 +304,19 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 #[derive(Clone, Copy)]
 pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
 
+fn direct_response_header_value(
+    status: StatusCode,
+    name_lower: &str,
+    value: &[u8],
+    is_sse: bool,
+    context: Option<&AsyncLocationContext>,
+) -> Option<axum::http::HeaderValue> {
+    if name_lower == "location" && status.is_redirection() {
+        return axum::http::HeaderValue::from_bytes(value).ok();
+    }
+    forwarded_response_header_value(name_lower, value, is_sse, context)
+}
+
 fn forwarded_response_header_value(
     name_lower: &str,
     value: &[u8],
@@ -7514,16 +7527,17 @@ async fn execute_resolved_proxy_inner<'a>(
                 &downstream_cancellation,
                 box_proxy_future(|| {
                     proxy_service::forward_request_with_resource_proof(
-                        if is_pool_attempt
+                        if crate::services::credential_verification::checking()
+                            || is_pool_attempt
                             || operation_scoped
                             || operation_guest
                             || permission_ingress.is_some()
                             || target.service.offering_kind
                                 == crate::models::downstream_service::OfferingKind::Tool
                         {
-                            proxy_service::no_redirect_http_client()
+                            proxy_service::Redirects::Return
                         } else {
-                            &state.http_client
+                            proxy_service::Redirects::SameOrigin
                         },
                         &target,
                         reqwest_method,
@@ -7788,7 +7802,8 @@ async fn execute_resolved_proxy_inner<'a>(
                 let name_lower = name.as_str().to_lowercase();
                 if let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                    && let Some(header_value) = forwarded_response_header_value(
+                    && let Some(header_value) = direct_response_header_value(
+                        status,
                         &name_lower,
                         value.as_bytes(),
                         is_sse,
@@ -8397,11 +8412,19 @@ async fn connect_downstream_ws(
     ws_config.max_frame_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     let (ws_stream, response) = tokio::time::timeout(
         std::time::Duration::from_secs(WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false),
+        async {
+            let destination = target.direct_destination(url).await?;
+            let stream = destination
+                .connect()
+                .await
+                .map_err(|_| AppError::Internal("Downstream WS connection failed".into()))?;
+            tokio_tungstenite::client_async_tls_with_config(request, stream, Some(ws_config), None)
+                .await
+                .map_err(|_| AppError::Internal("Downstream WS handshake failed".into()))
+        },
     )
     .await
-    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))?
-    .map_err(|e| AppError::Internal(format!("Downstream WS connection failed: {e}")))?;
+    .map_err(|_| AppError::Internal("Downstream WS connection timed out".to_string()))??;
 
     let selected_protocol = response
         .headers()
@@ -9871,6 +9894,30 @@ mod tests {
     }
 
     #[test]
+    fn proxy_destination_download_location_is_returned_verbatim() {
+        let value = b"https://download.example/archive?signature=fixture";
+        for status in [
+            axum::http::StatusCode::MULTIPLE_CHOICES,
+            axum::http::StatusCode::FOUND,
+        ] {
+            let header =
+                super::direct_response_header_value(status, "location", value, false, None)
+                    .expect("redirect Location");
+            assert_eq!(header.as_bytes(), value);
+        }
+        assert!(
+            super::direct_response_header_value(
+                axum::http::StatusCode::ACCEPTED,
+                "location",
+                value,
+                false,
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn async_locations_are_rewritten_to_the_caller_visible_proxy_route() {
         let context = AsyncLocationContext::new(
             "https://private.example/api/",
@@ -10974,6 +11021,26 @@ mod tests {
             url,
             "wss://api.example.com/socket?stream=true&api_key=secret%20value"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_destination_websocket_checks_address_before_connect() {
+        // Port zero has no listening peer. The policy must refuse this URL before a TCP dial.
+        let url = "ws://[::]:0/socket";
+        let target = make_target(url);
+        use crate::services::billing::{BillingIngress, route_inventory};
+        let permit = route_inventory::enforce_billing_egress_classification(
+            Some(route_inventory::BillingRoutePolicy::Metered(
+                BillingIngress::Proxy,
+            )),
+            BillingIngress::Proxy,
+        )
+        .unwrap();
+        let result = super::connect_downstream_ws(url, &target, &[], &[], &[], None, permit).await;
+        assert!(matches!(
+            result,
+            Err(crate::errors::AppError::ValidationError(_))
+        ));
     }
 
     #[tokio::test]

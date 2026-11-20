@@ -1205,6 +1205,7 @@ mod tests {
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
             caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

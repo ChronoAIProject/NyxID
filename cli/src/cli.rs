@@ -512,6 +512,14 @@ pub enum AdminCatalogCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Approve or revoke private direct access to the service's current catalog base URL
+    PrivateDestination {
+        service_id: uuid::Uuid,
+        #[arg(long)]
+        revoke: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Upload a static SVG and set the linked provider's catalog icon
     Icon {
         /// Provider ID or slug (all linked services inherit this icon)

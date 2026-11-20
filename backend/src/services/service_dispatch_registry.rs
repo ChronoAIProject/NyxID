@@ -323,7 +323,7 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("idempotency-key", "original-key".parse().unwrap());
         proxy_service::forward_request_with_resource_proof(
-            &reqwest::Client::new(),
+            proxy_service::Redirects::Return,
             target,
             reqwest::Method::POST,
             "/operation",

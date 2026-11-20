@@ -786,7 +786,7 @@ mod tests {
             tele(),
             Path(ep_id),
             Json(UpdateEndpointRequest {
-                url: Some("https://new.supabase.co".to_string()),
+                url: Some("https://127.0.0.1".to_string()),
                 label: None,
                 openapi_spec_url: None,
                 recommended_skills: None,
@@ -795,10 +795,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            updated.url.as_deref(),
-            Some("https://new.supabase.co/rest/v1")
-        );
+        assert_eq!(updated.url.as_deref(), Some("https://127.0.0.1/rest/v1"));
     }
 
     #[tokio::test]

@@ -25,6 +25,26 @@ use crate::{
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+pub(crate) fn build_http_client(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, reqwest::Error> {
+    builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(TIMEOUT)
+        .build()
+}
+
+pub(crate) fn control_client() -> AppResult<reqwest::Client> {
+    static CLIENT: std::sync::LazyLock<Result<reqwest::Client, reqwest::Error>> =
+        std::sync::LazyLock::new(|| build_http_client(reqwest::Client::builder()));
+    CLIENT
+        .as_ref()
+        .cloned()
+        .map_err(|_| AppError::Internal("Verification transport unavailable".into()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationView {
     pub state: String,
