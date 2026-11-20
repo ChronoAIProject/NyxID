@@ -4930,6 +4930,7 @@ pub(crate) async fn finish_turn_inner(
         .turn_id
         .clone();
     let mut session = db.client().start_session().await?;
+    let health_db = db;
     let db = db.clone();
     let row = row.clone();
     let result = result.clone();
@@ -5322,6 +5323,17 @@ artifact_recovery_target: None,
         .await
         .map_err(transactions::map_transaction_error)?;
     if let Some(turn) = settled.as_ref() {
+        if let Some(error) = &error {
+            let code = if error.upstream_code.as_deref() == Some("idempotency_conflict") {
+                "idempotency_conflict"
+            } else {
+                error.code
+            };
+            Box::pin(super::channel_inbound_diagnostics::org_guest_turn(
+                health_db, turn, code,
+            ))
+            .await;
+        }
         super::assistant_turn_observability::settled(&log_row, turn, error.as_ref(), Utc::now());
     }
     Ok(error)

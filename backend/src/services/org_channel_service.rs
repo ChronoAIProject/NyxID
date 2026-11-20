@@ -32,6 +32,22 @@ pub const GUEST_GRANTS_READINESS: &str = "nyxbot:org-guest-grants-v1";
 pub const FLAG: &str = "nyxbot:org-specialist-channels";
 pub const UNAVAILABLE: &str = "This assistant is unavailable right now. Please try again later.";
 
+/// Only fixed, audience-safe copy crosses the org guest delivery boundary.
+pub(crate) fn guest_failure_notice(code: Option<&str>) -> &'static str {
+    match code {
+        Some("guest_model_route_required") => {
+            "The assistant could not use its model for this question. Please check any actions already taken before trying again."
+        }
+        Some("capacity_exceeded") => {
+            "The assistant is at capacity right now. Please try again shortly."
+        }
+        Some("session_busy" | "queue_timeout") => {
+            "The assistant is busy with another request. Please try again shortly."
+        }
+        _ => UNAVAILABLE,
+    }
+}
+
 pub(crate) fn denied() -> AppError {
     AppError::Forbidden("Organization channel authority is no longer available".into())
 }

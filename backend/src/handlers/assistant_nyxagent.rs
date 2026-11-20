@@ -3085,6 +3085,7 @@ async fn execute_turn(
         block_id,
         partial,
         instruction_context,
+        None,
     )
     .await
 }

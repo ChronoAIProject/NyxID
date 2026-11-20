@@ -3488,6 +3488,7 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
         "block",
         &mut String::new(),
         &mut None,
+        None,
     )
     .await
     .unwrap();
@@ -3521,7 +3522,8 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
             &mut events,
             "block",
             &mut String::new(),
-            &mut None
+            &mut None,
+            None,
         )
         .await
         .is_err()
