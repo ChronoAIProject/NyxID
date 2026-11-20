@@ -2726,12 +2726,19 @@ pub(crate) async fn start_turn_with_voice(
     let user_id = auth.user_id.to_string();
     let mut admitted = start.clone();
     admitted.capacity = permit.token().cloned();
-    if start.origin == crate::models::assistant_conversation::TurnOrigin::Event
-        && crate::services::security_readiness_service::turn_restart_enrollment_ready()
+    use crate::models::assistant_conversation::TurnOrigin;
+    use crate::services::security_readiness_service as readiness;
+    let team_candidate = matches!(start.origin, TurnOrigin::Orchestrator | TurnOrigin::Group)
+        && start.automation_work.is_none()
+        && start.automation_parent.is_none();
+    let team_ready = readiness::team_restart_enrollment_ready();
+    if (start.origin == TurnOrigin::Event && readiness::turn_restart_enrollment_ready())
+        || (team_candidate && team_ready)
     {
         let _ = crate::services::assistant_notification_service::enabled(&state.db, &user_id).await;
     }
     let metadata = if engine::restart_enabled(&state.db, &user_id)
+        && (!team_candidate || team_ready)
         && voice_request_id.is_none()
         && !start.guest
         && start.channel.is_none()
@@ -2773,28 +2780,30 @@ pub(crate) async fn start_turn_with_voice(
         text.push_str(&prelude);
     }
     credentials::validate_claimed(&state.db, &row, &credential).await?;
-    state.shutdown.spawn(
-        run_turn(
-            state.clone(),
-            auth,
-            row.clone(),
-            text,
-            credential,
-            policy,
-            permit,
-            Events {
-                checkpoint: None,
-                sender,
-                cursor: 0,
-                reset_notified: false,
-            },
-        )
-        .in_current_span(),
-    );
+    let driver = run_turn(
+        state.clone(),
+        auth,
+        row.clone(),
+        text,
+        credential,
+        policy,
+        permit,
+        Events {
+            checkpoint: None,
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        },
+    )
+    .in_current_span();
+    #[cfg(test)]
+    let driver = crate::services::assistant_engine_worker::TEST_WORKER
+        .scope(crate::services::assistant_engine_worker::instance(), driver);
+    state.shutdown.spawn(driver);
     Ok((row, receiver))
 }
 
-async fn restart_metadata(
+pub(super) async fn restart_metadata(
     state: &AppState,
     auth: &AuthUser,
     policy: Option<BillingRoutePolicy>,

@@ -676,6 +676,15 @@ or globally in Feature Flags after every NyxID replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
 
+Standalone NyxBot specialist assignments and member turns in personal web groups
+also require `assistant:turn-handoff-v3` across the serving NyxID fleet. They
+use the same feature flag. The survivor takes over the original team slot,
+publishes an assignment to its saved report thread, or settles the member reply
+and mention budget together in the group transcript. A pending group follower
+receives its ordinary `group_settled` event when the group becomes quiet.
+Chat-app, guest, voice, shared-agent, organization-group and collaboration-group
+turns remain outside these two lanes.
+
 The admitting replica discovers missing metadata with the owner's existing
 private assistant credential. It allows two seconds in total before admission
 for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
@@ -706,7 +715,10 @@ flight finish. Keep compatible subscribers and cancellation handlers serving.
 Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
 with a URI selecting the NyxID database. Exit 0 means the majority read on the
 primary found zero outstanding conversation records. Exit 2 prints counts for
-subscribed, offered, claimed or stopped windows. A read error requires another
+subscribed, offered, claimed or stopped windows, grouped by the active team lane
+when present. Run this check before removing v3 subscribers even when rolling
+back to a v2-capable build. V2 readers decode the compatible source and skip
+version 3 in both offer discovery and the claim update. A read error requires another
 check. A stopped window clears after confirmed cancellation or after the next
 authorized admission replaces the internal credential. Deleting its marker by
 hand could let an earlier execution use the next turn's authority.

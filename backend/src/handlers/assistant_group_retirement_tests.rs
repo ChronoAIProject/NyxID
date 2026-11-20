@@ -352,9 +352,16 @@ async fn crew_removal_stale_edit_cannot_restore_removed_member() {
     let before = group_with(&state, "Crew", &[&a, &b]).await;
     let row = begin(&state, &before, &a).await;
     finish(&state, &row).await.unwrap();
-    groups::update_prepared(&state.db, OWNER, &before, None, Some(vec![b.clone()]))
-        .await
-        .unwrap();
+    groups::update_prepared(
+        &state.db,
+        OWNER,
+        &before,
+        None,
+        Some(vec![b.clone()]),
+        |_| async {},
+    )
+    .await
+    .unwrap();
     let stale = groups::update_from_snapshot(
         &state.db,
         OWNER,

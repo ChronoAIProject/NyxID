@@ -612,6 +612,8 @@ pub struct RestartAdmission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<ReattachWindow>,
     pub source: RestartSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_source: Option<TeamRestartSource>,
     pub initiating_message_id: String,
     pub initiating_seq: i64,
     pub reply_id: String,
@@ -719,6 +721,13 @@ pub struct ReattachLimits {
 pub struct CredentialWatchLimits {
     pub interval_seconds: u32,
     pub model_request_max_age_seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeamRestartSource {
+    Assignment { report_to: String },
+    GroupMember { group_id: String, upper_seq: i64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

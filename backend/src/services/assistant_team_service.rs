@@ -130,6 +130,32 @@ pub async fn in_progress(
         .collect())
 }
 
+pub(crate) fn specialist_settled_event(
+    agent: &AssistantAgent,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    text: &str,
+    error_code: Option<&str>,
+    created_at: DateTime<Utc>,
+) -> AgentEvent {
+    let status = match error_code {
+        None => "replied".to_owned(),
+        Some("cancelled") => "was stopped".to_owned(),
+        Some(code) => format!("failed ({code})"),
+    };
+    let note = format!(
+        "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
+        super::assistant_nyxagent::identifier(&agent.name),
+        super::assistant_nyxagent::excerpt(text, 1200).replace('"', "'"),
+        agent.id
+    );
+    let mut report = event("subagent_settled", note, Some(&agent.id))
+        .for_invocation(turn.invocation_id.as_deref());
+    report.id.clone_from(&turn.turn_id);
+    report.created_at = created_at;
+    report.execution_task.clone_from(&turn.execution_task);
+    report
+}
+
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {

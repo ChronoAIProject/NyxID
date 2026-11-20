@@ -9,13 +9,51 @@ use uuid::Uuid;
 use super::assistant_nyxagent::WorkerFence;
 use crate::{
     errors::AppResult,
-    models::assistant_conversation::{AssistantConversation, COLLECTION_NAME},
+    models::assistant_conversation::{
+        AssistantConversation, COLLECTION_NAME, RestartSource, TeamRestartSource, TurnOrigin,
+    },
 };
 
 pub(crate) enum Loss<'a> {
     Shutdown(&'a str),
     Stale(DateTime<Utc>),
     Expiry(DateTime<Utc>),
+}
+
+fn source_matches(row: &AssistantConversation) -> bool {
+    let Some(turn) = &row.active_turn else {
+        return false;
+    };
+    let Some(source) = &turn.restart_admission else {
+        return false;
+    };
+    match (source.version, &source.team_source) {
+        (1 | 2, None) => true,
+        (3, Some(team))
+            if source.source == RestartSource::FirstPartyOwner
+                && turn.automation_work.is_none()
+                && turn.trigger_run_id.is_none() =>
+        {
+            match team {
+                TeamRestartSource::Assignment { report_to } => {
+                    turn.origin == TurnOrigin::Orchestrator
+                        && row.is_subagent()
+                        && row.group_id.is_none()
+                        && turn.report_to.as_ref() == Some(report_to)
+                }
+                TeamRestartSource::GroupMember {
+                    group_id,
+                    upper_seq,
+                } => {
+                    turn.origin == TurnOrigin::Group
+                        && turn.group_reply_in_settlement
+                        && row.group_id.as_ref() == Some(group_id)
+                        && row.group_seen_seq == *upper_seq
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn awaiting_reply(row: &AssistantConversation, turn_id: &str) -> bool {
@@ -94,7 +132,7 @@ fn offer_change(
     ) else {
         return Ok(None);
     };
-    if !matches!(source.version, 1 | 2) || source.reattach.is_none() || turn.stop_requested {
+    if !source_matches(row) || source.reattach.is_none() || turn.stop_requested {
         return Ok(None);
     }
     let Some(next_epoch) = previous.epoch.checked_add(1) else {
@@ -295,11 +333,37 @@ pub(crate) async fn claim_capacity(
     let Some(offer) = &turn.restart_offer else {
         return Ok(None);
     };
-    if offer.claimed_by.is_some() || offer.from_worker == survivor.id {
+    if offer.claimed_by.is_some() || offer.from_worker == survivor.id || !source_matches(offered) {
         return Ok(None);
     }
     let mut filter = WorkerFence::capture(offered)?.filter();
-    filter.extend(doc!{"active_turn.restart_admission.version":{"$in":[1,2]}, "active_turn.restart_offer.from_worker":&offer.from_worker,
+    let source = turn.restart_admission.as_deref().expect("validated source");
+    filter.insert(
+        "active_turn.restart_admission.team_source",
+        bson::to_bson(&source.team_source)
+            .map_err(|err| crate::errors::AppError::Internal(err.to_string()))?,
+    );
+    if let Some(team) = &source.team_source {
+        filter.insert("agent_id", &source.agent_id);
+        filter.insert("model", &source.model);
+        if !source.credential_ended {
+            filter.insert("credential_api_key_id", &source.credential_id);
+        }
+        match team {
+            TeamRestartSource::Assignment { report_to } => {
+                filter.insert("active_turn.report_to", report_to);
+            }
+            TeamRestartSource::GroupMember {
+                group_id,
+                upper_seq,
+            } => {
+                filter.insert("group_id", group_id);
+                filter.insert("group_seen_seq", *upper_seq);
+                filter.insert("active_turn.group_reply_in_settlement", true);
+            }
+        }
+    }
+    filter.extend(doc!{"active_turn.restart_admission.version":source.version, "active_turn.restart_offer.from_worker":&offer.from_worker,
         "active_turn.restart_offer.claimed_by":null, "active_turn.stop_requested":false,
         "active_turn.restart_offer.due_at":{"$lte":bson::DateTime::now()}});
     let mut fields = doc! {"active_turn.restart_offer.claimed_by": &survivor.id,
@@ -345,7 +409,7 @@ pub(crate) async fn claim_capacity(
 pub(crate) async fn due(db: &Database, worker: &str) -> AppResult<Vec<AssistantConversation>> {
     use futures::TryStreamExt;
     Ok(db.collection::<AssistantConversation>(COLLECTION_NAME).find(doc! {
-        "active_turn.restart_admission.version":{"$in":[1,2]}, "active_turn.restart_offer.due_at":{"$type":"date","$lte":bson::DateTime::now()},
+        "active_turn.restart_admission.version":{"$in":[1,2,3]}, "active_turn.restart_offer.due_at":{"$type":"date","$lte":bson::DateTime::now()},
         "active_turn.restart_offer.claimed_by":null,"active_turn.restart_offer.from_worker":{"$ne":worker}, "active_turn.stop_requested":false
     }).sort(doc!{"active_turn.restart_offer.due_at":1,"_id":1}).limit(32).await?.try_collect().await?)
 }
