@@ -4290,6 +4290,7 @@ async fn nyxagent_egress_uses_its_turn_key_for_explicit_policy_blocks() {
                         relative_path: "v1/models".into(),
                         body: None,
                         idempotency_key: Uuid::new_v4().to_string(),
+                        destination: None,
                         billing_policy: Some(
                             crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                                 crate::services::billing::BillingIngress::Proxy,
@@ -4298,14 +4299,19 @@ async fn nyxagent_egress_uses_its_turn_key_for_explicit_policy_blocks() {
                     },
                 )
                 .await;
-            let denied = effect == "deny" && keys != vec![other.id.clone()];
-            assert_eq!(
-                matches!(result, Err(crate::errors::AppError::Forbidden(_))),
-                denied,
-                "{effect}/{keys:?}"
-            );
-            if !denied {
-                result.unwrap();
+            match effect {
+                "deny" if keys.is_empty() || keys.contains(&key_id) => {
+                    assert!(matches!(result, Err(crate::errors::AppError::Forbidden(_))));
+                }
+                "require_approval" if keys.contains(&key_id) => {
+                    assert!(matches!(
+                        result,
+                        Err(crate::errors::AppError::ApprovalUnsupported)
+                    ));
+                }
+                _ => {
+                    result.unwrap();
+                }
             }
         }
     }
