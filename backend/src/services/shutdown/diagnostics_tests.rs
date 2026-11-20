@@ -330,12 +330,25 @@ async fn shutdown_diagnostics_progress_fixed_points_budget_and_finish() {
             )
             .await;
             tokio::time::resume();
-            let _ = tokio::time::timeout(Duration::from_millis(150), &mut progress).await;
-            let rows = audit_data(&db, "backend_shutdown_drain_progress").await;
             let expected = [10, 25, 60, 300]
                 .into_iter()
                 .filter(|p| *p <= point && *p < budget)
                 .count();
+            let recorded = async {
+                loop {
+                    let rows = audit_data(&db, "backend_shutdown_drain_progress").await;
+                    if rows.len() >= expected {
+                        return rows;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            let rows = tokio::select! {
+                biased;
+                never = &mut progress => match never {},
+                result = tokio::time::timeout(Duration::from_secs(5), recorded) =>
+                    result.unwrap_or_else(|_| panic!("missing checkpoint: budget={budget}, point={point}")),
+            };
             assert_eq!(rows.len(), expected, "budget={budget}, point={point}");
             for (row, expected_point) in rows.iter().zip([10, 25, 60, 300]) {
                 assert_eq!(row.get_i64("elapsed_secs").unwrap(), expected_point);
@@ -354,14 +367,10 @@ async fn shutdown_diagnostics_progress_fixed_points_budget_and_finish() {
                 assert!(row.contains_key("open_http"));
             }
         }
-        drain
-            .audit(
-                &state,
-                drain::End::Idle,
-                Default::default(),
-                Instant::now() + Duration::from_secs(3),
-            )
-            .await;
+        tokio::select! {
+            never = &mut progress => match never {},
+            () = drain.audit(&state, drain::End::Idle, Default::default(), Instant::now() + Duration::from_secs(3)) => {},
+        }
         drop(work);
         let _ = tokio::time::timeout(Duration::from_millis(20), &mut progress).await;
         assert_eq!(
@@ -534,7 +543,7 @@ async fn shutdown_diagnostics_early_finish_cancels_future_checkpoints() {
     db.drop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn shutdown_diagnostics_stalled_progress_does_not_hold_idle_or_finish() {
     crate::test_utils::init_test_audit_chain_hmac_key();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
