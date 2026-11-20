@@ -57,7 +57,6 @@ pub mod audit_chain_service;
 pub mod audit_service;
 pub mod auth_agent_key_login_service;
 pub mod auth_device_service;
-pub mod staging_qr;
 pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
@@ -286,6 +285,7 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+pub mod staging_qr;
 mod startup_seed_service;
 #[cfg(test)]
 mod startup_seed_tests;
