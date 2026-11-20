@@ -38,9 +38,15 @@ impl LagoClient {
             )
             .await?
             .ok_or_else(invalid)?;
+        // Lago leaves the customer override null when billing inherits its timezone.
+        // Only an absent effective field permits the legacy override fallback.
+        let timezone = customer
+            .get("applicable_timezone")
+            .or_else(|| customer.get("timezone"))
+            .and_then(Value::as_str);
         if customer.get("external_id").and_then(Value::as_str)
             != Some(snapshot.subscription.external_customer_id.as_str())
-            || customer.get("timezone").and_then(Value::as_str) != Some("UTC")
+            || timezone != Some("UTC")
         {
             return Err(invalid());
         }
@@ -164,7 +170,7 @@ mod tests {
             .and(path("/api/v1/customers/owner"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"customer": {
-                    "external_id": "owner", "timezone": "UTC"
+                    "external_id": "owner", "timezone": null, "applicable_timezone": "UTC"
                 }})),
             )
             .mount(&server)
@@ -198,7 +204,7 @@ mod tests {
             .and(path("/api/v1/customers/owner"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"customer": {
-                    "external_id": "owner", "timezone": "UTC"
+                    "external_id": "owner", "timezone": null, "applicable_timezone": "UTC"
                 }})),
             )
             .mount(&server)
@@ -228,8 +234,16 @@ mod tests {
         let (subscription, codes) = fixture();
         for customer in [
             json!({"external_id":"owner"}),
+            json!({"external_id":"owner","timezone":null}),
             json!({"external_id":"owner","timezone":"America/New_York"}),
+            json!({"external_id":"owner","timezone":null,"applicable_timezone":"America/New_York"}),
+            json!({"external_id":"owner","timezone":"UTC","applicable_timezone":"America/New_York"}),
+            json!({"external_id":"owner","timezone":"UTC","applicable_timezone":null}),
+            json!({"external_id":"owner","timezone":"UTC","applicable_timezone":""}),
+            json!({"external_id":"owner","timezone":"UTC","applicable_timezone":42}),
+            json!({"external_id":"owner","timezone":"UTC","applicable_timezone":" UTC "}),
             json!({"external_id":"other","timezone":"UTC"}),
+            json!({"external_id":"other","timezone":null,"applicable_timezone":"UTC"}),
             Value::Null,
         ] {
             server.reset().await;
@@ -247,9 +261,129 @@ mod tests {
                 )
                 .mount(&server)
                 .await;
-            assert!(client.sandbox_subscription("sub", &codes).await.is_err());
+            assert!(
+                matches!(
+                    client.sandbox_subscription("sub", &codes).await,
+                    Err(AppError::BillingProviderUnavailable(message))
+                        if message == "Sandbox provider price proof is invalid"
+                ),
+                "customer: {customer}"
+            );
             assert_eq!(server.received_requests().await.unwrap().len(), 2);
         }
+    }
+
+    async fn mock_subscription_and_metrics(server: &wiremock::MockServer) -> Vec<String> {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let (subscription, codes) = fixture();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/subscriptions/sub"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"subscription":subscription})),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+        for code in &codes {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/billable_metrics/{code}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"billable_metric":{
+                    "code":code,"aggregation_type":"sum_agg","field_name":"quantity","recurring":false
+                }})))
+                .expect(1)
+                .mount(server)
+                .await;
+        }
+        codes
+    }
+
+    #[tokio::test]
+    async fn accepts_effective_utc_and_legacy_explicit_utc() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for customer in [
+            json!({"external_id":"owner","timezone":null,"applicable_timezone":"UTC"}),
+            json!({"external_id":"owner","applicable_timezone":"UTC"}),
+            json!({"external_id":"owner","timezone":"America/New_York","applicable_timezone":"UTC"}),
+            json!({"external_id":"owner","timezone":"UTC"}),
+        ] {
+            let server = MockServer::start().await;
+            let codes = mock_subscription_and_metrics(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/customers/owner"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"customer":customer})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = LagoClient::new(server.uri(), "test-only".into()).unwrap();
+            let proof = client.sandbox_subscription("sub", &codes).await.unwrap();
+            assert_eq!(proof.subscription.external_customer_id, "owner");
+            assert_eq!(proof.rates.len(), 3);
+            assert!(
+                proof
+                    .rates
+                    .iter()
+                    .all(|rate| rate.credits_per_unit_pico == Some(10001))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provisioned_customer_with_inherited_utc_passes_provider_proof() {
+        use wiremock::{
+            Mock, MockServer, Request, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let codes = mock_subscription_and_metrics(&server).await;
+        let customer = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
+        let stored = customer.clone();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/customers/owner"))
+            .respond_with(move |_: &Request| match stored.lock().unwrap().as_ref() {
+                Some(customer) => {
+                    ResponseTemplate::new(200).set_body_json(json!({"customer":customer}))
+                }
+                None => ResponseTemplate::new(404),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let stored = customer.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/customers"))
+            .respond_with(move |request: &Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let mut customer = body["customer"].clone();
+                assert!(customer.get("timezone").is_none());
+                // Lago's nullable override and effective billing timezone response contract.
+                customer["timezone"] = Value::Null;
+                customer["applicable_timezone"] = json!("UTC");
+                *stored.lock().unwrap() = Some(customer.clone());
+                ResponseTemplate::new(200).set_body_json(json!({"customer":customer}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = LagoClient::new(server.uri(), "test-only".into()).unwrap();
+        let customer_id = client
+            .ensure_customer(&OwnerProvisionInput {
+                external_customer_id: "owner".into(),
+                name: None,
+                email: None,
+            })
+            .await
+            .unwrap();
+        let proof = client.sandbox_subscription("sub", &codes).await.unwrap();
+        assert_eq!(proof.subscription.external_customer_id, customer_id);
+        assert_eq!(proof.rates.len(), 3);
     }
 
     fn fixture() -> (Value, Vec<String>) {
