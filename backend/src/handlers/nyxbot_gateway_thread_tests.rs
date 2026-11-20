@@ -194,7 +194,10 @@ impl Fixture {
         Box::pin(Self::with_org(name, false)).await
     }
     async fn with_org(name: &str, org: bool) -> Self {
-        let (state, calls, model) = setup(name).await;
+        Box::pin(Self::with_reply(name, org, "Here is your answer")).await
+    }
+    async fn with_reply(name: &str, org: bool, reply: &'static str) -> Self {
+        let (state, calls, model) = setup_with_reply(name, reply).await;
         let (mut row, key) = if org {
             let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
             (row, key)
@@ -1472,17 +1475,6 @@ async fn supplemental_followed_reply_preserves_thread_callback_variants_and_part
                 let response=axum::Router::new().route(endpoint,route).with_state(f.state.clone()).oneshot(Request::builder().method("POST").uri(endpoint).header("authorization",format!("Bearer {token}")).header("content-type","application/json").body(Body::from(json!({"message_id":id,"reply":{"text":"中文 English မြန်မာစာ\n".repeat(8000)}}).to_string())).unwrap()).await.unwrap();
                 let status=response.status();
                 let bytes=axum::body::to_bytes(response.into_body(),8192).await.unwrap();
-                if commonmark {
-                    // Current gateway thread negotiation supports Lark/Feishu;
-                    // CommonMark callback routes support Telegram only.
-                    assert_eq!(status,StatusCode::BAD_REQUEST);
-                    assert!(String::from_utf8_lossy(&bytes).contains("CommonMark relay formatting is supported for Telegram"));
-                    assert_eq!(f.state.db.collection::<bson::Document>("reply_token_uses").count_documents(doc!{}).await.unwrap(),0);
-                    assert_eq!(f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).count(),usize::from(notice));
-                    assert!(f.gateway.received_requests().await.unwrap().iter().all(|r|!r.url.path().ends_with("/replies")));
-                    f.state.db.drop().await.unwrap();
-                    continue;
-                }
                 assert_eq!(status,StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
                 let reply:Value=serde_json::from_slice(&bytes).unwrap();
                 let requests:Vec<Value>=f.platform.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/om_root/reply")).map(|r|serde_json::from_slice(&r.body).unwrap()).collect();
