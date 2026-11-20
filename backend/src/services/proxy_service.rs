@@ -7056,6 +7056,7 @@ mod tests {
             .await
             .unwrap();
         let creator = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
+        let caller = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
         let mut catalog = dummy_service();
         catalog.created_by.clone_from(&creator.id);
         catalog.slug = crate::services::assistant_service::AEVATAR_SLUG.into();
@@ -7065,7 +7066,7 @@ mod tests {
         catalog.identity_propagation_mode = "jwt".into();
         catalog.forward_access_token = true;
         db.collection::<User>(USERS)
-            .insert_one(creator)
+            .insert_many([&creator, &caller])
             .await
             .unwrap();
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -7080,19 +7081,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(approved, [(catalog.id.clone(), catalog.slug.clone())]);
-        let target = resolve_proxy_target(
+        assert!(matches!(
+            resolve_proxy_target(
+                &db,
+                &test_encryption_keys(),
+                &caller.id,
+                &catalog.id,
+                disabled_platform_rate_limit(),
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        crate::services::security_readiness_service::ready_test_replica(&db).await;
+        let connection = crate::services::unified_key_service::connect_catalog_service(
             &db,
-            &test_encryption_keys(),
-            &uuid::Uuid::new_v4().to_string(),
-            &catalog.id,
-            disabled_platform_rate_limit(),
+            &caller.id,
+            &caller.id,
+            &catalog.slug,
         )
         .await
         .unwrap();
+        let target = resolve_proxy_target_by_user_service_id(
+            &db,
+            &test_encryption_keys(),
+            &caller.id,
+            &connection.id,
+            None,
+            None,
+            test_execution_context(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .target;
         assert_eq!(
-            admit_caller_bearer(&db, "caller", None, &target, None, Some("fixture"), &[])
-                .await
-                .unwrap(),
+            admit_caller_bearer(
+                &db,
+                &caller.id,
+                Some(&connection.id),
+                &target,
+                None,
+                Some("fixture"),
+                &[],
+            )
+            .await
+            .unwrap(),
             Some("fixture")
         );
         assert_eq!(target.base_url, catalog.base_url);
