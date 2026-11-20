@@ -17,6 +17,7 @@ TARGETS = {"staging": ("dev", 900), "production": ("main", 1800)}
 TARGET_SECRET = "NYXID_DEPLOY_TARGET"
 POLL_SECONDS = 10
 REQUIRED_SAMPLES = 3
+DIGEST = r"sha256:[0-9a-f]{64}"
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,10 @@ class Target:
 
 class DeployError(Exception):
     pass
+
+
+class RestoreError(DeployError):
+    """Only the restoration stage is safe to publish."""
 
 
 class ObjectPairs(list):
@@ -121,7 +126,7 @@ class NewerCommit(Exception):
     pass
 
 
-def already_current(app, observed, target):
+def resolve_commit(app, observed):
     # Match object IDs only. A hex-named ref or an ambiguous prefix cannot
     # authorize a write. The deploy job checks out full commit history.
     resolved = subprocess.run(["git", "rev-parse", "--disambiguate=" + observed],
@@ -129,6 +134,11 @@ def already_current(app, observed, target):
     full = resolved.stdout.strip()
     if resolved.returncode or not re.fullmatch(r"[0-9a-f]{40}", full):
         raise DeployError(f"{app.role} commit {observed} cannot be resolved uniquely in the checkout")
+    return full
+
+
+def already_current(app, observed, target):
+    full = resolve_commit(app, observed)
     if full == target:
         return True
     base = subprocess.run(["git", "merge-base", full, target], capture_output=True, text=True)
@@ -167,6 +177,25 @@ def mask(value):
         print("::add-mask::" + value.replace("%", "%25"), flush=True)
 
 
+def image_tag(role, branch, sha):
+    return f"ghcr.io/chronoaiproject/nyxid/{role}:{branch}-{sha[:7]}"
+
+
+def published_digests(branch, sha):
+    digests = {}
+    for role in ("backend", "frontend"):
+        try:
+            result = subprocess.run(["docker", "buildx", "imagetools", "inspect", image_tag(role, branch, sha)],
+                                    capture_output=True, text=True, check=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        match = re.search(rf"^Digest:[ \t]+({DIGEST})[ \t]*$", result.stdout, re.MULTILINE)
+        if not match:
+            return {}
+        digests[role] = match[1]
+    return digests
+
+
 class Rollout:
     def __init__(self, target, *, send=exchange, clock=time.monotonic, sleep=time.sleep, timeout=None):
         self.target = target
@@ -189,6 +218,7 @@ class Rollout:
         if apps.path.rstrip("/"):
             self.redactions.add(apps.path.rstrip("/"))
         self.redactions |= {quote_plus(value) for value in self.redactions}
+        self.applied_digests = {}
         self.status = {}
         self.last_error = ""
 
@@ -262,15 +292,18 @@ class Rollout:
     def check_pair(self, sha):
         while True:
             try:
-                return {app: already_current(app, self.version(app)["commit"], sha)
-                        for app in (self.target.backend, self.target.frontend)}
+                observed, current = {}, {}
+                for app in (self.target.backend, self.target.frontend):
+                    observed[app] = self.version(app)["commit"]
+                    current[app] = already_current(app, observed[app], sha)
+                return current, observed
             except RequestError as error:
                 if not error.retryable:
                     raise
                 self.last_error = str(error)
                 self.sleep(min(POLL_SECONDS, self.remaining()))
 
-    def sample(self, app, sha):
+    def sample(self, app, sha, rollback_from=None):
         state = self.app_request(app, "GET")
         phase = state.get("phase")
         if not isinstance(phase, str) or not phase:
@@ -285,24 +318,36 @@ class Rollout:
         version = self.version(app)
         observed = version["commit"]
         self.status[app] += f" commit={observed}"
-        current = already_current(app, observed, sha)
+        if rollback_from is None:
+            current = already_current(app, observed, sha)
+        else:
+            if observed not in (rollback_from[:12], sha[:12]):
+                raise DeployError("live release changed during rollback")
+            current = observed == sha[:12]
         ready = phase == "ready" and (app != self.target.backend or version.get("status") == "ok")
-        return current, current and ready
+        return observed, current, current and ready
 
-    def ensure(self, app, sha, was_current):
+    def ensure(self, app, sha, was_current, rollback_from=None, digest=None):
         self.status[app] = f"{app.role} phase=unknown pod reasons=unknown"
-        patched = False
+        replaced = None
         consecutive = 0
         while consecutive < REQUIRED_SAMPLES:
             try:
-                current, ready = self.sample(app, sha)
-                if not was_current and not patched and not current:
-                    image = f"ghcr.io/chronoaiproject/nyxid/{app.role}:{self.target.branch}-{sha[:7]}"
+                observed, current, ready = self.sample(app, sha, rollback_from)
+                if not was_current and replaced is None and not current:
+                    if rollback_from:
+                        peer = self.target.frontend if app == self.target.backend else self.target.backend
+                        expected = rollback_from if app == self.target.backend else sha
+                        if self.version(peer)["commit"] != expected[:12]:
+                            raise DeployError("peer release changed before rollback write")
+                    image = image_tag(app.role, self.target.branch, sha)
+                    if digest:
+                        image += "@" + digest
                     body = json.dumps({"services": {app.service: {"image": image}}}).encode()
                     self.app_request(app, "PATCH", body=body)
-                    patched = True
+                    replaced = observed
                 if ready and app == self.target.frontend:
-                    _, ready = self.sample(self.target.backend, sha)
+                    _, _, ready = self.sample(self.target.backend, sha, rollback_from)
                 consecutive = consecutive + 1 if ready else 0
                 self.last_error = ""
             except RequestError as error:
@@ -313,7 +358,7 @@ class Rollout:
                 consecutive = 0
             if consecutive < REQUIRED_SAMPLES:
                 self.sleep(min(POLL_SECONDS, self.remaining()))
-        return "updated" if patched else "already current"
+        return replaced
 
     def run(self, sha, client_id, secret):
         for value in sorted(self.private_values):
@@ -321,10 +366,17 @@ class Rollout:
         try:
             if not re.fullmatch(r"[0-9a-f]{40}", sha):
                 raise DeployError(f"expected the full {self.target.branch} commit SHA")
-            current = self.check_pair(sha)
+            current, observed = self.check_pair(sha)
             self.login(client_id, secret)
-            backend = self.ensure(self.target.backend, sha, current[self.target.backend])
-            frontend = self.ensure(self.target.frontend, sha, current[self.target.frontend])
+            digests = {}
+            if os.getenv("NYXID_PIN_CHECK_IMAGES") == "true" and not any(current.values()):
+                digests = published_digests(self.target.branch, sha)
+                if not digests:
+                    print("::notice::Image digests unavailable. This rollout cannot become a rollback baseline.")
+            backend = self.ensure(self.target.backend, sha, current[self.target.backend], digest=digests.get("backend"))
+            frontend = self.ensure(self.target.frontend, sha, current[self.target.frontend], digest=digests.get("frontend"))
+            if backend and frontend:
+                self.applied_digests = digests
             self.remaining()
         except NewerCommit as error:
             print(self.redact(f"Skipping further {self.target.name} updates for {sha[:12]}: {error}."))
@@ -334,7 +386,29 @@ class Rollout:
             raise DeployError(self.redact(f"{self.target.name} {detail}")) from None
         summary = (f"Skipping deployment, {self.target.name} already ready" if all(current.values())
                    else f"{self.target.name.capitalize()} ready")
-        print(self.redact(f"{summary} at {sha[:12]} (backend {backend}, frontend {frontend})."))
+        backend_status = "updated" if backend else "already current"
+        frontend_status = "updated" if frontend else "already current"
+        print(self.redact(f"{summary} at {sha[:12]} (backend {backend_status}, frontend {frontend_status})."))
+        if backend and backend == frontend and set(observed.values()) == {backend}:
+            return backend
+        return ""
+
+    def restore(self, failed, previous, digests, client_id, secret):
+        if not all(re.fullmatch(DIGEST, digests.get(role, "")) for role in ("backend", "frontend")):
+            raise RestoreError("image_digests")
+        stage = "verify_candidate"
+        try:
+            for app in (self.target.backend, self.target.frontend):
+                if self.version(app)["commit"] != failed[:12]:
+                    raise DeployError("live pair changed")
+            stage = "authenticate_deployer"
+            self.login(client_id, secret)
+            for app in (self.target.backend, self.target.frontend):
+                stage = app.role
+                self.ensure(app, previous, False, rollback_from=failed, digest=digests[app.role])
+            self.remaining()
+        except (DeployError, OSError):
+            raise RestoreError(stage) from None
 
 
 def main():
@@ -344,8 +418,14 @@ def main():
     credentials = f"NYXID_{name.upper()}_DEPLOY_CLIENT"
     try:
         target = load_target(name, os.getenv(TARGET_SECRET))
-        Rollout(target).run(os.getenv("GITHUB_SHA", ""), os.getenv(credentials + "_ID"),
-                            os.getenv(credentials + "_SECRET"))
+        rollout = Rollout(target)
+        previous = rollout.run(os.getenv("GITHUB_SHA", ""), os.getenv(credentials + "_ID"),
+                               os.getenv(credentials + "_SECRET"))
+        if previous is not None and os.getenv("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                print("deployed=true", f"previous={previous}", sep="\n", file=output)
+                for role, digest in rollout.applied_digests.items():
+                    print(f"{role}_digest={digest}", file=output)
     except DeployError as exc:
         sys.exit(f"Deploy failed: {exc}")
 
