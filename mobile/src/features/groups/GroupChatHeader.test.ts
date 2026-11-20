@@ -48,6 +48,7 @@ function setup({
   ];
   const posted: any[] = [];
   const attachmentChoices: unknown[][] = [];
+  const uploadState = { sourcePicker: undefined as undefined | { choices: { label: string; onPress: () => void }[]; onClose: () => void } };
   const chat: any = {
     active: true,
     epoch: 1,
@@ -207,8 +208,10 @@ function setup({
       AssistantMessageTime: "Time",
     },
     "../assistant/assistantSelectableMarkdown": {},
+    "../assistant/AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
+        ...uploadState,
         choose: (...actions: unknown[]) => attachmentChoices.push(actions),
         files: [],
         session: {
@@ -335,6 +338,7 @@ function setup({
     chat,
     posted,
     attachmentChoices,
+    uploadState,
     identity,
     headerActions: () => nodes(options.headerRight()),
     columnHeader: () => columnHeader,
@@ -1005,4 +1009,15 @@ test("P9 ordinary crew transcript keeps its base identity across text size chang
   f.setFontScale(3.12);
   assert.equal(list().key,before);
   f.h.unmount();
+});
+
+test("crew mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup();
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploadState.sourcePicker = sourcePicker;
+  x.h.render();
+  const picker = nodes(x.h.value()).find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.h.unmount();
 });

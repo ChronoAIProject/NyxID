@@ -6,7 +6,7 @@ import {
   FLOATING_HEADER_MARGIN,
   WORKSPACE_HEADER_ROW,
 } from "../../components/workspace/workspaceHeaderMetrics";
-import { useContext } from "react";
+import { useContext, useState } from "react";
 import {
   WorkspaceCornerSensorContext,
   WorkspaceQuickRailContext,
@@ -47,7 +47,11 @@ function ChatHeaderContent({ options, back, route }: NativeStackHeaderProps) {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const window = useWindowDimensions();
+  const [measuredWidth, setMeasuredWidth] = useState<number>();
   const cornerSensor = useContext(WorkspaceCornerSensorContext);
+  const narrow = !cornerSensor &&
+    Math.min(window.width, measuredWidth ?? window.width) /
+      Math.max(1, window.fontScale ?? 1) < 340;
   // The Duo (folded or unfolded), rail mode: no top bar. The chat's controls
   // (Menu or Back, the agent, More) sit in the status column below the
   // toggle, so the chat starts at the top inset. Full screen: the chat's own
@@ -72,12 +76,16 @@ function ChatHeaderContent({ options, back, route }: NativeStackHeaderProps) {
   );
   const props = { canGoBack: !!back, tintColor: colors.textPrimary };
   const margin = FLOATING_HEADER_MARGIN;
+  const identity = typeof options.headerTitle === "function"
+    ? options.headerTitle({ children: options.title ?? route.name, tintColor: colors.textPrimary })
+    : null;
 
   return (
     <MotionView
       testID="workspace-chat-header"
       entering={rail ? HEADER_ACTION_ENTERING : undefined}
       exiting={rail ? HEADER_ACTION_EXITING : undefined}
+      onLayout={({ nativeEvent: { layout } }) => setMeasuredWidth(layout.width)}
       style={{ ...band, backgroundColor: colors.bg }}
     >
       <View
@@ -91,15 +99,21 @@ function ChatHeaderContent({ options, back, route }: NativeStackHeaderProps) {
       >
         {options.headerLeft?.(props)}
         <View style={styles.identitySlot}>
-          {typeof options.headerTitle === "function"
-            ? options.headerTitle({
-                children: options.title ?? route.name,
-                tintColor: colors.textPrimary,
-              })
-            : null}
+          {narrow ? null : identity}
         </View>
         {options.headerRight?.(props)}
       </View>
+      {narrow && (
+        <View
+          testID="workspace-chat-identity-row"
+          style={[styles.narrowIdentity, {
+            paddingLeft: margin + insets.left,
+            paddingRight: workspaceHeaderRightPadding(insets.right, margin),
+          }]}
+        >
+          {identity}
+        </View>
+      )}
       {rail ? (
         // The Duo's full-screen bar fades into the page: content scrolling
         // under its bottom edge dissolves gradually instead of being cut.
@@ -258,6 +272,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   identitySlot: { flex: 1, minWidth: 0 },
+  narrowIdentity: { minHeight: 44, paddingBottom: 8 },
   // 24pt below the bar, in the page colour fading to clear (drawn over the
   // page: the header sits above the screen's content).
   bottomFade: {

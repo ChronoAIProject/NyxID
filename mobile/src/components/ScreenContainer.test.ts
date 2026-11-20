@@ -9,6 +9,7 @@ test("legacy workspace list surfaces run to the right edge beside a corner clust
   const h = hookHarness<any>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
+      Platform: { OS: "ios" },
       SafeAreaView: "NativeSafeArea",
       View: "View",
       StyleSheet: { create: (value: unknown) => value },
@@ -43,6 +44,7 @@ test("on the folded Duo legacy pages put their content in a RailInsetView (rail 
   const h = hookHarness<any>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
+      Platform: { OS: "ios" },
       SafeAreaView: "NativeSafeArea",
       View: "View",
       StyleSheet: { create: (value: unknown) => value },
@@ -70,5 +72,22 @@ test("on the folded Duo legacy pages put their content in a RailInsetView (rail 
   assert.equal(flat(content.props.style).flex, 1);
   assert.equal(flat(content.props.style).paddingRight, undefined);
   assert.equal(content.props.children, "Settings");
+  h.unmount();
+});
+
+test("Android content protects its bottom navigation inset using the cross-platform safe area", () => {
+  const jsx = (type: unknown, props: any) => ({ type, props });
+  const h = hookHarness<any>({
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "react-native": { Platform: { OS: "android" }, SafeAreaView: "NativeSafeArea", StyleSheet: { create: (value: unknown) => value } },
+    "react-native-safe-area-context": { SafeAreaView: "SafeArea" },
+    "./workspace/WorkspaceLayoutContext": { WorkspaceCornerSensorContext: { value: false } },
+    "../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+  });
+  const { ScreenContainer } = h.load(fileURLToPath(new URL("./ScreenContainer.tsx", import.meta.url))) as any;
+  h.mount(() => ScreenContainer({ children: "Delete Chat" }));
+  assert.equal(h.value().type, "SafeArea", "RN's native SafeAreaView does not apply Android navigation insets");
+  assert.deepEqual(Array.from(h.value().props.edges), ["bottom", "left", "right"]);
+  assert.equal(h.value().props.children.props.children, "Delete Chat");
   h.unmount();
 });

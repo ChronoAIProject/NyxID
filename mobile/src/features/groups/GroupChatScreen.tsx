@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "../assistant/AttachmentSourcePicker";
 import { useContext } from "react";
 import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
@@ -1366,6 +1367,7 @@ function GroupChat({
           </View>
         </View>
       </Modal>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

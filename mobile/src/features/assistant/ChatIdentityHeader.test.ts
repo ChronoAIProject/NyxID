@@ -302,6 +302,28 @@ test("navigation can invoke chat header options repeatedly without calling hooks
   }
 });
 
+test("narrow chat headers give identity a separate full-width row while retaining every action", () => {
+  window = { width: 274, height: 610 };
+  const x = setup();
+  let picked = 0;
+  x.h.mount(() => {
+    const element = x.ChatHeaderFrame({ route: { name: "Assistant" }, options: {
+      headerLeft: () => ({ type: "Menu", props: {} }),
+      headerTitle: () => ({ type: "Identity", props: { onPress: () => picked++ } }),
+      headerRight: () => ({ type: "AllActions", props: {} }),
+    } });
+    return (element.type as (props: any) => E)(element.props);
+  });
+  const identityRow = nodes(x.h.value()).find((node) => node.props.testID === "workspace-chat-identity-row");
+  assert.ok(identityRow, "identity must not compete with the navigation controls at 274pt");
+  assert.equal(nodes(headerRow(x.h.value())).some((node) => node.type === "Identity"), false);
+  assert.ok(nodes(headerRow(x.h.value())).some((node) => node.type === "AllActions"));
+  nodes(identityRow).find((node) => node.type === "Identity")!.props.onPress();
+  assert.equal(picked, 1);
+  x.h.unmount();
+  window = { width: 402, height: 874 };
+});
+
 test("on the Duo (folded or unfolded) a chat has no top bar in rail mode and its own bar, fading in, in full screen; ordinary phones and iPads keep theirs", () => {
   const corner = { value: true };
   const rail = { value: true };

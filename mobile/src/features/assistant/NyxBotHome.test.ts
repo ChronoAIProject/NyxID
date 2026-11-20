@@ -27,7 +27,7 @@ const request = (id: string) => ({
   summary: `Approve ${id}`,
 });
 
-function setup(widePanel = false, panel = false, cornerWindow = false) {
+function setup(widePanel = false, panel = false, cornerWindow = false, width = 393) {
   const state = {
     agents: [
       agent("nyxbot", { kind: "nyxbot" }),
@@ -95,6 +95,7 @@ function setup(widePanel = false, panel = false, cornerWindow = false) {
       ScrollView: "ScrollView",
       View: "View",
       StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 },
+      useWindowDimensions: () => ({ width, height: 800, fontScale: 1 }),
     },
     "lucide-react-native": {
       Bot: "Bot",
@@ -278,6 +279,21 @@ test("home renders real requests, completed replies, owner sections and crews wi
     ["new-agent"],
     ["new-crew"],
   ]);
+  h.harness.unmount();
+});
+
+test("narrow Home rows wrap the agent name and summary and keep timestamp in the body", () => {
+  const h = setup(false, false, false, 274);
+  const row = h.all().find((node) => node.props.accessibilityLabel === "Open finished's latest work")!;
+  const children = row.props.children;
+  const body = children[1];
+  const flatten = (style: any) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+  assert.equal(flatten(body.props.children[0].props.style).flexDirection, "column");
+  const name = h.all().find((node) => node.type === "Label" && node.props.children === "finished")!;
+  assert.equal(name.props.numberOfLines, undefined);
+  const summary = h.all().find((node) => node.type === "Label" && node.props.children === "The review is ready.")!;
+  assert.equal(summary.props.numberOfLines, undefined);
+  assert.equal(children[2], null, "timestamp no longer consumes the row's body width");
   h.harness.unmount();
 });
 
