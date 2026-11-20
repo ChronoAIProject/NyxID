@@ -204,6 +204,28 @@ Returns service health status. No authentication required.
 curl http://localhost:3001/health
 ```
 
+This is a dependency-free process liveness check and remains HTTP 200 during
+draining or a MongoDB outage. Existing `commit` and `encryption` diagnostics are
+also retained. Responses use `Cache-Control: no-store`.
+
+#### GET /ready
+
+No authentication required. Preserves the drain-only orchestration signal:
+HTTP 200 with an empty body while accepting traffic, HTTP 503 with an empty
+body during graceful draining. No database I/O; MongoDB failure or pool pressure
+does not evict every replica from load balancers. Responses are `no-store`.
+
+chrono-probe can use `/ready` with HTTP 200 and an empty body as its backend
+readiness assertion. These probes do not check MongoDB or other dependencies.
+
+The frontend serves `/frontend/health` and `/frontend/ready` independently and
+preserves backend `/health` and `/ready` proxies. Frontend orchestrators/load
+balancers must use `/frontend/health` for liveness and routing. `/frontend/ready`
+is for chrono-probe diagnostics and loopback container healthchecks only;
+loopback bypasses its public rate/concurrency limits. See
+[health/readiness contract](HEALTH_READINESS.md) for exact assertions, rate limits,
+public targets, staging chrono-cd compatibility and rollout.
+
 ---
 
 ### Public Configuration
