@@ -3,6 +3,7 @@ import { Image, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { X } from "lucide-react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Label } from "../../components/workspace/WorkspaceUI";
+import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import { LinearGradient } from "expo-linear-gradient";
@@ -47,6 +48,7 @@ export function AssistantPendingUploads({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const railIndicator = useRailScrollIndicator();
   const scroll = useRef<ScrollView>(null);
   const [width, setWidth] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -170,6 +172,7 @@ export function AssistantPendingUploads({
           {errors.length > 0 ? (
             <ScrollView
               style={styles.errors}
+              {...railIndicator}
               contentContainerStyle={styles.errorContent}
               keyboardShouldPersistTaps="always"
               alwaysBounceVertical={false}
