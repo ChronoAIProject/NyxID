@@ -1,5 +1,5 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import type { translateUi as translate } from "@/i18n/use-ui-translation";
 import { useEffect, useId, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import type { z } from "zod";
@@ -22,7 +22,7 @@ import { ProposalDraftEditor } from "./learning-draft-editor";
 // read-only check remains.
 const NOTHING_SENT = ["publish", "retry", "deny", "discard"];
 
-function interruptedCopy(actions: readonly string[]): string {
+function interruptedCopy(translateUi: typeof translate, actions: readonly string[]): string {
   if (actions.some((action) => NOTHING_SENT.includes(action))) {
     return translateUi("The last attempt was interrupted before anything was sent to Ornn.");
   }
@@ -34,16 +34,16 @@ function interruptedCopy(actions: readonly string[]): string {
 type AuthoredPreview = z.infer<typeof authoredSkillPreviewSchema>;
 
 function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (!data.failure_code) return null;
   return (
     <>
       <p role="alert" className="text-14 text-destructive">
-        {publicationFailureText(data.failure_code, data.status, "authored")}
+        {translateUi(publicationFailureText(data.failure_code, data.status, "authored"))}
       </p>
       {data.failure_rules.length ? (
         <ul className="list-disc pl-5 text-13 text-muted-foreground">
-          {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
+          {data.failure_rules.map((rule) => <li key={rule}>{translateUi(publicationRuleText(rule))}</li>)}
         </ul>
       ) : data.failure_details_unavailable ? (
         <p className="text-13 text-muted-foreground">{translateUi("Format details unavailable.")}</p>
@@ -58,7 +58,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   readonly accepted: boolean;
   readonly onAccepted: (accepted: boolean) => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (data.scope_unavailable) {
     return (
       <p role="alert" className="text-13 text-muted-foreground">{translateUi("Scope unavailable. Reload the draft before allowing publication.")}</p>
@@ -90,7 +90,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   );
 }
 
-function coverageText(upload: AuthoredPreview["coverage"][number]): string {
+function coverageText(translateUi: typeof translate, upload: AuthoredPreview["coverage"][number]): string {
   if (upload.expired) return translateUi("expired");
   if (upload.unknown) return translateUi("read coverage unavailable");
   if (upload.reads === 0) return translateUi("not read");
@@ -100,7 +100,7 @@ function coverageText(upload: AuthoredPreview["coverage"][number]): string {
 }
 
 function CoverageList({ data }: { readonly data: AuthoredPreview }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   return (
     <>
       {data.coverage.length ? (
@@ -109,7 +109,7 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
           <ul>
             {data.coverage.map((upload) => (
               <li key={upload.id}>
-                {upload.name}: {coverageText(upload)}
+                {upload.name}: {coverageText(translateUi, upload)}
                 {upload.since_reset_percent != null ? (
                   <>; {upload.lower_bound
                     ? translateUi("at least {{percent}}% since the last context reset", { percent: upload.since_reset_percent })
@@ -137,7 +137,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const reference = card.authored_skill!;
   const owner = useAuthStore((s) => s.user?.id);
   const queryClient = useQueryClient();
@@ -245,7 +245,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     </div>;
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
-  return <section aria-label={translateUi("Review skill draft")} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
+  return <section lang={language} aria-label={translateUi("Review skill draft")} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
     <p className="type-card-title">{data
       ? translateUi("Review skill draft: {{name}} · {{version}}", { name: data.name, version: data.version })
       : translateUi("Review skill draft")}</p>
@@ -269,7 +269,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         }} />
       </> : null}
     </div> : null}
-    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? translateUi("Publication is in progress.") : interruptedCopy(actions)}</p> : null}
+    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? translateUi("Publication is in progress.") : interruptedCopy(translateUi, actions)}</p> : null}
     {preview.isLoading ? <p role="status">{translateUi("Loading complete draft…")}</p> : null}
     {preview.isError ? <p role="alert" className="text-14 text-destructive">{translateUi("Draft unavailable or changed. Reload and review it again.")}</p> : null}
     {data ? (

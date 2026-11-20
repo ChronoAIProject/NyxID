@@ -24,12 +24,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatDate(dateStr: string | null | undefined): string {
+export function formatDate(dateStr: string | null | undefined, locale = getFormattingLocale()): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
   return new Intl.DateTimeFormat(
-    getFormattingLocale(),
+    locale,
     {
       month: "short",
       day: "numeric",
@@ -75,7 +75,7 @@ export function formatClockTime(dateStr: string | null | undefined): string {
   ).format(date);
 }
 
-export function formatRelativeTime(dateStr: string | null | undefined): string {
+export function formatRelativeTime(dateStr: string | null | undefined, translate = t, locale = getFormattingLocale()): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
@@ -86,11 +86,11 @@ export function formatRelativeTime(dateStr: string | null | undefined): string {
   const diffHours = Math.floor(diffMinutes / 60);
   const diffDays = Math.floor(diffHours / 24);
 
-  if (diffSeconds < 60) return t("just now");
-  if (diffMinutes < 60) return t("{{count}}m ago", { count: diffMinutes });
-  if (diffHours < 24) return t("{{count}}h ago", { count: diffHours });
-  if (diffDays < 7) return t("{{count}}d ago", { count: diffDays });
-  return formatDate(dateStr);
+  if (diffSeconds < 60) return translate("just now");
+  if (diffMinutes < 60) return translate("{{count}}m ago", { count: diffMinutes });
+  if (diffHours < 24) return translate("{{count}}h ago", { count: diffHours });
+  if (diffDays < 7) return translate("{{count}}d ago", { count: diffDays });
+  return formatDate(dateStr, locale);
 }
 
 /**

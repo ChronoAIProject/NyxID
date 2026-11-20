@@ -77,6 +77,9 @@ import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { NyxAgentComposer } from "@/components/assistant/nyxagent-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageEntry, ChatMessageList } from "@/components/assistant/chat-message";
+import { CardLanguageContext, useCardCatalog, useCardLanguageChoice } from "./card-language";
+import { conversationCardLanguage } from "@/lib/assistant/card-language";
+import { resolveLanguage } from "@/i18n/language";
 import { WorkingContextPanel } from "@/components/assistant/working-context-panel";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import {
@@ -611,7 +614,7 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
   const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
@@ -1061,6 +1064,14 @@ function NyxAgentThreadPage() {
     chat.interruption ??
     (requestError?.scope === errorScope ? requestError.message : undefined) ??
     turnError;
+  const appLanguage = resolveLanguage(i18n.language) ?? "en";
+  const cardPreference = useCardLanguageChoice(user?.id, selectedId);
+  const cardLanguage = useMemo(() => {
+    if (cardPreference.choice === "app") return appLanguage;
+    if (cardPreference.choice !== "auto") return cardPreference.choice;
+    return conversationCardLanguage(chat.session.messages, appLanguage);
+  }, [appLanguage, cardPreference.choice, chat.session.messages]);
+  useCardCatalog(cardLanguage);
   const threadPanels = !showHome ? (
     <ThreadPanels>
       <ThreadHeader
@@ -1084,7 +1095,7 @@ function NyxAgentThreadPage() {
             <CmaSessionIndicator conversationId={machineConversation} />
             {machineToggle}
             {selectedId ? (
-              <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
+              <WorkingContextPanel cardLanguage={cardPreference} conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
             ) : null}
           </>
         ) : undefined}
@@ -1233,6 +1244,7 @@ function NyxAgentThreadPage() {
         ) : chat.isLoading && !chat.session.messages.length ? (
           <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>
         ) : (
+          <CardLanguageContext.Provider value={cardLanguage}>
           <AssistantLinkModalHost>
             {machineOpen && !wideScreen ? (
               <ConversationMachineDesktops
@@ -1392,6 +1404,7 @@ function NyxAgentThreadPage() {
               }
             />
           </AssistantLinkModalHost>
+          </CardLanguageContext.Provider>
         )}
         {voiceEnabled && !destroyed && !channelPlatform && <Dialog open={voiceSettingsOpen} onOpenChange={setVoiceSettingsOpen}>
           <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl" aria-describedby={undefined}>

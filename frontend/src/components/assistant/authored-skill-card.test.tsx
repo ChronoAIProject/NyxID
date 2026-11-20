@@ -5,6 +5,8 @@ import { AuthoredSkillScopePreview } from "./authored-skill-scope-preview";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 import { authoredSkillPreviewSchema } from "@/schemas/agent-skills";
+import { CardLanguageContext } from "./card-language";
+import type { Language } from "@/i18n/language";
 import { appI18n } from "@/i18n";
 const mocks = vi.hoisted(() => ({ json: vi.fn() }));
 vi.mock("@/lib/assistant/assistant-http", () => ({ assistantJson: mocks.json }));
@@ -21,9 +23,11 @@ const preview = {
   state: "active", actions: ["deny", "publish"], lease_live: false,
   files: [{ path: "SKILL.md", content: "---\nname: weekly-review\n---\n# Review every Friday" }, { path: "references/checklist.md", content: "Verify every date" }],
 };
-function show(value = card, decide = vi.fn().mockResolvedValue(undefined), accessMode?: NyxAgentAccessMode) {
+function show(value = card, decide = vi.fn().mockResolvedValue(undefined), accessMode?: NyxAgentAccessMode, language?: Language) {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}>
-    <NyxAgentAcknowledgementCard acknowledgement={value} accessMode={accessMode} deciding={false} onDecision={decide} />
+    <CardLanguageContext.Provider value={language}>
+      <NyxAgentAcknowledgementCard acknowledgement={value} accessMode={accessMode} deciding={false} onDecision={decide} />
+    </CardLanguageContext.Provider>
   </QueryClientProvider>);
   return decide;
 }
@@ -59,6 +63,17 @@ it.each([
     await act(async () => { await appI18n.changeLanguage(language); });
     expect(screen.getByRole("status")).toHaveTextContent(summary!);
   }
+});
+
+it("keeps a chat-pinned language through publication and its receipt", async () => {
+  await appI18n.loadLanguages("zh-TW");
+  mocks.json.mockResolvedValueOnce(preview).mockResolvedValue({ ...preview, state: "pinned", actions: [] });
+  const decide = show(card, undefined, undefined, "zh-TW");
+  expect(await screen.findByText("Verify every date")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "允許並發布" }));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("技能 weekly-review 1.0 已發布並附加至 Operations"));
+  expect(decide).toHaveBeenCalledExactlyOnceWith("allow");
+  expect(appI18n.language).toBe("en");
 });
 
 it("translates the published summary when confirmations are bypassed", async () => {
