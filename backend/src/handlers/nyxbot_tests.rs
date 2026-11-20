@@ -7154,69 +7154,173 @@ async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
     }
 }
 
+async fn recovery_channel(
+    state: &AppState,
+    expect_late_send: bool,
+) -> (NyxbotChannel, String, wiremock::MockServer, Value) {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    enable_relay_response_recovery(state).await;
+    let (mut row, key) = channel(state, "gateway").await;
+    row.owner_sender_ids = vec!["7".into()];
+    row.gateway_channel_id = Some("cmaeg1.ch.test".into());
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_chats".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(state, &key, PARTITION).await;
+    row = load_channel(state, OWNER, &row.id).await.unwrap();
+    let gateway = MockServer::start().await;
+    relay_responses::clear_capabilities(&gateway.uri());
+    let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+    svc.id = Uuid::new_v4().to_string();
+    svc.slug = GATEWAY_SLUG.into();
+    svc.base_url = gateway.uri();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(svc)
+        .await
+        .unwrap();
+    Mock::given(path("/channel-capabilities"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}),
+            ),
+        )
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    Mock::given(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
+    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "reply_target_ref":"cmaeg1.rt.recovery", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()
+    }))).mount(&gateway).await;
+    Mock::given(path("/reply-targets/cmaeg1.rt.recovery/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
+        )
+        .expect(u64::from(expect_late_send))
+        .mount(&gateway)
+        .await;
+    let mut request = event("Hello", "7", "relay-recovery-event");
+    request["metadata"] = json!({"cmaeg.channel":&sha256_hex("cmaeg1.ch.test")[..16],"cmaeg.event":"relay-recovery-event","cmaeg.partition":"0123456789abcdef","cmaeg.actor":"7"});
+    (row, key, gateway, request)
+}
+
+#[tokio::test]
+async fn lost_booking_reply_recovers_one_committed_receipt_on_dispatch_retry() {
+    use tokio::sync::Notify;
+    let (state, _, default_server) = setup("booking_receipt_retry").await;
+    let (_, key, gateway, request) = recovery_channel(&state, false).await;
+    let bookings = state.db.collection::<bson::Document>("test_bookings");
+    let committed = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let booking_endpoint = {
+        let bookings = bookings.clone();
+        let committed = committed.clone();
+        let release = release.clone();
+        post(move || {
+            let bookings = bookings.clone();
+            let committed = committed.clone();
+            let release = release.clone();
+            async move {
+                // A fresh dispatch creates another row, just like a Sheets append.
+                let receipt = Uuid::new_v4().to_string();
+                bookings.insert_one(doc! {"_id": &receipt}).await.unwrap();
+                committed.notify_one();
+                release.notified().await;
+                let session = Uuid::new_v4().simple().to_string();
+                let frame = json!({"type":"response.failed","sequence_number":0,"response":{
+                    "status":"failed","conversation":{"id":format!("conv_{session}")},
+                    "id":format!("resp_{session}_{}",Uuid::new_v4().simple()),
+                    "error":{"code":"outcome_unknown"},
+                    "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":receipt}]}]
+                }});
+                (
+                    [("content-type", "text/event-stream")],
+                    format!("data: {frame}\n\n"),
+                )
+            }
+        })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/v1/responses", booking_endpoint),
+        )
+        .await
+        .unwrap();
+    });
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(
+            doc! {"slug":engine::SERVICE_SLUG},
+            doc! {"$set":{"base_url":format!("http://{address}")}},
+        )
+        .await
+        .unwrap();
+    let original = respond(&state, &key, &request, "booking-command").await;
+    assert_eq!(original.status(), StatusCode::OK);
+    let id = original.headers()["x-cma-response-id"].clone();
+    tokio::time::timeout(Duration::from_secs(30), committed.notified())
+        .await
+        .unwrap();
+    drop(original);
+    let replay = respond(&state, &key, &request, "booking-command").await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(replay.headers()["x-cma-response-id"], id);
+    release.notify_one();
+    let wire = tokio::time::timeout(Duration::from_secs(30), body_text(replay))
+        .await
+        .unwrap();
+    let receipt = bookings.find_one(doc! {}).await.unwrap().unwrap();
+    let frames: Vec<Value> = wire
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let terminal = &frames.last().unwrap()["response"];
+    assert_eq!(terminal["status"], "completed");
+    let output = terminal["output"].as_array().unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .matches(receipt.get_str("_id").unwrap())
+            .count(),
+        1
+    );
+    late_delivery::sweep(&state).await.unwrap();
+    assert_eq!(bookings.count_documents(doc! {}).await.unwrap(), 1);
+    gateway.verify().await;
+    server.abort();
+    default_server.abort();
+    state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
     use crate::services::nyxbot_response_recovery as recovery;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
     for recover in [true, false] {
         let (state, calls, server) = setup("relay_response_recovery").await;
-        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
-        enable_relay_response_recovery(&state).await;
-        let (mut row, key) = channel(&state, "gateway").await;
-        row.owner_sender_ids = vec!["7".into()];
-        row.gateway_channel_id = Some("cmaeg1.ch.test".into());
-        state
-            .db
-            .collection::<NyxbotChannel>(CHANNELS)
-            .replace_one(doc! {"_id":&row.id}, &row)
-            .await
-            .unwrap();
-        assert_eq!(
-            put_binding(
-                State(state.clone()),
-                Path("bnd_chats".into()),
-                bearer(&key),
-                Json(binding_body(&key, OWNER))
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-        ensure_partition(&state, &key, PARTITION).await;
-        row = load_channel(&state, OWNER, &row.id).await.unwrap();
-        let gateway = MockServer::start().await;
-        relay_responses::clear_capabilities(&gateway.uri());
-        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
-        svc.id = Uuid::new_v4().to_string();
-        svc.slug = GATEWAY_SLUG.into();
-        svc.base_url = gateway.uri();
-        state
-            .db
-            .collection::<DownstreamService>(SERVICES)
-            .insert_one(svc)
-            .await
-            .unwrap();
-        Mock::given(path("/channel-capabilities"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}),
-            ))
-            .expect(1)
-            .mount(&gateway)
-            .await;
-        Mock::given(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "reply_target_ref":"cmaeg1.rt.recovery", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()
-        }))).mount(&gateway).await;
-        Mock::given(path("/reply-targets/cmaeg1.rt.recovery/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
-            )
-            .expect(if recover { 0 } else { 1 })
-            .mount(&gateway)
-            .await;
-        let mut request = event("Hello", "7", "relay-recovery-event");
-        request["metadata"] = json!({"cmaeg.channel":&sha256_hex("cmaeg1.ch.test")[..16],"cmaeg.event":"relay-recovery-event","cmaeg.partition":"0123456789abcdef","cmaeg.actor":"7"});
+        let (row, key, gateway, mut request) = recovery_channel(&state, !recover).await;
         let blocked = calls.lock().await;
         let response = respond(&state, &key, &request, "relay-recovery-command").await;
         assert_eq!(response.status(), StatusCode::OK);

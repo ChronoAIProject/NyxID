@@ -958,7 +958,7 @@ async fn response_read_2588_failed_followed_turn_stays_empty_and_sends_failure_i
         .unwrap();
     assert_eq!(
         sent,
-        json!({"text":"I could not finish that. Please try again.","thread_reply":true})
+        json!({"text":"The previous operation may have taken effect. Check its result before trying again.","thread_reply":true})
     );
     let events = native_responses::events(
         State(f.state.clone()),

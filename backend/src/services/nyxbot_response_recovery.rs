@@ -3,6 +3,7 @@ use crate::{
     crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
     models::{
+        assistant_message::AssistantMessage,
         nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel, NyxbotEvent},
         nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
     },
@@ -246,6 +247,48 @@ pub async fn finish(
     Ok(())
 }
 
+/// The provider successfully returns a notice for a failed relay turn. Only a
+/// proven start refusal may tell the caller that nothing was done.
+fn relay_failure_reply(message: &AssistantMessage, org_guest: bool) -> String {
+    use super::assistant_nyxagent::TurnError;
+
+    let code = message.error_code.as_deref();
+    if code == Some("assistant_start_unavailable") {
+        return TurnError::new("assistant_start_unavailable").message;
+    }
+    if code == Some("guest_model_route_required")
+        && message.activity_count == Some(0)
+        && message.activities.is_empty()
+        && message.activity_total == 0
+        && message.text.trim().is_empty()
+        && !message
+            .turn_metadata
+            .as_ref()
+            .and_then(|m| m.work.as_ref())
+            .is_some_and(|work| work.business_system_success)
+    {
+        let reason = message
+            .turn_metadata
+            .as_ref()
+            .and_then(|m| m.failure_reason.as_ref())
+            .and_then(|r| r.model_route.as_ref())
+            .map(|route| route.reason.as_str());
+        return if !org_guest && reason.is_some_and(super::assistant_guest_model_setup::failure_code)
+        {
+            "Visitor setup could not finish. No tool ran for this request. The owner has been notified.".into()
+        } else {
+            "I couldn't answer this message. No tool ran for this request.".into()
+        };
+    }
+
+    let notice = TurnError::new("outcome_unknown").message;
+    if org_guest || message.text.trim().is_empty() {
+        notice
+    } else {
+        format!("{}\n\n{notice}", message.text)
+    }
+}
+
 /// Called by snapshots/replay and the existing delivery sweep. Transcript is
 /// authoritative across process restarts; no in-memory receiver is required.
 pub async fn refresh<F, Fut>(
@@ -275,12 +318,21 @@ where
         return finish(db, keys, row, None, true).await;
     };
     if let (Some(conversation), Some(turn)) = (&event.conversation_id, &event.turn_id) {
-        use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
+        use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
         if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":super::org_channel_service::event_actor(&event),
             "conversation_id":conversation,"turn_id":turn,"role":"assistant", "status":{"$in":["completed","failed","cancelled","interrupted"]}}).await? {
-            let guest_refused=event.delivery.as_ref().and_then(|d|d.origin.org_execution.as_ref()).is_some_and(|e|e.guest) && message.status!="completed";
-            let start_refused = message.error_code.as_deref() == Some("assistant_start_unavailable") || guest_refused;
-            let mut text = if guest_refused {super::org_channel_service::UNAVAILABLE.into()} else if start_refused { super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message } else { message.text };
+            let org_guest = event.delivery.as_ref().and_then(|d| d.origin.org_execution.as_ref()).is_some_and(|e| e.guest);
+            let (mut text, failed) = if message.status == "completed" {
+                (message.text, false)
+            } else if event.relay_message_id.is_some() {
+                (relay_failure_reply(&message, org_guest), false)
+            } else if org_guest {
+                (super::org_channel_service::UNAVAILABLE.into(), false)
+            } else if message.error_code.as_deref() == Some("assistant_start_unavailable") {
+                (super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message, false)
+            } else {
+                (message.text, true)
+            };
             let images=super::assistant_nyxagent::turn_tool_attachments(db,super::org_channel_service::event_actor(&event),conversation,turn).await?;
             if event.relay_message_id.is_none() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
@@ -292,7 +344,7 @@ where
                 // replay cannot change the answer or repeat uncertain sends.
                 text = relay_images(text).await;
             }
-            finish(db,keys,row,Some(&text),message.status != "completed" && !start_refused).await?;
+            finish(db,keys,row,Some(&text),failed).await?;
         } else {
             let mut body=payload(keys,row).await?;
             if body.progress() {
