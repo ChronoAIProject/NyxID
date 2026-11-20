@@ -938,6 +938,7 @@ async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
         None,
         None,
         None,
+        None,
     )
     .await;
     assert!(result.is_err());

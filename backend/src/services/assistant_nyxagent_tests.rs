@@ -1684,6 +1684,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
         Some(99),
         Some(&proof),
         None,
+        None,
     )
     .await
     .unwrap()
@@ -1716,6 +1717,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
         &agent,
         Some(99),
         Some(&proof),
+        None,
         None,
     )
     .await
@@ -2724,6 +2726,7 @@ async fn late_worker_cannot_renew_checkpoint_replace_or_finish_successor_attempt
         "owner",
         &request(None, "question"),
         &state.encryption_keys,
+        None,
         None,
     )
     .await

@@ -329,6 +329,79 @@ pub async fn get(db: &Database, owner: &str, id: &str) -> AppResult<AssistantGro
         .ok_or_else(not_found)
 }
 
+pub(crate) async fn get_for_automation_dispatch(
+    db: &Database,
+    owner: &str,
+    id: &str,
+) -> AppResult<AssistantGroup> {
+    use super::{assistant_notification_service as notifications, feature_flag_service as flags};
+    use crate::models::{feature_flag_override, org_membership};
+
+    if !super::security_readiness_service::turn_restart_enrollment_ready()
+        || notifications::has_admission_features(db, owner)
+    {
+        return get(db, owner, id).await;
+    }
+    #[derive(serde::Deserialize)]
+    struct MembershipRole {
+        org_user_id: String,
+        role: org_membership::OrgRole,
+    }
+    #[derive(serde::Deserialize)]
+    struct DispatchGroup {
+        group: AssistantGroup,
+        roles: Vec<MembershipRole>,
+        overrides: Vec<feature_flag_override::FeatureFlagOverride>,
+    }
+    let keys = [notifications::FLAG_KEY, flags::TURN_HANDOFF_FLAG_KEY];
+    let target_keys: Vec<_> = [bson::Bson::Null, owner.into()]
+        .into_iter()
+        .chain(org_membership::OrgRole::ALL.map(|role| role.as_str().into()))
+        .collect();
+    let found = db
+        .collection::<AssistantGroup>(GROUPS)
+        .aggregate([
+            doc! {"$match": owner_filter(owner, id)?},
+            doc! {"$replaceWith": {"group": "$$ROOT"}},
+            doc! {"$lookup": {"from": org_membership::COLLECTION_NAME, "pipeline": [
+                {"$match": {"member_user_id": owner, "revoked_at": null}},
+                {"$project": {"_id": 0, "org_user_id": 1, "role": 1}}
+            ], "as": "roles"}},
+            doc! {"$lookup": {"from": feature_flag_override::COLLECTION_NAME,
+            "let": {"scopes": {"$concatArrays": [[null], "$roles.org_user_id"]}},
+            "pipeline": [{"$match": {"flag_key": {"$in": keys.to_vec()}, "definition_id": null,
+                "target_key": {"$in": target_keys},
+                "$expr": {"$in": [{"$ifNull": ["$org_user_id", null]}, "$$scopes"]}
+            }}], "as": "overrides"}},
+        ])
+        .with_type::<DispatchGroup>()
+        .await?
+        .try_next()
+        .await?
+        .ok_or_else(not_found)?;
+    let roles: Vec<_> = found
+        .roles
+        .into_iter()
+        .map(|row| (row.org_user_id, row.role))
+        .collect();
+    let (org, platform): (Vec<_>, Vec<_>) = found
+        .overrides
+        .into_iter()
+        .partition(|row| row.org_user_id.is_some());
+    let features = flags::resolve_personal_definitions(
+        flags::FEATURE_FLAGS
+            .iter()
+            .filter(|flag| keys.contains(&flag.key))
+            .map(|flag| (flag.key, flag.default_enabled, None)),
+        &platform,
+        &org,
+        &roles,
+        owner,
+    );
+    notifications::cache_features(db, owner, &features);
+    Ok(found.group)
+}
+
 /// Find a group by ID or (case-insensitive) name, for agent tools.
 pub async fn find(db: &Database, owner: &str, reference: &str) -> AppResult<AssistantGroup> {
     let reference = reference.trim();

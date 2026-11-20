@@ -199,7 +199,12 @@ pub async fn steer(
     else {
         return Ok(refusal("steer_unavailable"));
     };
-    let cap = upstream_capabilities(&state, &auth, &row, &credential, policy).await;
+    let cap = steering::OwnerControl::Capabilities
+        .send(
+            &owner,
+            upstream_capabilities(&state, &auth, &row, &credential, policy),
+        )
+        .await;
     let Some(cap) = steer_capability(&cap) else {
         return Err(AppError::AssistantTurnActive);
     };
@@ -236,18 +241,23 @@ pub async fn steer(
         ("refused", Some(code), refusal(code).status().as_u16())
     } else {
         let call = async {
-            let response = Box::pin(proxy(
-                &state,
-                &auth,
-                &credential,
-                "POST",
-                &format!("v1/conversations/{}/steer", receipt.session_id),
-                Some(json!({"input":body.text,"expected_response_id":receipt.response_id})),
-                Some(&body.client_request_id),
-                policy,
-            ))
-            .await
-            .ok()?;
+            let path = format!("v1/conversations/{}/steer", receipt.session_id);
+            let response = steering::OwnerControl::Guidance(receipt)
+                .send(
+                    &owner,
+                    Box::pin(proxy(
+                        &state,
+                        &auth,
+                        &credential,
+                        "POST",
+                        &path,
+                        Some(json!({"input":body.text,"expected_response_id":receipt.response_id})),
+                        Some(&body.client_request_id),
+                        policy,
+                    )),
+                )
+                .await
+                .ok()?;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), 16384)
                 .await

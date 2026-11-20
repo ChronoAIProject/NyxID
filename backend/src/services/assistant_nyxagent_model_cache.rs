@@ -23,23 +23,6 @@ pub(crate) enum InferenceCredential {
     Platform,
 }
 
-pub(super) fn inference_credential(
-    db: &mongodb::Database,
-    owner: &str,
-    model: &str,
-) -> Option<InferenceCredential> {
-    let cache = MODELS.try_lock().ok()?;
-    let (_, models) = cache
-        .get(&format!("{}:{owner}", db.name()))
-        .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))?;
-    let mut matching = models
-        .as_ref()?
-        .iter()
-        .filter(|row| row.id == model && row.available);
-    let first = matching.next()?.inference_credential?;
-    matching.next().is_none().then_some(first)
-}
-
 type ModelCache = HashMap<String, (Instant, Option<Vec<ModelInfo>>)>;
 pub(crate) static MODELS: LazyLock<Mutex<ModelCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

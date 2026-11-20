@@ -939,6 +939,20 @@ pub(crate) async fn refresh_test_replica_heartbeat(db: &Database) {
 }
 
 #[cfg(test)]
+pub(crate) async fn observe_test_handoff_readiness(db: &Database, ready: bool) {
+    ready_test_replica(db).await;
+    stop_test_replica(db).await;
+    if !ready {
+        let legacy = overlapping_test_replica(db).await;
+        remove_test_replica_capability(db, &legacy, TURN_HANDOFF).await;
+    }
+    observe_with_automation(db, runtime().unwrap(), false)
+        .await
+        .unwrap();
+    assert_eq!(turn_restart_enrollment_ready(), ready);
+}
+
+#[cfg(test)]
 pub(crate) async fn ready_automation_test_replica(db: &Database) {
     drop(ready_test_replica_inner(db, true, None).await);
 }
