@@ -12,3 +12,5 @@ mod contract_tests;
 mod correction_tests;
 #[cfg(test)]
 mod fixture_tests;
+#[cfg(test)]
+mod resource_tests;

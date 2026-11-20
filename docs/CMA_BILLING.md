@@ -457,7 +457,7 @@ Wire bounds and ordering are fixed as follows:
   The JSON parser's recursion limit also applies. Empty usage facts can advance
   a zero-duration source transition without inventing a billable interval.
 - Quantities are canonical nonnegative decimal strings, at most 38 digits.
-  Sequence, evidence revision and resource generation are positive decimal
+  Sequence, evidence revision and runtime generation are positive decimal
   strings up to `i64::MAX`; source part starts at zero. Times are nonnegative
   epoch-millisecond strings up to `i64::MAX`. Signs, leading zeroes, decimal
   points, exponent notation and JSON numeric quantities are rejected.
@@ -465,6 +465,14 @@ Wire bounds and ordering are fixed as follows:
   UUIDv4 strings. Digests are 64 lowercase hexadecimal characters. Other text
   is nonempty, at most 256 UTF-8 bytes, without control characters or leading
   or trailing whitespace.
+- Resource fields are required, with explicit nulls for absent or unknown
+  identity components. Home generation is opaque bounded text, preserved
+  exactly rather than parsed as a counter. Compute without a home and retained
+  home storage without a runtime are valid. Positive audit duration or expected
+  coverage requires both ID and generation for the corresponding resource,
+  including measured residual or missing evidence at zero logical uptime.
+  Inactive legacy runtime metadata can retain its ID with an unknown generation;
+  decoding preserves that evidence without constructing a complete binding.
 - Facts are strictly ascending by `fact_id`. Source references are strictly
   ascending by `(kind, id, revision, part)`, comparing text by Unicode scalar
   order and revision/part numerically. Historical missing ranges ascend by

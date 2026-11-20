@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / "backend/tests/fixtures/cma_usage_v1"
-MANIFEST_SHA256 = "5aa9606080eef4123e5314f0eac412f2c1bc018eb83aff172e01bfbbc14ac033"
+MANIFEST_SHA256 = "0ee25ff6640a4508a774df2a6e7185a6dba6cb1f1ee0f63523d36ce232830830"
 
 
 class UsageContractBundleTests(unittest.TestCase):

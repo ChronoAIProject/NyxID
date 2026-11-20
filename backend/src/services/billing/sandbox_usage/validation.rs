@@ -157,6 +157,14 @@ fn fact(header: &Header, fact: &Fact, clock: Clock) -> Check {
         audit.compute_uptime_ms.get() <= end - start && audit.retained_home_ms.get() <= end - start,
         "invalid_audit_time",
     )?;
+    let resource = &fact.resource;
+    require(
+        (!has_compute(fact)
+            || (resource.runtime_id.is_some() && resource.runtime_generation.is_some()))
+            && (!has_home(fact)
+                || (resource.home_id.is_some() && resource.home_generation.is_some())),
+        "usage_resource_binding_required",
+    )?;
     let metrics = match header.basis {
         Basis::Allocated => [
             Metric::AllocatedCpu,

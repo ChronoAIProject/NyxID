@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 // CMA copies this release bundle verbatim and pins this same manifest hash.
-const MANIFEST_SHA256: &str = "5aa9606080eef4123e5314f0eac412f2c1bc018eb83aff172e01bfbbc14ac033";
+const MANIFEST_SHA256: &str = "0ee25ff6640a4508a774df2a6e7185a6dba6cb1f1ee0f63523d36ce232830830";
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cma_usage_v1")
 }

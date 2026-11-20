@@ -112,10 +112,14 @@ pub struct Fact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceIdentity {
-    pub runtime_id: Text,
-    pub runtime_generation: Counter,
-    pub home_id: Text,
-    pub home_generation: Counter,
+    #[serde(deserialize_with = "nullable")]
+    pub runtime_id: Option<Text>,
+    #[serde(deserialize_with = "nullable")]
+    pub runtime_generation: Option<Counter>,
+    #[serde(deserialize_with = "nullable")]
+    pub home_id: Option<Text>,
+    #[serde(deserialize_with = "nullable")]
+    pub home_generation: Option<Text>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
