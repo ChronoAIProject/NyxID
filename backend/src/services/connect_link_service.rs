@@ -154,7 +154,7 @@ pub enum CompleteResult {
 }
 
 pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<CreatedLink> {
-    let service = load_catalog_info_by_slug(db, &input.service_slug).await?;
+    let service = load_catalog_info_by_slug(db, &input.service_slug, &input.user_id).await?;
     if input.use_platform_key == Some(true) {
         if !input.scopes.is_empty() {
             return Err(AppError::ValidationError(
@@ -408,7 +408,7 @@ pub async fn complete(
             "This assistant connection link has a fixed credential intent".into(),
         ));
     }
-    let catalog = load_catalog_info_by_id(db, &current.service_id).await?;
+    let catalog = load_catalog_info_by_id(db, &current.service_id, &current.user_id).await?;
 
     if let Some(service_id) = current.completed_user_service_id.clone() {
         return resume_existing_completion(db, current, catalog, &service_id).await;
@@ -1306,7 +1306,7 @@ pub async fn dispatch_terminal_webhook_by_token_if_needed(
 }
 
 async fn view_for_link(db: &mongodb::Database, link: ConnectLink) -> AppResult<LinkView> {
-    let service = load_catalog_info_by_id(db, &link.service_id).await?;
+    let service = load_catalog_info_by_id(db, &link.service_id, &link.user_id).await?;
     let completed_service_slug = match link.completed_user_service_id.as_deref() {
         Some(id) if link.status == ConnectLinkStatus::Completed => {
             crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
@@ -1326,6 +1326,7 @@ async fn view_for_link(db: &mongodb::Database, link: ConnectLink) -> AppResult<L
 async fn load_catalog_info_by_slug(
     db: &mongodb::Database,
     slug: &str,
+    owner: &str,
 ) -> AppResult<CatalogConnectInfo> {
     let slug = slug.trim();
     if slug.is_empty() {
@@ -1338,18 +1339,21 @@ async fn load_catalog_info_by_slug(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
+    super::catalog_service::require_connection_access(db, owner, &service).await?;
     catalog_info(db, service).await
 }
 
 async fn load_catalog_info_by_id(
     db: &mongodb::Database,
     service_id: &str,
+    owner: &str,
 ) -> AppResult<CatalogConnectInfo> {
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": service_id })
+        .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or(AppError::ConnectLinkNotFound)?;
+    super::catalog_service::require_connection_access(db, owner, &service).await?;
     catalog_info(db, service).await
 }
 

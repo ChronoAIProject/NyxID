@@ -1027,10 +1027,9 @@ async fn create_key_inner(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
-        if crate::services::retired_service_service::is_retired(&svc) {
-            return Err(AppError::NotFound(format!(
-                "Catalog service '{slug}' not found"
-            )));
+        super::catalog_service::require_connection_access(db, user_id, &svc).await?;
+        if user_id != actor_user_id {
+            super::catalog_service::require_connection_access(db, actor_user_id, &svc).await?;
         }
 
         if matches!(
@@ -6151,6 +6150,129 @@ mod tests {
         .expect("user B lookup by backing downstream_service should exist");
         assert_eq!(owner_service_a.slug, "shared-label");
         assert_eq!(owner_service_b.slug, "shared-label");
+    }
+
+    #[tokio::test]
+    async fn catalog_connection_paths_require_current_access() {
+        use crate::services::{assistant_connection_service, connect_link_service, mcp_service};
+        use crate::test_utils::{connect_transaction_test_database, test_user_service};
+
+        let db = connect_transaction_test_database("catalog_connection_access").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &actor,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let nodes = crate::services::node_ws_manager::NodeWsManager::new(30, 100);
+        let mut catalog = sample_catalog_service();
+        catalog.visibility = "private".into();
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        auto_provision_no_auth_services(&db, &actor).await.unwrap();
+        let connections = db.collection::<UserService>(USER_SERVICES);
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            0
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(crate::test_utils::test_user_endpoint(
+                "endpoint",
+                &actor,
+                "Existing",
+                &catalog.base_url,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        connections
+            .insert_one(test_user_service(
+                "existing",
+                &actor,
+                "existing",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let unified = create_catalog_key(&db, &keys, &actor, &catalog.slug, "Catalog").await;
+        let hosted = connect_link_service::create(
+            &db,
+            connect_link_service::CreateInput {
+                user_id: actor.clone(),
+                service_slug: catalog.slug.clone(),
+                use_platform_key: None,
+                scopes: vec![],
+                label: None,
+                endpoint_url: None,
+                requested_by: None,
+                callback_url: None,
+                ttl_secs: None,
+                oauth_client_id: None,
+                assistant_intent_locked: false,
+            },
+        )
+        .await;
+        let mcp = mcp_service::connect_service(
+            &db,
+            &keys,
+            &nodes,
+            &actor,
+            &catalog.id,
+            None,
+            None,
+            "https://example.test",
+            None,
+            &[],
+        )
+        .await;
+        let assistant =
+            assistant_connection_service::resolve_catalog(&db, &actor, Some(&catalog.id), None)
+                .await;
+        let existing =
+            crate::services::proxy_service::read_connection_authority(&db, &actor, "existing")
+                .await;
+        let errors = [
+            unified.err(),
+            hosted.err(),
+            mcp.err(),
+            assistant.err(),
+            existing.err(),
+        ];
+        let outcomes = errors
+            .each_ref()
+            .map(|err| err.as_ref().map(AppError::error_code));
+        assert!(
+            errors
+                .iter()
+                .all(|err| matches!(err, Some(AppError::NotFound(_)))),
+            "unified, hosted, MCP, assistant, existing connection error codes: {outcomes:?}"
+        );
+        assert_eq!(
+            connections
+                .count_documents(doc! {"user_id": &actor})
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
