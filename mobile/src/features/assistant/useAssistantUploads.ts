@@ -689,7 +689,7 @@ export function useAssistantUploads({
       } catch {
         if (current.current === session && epoch === getAuthEpoch())
           setError(() =>
-            translateApp("Could not discard the attachment draft. Try again."),
+            translateApp("The attachment draft could not be discarded. Try again."),
           );
       }
     },
