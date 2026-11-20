@@ -1,9 +1,7 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
-import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useCardTranslation } from "@/components/assistant/card-language";
 import { formatRelativeTime } from "@/lib/utils";
 import { Check, Clock, X } from "lucide-react";
-import { ACTION_RISK_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { actionRiskLabel } from "@/lib/assistant/nyxbot-labels";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
 /** A durable decision in the transcript, without interactive card chrome. */
@@ -16,7 +14,7 @@ export function DecisionReceipt({
   readonly summary?: string;
   readonly retired?: boolean;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const automatic = row.decided_by === "access_mode";
   const bypass = automatic
     ? (
@@ -49,6 +47,7 @@ export function DecisionReceipt({
   const time = row.decided_at ?? row.created_at;
   return (
     <p
+      lang={language}
       role="status"
       className="flex items-start gap-1.5 text-13 text-muted-foreground"
     >
@@ -62,14 +61,14 @@ export function DecisionReceipt({
             <a className="underline" href={row.link}>{translateUi("Inspect or discard proposal")}</a>
           </>
         ) : null}
-        {row.confirmation ? ` · ${ACTION_RISK_LABEL[row.confirmation.risk]}` : ""}
+        {row.confirmation ? ` · ${actionRiskLabel(row.confirmation.risk, translateUi)}` : ""}
         {row.reason?.trim() ? ` · ${row.reason}` : ""}
         <time
           dateTime={time}
-          title={new Date(time).toLocaleString(getFormattingLocale())}
+          title={new Date(time).toLocaleString(language)}
           className="text-13 text-text-tertiary"
         >
-          {" · "}{formatRelativeTime(time)}
+          {" · "}{formatRelativeTime(time, translateUi, language)}
         </time>
       </span>
     </p>

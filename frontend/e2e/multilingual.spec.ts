@@ -150,3 +150,44 @@ test("Studio translates open forms across tabs without translating drafts", asyn
   await expect(page.getByRole("button", { name: "Create User", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("a chat's pinned card language survives reload through a decision", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const englishCard = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
+  await expect(englishCard).toBeVisible();
+  await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  const context = page.getByRole("button", { name: "Working context", exact: true });
+  await context.click();
+  const selector = page.getByRole("combobox", { name: "Approval card language" });
+  await selector.selectOption("zh-TW");
+  await page.keyboard.press("Escape");
+  const card = page.getByRole("region", { name: /確認：Delete agent key 'ci-bot'/ });
+  await expect(card).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await page.reload();
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "拒絕", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "你已拒絕 · Delete agent key" })).toBeVisible();
+  await context.click();
+  await expect(selector).toHaveValue("zh-TW");
+  await selector.selectOption("app");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("status").filter({ hasText: "You denied · Delete agent key" })).toBeVisible();
+});
+
+test("approval cards follow sustained user language on a reloaded English thread", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  for (const text of ["请帮我检查这个服务的配置", "我需要确认这个操作的范围。"]) {
+    await sendMessage(page, text);
+    await expect(page.getByText(text, { exact: true }).first()).toBeVisible();
+    await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  }
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = page.getByRole("region", { name: /确认：Delete agent key 'ci-bot'/ });
+  await expect(card).toBeVisible();
+  await expect(stopButton(page)).not.toBeVisible({ timeout: 10_000 });
+  await page.reload();
+  await expect(card.getByRole("button", { name: "拒绝", exact: true })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+});

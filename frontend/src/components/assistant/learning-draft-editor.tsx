@@ -1,6 +1,5 @@
-import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import type { translateUi as translate } from "@/i18n/use-ui-translation";
 import { useGroupedDraft } from "@/lib/grouped-drafts";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
@@ -105,7 +104,7 @@ function formPath(
   }
 }
 
-function fieldMessage(item: SkillDraftDiagnostic): string {
+function fieldMessage(translateUi: typeof translate, item: SkillDraftDiagnostic): string {
   return `${item.line ? translateUi("Line {{line}}: ", { line: item.line }) : ""}${item.remediation}`;
 }
 
@@ -135,7 +134,7 @@ function BaseSkillField({
   readonly form: ReturnType<typeof useAppForm<SkillDraftForm>>;
   readonly onChosen: (pin: SkillPin) => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   return (
     <FormField
       control={form.control}
@@ -197,7 +196,7 @@ export function LearningDraftEditor({
   readonly validate: Review["validate"];
   readonly onSaved?: () => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const drawer = useContext(DrawerSectionInfoContext);
   const draft = proposal.draft;
   const form = useAppForm<SkillDraftForm>({
@@ -234,11 +233,11 @@ export function LearningDraftEditor({
       for (const item of skillDraftDiagnostics(cause)) {
         const path = formPath(item.field, form.getValues("files").length);
         if (path) {
-          form.setError(path, { type: item.rule, message: fieldMessage(item) });
+          form.setError(path, { type: item.rule, message: fieldMessage(translateUi, item) });
         }
       }
     },
-    [form],
+    [form, translateUi],
   );
   const failure = (cause: unknown) => ({
     message: requestFailure(cause),
@@ -342,7 +341,7 @@ export function LearningDraftEditor({
             <p>{shown.message}</p>
             {shown.items.map((item) => (
               <p key={`${item.field}-${item.rule}-${item.line ?? 0}`}>
-                {skillDraftFieldLabel(item.field)}: {fieldMessage(item)}
+                {skillDraftFieldLabel(item.field)}: {fieldMessage(translateUi, item)}
               </p>
             ))}
           </div>
@@ -476,7 +475,7 @@ export function LearningDraftEditor({
           </div>
         ) : null}
         {validBytes !== undefined ? (
-          <p role="status" className="text-13 text-success">{translateUi("The draft passes validation (")}{validBytes.toLocaleString(getFormattingLocale())}{" "}{translateUi("bytes).")}{form.formState.isDirty ? translateUi(" Save it to keep these changes.") : ""}
+          <p role="status" className="text-13 text-success">{translateUi("The draft passes validation (")}{validBytes.toLocaleString(language)}{" "}{translateUi("bytes).")}{form.formState.isDirty ? translateUi(" Save it to keep these changes.") : ""}
           </p>
         ) : null}
         {proposal.source === "authored" ? (
@@ -521,7 +520,7 @@ export function ProposalDraftEditor({
   readonly showCardLink?: boolean;
   readonly onSaved?: () => void;
 }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   const review = useAgentLearningReview(agentId);
   const proposal = review.data?.proposals.find((item) => item.id === proposalId);
   if (review.isPending) {

@@ -22,29 +22,36 @@ export function approvalRequestToBlock(
   stateVersion: number,
   existing?: ApprovalCardContentBlock,
 ): ApprovalCardContentBlock {
-  const presentation = asRecord(request.presentation);
-  const presentationBody = [
-    stringField(presentation ?? request, "actorLabel"),
-    stringField(presentation ?? request, "action"),
-    stringField(presentation ?? request, "target")
-      ? `on ${stringField(presentation ?? request, "target")}`
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const toolName = stringField(request, "toolName");
-  const body =
-    stringField(request, "message", "body") ||
-    presentationBody ||
-    (toolName
-      ? `The assistant wants to run ${redactAssistantDisplayText(toolName)}.`
-      : "The assistant is requesting your approval to continue.");
+  const presentation = asRecord(request.presentation) ?? request;
+  const action = redactAssistantDisplayText([
+    stringField(presentation, "actorLabel"),
+    stringField(presentation, "action"),
+  ].filter(Boolean).join(" "));
+  const target = redactAssistantDisplayText(stringField(presentation, "target"));
+  const tool = redactAssistantDisplayText(stringField(request, "toolName"));
+  let body = stringField(request, "message") || stringField(request, "body");
+  let bodyTemplate: ApprovalCardContentBlock["body_template"];
+  if (!body) {
+    if (target) {
+      bodyTemplate = { kind: "target", action, target };
+      body = [action, `on ${target}`].filter(Boolean).join(" ");
+    } else if (action) {
+      body = action;
+    } else if (tool) {
+      bodyTemplate = { kind: "tool", tool };
+      body = `The assistant wants to run ${tool}.`;
+    } else {
+      bodyTemplate = { kind: "approval" };
+      body = "The assistant is requesting your approval to continue.";
+    }
+  }
   const grantDuration = request.grantDurationSec;
   return {
     type: "approval_card",
     block_id: existing?.block_id ?? `current-approval:${request.approvalRequestId}`,
     approval_request_id: request.approvalRequestId,
     body: redactAssistantDisplayText(body),
+    ...(bodyTemplate && { body_template: bodyTemplate }),
     service_slug: stringField(request, "serviceSlug", "service_slug"),
     agent_key_prefix: stringField(request, "agentKeyPrefix") || "aevatar",
     approval_mode: request.approvalMode === "grant" ? "grant" : "per_request",

@@ -1,3 +1,4 @@
+import { useCardTranslation } from "./card-language";
 import { groupVoiceMessages } from "@/lib/assistant/voice-message-groups";
 import { larkAttachmentFailureReason } from "../../../../shared/larkAttachmentDiagnostics";
 import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
@@ -222,7 +223,7 @@ function StatusLabel({ label, interrupted }: {
 }
 
 function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"] }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   if (status === "streaming") return <span className={BANNER_ICON}><PulseDot /></span>;
   if (status === "error") {
     return <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-label={translateUi("Turn failed")} />;
@@ -234,18 +235,18 @@ function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"
   return <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-label={translateUi("Completed")} />;
 }
 
-function activitySummary(message: ChatMessage): string {
+function activitySummary(message: ChatMessage, t = translateUi): string {
   switch (message.status) {
     case "streaming":
-      return message.turnStatus?.label ?? "Working…";
+      return message.turnStatus?.label ?? t("Working…");
     case "error":
-      return billingError(message.errorCode)?.title ?? translateUi("Turn failed");
+      return billingError(message.errorCode)?.title ?? t("Turn failed");
     case "stopped":
-      return translateUi("Stopped");
+      return t("Stopped");
     case "complete":
-      return translateUi("Completed");
+      return t("Completed");
     default:
-      return translateUi("Status unavailable");
+      return t("Status unavailable");
   }
 }
 
@@ -281,11 +282,11 @@ function deliveryText(delivery: NonNullable<ChatMessage["channelDelivery"]>): st
 
 /** A decision on its tool call: a short pill, the full receipt on hover. */
 function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   const denied = row.status === "denied";
   return (
     <span
-      title={decisionTitle(row)}
+      title={decisionTitle(row, translateUi)}
       className={cn(
         "shrink-0 rounded border px-1 font-sans text-12 ",
         denied
@@ -293,7 +294,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
           : "border-hairline bg-overlay text-text-tertiary",
       )}
     >
-      {decisionLabel(row)}
+      {decisionLabel(row, translateUi)}
     </span>
   );
 }
@@ -306,7 +307,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
  * itself; the rest is on demand.
  */
 function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine || tool.decision);
   const decisions = message.decisions ?? [];
@@ -337,10 +338,10 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   }
   const counts = countDecisions(decisions, tools.flatMap((tool) => tool.decision ? [tool.decision] : []));
   const parts = [
-    activitySummary(message),
-    total ? `${String(total)} ${total === 1 ? "action" : "actions"}` : "",
-    ...decisionSummary(counts),
-    capacityWaitMs > 0 && waited ? `waited ${formatCapacityWait(capacityWaitMs)}` : "",
+    activitySummary(message, translateUi),
+    total ? translateUi("{{count}} actions", { count: total }) : "",
+    ...decisionSummary(counts, translateUi),
+    capacityWaitMs > 0 && waited ? translateUi("waited ") + formatCapacityWait(capacityWaitMs) : "",
   ].filter(Boolean);
   const deliveryFailed = delivery?.status === "failed";
   return (
@@ -359,7 +360,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
               key={part}
               className={cn(
                 index > 0 && "before:mx-1 before:content-['·']",
-                counts.denied && part.endsWith(" denied") && "text-warning",
+                counts.denied && part === translateUi("{{count}} denied", { count: counts.denied }) && "text-warning",
               )}
             >
               {part}
@@ -418,7 +419,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                       status === "error" && "text-destructive",
                     )}
                   >
-                    {status === "skipped" ? toolFailureCopy(tool.failure, tool.name) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
+                    {status === "skipped" ? toolFailureCopy(tool.failure, tool.name) : status === "unknown" ? translateUi("Activity details unavailable in this app version.") : decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
                   <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
@@ -429,7 +430,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
+                {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{translateUi(decision.detail)}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
                     {toolFailureCopy(tool.failure, tool.name)}{translateUi(" The assistant can continue after a failed step.")}</span>
                 ) : null}
@@ -445,7 +446,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
           {loose.length ? (
             <ul aria-label={translateUi("Permissions used")} className="space-y-1 pt-0.5">
               {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
-                <li key={row.id} title={decisionTitle(row)}>
+                <li key={row.id} title={decisionTitle(row, translateUi)}>
                 <ReviewCardTarget selected={row.id === selectedDecisionId}>
                 <div className="flex items-start gap-2 text-13 text-muted-foreground">
                   {row.status === "denied" ? (
@@ -454,7 +455,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     <Check aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-text-tertiary" />
                   )}
                   <span className="min-w-0 flex-1 break-words">
-                    <span className={cn(row.status === "denied" && "text-warning")}>{decisionLabel(row)}</span>
+                    <span className={cn(row.status === "denied" && "text-warning")}>{decisionLabel(row, translateUi)}</span>
                     {" · "}{decisionText(row)}
                     {row.reason?.trim() ? <span className="text-text-tertiary"> · {row.reason}</span> : null}
                   </span>

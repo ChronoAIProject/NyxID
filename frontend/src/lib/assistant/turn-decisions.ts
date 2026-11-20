@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ActivityDecision } from "./activity-decision";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 
@@ -10,18 +11,17 @@ export function isAutomatic(row: Decision): boolean {
 }
 
 /** Who decided and how, in a couple of words. */
-export function decisionLabel(row: Decision): string {
-  if (isAutomatic(row)) return "Full access";
-  const by = row.decided_by === "orchestrator" ? "NyxBot" : row.decided_by === "user" ? "You" : undefined;
+export function decisionLabel(row: Decision, t = translateUi): string {
+  if (isAutomatic(row)) return t("Full access");
   switch (row.status) {
     case "allowed":
-      return by ? `${by} allowed` : "Allowed";
+      return row.decided_by === "orchestrator" ? t("NyxBot allowed") : row.decided_by === "user" ? t("You allowed") : t("Allowed");
     case "denied":
-      return by ? `${by} denied` : "Denied";
+      return row.decided_by === "orchestrator" ? t("NyxBot denied") : row.decided_by === "user" ? t("You denied") : t("Denied");
     case "used":
-      return "Used";
+      return t("Used");
     default:
-      return "Expired";
+      return t("Expired");
   }
 }
 
@@ -71,15 +71,15 @@ export function countDecisions(rows: readonly Decision[], links: readonly Activi
 }
 
 /** Header fragments for a turn's decisions, most important first. */
-export function decisionSummary(counts: DecisionCounts): string[] {
+export function decisionSummary(counts: DecisionCounts, t = translateUi): string[] {
   return [
-    counts.waiting ? `${String(counts.waiting)} waiting` : "",
-    counts.cancelled ? `${String(counts.cancelled)} cancelled` : "",
-    counts.unavailable ? `${String(counts.unavailable)} outcome unavailable` : "",
-    counts.denied ? `${String(counts.denied)} denied` : "",
-    counts.allowed ? `${String(counts.allowed)} allowed` : "",
-    counts.automatic ? `${String(counts.automatic)} allowed by Full access` : "",
-    counts.expired ? `${String(counts.expired)} expired` : "",
+    counts.waiting ? t("{{count}} waiting", { count: counts.waiting }) : "",
+    counts.cancelled ? t("{{count}} cancelled", { count: counts.cancelled }) : "",
+    counts.unavailable ? t("{{count}} outcome unavailable", { count: counts.unavailable }) : "",
+    counts.denied ? t("{{count}} denied", { count: counts.denied }) : "",
+    counts.allowed ? t("{{count}} allowed", { count: counts.allowed }) : "",
+    counts.automatic ? t("{{count}} allowed by Full access", { count: counts.automatic }) : "",
+    counts.expired ? t("{{count}} expired", { count: counts.expired }) : "",
   ].filter(Boolean);
 }
 
@@ -102,7 +102,7 @@ export function groupDecisions(
 }
 
 /** The full receipt, for a tooltip: the verdict, what bypassed which check, and the action. */
-export function decisionTitle(row: Decision): string {
+export function decisionTitle(row: Decision, t = translateUi): string {
   const bypass = isAutomatic(row)
     ? (
         {
@@ -116,8 +116,8 @@ export function decisionTitle(row: Decision): string {
       )[row.confirmation?.reason ?? "access_mode"]
     : "";
   return [
-    isAutomatic(row) ? "Allowed automatically by Full access" : decisionLabel(row),
-    bypass ? `bypassed ${bypass}` : "",
+    isAutomatic(row) ? t("Allowed automatically by Full access") : decisionLabel(row, t),
+    bypass ? t("bypassed {{reason}}", { reason: t(bypass) }) : "",
     row.summary,
     row.reason?.trim() ?? "",
   ]

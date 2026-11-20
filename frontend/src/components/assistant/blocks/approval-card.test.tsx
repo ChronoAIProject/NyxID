@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ApprovalCardContentBlock } from "@/types/assistant";
+import { approvalRequestToBlock } from "@/lib/assistant/chat-approval-presentation";
+import { CardLanguageContext } from "../card-language";
 import { ApprovalCard } from "./approval-card";
 import { appI18n } from "@/i18n";
 
@@ -37,6 +39,25 @@ afterEach(async () => {
 });
 
 describe("ApprovalCard", () => {
+  it("localizes only client-authored approval templates in the chat language", async () => {
+    await appI18n.loadLanguages("zh-CN");
+    const request = { approvalRequestId: "test", toolName: "send_digest", expiresAt: approval().expires_at };
+    const show = (fields: Record<string, unknown>) => (
+      <CardLanguageContext.Provider value="zh-CN">
+        <ApprovalCard block={approvalRequestToBlock({ ...request, ...fields }, 1)} onDecide={vi.fn()} />
+      </CardLanguageContext.Provider>
+    );
+    const { rerender } = render(show({}));
+    expect(screen.getByText("助手请求运行 send_digest。")).toBeVisible();
+    rerender(show({ toolName: "" }));
+    expect(screen.getByText("助手需要你批准才能继续。")).toBeVisible();
+    rerender(show({ presentation: { action: "post", target: "#digest" } }));
+    expect(screen.getByText("post（目标：#digest）")).toBeVisible();
+    rerender(show({ body: "The assistant wants to run send_digest." }));
+    expect(screen.getByText("The assistant wants to run send_digest.")).toBeVisible();
+    expect(appI18n.language).toBe("en");
+  });
+
   it("approves once and throttles a repeated click", async () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(
