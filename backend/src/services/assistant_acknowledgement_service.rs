@@ -1937,6 +1937,18 @@ pub(crate) async fn fence(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if row.credential_api_key_id == chat.api_key_id
+        && chat.key_version < row.credential_version_floor()
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid authentication credentials".into(),
+        ));
+    }
+    if row.stopped_window.as_ref().is_some_and(|window| {
+        window.credential_id == chat.api_key_id && Some(&window.turn_id) == chat.turn_id.as_ref()
+    }) {
+        return Err(AppError::AssistantTurnRequired);
+    }
     if let Some(work) = chat.automation_work.as_ref() {
         if row.active_turn.as_ref().is_none_or(|t| {
             t.stop_requested

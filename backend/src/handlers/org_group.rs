@@ -212,6 +212,7 @@ async fn run_member(
         execution_enrollment: request.execution_task.is_some(),
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),

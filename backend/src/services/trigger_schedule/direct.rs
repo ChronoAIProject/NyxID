@@ -180,8 +180,7 @@ async fn recover_one(
         .session(&mut *session)
         .await?;
     if child.as_ref().is_some_and(|c| {
-        super::super::assistant_nyxagent::live_turn(c, Utc::now())
-            .is_some_and(|t| t.turn_id == receipt.child_turn_id)
+        super::super::assistant_turn_restart::awaiting_reply(c, &receipt.child_turn_id)
     }) {
         return Ok(());
     }

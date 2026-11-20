@@ -691,6 +691,7 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    pub(crate) capacity: Option<crate::models::coordination::SlotToken>,
     /// Validated first-party UI language; not forwarded to NyxAgent.
     pub title_language: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
@@ -891,6 +892,7 @@ impl From<&TurnRequest> for TurnStart {
             text: request.text.clone(),
             model: request.model.clone(),
             channel_context: None,
+            capacity: None,
             owner_instruction_source: None,
             origin: TurnOrigin::User,
             channel: None,
@@ -3666,6 +3668,20 @@ pub(crate) async fn begin_owner_turn_in_session(
             profile,
             super::shutdown::process().is_draining(),
         );
+        if let Some(active) = &row.active_turn
+            && let Some(offer) = &active.restart_offer
+        {
+            super::assistant_turn_restart::audit(
+                db,
+                session,
+                &row.user_id,
+                &active.turn_id,
+                offer,
+                "offered",
+                "pending",
+            )
+            .await?;
+        }
     }
     if start.conversation_id.is_some() {
         collection
@@ -3845,6 +3861,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                continued_after_restart: turn
+                    .restart_admission
+                    .as_ref()
+                    .is_some_and(|source| source.continued_after_restart),
                 voice_link_publication: None,
                 links_in_chat: None,
                 artifact_recovery_target: row
@@ -4506,16 +4526,46 @@ pub async fn mark_queued(
 /// Clear the queued display once the turn runs. The engine request start
 /// (`assistant_turn_observability::request_started`) also clears it.
 pub async fn mark_dequeued(db: &Database, row: &AssistantConversation) -> AppResult<()> {
-    db.collection::<bson::Document>(CONVERSATIONS)
-        .update_one(
-            WorkerFence::capture(row)?.filter(),
-            vec![doc! {"$set": {"active_turn.timing.queue_wait_ms":{"$add":[
-                {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
-                {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}}},
-                doc! {"$unset":["active_turn.queued_at","active_turn.queue_deadline"]}],
-        )
-        .await?;
-    Ok(())
+    mark_dequeued_with_capacity(db, row, None).await.map(|_| ())
+}
+
+pub(crate) async fn mark_dequeued_with_capacity(
+    db: &Database,
+    row: &AssistantConversation,
+    capacity: Option<&crate::models::coordination::SlotToken>,
+) -> AppResult<u64> {
+    let mut fields = doc! {"active_turn.timing.queue_wait_ms":{"$add":[
+    {"$ifNull":["$active_turn.timing.queue_wait_ms",0]},
+    {"$max":[0,{"$subtract":["$$NOW",{"$ifNull":["$active_turn.queued_at","$$NOW"]}]}]}]}};
+    if let Some(token) = capacity {
+        fields.insert("active_turn.restart_admission.capacity", doc! {"$literal":bson::to_bson(token).map_err(|error|AppError::Internal(error.to_string()))?});
+    }
+    let collection = db.collection::<bson::Document>(CONVERSATIONS);
+    let filter = WorkerFence::capture(row)?.filter();
+    let update = vec![
+        doc! {"$set":fields},
+        doc! {"$unset":["active_turn.queued_at","active_turn.queue_deadline"]},
+    ];
+    if capacity.is_some() {
+        let saved = collection
+            .find_one_and_update(filter, update)
+            .return_document(mongodb::options::ReturnDocument::After)
+            .projection(doc! {"active_turn.timing.queue_wait_ms":1})
+            .await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let timing = saved
+            .get_document("active_turn")
+            .and_then(|turn| turn.get_document("timing"))
+            .map_err(|_| AppError::AssistantTurnRequired)?;
+        return timing
+            .get_i64("queue_wait_ms")
+            .or_else(|_| timing.get_i32("queue_wait_ms").map(i64::from))
+            .ok()
+            .and_then(|wait| wait.try_into().ok())
+            .ok_or(AppError::AssistantTurnRequired);
+    }
+    collection.update_one(filter, update).await?;
+    Ok(0)
 }
 
 #[derive(Clone)]
@@ -4629,7 +4679,10 @@ pub(crate) fn enroll_restart(
         return;
     };
     turn.restart_admission = Some(Box::new(RestartAdmission {
-        version: 1,
+        continued_after_restart: false,
+        generation: super::security_readiness_service::local_generation().map(str::to_owned),
+        version: 2,
+        capacity: start.capacity.clone(),
         reattach: Some(deployment),
         window: None,
         source,
@@ -4651,6 +4704,7 @@ pub(crate) fn enroll_restart(
     if draining {
         let now = Utc::now();
         turn.restart_offer = Some(RestartOffer {
+            generation: super::security_readiness_service::local_generation().map(str::to_owned),
             from_worker: worker.id.clone(),
             reason: "shutdown".into(),
             offered_at: now,
@@ -4777,7 +4831,6 @@ pub async fn finish_turn_with_instructions(
 pub(crate) enum SettlementCondition {
     Worker,
     Orphaned(DateTime<Utc>),
-    CancelUnconfirmed(String),
 }
 
 pub(crate) async fn finish_turn_inner(
@@ -4801,7 +4854,12 @@ pub(crate) async fn finish_turn_inner(
     let row = row.clone();
     let result = result.clone();
     let credential_id = credential_id.to_owned();
-    let message_id = message_id.to_owned();
+    let message_id = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.restart_admission.as_deref())
+        .map_or(message_id, |source| source.reply_id.as_str())
+        .to_owned();
     let log_row = row.clone();
     let (error, settled) = session
         .start_transaction()
@@ -4835,6 +4893,7 @@ pub(crate) async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                continued_after_restart: saved.turn_metadata.as_ref().is_some_and(|metadata| metadata.continued_after_restart),
                                 voice_link_publication: None,
                                 links_in_chat: None,
 artifact_recovery_target: None,
@@ -5023,15 +5082,19 @@ artifact_recovery_target: None,
                             "role":{"$ne":"assistant"},"media_event_ids.0":{"$exists":true}})
                         .projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
                 let settled_turn = current.active_turn.take();
+                if let Some(turn) = settled_turn.as_ref() && let Some(offer) = &turn.restart_offer {
+                    super::assistant_turn_restart::audit(&db, session, &row.user_id, &turn.turn_id, offer, "settled", error.as_ref().map_or("completed",|error|error.code)).await?;
+                }
                 if let Some(turn) = settled_turn.as_ref()
                     && let Some(source) = turn.restart_admission.as_deref().filter(|source| !source.credential_ended)
                     && let Some(window) = &source.window
-                    && (turn.stop_requested || matches!(&condition, SettlementCondition::CancelUnconfirmed(key) if key == &window.key))
+                    && !window.terminal
                 {
                     current.stopped_window = Some(crate::models::assistant_conversation::StoppedWindow {
                         turn_id: turn.turn_id.clone(),
                         credential_id: source.credential_id.clone(),
                         window_key: window.key.clone(),
+                        destination_hash: source.reattach.as_ref().map(|deployment| deployment.destination_hash.clone()),
                     });
                 }
                 // A disposable upstream session may retain fetched pixels or
@@ -8005,7 +8068,7 @@ pub enum RecoveryAction {
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
         // Billing failures need their own remedy, never a credential replacement or rebind.
-        if code == "model_authority_changed"
+        if matches!(code, "model_authority_changed" | "model_unavailable")
             || super::assistant_model_observer::billing_failure_code(code).is_some()
         {
             return RecoveryAction::Fail;
@@ -8278,21 +8341,7 @@ impl ResponseStream {
             if text.len() > MAX_OUTPUT_BYTES {
                 return Err(TurnError::internal("output_too_large", "stream"));
             }
-            self.image_input_unsupported =
-                response["nyxagent_notices"]
-                    .as_array()
-                    .is_some_and(|notices| {
-                        notices.iter().take(32).any(|notice| {
-                            notice["code"].as_str().is_some_and(|code| {
-                                !code.is_empty()
-                                    && code.len() <= 64
-                                    && code.bytes().all(|b| {
-                                        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'
-                                    })
-                                    && code == "image_input_unsupported"
-                            })
-                        })
-                    });
+            self.image_input_unsupported = unsupported_images(response);
             self.text = text;
             self.terminal = Some(TurnResult {
                 text: self.text.clone(),
@@ -8314,6 +8363,17 @@ impl ResponseStream {
         }
         Ok(())
     }
+}
+
+pub(crate) fn unsupported_images(response: &Value) -> bool {
+    response["nyxagent_notices"]
+        .as_array()
+        .is_some_and(|notices| {
+            notices
+                .iter()
+                .take(32)
+                .any(|notice| notice["code"] == "image_input_unsupported")
+        })
 }
 
 #[cfg(test)]

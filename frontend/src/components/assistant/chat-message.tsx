@@ -783,6 +783,11 @@ export function ChatMessageBubble({
       className="group/message flex items-start gap-2.5"
     >
       <div className="min-w-0 w-full pt-0.5">
+        {message.continuedAfterRestart && (
+          <p role="note" className="text-xs text-muted-foreground">
+            {translateUi("Continued after a restart.")}
+          </p>
+        )}
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <TurnSummary message={message} selectedDecisionId={selectedDecisionId} />
         {message.toolCalls

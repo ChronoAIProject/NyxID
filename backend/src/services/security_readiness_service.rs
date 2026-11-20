@@ -102,7 +102,7 @@ pub(crate) fn local_generation() -> Option<&'static str> {
         .map(|runtime| runtime.identity.generation_id.as_str())
 }
 
-pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v1";
+pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v2";
 
 pub(crate) fn turn_restart_enrollment_ready() -> bool {
     RUNTIME

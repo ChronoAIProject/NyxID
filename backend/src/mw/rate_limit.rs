@@ -491,6 +491,7 @@ impl DirectChatRateLimiter {
             drop(state);
 
             Ok(DirectChatPermit {
+                settlement_only: false,
                 slot: None,
                 queued: None,
                 local_limiter: Some(self.clone()),
@@ -529,6 +530,7 @@ impl DirectChatRateLimiter {
                     .await?
                     .ok_or(AppError::RateLimited)?;
                 DirectChatPermit {
+                    settlement_only: false,
                     slot: None,
                     queued: Some(QueuePlace {
                         place,
@@ -583,6 +585,7 @@ impl DirectChatRateLimiter {
         unreachable!("production direct-chat limiters always have a MongoDB backend");
         #[cfg(test)]
         Ok(Some(DirectChatPermit {
+            settlement_only: false,
             slot: None,
             queued: None,
             local_limiter: None,
@@ -596,6 +599,57 @@ impl DirectChatRateLimiter {
     ) -> Result<Option<DirectChatPermit>, AppError> {
         self.try_acquire_pool(DIRECT_CHAT_NAMESPACE, owner, self.max_in_flight)
             .await
+    }
+
+    pub(crate) async fn transfer_capacity(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &crate::models::coordination::SlotToken,
+        owner: &str,
+        team_limit: Option<u32>,
+    ) -> Result<Option<crate::models::coordination::SlotToken>, AppError> {
+        let (namespace, limit) = match team_limit {
+            Some(limit) => ("assistant_team", limit.max(1)),
+            None if token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE => {
+                (DIRECT_CHAT_QUEUE_NAMESPACE, self.max_queued)
+            }
+            None => (DIRECT_CHAT_NAMESPACE, self.max_in_flight),
+        };
+        self.slot_manager
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .transfer(session, token, namespace, owner, limit)
+            .await
+    }
+
+    pub(crate) fn transferred_permit(
+        &self,
+        owner: &str,
+        token: crate::models::coordination::SlotToken,
+    ) -> DirectChatPermit {
+        let manager = self
+            .slot_manager
+            .as_ref()
+            .expect("transferred database slot");
+        let queued = token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
+        let place = manager.guard(token);
+        if !queued {
+            return DirectChatPermit::running(place);
+        }
+        DirectChatPermit {
+            settlement_only: false,
+            slot: None,
+            queued: Some(QueuePlace {
+                place,
+                slot_manager: manager.clone(),
+                user_id: owner.to_owned(),
+                max_in_flight: self.max_in_flight,
+            }),
+            #[cfg(test)]
+            local_limiter: None,
+            #[cfg(test)]
+            user_id: String::new(),
+        }
     }
 
     #[cfg(test)]
@@ -618,6 +672,7 @@ impl DirectChatRateLimiter {
 }
 
 pub struct DirectChatPermit {
+    settlement_only: bool,
     slot: Option<RenewableSlotGuard>,
     queued: Option<QueuePlace>,
     #[cfg(test)]
@@ -640,8 +695,30 @@ struct QueuePlace {
 }
 
 impl DirectChatPermit {
+    pub(crate) fn settlement_only() -> Self {
+        Self {
+            settlement_only: true,
+            slot: None,
+            queued: None,
+            #[cfg(test)]
+            local_limiter: None,
+            #[cfg(test)]
+            user_id: String::new(),
+        }
+    }
+
+    pub(crate) fn can_execute(&self) -> bool {
+        !self.settlement_only
+    }
+    pub(crate) fn token(&self) -> Option<&crate::models::coordination::SlotToken> {
+        self.slot
+            .as_ref()
+            .or_else(|| self.queued.as_ref().map(|queue| &queue.place))
+            .map(RenewableSlotGuard::token)
+    }
     fn running(slot: RenewableSlotGuard) -> Self {
         Self {
+            settlement_only: false,
             slot: Some(slot),
             queued: None,
             #[cfg(test)]

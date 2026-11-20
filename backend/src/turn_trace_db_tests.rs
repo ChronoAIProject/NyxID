@@ -82,11 +82,15 @@ async fn admission_continuation_and_settlement_command_count_parity() {
                         )
                         .await
                         .unwrap();
-                        let window =
-                            crate::services::assistant_continuation::started(&db, &owner, &row.id)
-                                .await
-                                .unwrap()
-                                .unwrap();
+                        let window = crate::services::assistant_continuation::started(
+                            &db,
+                            &owner,
+                            &row.id,
+                            &turn.turn_id,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
                         crate::services::assistant_continuation::completed(
                             &db,
                             &owner,

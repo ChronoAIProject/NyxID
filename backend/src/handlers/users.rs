@@ -1012,6 +1012,12 @@ pub async fn delete_me(
         .unwrap_or("");
     admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id,
+        mongodb::bson::doc! {"user_id":&user_id},
+    )
+    .await;
 
     let job = crate::services::personal_erasure_service::accept(
         &state.db,
