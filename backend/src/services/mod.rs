@@ -60,6 +60,7 @@ pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
 pub mod call_channels;
+pub mod caller_token_approval;
 pub mod catalog_auth_scheme;
 pub(crate) mod catalog_credential_record_service;
 pub mod catalog_delegation_service;

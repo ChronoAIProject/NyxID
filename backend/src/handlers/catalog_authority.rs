@@ -559,6 +559,10 @@ pub async fn require_service_update_authority(
     body: &UpdateServiceRequest,
 ) -> AppResult<Option<CatalogAuthority>> {
     use crate::models::downstream_service::OfferingKind;
+    if body.approve_caller_token_destination.is_some() {
+        super::login_client_context::require_first_party_human(auth_user)?;
+        super::services_helpers::require_admin(state, auth_user).await?;
+    }
     if service.offering_kind == OfferingKind::Tool {
         let authority = require_tool_writer(state, auth_user, Some(service)).await?;
         if authority == CatalogAuthority::ToolsManager {
@@ -585,6 +589,7 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
 
 fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
     let UpdateServiceRequest {
+        approve_caller_token_destination,
         auth_scheme: _,
         service_category,
         offering_kind,
@@ -638,6 +643,9 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
         proxy_operation_policy,
     } = body;
     [
+        approve_caller_token_destination
+            .as_ref()
+            .map(|_| "approve_caller_token_destination"),
         service_category.as_ref().map(|_| "service_category"),
         offering_kind
             .as_ref()

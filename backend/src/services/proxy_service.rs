@@ -519,6 +519,92 @@ pub(crate) fn caller_bearer_token_for_downstream(
         .map(CallerToken::from_verified)
 }
 
+/// Release a supplied credential only to the authorized concrete destination
+/// and, for node HTTP, to a route whose possible recipients the caller owns.
+pub(crate) async fn admit_caller_bearer<'a>(
+    db: &mongodb::Database,
+    actor: &str,
+    connection: Option<&str>,
+    target: &ProxyTarget,
+    route: Option<&super::node_routing_service::NodeRoute>,
+    bearer: Option<&'a str>,
+    server_headers: &[(String, String)],
+) -> AppResult<Option<&'a str>> {
+    let Some(bearer) = forwarded_caller_token(target, bearer, server_headers) else {
+        return Ok(None);
+    };
+    let denied =
+        || AppError::Forbidden("This destination cannot receive the caller's access token".into());
+    if let Some(route) = route {
+        let ids: Vec<_> = std::iter::once(route.node_id.as_str())
+            .chain(route.fallback_node_ids.iter().map(String::as_str))
+            .collect();
+        let owned = db
+            .collection::<mongodb::bson::Document>(crate::models::node::COLLECTION_NAME)
+            .count_documents(doc! {"_id": {"$in": &ids}, "user_id": actor, "is_active": true})
+            .await?;
+        if owned != ids.len() as u64 {
+            return Err(denied());
+        }
+    }
+    let mut personal_endpoint = false;
+    if let Some(id) = connection {
+        let row = super::service_history::collection::<UserService>(
+            db,
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": id, "is_active": true, "deleted_at": null})
+        .await?
+        .ok_or_else(denied)?;
+        if !row.forward_access_token
+            || row.catalog_service_id.as_deref().unwrap_or(&row.id) != target.service.id
+        {
+            return Err(denied());
+        }
+        if row.user_id == actor
+            && row.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+            && target.target_id.is_none()
+        {
+            personal_endpoint =
+                super::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .count_documents(
+                        doc! {"_id": &row.endpoint_id, "user_id": actor, "url": &target.base_url},
+                    )
+                    .await?
+                    != 0;
+            if personal_endpoint && row.catalog_service_id.is_none() {
+                return Ok(Some(bearer));
+            }
+        }
+    }
+    if target.catalog_slug.is_none() {
+        return Err(denied());
+    }
+    let catalog = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": &target.service.id, "is_active": true})
+        .await?
+        .ok_or_else(denied)?;
+    // A directly owned connection may opt in independently of its catalog
+    // defaults. An inherited forwarding flag needs approval for the catalog destination.
+    if !catalog.forward_access_token {
+        return if personal_endpoint {
+            Ok(Some(bearer))
+        } else {
+            Err(denied())
+        };
+    }
+    if super::caller_token_approval::approved(
+        &catalog,
+        target.target_id.as_deref(),
+        &target.base_url,
+    ) {
+        Ok(Some(bearer))
+    } else {
+        Err(denied())
+    }
+}
+
 /// Credential ownership follows the resolved service, falling back to the
 /// authenticated proxy principal (the effective owner for a service account).
 /// This is independent of the caller subject and the eventual billing payer.
@@ -4255,6 +4341,7 @@ fn build_minimal_downstream_service(
         requires_user_credential: !platform_managed_catalog_service,
         is_active: true,
         created_by: "system".to_string(),
+        caller_token_approved_destinations: Default::default(),
         catalog_manager_created: false,
         tools_manager_created: false,
         icon_url: None,
@@ -6707,6 +6794,285 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_bearer_authority_follows_destination_ownership() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("caller_bearer_authority").await;
+        let person = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&person, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org, &person, OrgRole::Member, None))
+            .await
+            .unwrap();
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            &org,
+            "Service",
+            "https://service.example.test",
+            None,
+            None,
+        );
+        let mut service =
+            test_user_service("connection", &org, "service", &endpoint.id, None, None);
+        service.forward_access_token = true;
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        for (actor, expected) in [(&org, true), (&person, false)] {
+            let resolution = resolve_proxy_target_by_user_service_id(
+                &db,
+                &test_encryption_keys(),
+                actor,
+                &service.id,
+                None,
+                None,
+                test_execution_context(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let authority = admit_caller_bearer(
+                &db,
+                actor,
+                Some(&service.id),
+                &resolution.target,
+                None,
+                Some("fixture"),
+                &[],
+            )
+            .await;
+            if !expected {
+                assert!(matches!(authority, Err(AppError::Forbidden(_))));
+                continue;
+            }
+            let admitted = authority.unwrap();
+            let route = super::super::node_routing_service::NodeRoute {
+                node_id: "primary".into(),
+                fallback_node_ids: vec!["fallback".into()],
+            };
+            let nodes =
+                db.collection::<mongodb::bson::Document>(crate::models::node::COLLECTION_NAME);
+            nodes
+                .insert_many([
+                    doc! {"_id": "primary", "user_id": actor, "is_active": true},
+                    doc! {"_id": "fallback", "user_id": &person, "is_active": true},
+                ])
+                .await
+                .unwrap();
+            assert!(matches!(
+                admit_caller_bearer(
+                    &db,
+                    actor,
+                    Some(&service.id),
+                    &resolution.target,
+                    Some(&route),
+                    Some("fixture"),
+                    &[]
+                )
+                .await,
+                Err(AppError::Forbidden(_))
+            ));
+            nodes
+                .update_one(doc! {"_id": "fallback"}, doc! {"$set": {"user_id": actor}})
+                .await
+                .unwrap();
+            assert_eq!(
+                admit_caller_bearer(
+                    &db,
+                    actor,
+                    Some(&service.id),
+                    &resolution.target,
+                    Some(&route),
+                    Some("fixture"),
+                    &[]
+                )
+                .await
+                .unwrap(),
+                admitted
+            );
+            let ws = crate::handlers::proxy::build_downstream_ws_request(
+                "wss://service.example.test/",
+                &resolution.target,
+                &[],
+                &[],
+                &[],
+                admitted,
+            )
+            .unwrap();
+            assert_eq!(ws.headers().contains_key("authorization"), expected);
+            let node = prepare_node_request(
+                &resolution.target,
+                "/",
+                None,
+                vec![],
+                &[],
+                &[],
+                admitted,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                node.headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chrono_sandbox_personal_connection_retains_owner_forwarding() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("personal_sandbox_forward").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.slug = "chrono-sandbox".into();
+        catalog.auth_method = "none".into();
+        catalog.requires_user_credential = false;
+        catalog.forward_access_token = false;
+        let endpoint = test_user_endpoint(
+            "endpoint",
+            &owner,
+            "Sandbox",
+            &catalog.base_url,
+            None,
+            Some(&catalog.id),
+        );
+        let mut service = test_user_service(
+            "connection",
+            &owner,
+            &catalog.slug,
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        service.forward_access_token = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let target = read_connection_authority(&db, &owner, &service.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .target;
+        assert_eq!(
+            admit_caller_bearer(
+                &db,
+                &owner,
+                Some(&service.id),
+                &target,
+                None,
+                Some("fixture"),
+                &[],
+            )
+            .await
+            .unwrap(),
+            Some("fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_catalog_destination_retains_caller_bearer_authority() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("catalog_bearer_authority").await;
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let creator = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
+        let mut catalog = dummy_service();
+        catalog.created_by.clone_from(&creator.id);
+        catalog.slug = crate::services::assistant_service::AEVATAR_SLUG.into();
+        catalog.auth_method = "none".into();
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.identity_propagation_mode = "jwt".into();
+        catalog.forward_access_token = true;
+        db.collection::<User>(USERS)
+            .insert_one(creator)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let approved = super::super::caller_token_approval::bootstrap(
+            &db,
+            crate::services::audit_service::audit_chain_hmac_key().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approved, [(catalog.id.clone(), catalog.slug.clone())]);
+        let target = resolve_proxy_target(
+            &db,
+            &test_encryption_keys(),
+            &uuid::Uuid::new_v4().to_string(),
+            &catalog.id,
+            disabled_platform_rate_limit(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            admit_caller_bearer(&db, "caller", None, &target, None, Some("fixture"), &[])
+                .await
+                .unwrap(),
+            Some("fixture")
+        );
+        assert_eq!(target.base_url, catalog.base_url);
+        let aevatar = crate::services::assistant_service::resolve_admin_service(&db)
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let mut assistant = resolve_admin_proxy_target(&db, &keys, &aevatar.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            admit_caller_bearer(&db, "caller", None, &assistant, None, Some("fixture"), &[])
+                .await
+                .unwrap(),
+            Some("fixture")
+        );
+        assistant.base_url = "https://other.example.test".into();
+        assert!(matches!(
+            admit_caller_bearer(&db, "caller", None, &assistant, None, Some("fixture"), &[]).await,
+            Err(AppError::Forbidden(_))
+        ));
+
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = crate::services::assistant_nyxagent::SERVICE_SLUG.into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        assert!(
+            crate::services::assistant_nyxagent::catalog_contract(&db, &keys)
+                .await
+                .unwrap()
+                .valid()
+        );
+    }
+
+    #[tokio::test]
     async fn org_inherited_role_scope_allows_and_denies_proxy_targets() {
         let Some(db) = connect_test_database("proxy_org_role_scope").await else {
             eprintln!("skipping proxy org role-scope integration test: no local MongoDB available");
@@ -7497,6 +7863,7 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -8970,6 +9337,7 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9380,6 +9748,7 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9630,6 +9999,7 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                caller_token_approved_destinations: Default::default(),
                 catalog_manager_created: false,
                 tools_manager_created: false,
                 icon_url: None,
@@ -9892,6 +10262,7 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "system".into(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
