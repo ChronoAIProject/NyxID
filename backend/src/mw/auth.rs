@@ -1293,6 +1293,37 @@ pub(crate) fn is_assistant_conversation_key_candidate(
             || key.allow_auto_connected_services)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AccountManagementRoute;
+
+async fn check_app_management(state: &AppState, parts: &Parts, client_id: &str) -> AppResult<()> {
+    if parts.extensions.get::<AccountManagementRoute>().is_none() {
+        return Ok(());
+    }
+    let route = parts
+        .extensions
+        .get::<axum::extract::MatchedPath>()
+        .map_or("<unmatched>", axum::extract::MatchedPath::as_str);
+    if parts.method == Method::GET
+        && matches!(
+            route,
+            "/api/v1/channel-bots" | "/api/v1/channel-conversations"
+        )
+    {
+        return Ok(());
+    }
+    state
+        .app_management_observations
+        .record(&state.shutdown, client_id, &parts.method, route);
+    if crate::services::feature_flag_service::app_token_management_enforced(&state.db).await? {
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            CredentialType::OauthClient,
+        ));
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -1495,7 +1526,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                     let user_id_str = user_id.to_string();
-                    crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    let unflagged_client = crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await?;
+                    if let Some(client_id) = unflagged_client.as_deref() {
+                        check_app_management(state, parts, client_id).await?;
+                    }
 
                     // Verify the user account is still active
                     let user_model = state
@@ -3774,6 +3808,7 @@ mod tests {
                 delegation_scopes: "proxy:*".to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,

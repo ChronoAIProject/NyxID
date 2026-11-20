@@ -52,6 +52,9 @@ pub struct OauthClient {
     pub default_service_catalog_slugs: Vec<String>,
     #[serde(default)]
     pub broker_capability_enabled: bool,
+    /// An administrator designated this registration for account management.
+    #[serde(default)]
+    pub first_party_management: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -157,6 +160,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
@@ -215,6 +219,7 @@ mod tests {
 
         let restored: OauthClient = bson::from_document(doc).expect("deserialize legacy doc");
         assert!(!restored.broker_capability_enabled);
+        assert!(!restored.first_party_management);
         assert!(restored.revocation_webhook_url.is_none());
         assert!(restored.revocation_webhook_secret_encrypted.is_none());
         assert!(restored.default_service_catalog_slugs.is_empty());
@@ -235,6 +240,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec!["openai".to_string(), "lark".to_string()],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -272,6 +278,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -303,6 +310,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec![],
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,

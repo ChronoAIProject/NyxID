@@ -327,8 +327,11 @@ async fn validate_lineage(
 
 /// Called only after signature/type validation. Service-issued delegation has
 /// its own signed origin and retains the existing service-policy contract.
-pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<()> {
-    validate_claims_with_user(db, claims).await.map(|_| ())
+/// Returns the client needing designation only for a direct, verified app token.
+pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<Option<String>> {
+    validate_claims_with_reads(&mut AuthorityReads::new(db), claims)
+        .await
+        .map(|access| access.unflagged_client_id)
 }
 
 pub async fn validate_claims_for_route(
@@ -344,8 +347,10 @@ pub async fn validate_claims_for_route(
 /// Retain the active user loaded during authority validation so callers can
 /// apply account checks without another read. Service accounts and relay tokens
 /// keep their separate authority checks and return no human user.
-pub async fn validate_claims_with_user(db: &Database, claims: &Claims) -> AppResult<Option<User>> {
-    validate_claims_with_reads(&mut AuthorityReads::new(db), claims).await
+struct ValidatedAccess {
+    user: Option<User>,
+    /// Present only for a direct user access token from an undesignated active client.
+    unflagged_client_id: Option<String>,
 }
 
 pub async fn validate_claims_with_user_for_route(
@@ -353,15 +358,20 @@ pub async fn validate_claims_with_user_for_route(
     claims: &Claims,
     route_class: &'static str,
 ) -> AppResult<Option<User>> {
-    validate_claims_with_reads(&mut AuthorityReads::for_route(db, route_class), claims).await
+    validate_claims_with_reads(&mut AuthorityReads::for_route(db, route_class), claims)
+        .await
+        .map(|access| access.user)
 }
 
 async fn validate_claims_with_reads(
     reads: &mut AuthorityReads<'_>,
     claims: &Claims,
-) -> AppResult<Option<User>> {
+) -> AppResult<ValidatedAccess> {
     if claims.sa == Some(true) || claims.relay == Some(true) {
-        return Ok(None);
+        return Ok(ValidatedAccess {
+            user: None,
+            unflagged_client_id: None,
+        });
     }
     let user: User = reads
         .required(
@@ -369,13 +379,17 @@ async fn validate_claims_with_reads(
             doc! {"_id":&claims.sub,"is_active":true,"platform_personal_deleting":{"$ne":true}},
         )
         .await?;
+    let mut unflagged_client_id = None;
     if let Some(actor) = &claims.act {
         match claims.delegation_origin {
             Some(DelegationOrigin::Service) if claims.client_id.is_none() => {
                 if let Some(lineage) = &claims.oauth_lineage {
                     validate_lineage(reads, &claims.sub, lineage).await?;
                 }
-                return Ok(Some(user));
+                return Ok(ValidatedAccess {
+                    user: Some(user),
+                    unflagged_client_id,
+                });
             }
             // Legacy delegation has no authenticated origin discriminator.
             // It cannot fall back to service authority when a client is deleted.
@@ -392,7 +406,10 @@ async fn validate_claims_with_reads(
             return Err(denied());
         }
     } else if let Some(client) = claims.client_id.as_deref() {
-        active_client(reads, client).await?;
+        let registration = active_client(reads, client).await?;
+        if !registration.first_party_management {
+            unflagged_client_id = Some(registration.id);
+        }
         consent_service::validate_protected_reference_with_reads(
             reads,
             &claims.sub,
@@ -405,7 +422,10 @@ async fn validate_claims_with_reads(
     } else if let Some(session) = claims.sid.as_deref() {
         source_session(reads, &claims.sub, session).await?;
     }
-    Ok(Some(user))
+    Ok(ValidatedAccess {
+        user: Some(user),
+        unflagged_client_id,
+    })
 }
 
 /// Capture references only during an already-authorized new exchange. Renewal

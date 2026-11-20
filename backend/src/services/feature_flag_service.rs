@@ -391,6 +391,13 @@ const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const APP_TOKEN_MANAGEMENT_FLAG_KEY: &str = "auth:app-token-management-v1";
+const APP_TOKEN_MANAGEMENT_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    description: "Require administrator designation for OAuth clients using account management routes (global only).",
+    default_enabled: false,
+};
+
 /// Mobile builds that embed both production domain sets read this global flag
 /// from `/public/config` on both API hosts at launch and use the new API,
 /// frontend and legal domains while it is on. Global only: the app reads it
@@ -405,6 +412,7 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
     INVITATION_CODE_FLAG_KEY,
+    APP_TOKEN_MANAGEMENT_FLAG_KEY,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
@@ -480,6 +488,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
@@ -545,6 +554,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
@@ -1154,6 +1164,10 @@ pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<boo
 /// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
 pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
+}
+
+pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &APP_TOKEN_MANAGEMENT_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -3384,6 +3398,7 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "auth:app-token-management-v1",
                 "mobile:new-domains",
                 "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
