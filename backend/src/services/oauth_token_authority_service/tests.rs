@@ -1134,3 +1134,5 @@ async fn delegation_fingerprint_mismatch_is_definitive_and_positive_reads_are_op
     assert_eq!(denied.into_response().status(), StatusCode::UNAUTHORIZED);
     fixture.state.db.drop().await.unwrap();
 }
+
+pub(super) mod catalog_issuance;
