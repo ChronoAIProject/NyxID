@@ -231,8 +231,8 @@ export const api = {
     return apiClient<T>(endpoint, options);
   },
 
-  post<T>(endpoint: string, body?: unknown): Promise<T> {
-    return apiClient<T>(endpoint, { method: "POST", body });
+  post<T>(endpoint: string, body?: unknown, options?: Pick<RequestOptions, "authorityGuard">): Promise<T> {
+    return apiClient<T>(endpoint, { ...options, method: "POST", body });
   },
 
   put<T>(

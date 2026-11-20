@@ -1812,6 +1812,7 @@ pub(crate) fn admit_http<'a>(
             false,
             auto_connected,
             auth.assistant_chat.as_deref(),
+            auth.api_key_id.as_deref(),
         )
         .await?;
         if matches!(outcome, super::approval_service::ApprovalOutcome::Denied) {
@@ -1996,7 +1997,7 @@ pub(crate) fn approval_outcome(
         && owner == permit.subject.actor_user_id
         && connection
             .is_some_and(|id| permit.satisfies(ExecutionFloor::PersonalServiceApproval, id))
-        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy && p.primary_owner_user_id == permit.subject.actor_user_id)
+        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy && !p.resolution.fresh_decision && p.primary_owner_user_id == permit.subject.actor_user_id)
     {
         super::approval_service::ApprovalOutcome::Allowed { required: false }
     } else {
@@ -2035,6 +2036,7 @@ pub(crate) fn approval<'a>(
     bypass: bool,
     auto_connected: bool,
     chat: Option<&'a acks::ChatAuthority>,
+    api_key_id: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<PolicyDecision>> {
     Box::pin(async move {
         let Some(context) = context.filter(|c| c.drain.get().is_some()) else {
@@ -2049,11 +2051,12 @@ pub(crate) fn approval<'a>(
                 bypass,
                 auto_connected,
                 chat,
+                api_key_id,
             )
             .await;
         };
         let key = format!(
-            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
+            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}:{api_key_id:?}"
         );
         let mut cache = context.policies.lock().await;
         if let Some((_, value)) = cache.iter().find(|(k, _)| k == &key) {
@@ -2089,6 +2092,7 @@ pub(crate) fn approval<'a>(
             bypass,
             auto_connected,
             chat,
+            api_key_id,
         )
         .await?;
         cache.push((key, decision.clone()));

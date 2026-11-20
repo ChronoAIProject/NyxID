@@ -476,3 +476,31 @@ look is not evidence of rollback. Initial heartbeat publication precedes workers
 and HTTP serving. The observation-floor limitations above still apply to invisible
 pre-protocol builds. No lease checkpoint, manual activation or provider total can
 certify missing history. Delivery, admission and money are unaffected.
+
+## Personal approval rules and catalog opt-in
+
+`approvals:personal-rules-v1` advertises key-aware personal readers, exact policy
+editing, revision checks, disabling and atomic/clearable policy durations.
+`catalog:explicit-connections-v1` advertises explicit catalog consent and rejection
+of catalog-only and legacy automatic execution. They participate in the normal
+fleet observation and durable activation protocol described above.
+
+Before authoring new personal fields, upgrade every serving replica and worker and
+retire older generations. `GET /api/v1/approvals/capabilities` exposes
+`personal_rules` and `catalog_opt_in` only when their serving assessment is ready.
+NyxBot and Studio disable these actions until readiness is reported. An old server
+returns 404 for this endpoint and the UI keeps authoring disabled; it must never
+send key-limited Allow, disable or per-policy-day payloads based on a version
+string or a cached assumption. Updated backend writers independently require the
+same fleet capability. Invalid data fails validation without policy/grant changes.
+
+This is a reader/writer rollout, not a data migration. Existing policies, grants,
+pending requests, history and explicit connections remain stored. Legacy automatic
+connections appear as available to Connect and cannot execute on updated replicas
+until explicit consent. During a rolling upgrade, old replicas still implement
+their historical implicit-connection behavior; rely on the new restriction only
+after every participating reader is upgraded and the capability activates.
+Do not restart an older binary after authoring new policy fields: it cannot enforce
+those fields, even though updated replicas detect its missing capability. Disable
+new authoring and drain all readers before any coordinated rollback that removes
+or converts the new policy data. No rollout tool mutates policy or connections.

@@ -77,6 +77,7 @@ async fn assistant_cma_creation_cutover_modes_approval_retry_and_permit() {
             crate::test_utils::set_test_approval_preference(&f.db, &f.owner, true).await;
             f.db.collection::<ServiceApprovalConfig>(CONFIGS)
                 .insert_one(ServiceApprovalConfig {
+        disabled: false, grant_expiry_days: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: f.catalog.id.clone(),

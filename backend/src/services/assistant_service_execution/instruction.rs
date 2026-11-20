@@ -62,7 +62,8 @@ pub(crate) async fn covered(
     // Cheapest checks first: the actor's own rows and platform/auto rows never
     // need instruction, so ordinary personal calls add no database reads.
     if service.user_id == chat.user_id
-        || service.source.as_deref() == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+        || service.source.as_deref()
+            == Some(crate::services::unified_key_service::CATALOG_OPT_IN_SOURCE)
         || service.credential_binding.as_deref() == Some("platform")
     {
         return Ok(false);

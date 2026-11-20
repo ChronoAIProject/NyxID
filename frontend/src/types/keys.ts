@@ -177,6 +177,7 @@ export interface ScopeCatalogEntry {
 }
 
 export interface CatalogEntry {
+  readonly offering_kind?: "ai_service" | "tool";
   readonly billing?: import("./api").ServiceBilling | null;
   readonly inference?: InferenceView | null;
   readonly platform_key?: {

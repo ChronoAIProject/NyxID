@@ -32,6 +32,7 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+        disabled: false, grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.caller.approval_owner_user_id.clone(),
                 service_id: approval_target.service_id,
@@ -296,4 +297,159 @@ async fn optional_authority_pinned_contextual_token_rejects_cross_record_ciphert
     );
     assert!(f.effects.lock().unwrap().is_empty());
     assert_eq!(f.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn caller_key_rules_cover_exact_create_observe_and_redeem() {
+    let f = optional_fixture().await;
+    f.token(false).await;
+    let db = &f.state.db;
+    let mut callers = Vec::new();
+    for label in ["a", "b"] {
+        let key = crate::services::key_service::create_api_key(
+            db,
+            &f.caller.actor_user_id,
+            label,
+            "proxy",
+            None,
+            None,
+            Some(std::slice::from_ref(&f.connection.id)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut caller = f.caller.clone();
+        caller.api_key_id = Some(key.id.clone());
+        caller.requester_type = "api_key".into();
+        caller.requester_id = key.id;
+        callers.push(caller);
+    }
+    let operation = f.operation().await;
+    let input = || ExactServiceApprovalCreate {
+        user_service_id: f.connection.id.clone(),
+        endpoint_id: f.endpoint_id.clone(),
+        catalog_digest: operation.catalog_digest.clone(),
+        exact_view_digest: Some(operation.exact_view_digest.clone()),
+        endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+        operation_digest: operation.operation_digest.clone(),
+        operation_id: f.endpoint_id.clone(),
+        operation_generation: Some(operation.operation_generation),
+        idempotency_key: uuid::Uuid::new_v4().to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let configs =
+        db.collection::<bson::Document>(crate::models::service_approval_config::COLLECTION_NAME);
+    let policy_id = uuid::Uuid::new_v4().to_string();
+    for effect in ["deny", "require_approval"] {
+        configs.delete_many(doc! {}).await.unwrap();
+        configs.insert_one(doc! {"_id":&policy_id,"user_id":&f.caller.actor_user_id,"service_id":&f.catalog.id,"service_name":"Exact",
+            "approval_required":false,"approval_mode":"per_request","rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":[callers[0].api_key_id.as_deref().unwrap()]}],
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        let listed = Box::pin(create_request(&f.state, &callers[0], input())).await;
+        if effect == "deny" {
+            assert!(matches!(listed, Err(AppError::Forbidden(_))));
+        } else {
+            assert_eq!(listed.unwrap().state, ExactServiceApprovalState::Pending);
+        }
+        assert!(
+            matches!(Box::pin(create_request(&f.state,&callers[1],input())).await,Err(AppError::Conflict(message)) if message=="exact_service_approval_not_required")
+        );
+    }
+    // General Ask is the unchanged control. Each key receives its own exact request.
+    configs
+        .update_many(doc! {}, doc! {"$set":{"rules.0.api_key_ids":[]}})
+        .await
+        .unwrap();
+    let mut requests = Vec::new();
+    for caller in &callers {
+        let created = Box::pin(create_request(&f.state, caller, input()))
+            .await
+            .unwrap();
+        Box::pin(approval_service::process_decision(
+            db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &created.request_id,
+            true,
+            None,
+            None,
+            "web",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            Box::pin(observe_request(&f.state, caller, &created.request_id))
+                .await
+                .unwrap()
+                .state,
+            ExactServiceApprovalState::Approved
+        );
+        requests.push(created.request_id);
+    }
+    // Replacing Ask with a key-specific Block revokes only that key at both live gates.
+    configs.update_many(doc! {},doc! {"$set":{"rules.0.api_key_ids":[callers[0].api_key_id.as_deref().unwrap()],"rules.0.effect":"deny","default_effect":"require_approval"}}).await.unwrap();
+    for (index, caller) in callers.iter().enumerate() {
+        let expected = if index == 0 {
+            ExactServiceApprovalState::Revoked
+        } else {
+            ExactServiceApprovalState::Approved
+        };
+        assert_eq!(
+            Box::pin(observe_request(&f.state, caller, &requests[index]))
+                .await
+                .unwrap()
+                .state,
+            expected
+        );
+        let row = db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .find_one(doc! {"_id":&requests[index]})
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = row.exact_service.unwrap();
+        let result = Box::pin(redeem_request(
+            &f.state,
+            caller,
+            &requests[index],
+            ExactServiceApprovalFence {
+                catalog_digest: stored.catalog_digest,
+                exact_view_digest: stored.exact_view_digest_binding,
+                operation_digest: stored.operation_digest,
+                operation_id: stored.operation_id,
+                operation_generation: stored.operation_generation,
+                idempotency_key: stored.effect_idempotency_key,
+            },
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::route_inventory::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::route_inventory::BillingIngress::Mcp,
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            result.state,
+            if index == 0 {
+                ExactServiceApprovalState::Revoked
+            } else {
+                ExactServiceApprovalState::Redeemed
+            }
+        );
+    }
+    assert_eq!(f.effects.lock().unwrap().len(), 1);
+    crate::test_utils::drop_test_database(db).await;
 }

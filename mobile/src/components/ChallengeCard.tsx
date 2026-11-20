@@ -1,3 +1,4 @@
+import { formatGrantDuration } from "../features/activity/challengeUiState";
 import { Translation } from "../i18n/Translation";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp } from "../i18n/appTranslation";
@@ -219,7 +220,7 @@ export function ChallengeCard({
               : challenge.approval_mode === "grant"
                 ? translateApp(
                     "Approving allows matching requests for {{label}}.",
-                    { label: grantDurationLabel },
+                    { label: challenge.grant_expiry_days == null ? grantDurationLabel : formatGrantDuration(challenge.grant_expiry_days) },
                   )
                 : translateApp("Approval applies only to this request.")}
           </Text>

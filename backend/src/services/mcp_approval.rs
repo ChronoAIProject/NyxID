@@ -167,6 +167,8 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                disabled: false,
+                grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner_id.to_string(),
                 service_id: catalog_id.to_string(),
@@ -226,6 +228,7 @@ mod tests {
                     &target.service_id,
                     &operation,
                     target.is_auto_connected,
+                    None,
                 )
                 .await
                 .unwrap(),

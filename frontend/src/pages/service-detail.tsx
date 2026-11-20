@@ -320,7 +320,7 @@ export function ServiceDetailPage() {
                 );
               })}
             </div>
-            <p className="text-13 text-muted-foreground">{translateUi("Users who consent to these apps will have this service auto-provisioned.")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("App consent makes eligible no-auth HTTP services discoverable. Users must choose Connect in NyxBot or AI Services.")}</p>
           </div>
         )}
         {!isSshService && (

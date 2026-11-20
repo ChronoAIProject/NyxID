@@ -1,3 +1,5 @@
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { useApprovalAuthoringCapabilities } from "@/hooks/use-approvals";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -38,7 +40,11 @@ import { ManageConnectionModal } from "./manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { ServiceCardSummary } from "@/components/shared/service-card-summary";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
-import { useCatalog, useKeys } from "@/hooks/use-keys";
+import {
+  useCatalog,
+  useKeys,
+  useConnectCatalogService,
+} from "@/hooks/use-keys";
 import {
   useAgentSkills,
   useAttachLatestSkill,
@@ -126,7 +132,9 @@ function PluginCard({
         subtitleTitle={status}
         className="pointer-events-none"
         icon={
-          add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
+          add ? (
+            <Plus aria-hidden className="size-[1.5em]" />
+          ) : item.iconSlug || item.iconUrl ? (
             <ServiceIcon
               slug={item.iconSlug}
               iconUrl={item.iconUrl}
@@ -152,10 +160,7 @@ function PluginCard({
         <div className="pointer-events-auto relative flex min-w-0 items-center gap-2">
           {secondary}
         </div>
-        <span
-          aria-hidden
-          className="flex items-center gap-1 type-row-title"
-        >
+        <span aria-hidden className="flex items-center gap-1 type-row-title">
           {actionLabel}
           {onActivate || href ? <ArrowRight className="size-[1em]" /> : null}
         </span>
@@ -181,7 +186,9 @@ function SectionHeading({
 }
 function CardGrid({ children }: { readonly children: ReactNode }) {
   useUiTranslation();
-  return <div className="assistant-plugin-grid shell-card-grid grid">{children}</div>;
+  return (
+    <div className="assistant-plugin-grid shell-card-grid grid">{children}</div>
+  );
 }
 function LoadingGrid() {
   useUiTranslation();
@@ -200,11 +207,13 @@ function ConnectorCard({
   onManage,
   onConnect,
   busy,
+  optInBlocked,
 }: {
   readonly item: ConnectorCardItem;
   readonly onManage: (id: string) => void;
   readonly onConnect: (slug: string, personal: boolean) => void;
   readonly busy: boolean;
+  readonly optInBlocked: boolean;
 }) {
   useUiTranslation();
   const count = item.manageKeyIds?.length ?? 0;
@@ -213,7 +222,7 @@ function ConnectorCard({
       item={item}
       status={
         item.added
-          ? `${translateUi(item.disabled ? "Disabled" : item.verificationLabel ?? "Connected")} · ${count} ${count === 1 ? "connection" : "connections"}`
+          ? `${translateUi(item.disabled ? "Disabled" : (item.verificationLabel ?? "Connected"))} · ${count} ${count === 1 ? "connection" : "connections"}`
           : item.meta
       }
       actionLabel={
@@ -226,7 +235,7 @@ function ConnectorCard({
       href={
         item.advancedSetupSlug ? { slug: item.advancedSetupSlug } : undefined
       }
-      disabled={!item.added && busy}
+      disabled={!item.added && (busy || optInBlocked)}
       onActivate={
         item.added
           ? () => onManage(item.id)
@@ -241,7 +250,9 @@ function ConnectorCard({
             disabled={busy}
             className="min-h-8 type-row-title text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onConnect(item.connectOwnSlug!, true)}
-          >{translateUi("Connect your own")}</button>
+          >
+            {translateUi("Connect your own")}
+          </button>
         ) : undefined
       }
     />
@@ -250,13 +261,45 @@ function ConnectorCard({
 function ConnectorsTab({ query }: { readonly query: string }) {
   useUiTranslation();
   const keysQuery = useKeys();
-  const catalogQuery = useCatalog();
+  const catalogQuery = useCatalog({ includeAll: true });
   const [manageCardId, setManageCardId] = useState<string | null>(null);
   const [connectHref, setConnectHref] = useState<string | null>(null);
   const [modelPicker, setModelPicker] = useState(false);
   const createConnect = useCreateAssistantConnectLink();
+  const connectCatalog = useConnectCatalogService();
+  const capabilities = useApprovalAuthoringCapabilities();
+  function needsCatalogOptIn(slug: string | undefined, personal = false) {
+    const entry = catalogQuery.data?.find((item) => item.slug === slug);
+    return (
+      !personal &&
+      Boolean(
+        entry &&
+        (entry.platform_key?.available ||
+          (!entry.requires_credential && !entry.requires_gateway_url)),
+      )
+    );
+  }
+  const optInReady =
+    capabilities.data?.catalog_opt_in === true && !capabilities.error;
+  const busy = createConnect.isPending || connectCatalog.isPending;
   function openConnect(slug: string, personal: boolean) {
-    if (createConnect.isPending) return;
+    if (createConnect.isPending || connectCatalog.isPending) return;
+    if (needsCatalogOptIn(slug, personal)) {
+      if (!optInReady) return;
+      void connectCatalog
+        .mutateAsync({ slug })
+        .then(() => setModelPicker(false))
+        .catch((cause: unknown) => {
+          toast.error(
+            translateErrorMessage(
+              cause instanceof Error
+                ? cause.message
+                : "Could not connect service",
+            ),
+          );
+        });
+      return;
+    }
     void createConnect
       .mutateAsync({ serviceSlug: slug, personal })
       .then((href) => {
@@ -265,9 +308,11 @@ function ConnectorsTab({ query }: { readonly query: string }) {
       })
       .catch((cause: unknown) => {
         toast.error(
-          translateErrorMessage(cause instanceof Error
-            ? cause.message
-            : "Could not create connection link"),
+          translateErrorMessage(
+            cause instanceof Error
+              ? cause.message
+              : "Could not create connection link",
+          ),
         );
       });
   }
@@ -300,7 +345,10 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     meta: "Model providers",
     added: false,
   };
-  const showModels = !searching || matchesPluginQuery({ ...addModel, category: "Models" }, query) || items.models.some((item) => matchesPluginQuery(item, query));
+  const showModels =
+    !searching ||
+    matchesPluginQuery({ ...addModel, category: "Models" }, query) ||
+    items.models.some((item) => matchesPluginQuery(item, query));
   function cards(rows: readonly ConnectorCardItem[]) {
     return rows.map((item) => (
       <ConnectorCard
@@ -308,14 +356,27 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         item={item}
         onManage={setManageCardId}
         onConnect={openConnect}
-        busy={createConnect.isPending}
+        busy={busy}
+        optInBlocked={needsCatalogOptIn(item.connectSlug) && !optInReady}
       />
     ));
   }
   return (
     <div className="space-y-7">
+      {(!optInReady || capabilities.error) && (
+        <ErrorBanner
+          message={translateUi(
+            "Service connections are not ready yet. Try again shortly.",
+          )}
+          onRetry={() => void capabilities.refetch()}
+        />
+      )}
       {loadFailed ? (
-        <GroupedList footer={translateUi("Some plugins may be missing until the catalog loads.")}>
+        <GroupedList
+          footer={translateUi(
+            "Some plugins may be missing until the catalog loads.",
+          )}
+        >
           <GroupedRow asChild interactive>
             <button
               type="button"
@@ -324,7 +385,9 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 void catalogQuery.refetch();
               }}
             >
-              <RefreshCw aria-hidden className="size-[1.125em]" />{translateUi("Retry")}</button>
+              <RefreshCw aria-hidden className="size-[1.125em]" />
+              {translateUi("Retry")}
+            </button>
           </GroupedRow>
         </GroupedList>
       ) : null}
@@ -336,8 +399,12 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           ) : (
             <p className="px-4 py-6 text-14 text-text-tertiary">
               {loadFailed
-                ? translateUi("Connected services could not be loaded right now.")
-                : translateUi("No connected services yet. Connect one below and your assistant can call it through the NyxID proxy.")}
+                ? translateUi(
+                    "Connected services could not be loaded right now.",
+                  )
+                : translateUi(
+                    "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy.",
+                  )}
             </p>
           )}
         </section>
@@ -362,11 +429,10 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           <CardGrid>{cards(available)}</CardGrid>
         </section>
       )}
-      {searching &&
-      !added.length &&
-      !available.length &&
-      !showModels ? (
-        <p className="py-12 text-center text-14 text-text-tertiary">{translateUi("No plugins match this search.")}</p>
+      {searching && !added.length && !available.length && !showModels ? (
+        <p className="py-12 text-center text-14 text-text-tertiary">
+          {translateUi("No plugins match this search.")}
+        </p>
       ) : null}
       <GroupedList>
         <GroupedRow asChild interactive>
@@ -392,31 +458,64 @@ function ConnectorsTab({ query }: { readonly query: string }) {
         <DialogContent className="bg-background sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>{translateUi("Add a model connection")}</DialogTitle>
-            <DialogDescription>{translateUi("Use your own provider account or model endpoint.")}</DialogDescription>
+            <DialogDescription>
+              {translateUi("Use your own provider account or model endpoint.")}
+            </DialogDescription>
           </DialogHeader>
+          {!optInReady &&
+            items.models.some((item) =>
+              needsCatalogOptIn(item.connectSlug),
+            ) && (
+              <ErrorBanner
+                message={translateUi(
+                  "Service connections are not ready yet. Try again shortly.",
+                )}
+                onRetry={() => void capabilities.refetch()}
+              />
+            )}
           <GroupedList>
             {items.models.map((item) => (
-              <GroupedRow asChild interactive key={item.id}>
-                <button
-                  type="button"
-                  disabled={createConnect.isPending}
-                  onClick={() => openConnect(item.connectSlug!, true)}
-                >
-                  <ServiceIcon slug={item.iconSlug} size="sm" />
-                  <span className="flex-1">{item.name}</span>
-                  <ArrowRight
-                    aria-hidden
-                    className="size-[1.125em] text-text-tertiary"
-                  />
-                </button>
-              </GroupedRow>
+              <div key={item.id}>
+                <GroupedRow asChild interactive>
+                  <button
+                    type="button"
+                    disabled={
+                      busy ||
+                      (needsCatalogOptIn(item.connectSlug) && !optInReady)
+                    }
+                    onClick={() => openConnect(item.connectSlug!, false)}
+                  >
+                    <ServiceIcon slug={item.iconSlug} size="sm" />
+                    <span className="flex-1">{item.name}</span>
+                    <ArrowRight
+                      aria-hidden
+                      className="size-[1.125em] text-text-tertiary"
+                    />
+                  </button>
+                </GroupedRow>
+                {item.connectOwnSlug && (
+                  <GroupedRow asChild interactive>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => openConnect(item.connectOwnSlug!, true)}
+                    >
+                      {translateUi("Connect your own {{service}}", {
+                        service: item.name,
+                      })}
+                    </button>
+                  </GroupedRow>
+                )}
+              </div>
             ))}
             <GroupedRow asChild interactive>
               <Link
                 to="/keys"
                 search={{ tab: "services", action: "add-service" }}
               >
-                <ServiceIcon slug="custom" size="sm" />{translateUi("Custom OpenAI-compatible endpoint")}<ArrowRight
+                <ServiceIcon slug="custom" size="sm" />
+                {translateUi("Custom OpenAI-compatible endpoint")}
+                <ArrowRight
                   aria-hidden
                   className="ml-auto size-[1.125em] text-text-tertiary"
                 />
@@ -525,7 +624,9 @@ function SkillsTab({
                 if (busy || !attached.data) return;
                 if (full) {
                   toast.info(
-                    translateUi("This agent already has 16 skills. Detach one first."),
+                    translateUi(
+                      "This agent already has 16 skills. Detach one first.",
+                    ),
                   );
                   return;
                 }
@@ -541,7 +642,9 @@ function SkillsTab({
       {agents.isPending ? (
         <Skeleton className="h-8 w-[300px]" />
       ) : manageable.length === 0 && !agents.error ? (
-        <p className="text-14 text-muted-foreground">{translateUi("No agent you can maintain is available.")}</p>
+        <p className="text-14 text-muted-foreground">
+          {translateUi("No agent you can maintain is available.")}
+        </p>
       ) : agent ? (
         <SkillAgentPicker
           agents={manageable}
@@ -556,12 +659,23 @@ function SkillsTab({
       ))}
       {agent && attached.data ? (
         <GroupedList
-          title={translateUi("Attached to {{value1}} · {{value2}}/16", { value1: agentTitle(agent), value2: pins.length })}
+          title={translateUi("Attached to {{value1}} · {{value2}}/16", {
+            value1: agentTitle(agent),
+            value2: pins.length,
+          })}
           footer={
             <>
-              <p>{translateUi("Versions, tests and edits live in the agent's settings.")}</p>
+              <p>
+                {translateUi(
+                  "Versions, tests and edits live in the agent's settings.",
+                )}
+              </p>
               {full ? (
-                <p>{translateUi("This agent already has 16 skills. Detach one first.")}</p>
+                <p>
+                  {translateUi(
+                    "This agent already has 16 skills. Detach one first.",
+                  )}
+                </p>
               ) : null}
             </>
           }
@@ -587,7 +701,9 @@ function SkillsTab({
                           ),
                         })
                       }
-                    >{translateUi("Detach {{value1}}", { value1: pin.name })}</Button>
+                    >
+                      {translateUi("Detach {{value1}}", { value1: pin.name })}
+                    </Button>
                   </>
                 }
               />
@@ -604,12 +720,16 @@ function SkillsTab({
         <GroupedList>
           <GroupedRow
             title={translateUi("Find a skill")}
-            description={translateUi("Search by name or workflow to explore the Ornn catalog.")}
+            description={translateUi(
+              "Search by name or workflow to explore the Ornn catalog.",
+            )}
           />
         </GroupedList>
       ) : null}
       {query.trim() && items.length === 0 && search.data ? (
-        <p className="py-14 text-center text-13 text-text-tertiary">{translateUi("No plugins match this search.")}</p>
+        <p className="py-14 text-center text-13 text-text-tertiary">
+          {translateUi("No plugins match this search.")}
+        </p>
       ) : null}
       {items.length > 0 && (
         <div>
@@ -629,16 +749,25 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
     <div className="shell-page-stack pb-4">
       <WorkspacePageHeader
         title={translateUi("Plugins")}
-        description={translateUi("Connect your services and model accounts. Add skills to teach your assistant new workflows.")}
+        description={translateUi(
+          "Connect your services and model accounts. Add skills to teach your assistant new workflows.",
+        )}
       />
       <SegmentedControl
         value={tab}
         onValueChange={setTab}
         className="space-y-6"
       >
-        <SegmentedControlList aria-label={translateUi("Plugin type")} className="max-w-80">
-          <SegmentedControlTrigger value="connector">{translateUi("Connectors")}</SegmentedControlTrigger>
-          <SegmentedControlTrigger value="skill">{translateUi("Skills")}</SegmentedControlTrigger>
+        <SegmentedControlList
+          aria-label={translateUi("Plugin type")}
+          className="max-w-80"
+        >
+          <SegmentedControlTrigger value="connector">
+            {translateUi("Connectors")}
+          </SegmentedControlTrigger>
+          <SegmentedControlTrigger value="skill">
+            {translateUi("Skills")}
+          </SegmentedControlTrigger>
         </SegmentedControlList>
         <GroupedList className="max-w-2xl">
           <GroupedRow leading={<Search aria-hidden />}>

@@ -119,6 +119,7 @@ async fn model_approval_personal_config_variants_and_non_assistant_callers() {
                         false,
                         false,
                         approvals::ApprovalOptions::default(),
+                        auth.api_key_id.as_deref(),
                     ),
                 )
                 .await
@@ -214,5 +215,83 @@ async fn model_approval_live_specialist_llm_policy_uses_same_exemption() {
         0
     );
     observer.complete().await.unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stateless_model_exemption_keeps_key_specific_denials_and_ignores_sibling_rules() {
+    let mut f = Box::pin(direct_fixture("model_key_policy_exemption")).await;
+    f.auth.assistant_chat = Some(Arc::new(f.chat.clone()));
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.inference =
+        Some(serde_json::from_value(json!({"wire_protocol":"openai_responses"})).unwrap());
+    let operation =
+        crate::services::operation_descriptor::build_http_descriptor("POST", "responses", None);
+    let body =
+        serde_json::to_vec(&json!({"model":"test","store":false,"input":"test","stream":true}))
+            .unwrap();
+    for effect in ["deny", "require_approval"] {
+        for key_ids in [
+            vec![f.row.credential_api_key_id.clone()],
+            vec!["sibling-key".into()],
+            vec![],
+        ] {
+            let configs = f
+                .state
+                .db
+                .collection::<bson::Document>("service_approval_configs");
+            configs.delete_many(doc! {}).await.unwrap();
+            configs.insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":&service.id,"service_name":"Model",
+                "approval_required":false,"rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":&key_ids}],
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+            let observer = ModelRequest::capture(
+                &f.state.db,
+                &f.row.id,
+                &f.row.credential_api_key_id,
+                &f.row.active_turn.as_ref().unwrap().turn_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            observer.configure_policy(
+                &f.auth,
+                &service,
+                "POST",
+                "responses",
+                None,
+                &axum::http::HeaderMap::new(),
+                &body,
+                None,
+            );
+            let outcome = CURRENT_MODEL
+                .scope(
+                    Some(observer.clone()),
+                    approvals::evaluate_and_check(
+                        &f.state.db,
+                        &f.owner,
+                        &f.owner,
+                        &service.id,
+                        &operation,
+                        Some("api_key"),
+                        &f.row.credential_api_key_id,
+                        false,
+                        false,
+                        f.auth.api_key_id.as_deref(),
+                    ),
+                )
+                .await
+                .unwrap();
+            let denied = effect == "deny" && key_ids != vec!["sibling-key".to_string()];
+            assert_eq!(
+                matches!(outcome, approvals::ApprovalOutcome::Denied),
+                denied
+            );
+            assert_eq!(
+                matches!(outcome, approvals::ApprovalOutcome::Allowed { .. }),
+                !denied
+            );
+            observer.complete().await.unwrap();
+        }
+    }
     f.state.db.drop().await.unwrap();
 }

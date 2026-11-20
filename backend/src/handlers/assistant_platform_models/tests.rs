@@ -1547,3 +1547,68 @@ async fn discovery_degrades_for_unready_and_unknown_fleets_without_authorizing_e
     );
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn repeated_platform_model_authority_uses_the_live_calling_key() {
+    let (state, initial_plan, row, key) = setup().await;
+    adapter::activate_bridge(&state.db, &row, &capabilities())
+        .await
+        .unwrap();
+    // Production builds its plan from persisted authority, including BSON
+    // timestamp precision; the seed plan still contains in-memory timestamps.
+    let plan = adapter::selection_plan(&state, PERSON, &initial_plan.model.public_id)
+        .await
+        .unwrap();
+    let stored = state
+        .db
+        .collection::<crate::models::api_key::ApiKey>("api_keys")
+        .find_one(doc! {"_id":&key.api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let auth = crate::mw::auth::api_key_auth_user(&state.db, &stored, None, None, None)
+        .await
+        .unwrap();
+    let handle = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .platform_model_context
+        .as_deref()
+        .unwrap();
+    let body = serde_json::to_vec(&json!({"model":plan.model.public_id,"messages":[{"role":"user","content":"hello"}],"max_tokens":128})).unwrap();
+    adapter::check_request(&state, &auth, handle, &plan, &body)
+        .await
+        .expect("the admitted model authority must be valid before adding rules");
+    let mut sibling = stored.clone();
+    sibling.id = uuid::Uuid::new_v4().to_string();
+    sibling.key_hash = crate::crypto::token::hash_token("sibling-model-test-key");
+    state
+        .db
+        .collection::<crate::models::api_key::ApiKey>("api_keys")
+        .insert_one(&sibling)
+        .await
+        .unwrap();
+    let configs = state.db.collection::<Document>("service_approval_configs");
+    for keys in [
+        vec![key.api_key_id.clone()],
+        vec![sibling.id.clone()],
+        vec![],
+    ] {
+        configs.delete_many(doc! {}).await.unwrap();
+        configs.insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":PERSON,"service_id":&plan.offering.id,"service_name":"Model",
+            "approval_required":false,"rules":[{"resource_pattern":"*","effect":"deny","api_key_ids":&keys}],
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        for _ in 0..2 {
+            let result = adapter::check_request(&state, &auth, handle, &plan, &body).await;
+            assert_eq!(
+                matches!(result, Err(AppError::Forbidden(_))),
+                keys != vec![sibling.id.clone()]
+            );
+            if keys == vec![sibling.id.clone()] {
+                result.unwrap();
+            }
+        }
+    }
+    state.db.drop().await.unwrap();
+}

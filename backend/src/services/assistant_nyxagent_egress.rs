@@ -306,6 +306,7 @@ impl NyxAgentEgress for Egress {
             &service.id,
             &operation,
             false,
+            Some(&key.id),
         )
         .await?
         {

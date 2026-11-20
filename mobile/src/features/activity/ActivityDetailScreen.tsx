@@ -244,11 +244,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   const decideMutation = useMutation({
     mutationFn: async (decision: "APPROVE" | "DENY") => {
-      const durationSec =
-        decision === "APPROVE"
-          ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400
-          : undefined;
-      return mobileApi.submitDecision(challengeId, decision, durationSec);
+      return mobileApi.submitDecision(challengeId, decision);
     },
     onMutate: () => {
       // Snapshot view->tap latency at tap-time (not at server-response
@@ -328,9 +324,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   }
 
   const actionState = getChallengeActionState(data);
-  const grantDurationLabel = formatGrantDuration(
-    settingsQuery.data?.grant_expiry_days,
-  );
+  const grantDurationLabel = formatGrantDuration(data.grant_expiry_days ?? settingsQuery.data?.grant_expiry_days);
   const isGrantMode = data.approval_mode === "grant";
   const summary =
     data.summary.trim() || `${data.action} ${data.resource}`.trim();

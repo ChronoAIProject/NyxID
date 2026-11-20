@@ -761,6 +761,7 @@ async fn voice_connection_preserves_catalog_operations_without_service_approval(
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1951,4 +1952,39 @@ async fn abandoned_device_grok_start_preserves_binding_and_releases_its_slot() {
     assert!(ended.provider_session_id.is_none());
     assert!(ended.client_key == expected_binding);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn device_voice_key_rules_apply_at_ingress_and_ongoing_checks() {
+    Box::pin(async {
+        let (f,voice,service,raw)=setup("device_voice_key_rules").await;
+        let a=auth(&f,&raw).await;
+        let other=key_service::create_api_key(&f.state.db,&f.owner,"other panel","read write proxy",None,None,
+            Some(std::slice::from_ref(&service)),None,None,None,None,None,None,None,None).await.unwrap();
+        let b=auth(&f,&other.full_key).await;
+        let proof=keys::authorize(&f.state.db,&a,&f.row.id).await.unwrap();
+        let call=session::admit_for_client_key(&f.state.db,&f.owner,&f.row.id,&Uuid::new_v4().to_string(),platform(&voice),"fixture".into(),"worker",proof).await.unwrap();
+        let connection=super::access::connection(&f.state.db,&a,&service).await.unwrap();
+        let configs=f.state.db.collection::<bson::Document>("service_approval_configs");
+        for effect in ["deny","require_approval"] {
+            for limited in [true,false] {
+                configs.delete_many(doc! {}).await.unwrap();
+                configs.insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":connection.catalog_service_id.as_deref().unwrap(),"service_name":"Voice",
+                    "approval_required":false,"rules":[{"resource_pattern":"*","effect":effect,"api_key_ids":if limited {vec![a.api_key_id.clone().unwrap()]} else {vec![]}}],
+                    "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+                for (auth,listed) in [(&a,true),(&b,false)] {
+                    let denied=(effect=="deny" || limited) && (listed || !limited);
+                    let ingress=keys::authorize(&f.state.db,auth,&f.row.id).await;
+                    assert_eq!(ingress.is_err(),denied,"ingress/{effect}/{listed}/{limited}");
+                    for (method,path,ws) in [("POST","/voice/sessions",true),("POST","/voice/sessions/call/announcements",false)] {
+                        assert_eq!(super::access::policy(&f.state.db,auth,&connection,method,path,ws).await.is_err(),denied,"ongoing/{effect}/{listed}/{limited}");
+                    }
+                }
+                assert_eq!(keys::revalidate(&f.state.db,&call).await.is_err(),effect=="deny" || limited);
+            }
+        }
+        configs.delete_many(doc! {}).await.unwrap();
+        keys::revalidate(&f.state.db,&call).await.unwrap();
+        f.state.db.drop().await.unwrap();
+    }).await;
 }
