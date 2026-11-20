@@ -37,6 +37,21 @@ test("partial resize and gesture navigation reserve only the remaining overlap",
   );
 });
 
+test("Android IME height excluding the navigation bar still lifts the whole viewport above the IME top", () => {
+  assert.equal(
+    keyboardOverlap({ y: 0, height: 914 }, { screenY: 611, height: 279 }, "android"),
+    303,
+    "bottom padding must include the 24pt below the reported IME frame",
+  );
+});
+
+test("an iPad floating keyboard retains intersection-only handling", () => {
+  assert.equal(
+    keyboardOverlap({ y: 0, height: 800 }, { screenY: 200, height: 120 }, "ios"),
+    120,
+  );
+});
+
 test("layout changes are calculated from the current view and IME frames", () => {
   assert.equal(
     keyboardOverlap({ y: 60, height: 340 }, { screenY: 230, height: 170 }),

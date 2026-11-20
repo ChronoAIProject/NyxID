@@ -32,6 +32,7 @@ function setup(
   let onDimensions: (() => void) | undefined;
   let metrics = initialKeyboard;
   let windowHeight = initialWindowHeight;
+  let screenHeight = initialWindowHeight;
   let state = "active";
   let onApp: ((state: string) => void) | undefined;
   const layouts: Array<() => void> = [];
@@ -66,8 +67,8 @@ function setup(
       },
       Dimensions: {
         get: (name: string) => {
-          assert.equal(name, "window");
-          return { height: windowHeight };
+          assert.ok(name === "window" || name === "screen");
+          return { height: name === "screen" ? screenHeight : windowHeight };
         },
         addEventListener: (_name: string, callback: () => void) => {
           onDimensions = callback;
@@ -122,6 +123,7 @@ function setup(
     show: (frame: Frame) => {
       metrics = frame;
       windowHeight = Math.max(windowHeight, frame.screenY + frame.height);
+      screenHeight = Math.max(screenHeight, frame.screenY + frame.height);
       keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
     },
     hide: () => {
@@ -141,6 +143,7 @@ function setup(
       onApp!(next);
     },
     metrics: (frame: Frame | undefined) => { metrics = frame; },
+    windowHeight: (height: number) => { windowHeight = height; },
     settledLayout: () => {
       for (const layout of layouts.splice(0)) layout();
     },
@@ -180,6 +183,26 @@ test("an already resized window consumes no additional inset with a status bar",
   );
   env.harness.unmount();
 });
+
+for (const [viewHeight, expectedOverlap] of [[482, 35], [447, 0]] as const) {
+  test(`Android IME-resized window retains its keyboard and reserves ${expectedOverlap}pt of remaining overlap`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 914 }, 914);
+    const frame = { screenY: 563, height: 351 };
+    env.windowHeight(563);
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1, "screen coordinates remain valid after native resize");
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap);
+    assert.deepEqual(env.viewport(), { y: 92, height: viewHeight - expectedOverlap });
+    env.resize();
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap, "resize events cannot erase the IME frame");
+    env.hide();
+    assert.equal(env.bottom(), 0);
+    env.harness.unmount();
+  });
+}
 
 test("a newer resized layout wins over a pending pre-resize measurement", () => {
   const env = setup();

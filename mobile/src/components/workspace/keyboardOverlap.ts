@@ -22,10 +22,13 @@ export function visibleKeyboardFrame(
   };
 }
 
-/** Intersect the view and visible keyboard in the same window coordinates. */
+/** Reserve the intersection in matching coordinates. Android reports IME
+ * height without its navigation bar, so its bottom also has to clear that gap.
+ * iOS retains intersection-only handling for floating/undocked keyboards. */
 export function keyboardOverlap(
   frame: { y: number; height: number },
   keyboard?: KeyboardFrame,
+  platform = "ios",
 ): number {
   if (
     !keyboard ||
@@ -38,9 +41,11 @@ export function keyboardOverlap(
   ) {
     return 0;
   }
-  return Math.max(
-    0,
-    Math.min(frame.y + frame.height, keyboard.screenY + keyboard.height) -
-      Math.max(frame.y, keyboard.screenY),
-  );
+  const bottom = frame.y + frame.height;
+  if (bottom <= keyboard.screenY || frame.y >= keyboard.screenY + keyboard.height)
+    return 0;
+  return platform === "android"
+    ? Math.min(frame.height, bottom - keyboard.screenY)
+    : Math.min(bottom, keyboard.screenY + keyboard.height) -
+        Math.max(frame.y, keyboard.screenY);
 }

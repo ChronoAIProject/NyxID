@@ -62,6 +62,7 @@ export function KeyboardViewport({
         // iOS keyboard events already use the same window as measureInWindow.
         // A nested provider can describe an already-lifted sheet, not the window.
         frame,
+        Platform.OS,
       );
       // The sheet's KeyboardAvoidingView lifts after will-change. Do not
       // reserve or reveal against its old position before native layout settles.
@@ -80,7 +81,10 @@ export function KeyboardViewport({
       keyboard: Keyboard,
       appState: AppState,
       dimensions: Dimensions,
-      windowHeight: () => Dimensions.get("window").height,
+      // Android IME frames use screen coordinates even after adjustResize
+      // shortens Dimensions.window. Validate against the matching screen.
+      windowHeight: () =>
+        Dimensions.get(Platform.OS === "android" ? "screen" : "window").height,
       afterLayout: requestAnimationFrame,
       cancelLayout: cancelAnimationFrame,
       onFrame: (frame, event) => {

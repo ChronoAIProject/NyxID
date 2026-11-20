@@ -190,6 +190,7 @@ function setup(sharedResolver?: typeof Resolver, renderManualModal = false) {
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
+      "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
       "../../lib/accessibility/useReducedMotion": {
         useReducedMotion: () => true,
       },

@@ -142,6 +142,11 @@ export function createDeviceLoginStyles(c: ThemeColors) {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: "rgba(0,0,0,0.65)",
     },
+    modalScroll: {
+      flexGrow: 0,
+      flexShrink: 1,
+      width: "100%" as const,
+    },
     modalCard: {
       width: "100%" as const,
       paddingTop: spacing.xxxl,
