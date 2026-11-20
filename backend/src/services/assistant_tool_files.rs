@@ -300,6 +300,8 @@ pub(crate) async fn retain(
             });
         }
     }
+    // Encryption and chunk preparation can outlast the preflight lease.
+    let filter = retention_claim_filter(filter);
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
@@ -385,6 +387,23 @@ pub(crate) async fn payload(
     Ok(bytes)
 }
 
+fn retention_claim_filter(live_and_capacity: bson::Document) -> bson::Document {
+    let ttl_ms = super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS * 1000;
+    // Keep the existing authority and capacity filter, including its own $expr.
+    // Null or absent leases use the same started_at fallback as live_filter.
+    doc! {"$and": [live_and_capacity, {"$expr": {"$cond": [
+        {"$in": [{"$type": "$active_turn.lease_expires_at"}, ["null", "missing"]]},
+        {"$and": [
+            {"$eq": [{"$type": "$active_turn.started_at"}, "date"]},
+            {"$gt": ["$active_turn.started_at", {"$subtract": ["$$NOW", ttl_ms]}]},
+        ]},
+        {"$and": [
+            {"$eq": [{"$type": "$active_turn.lease_expires_at"}, "date"]},
+            {"$gt": ["$active_turn.lease_expires_at", "$$NOW"]},
+        ]},
+    ]}}]}
+}
+
 fn unavailable() -> AppError {
     AppError::NotFound("Attachment not found or expired".into())
 }
@@ -392,6 +411,52 @@ fn unavailable() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn retention_claim_checks_server_time_after_preflight() {
+        use crate::test_utils::connect_transaction_test_database;
+        use chrono::Duration;
+        let db = connect_transaction_test_database("tool_file_claim_clock").await;
+        let rows = db.collection::<bson::Document>("threads");
+        let now = Utc::now();
+        let ttl = Duration::seconds(super::super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS);
+        let at = bson::DateTime::from_chrono;
+        // Preflight saw these leases as valid two minutes before the claim.
+        let cutoff = now - Duration::minutes(2);
+        let mut preflight = doc! {"_id": "thread", "$or": [
+            {"active_turn.lease_expires_at": {"$gt": at(cutoff)}},
+            {"active_turn.lease_expires_at": bson::Bson::Null,
+             "active_turn.started_at": {"$gt": at(cutoff - ttl)}},
+        ]};
+        super::super::assistant_nyxagent::file_attachment_capacity_filter(&mut preflight);
+        let claim = retention_claim_filter(preflight.clone());
+        for legacy in [false, true] {
+            for expired in [false, true] {
+                let expiry = if expired {
+                    now - Duration::minutes(1)
+                } else {
+                    now + Duration::minutes(1)
+                };
+                let mut turn = doc! {"started_at": at(expiry - ttl)};
+                if !legacy {
+                    turn.insert("lease_expires_at", at(expiry));
+                }
+                rows.replace_one(
+                    doc! {"_id": "thread"},
+                    doc! {"_id": "thread", "active_turn": turn},
+                )
+                .upsert(true)
+                .await
+                .unwrap();
+                assert!(rows.find_one(preflight.clone()).await.unwrap().is_some());
+                let result = rows.update_one(claim.clone(), doc! {"$push": {
+                    "active_turn.attachments": {"origin":"tool", "content_type":"application/pdf"}
+                }}).await.unwrap();
+                assert_eq!(result.matched_count, u64::from(!expired));
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn tool_file_inline_text_preserves_whitespace_and_counts_characters() {
         let handle = "{\"attachment_id\":\"id\"}\nUse attachment_id or nyx__attachment_read";
