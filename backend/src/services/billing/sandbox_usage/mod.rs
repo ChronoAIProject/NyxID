@@ -1,4 +1,4 @@
-//! Pure v1 evidence decoding. No routes, database access, startup work or charging.
+//! V1 evidence decoding and opt-in shadow pricing. No wallet/provider charging.
 pub mod contract;
 mod corrections;
 mod scalars;
@@ -12,3 +12,13 @@ mod contract_tests;
 mod correction_tests;
 #[cfg(test)]
 mod fixture_tests;
+
+pub mod policy;
+pub mod price_pins;
+pub mod pricing;
+pub mod pricing_schema;
+#[cfg(test)]
+mod pricing_store_tests;
+#[cfg(test)]
+mod pricing_tests;
+pub mod tariff_store;
