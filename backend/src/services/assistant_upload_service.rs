@@ -23,24 +23,15 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 pub const MAX_FILES: usize = 10;
+pub(crate) const MAX_FILENAME_CHARS: usize = 120;
 const CHUNK: usize = 4 * 1024 * 1024;
 fn missing() -> AppError {
     AppError::NotFound("Attachment not found or expired".into())
 }
 
 pub fn safe_name(input: &str) -> String {
-    let leaf = input.rsplit(['/', '\\']).next().unwrap_or("");
-    let name: String = leaf
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')'))
-        .take(120)
-        .collect();
-    let name = name.trim().trim_matches('.').trim();
-    if name.is_empty() {
-        "attachment".into()
-    } else {
-        name.into()
-    }
+    super::attachment_filename::sanitize_name(input, MAX_FILENAME_CHARS)
+        .unwrap_or_else(|| "attachment".into())
 }
 
 pub fn validate_ids(ids: &[String]) -> AppResult<()> {
@@ -130,6 +121,7 @@ pub async fn upload(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_authorized(
     db: &Database,
@@ -140,7 +132,34 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
-    store_authorized(db, keys, user, scope, name, bytes, access, None, None).await
+    upload_named_authorized(db, keys, user, scope, Some(name), bytes, access).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_named_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: Option<&str>,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+) -> AppResult<TurnAttachment> {
+    let original =
+        name.and_then(|name| super::attachment_filename::sanitize_name(name, MAX_FILENAME_CHARS));
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name.unwrap_or("attachment"),
+        bytes,
+        access,
+        None,
+        None,
+        Some(original.is_some()),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -154,7 +173,19 @@ pub(crate) async fn upload_channel_authorized(
     source: crate::models::assistant_channel_media::UploadSource,
 ) -> AppResult<TurnAttachment> {
     owner_scope(db, user, scope).await?;
-    store_authorized(db, keys, user, scope, name, bytes, None, Some(source), None).await
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name,
+        bytes,
+        None,
+        Some(source),
+        None,
+        None,
+    )
+    .await
 }
 
 /// Relay v2 retains an opaque original just like Telegram preparation. This
@@ -181,6 +212,37 @@ pub(crate) async fn upload_channel_original_authorized(
         None,
         Some(source),
         Some(mime_hint.unwrap_or("application/octet-stream")),
+        None,
+    )
+    .await
+}
+
+/// Lark fetch distinguishes original names from unverified download fallbacks.
+/// Only this path records provenance and names missing originals after parsing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_lark_channel_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: Option<&str>,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+    original_mime: Option<&str>,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    let original = super::attachment_filename::original_name(name, MAX_FILENAME_CHARS);
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name.unwrap_or("attachment"),
+        bytes,
+        None,
+        Some(source),
+        original_mime,
+        Some(original.is_some()),
     )
     .await
 }
@@ -196,6 +258,7 @@ async fn store_authorized(
     access: Option<super::org_group_service::Access>,
     source: Option<crate::models::assistant_channel_media::UploadSource>,
     original_mime: Option<&str>,
+    filename_is_original: Option<bool>,
 ) -> AppResult<TurnAttachment> {
     use sha2::{Digest, Sha256};
     // Legacy rows may lack a digest; attachment-write egress can hash their
@@ -213,7 +276,13 @@ async fn store_authorized(
     } else {
         attachment_extraction::extract(bytes.clone(), extension).await?
     };
+    let label = if filename_is_original == Some(false) {
+        super::attachment_filename::default_name(None, &extracted.content_type, MAX_FILENAME_CHARS)
+    } else {
+        label
+    };
     let mut row = AssistantUpload {
+        filename_is_original,
         source,
         content_sha256,
         secret_context_versions: Default::default(),
@@ -400,6 +469,7 @@ pub(crate) async fn prepare_channel_upload(
     let extracted = extract_channel_original(bytes.clone(), extension, mime_hint).await?;
     use sha2::{Digest, Sha256};
     let mut row = AssistantUpload {
+        filename_is_original: None,
         source: None,
         content_sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
         secret_context_versions: Default::default(),
@@ -860,6 +930,16 @@ pub async fn chat_bytes(
     Ok(bytes)
 }
 
+async fn reserve_tool_read(size: usize) -> Option<byte_budget::ByteReservation> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        byte_budget::reserve(size),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+}
+
 async fn read_tool_file(
     db: &Database,
     keys: &EncryptionKeys,
@@ -873,8 +953,32 @@ async fn read_tool_file(
     }
     let attachment = for_file_egress(db, chat, id).await?;
     let size = usize::try_from(row.size).map_err(|_| missing())?;
-    let _reservation = byte_budget::reserve(size).await?;
+    let Some(_reservation) = reserve_tool_read(size).await else {
+        return Ok(json!({
+            "error": "attachment_busy",
+            "retryable": true,
+            "instructions": "Attachment reading is temporarily busy; retry nyx__attachment_read shortly.",
+        }));
+    };
     let bytes = zeroize::Zeroizing::new(file_egress_bytes(db, keys, chat, &attachment).await?);
+    if !attachment_extraction::is_pdf(&bytes)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+    {
+        let extracted = Extracted {
+            content_type: row.content_type.clone(),
+            text: text.to_owned(),
+            sections: vec![crate::services::attachment_extraction::Section {
+                offset: 0,
+                label: "Document".into(),
+            }],
+        };
+        for_file_egress(db, chat, id).await?;
+        return Ok(page(
+            &extracted,
+            args["offset"].as_u64().unwrap_or(0) as usize,
+            (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000),
+        ));
+    }
     let extension = attachment
         .label()
         .rsplit_once('.')
@@ -903,8 +1007,30 @@ pub async fn read(
     let id = args["attachment_id"].as_str().ok_or_else(missing)?;
     let row = match for_chat(db, chat, id).await {
         Ok(row) => row,
-        Err(AppError::NotFound(_)) if !chat.guest => {
-            return read_tool_file(db, keys, chat, id, args).await;
+        Err(original @ AppError::NotFound(_))
+            if !chat.guest
+                && !chat.turn_stopped
+                && chat.turn_id.is_some()
+                && Uuid::parse_str(id).is_ok() =>
+        {
+            // Preserve the ordinary upload miss exactly. Only a single indexed
+            // attachment lookup decides whether this is the explicit tool-file
+            // path; a miss does not load the conversation/thread again.
+            let tool = db
+                .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+                .find_one(doc! {
+                    "_id": id,
+                    "user_id": &chat.user_id,
+                    "conversation_id": &chat.conversation_id,
+                    "turn_id": chat.turn_id.as_deref().unwrap_or_default(),
+                    "origin": "tool",
+                })
+                .projection(doc! {"_id": 1})
+                .await?;
+            if tool.is_some() {
+                return read_tool_file(db, keys, chat, id, args).await;
+            }
+            return Err(original);
         }
         Err(error) => return Err(error),
     };
@@ -1511,6 +1637,28 @@ impl EgressAttachment {
             Self::Tool(row, _) => &row.content_type,
         }
     }
+    /// Keep named originals; repair missing or legacy generic upload names.
+    /// Explicit tool file_name overrides remain the multipart caller's input.
+    pub(crate) fn filename(&self) -> String {
+        if let Self::User(row) = self {
+            match row.filename_is_original {
+                Some(true) => return safe_name(&row.label),
+                Some(false) => {
+                    return super::attachment_filename::default_name(
+                        None,
+                        self.content_type(),
+                        MAX_FILENAME_CHARS,
+                    );
+                }
+                None => {}
+            }
+        }
+        super::attachment_filename::default_name(
+            Some(self.label()),
+            self.content_type(),
+            MAX_FILENAME_CHARS,
+        )
+    }
 }
 
 pub async fn for_egress(
@@ -1631,6 +1779,7 @@ async fn egress_bytes_inner(
     let current = for_egress_inner(db, chat, attachment.id(), files).await?;
     if current.size() != attachment.size()
         || current.label() != attachment.label()
+        || current.filename() != attachment.filename()
         || current.content_type() != attachment.content_type()
         || std::mem::discriminant(&current) != std::mem::discriminant(attachment)
     {
@@ -2813,6 +2962,23 @@ mod integration_tests {
     }
 
     #[tokio::test]
+    async fn tool_attachment_read_budget_wait_is_bounded_and_retryable() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
+        let full = byte_budget::reserve(byte_budget::CAPACITY / 2)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), reserve_tool_read(1))
+                .await
+                .expect("budget wait must end")
+                .is_none()
+        );
+        drop(full);
+        assert_eq!(byte_budget::available_for_tests(), byte_budget::CAPACITY);
+    }
+
+    #[tokio::test]
     async fn assistant_uploads_full_router_enforces_exact_twenty_mib_for_threads_and_groups() {
         let _budget_guard =
             crate::services::assistant_upload_service::byte_budget::test_guard().await;
@@ -3561,6 +3727,22 @@ mod integration_tests {
 #[cfg(test)]
 mod channel_upload_tests {
     use super::*;
+    #[tokio::test]
+    async fn image_download_signature_does_not_validate_an_opaque_channel_original() {
+        let bytes = b"\x89PNG\r\n\x1a\ntruncated raster".to_vec();
+        assert_eq!(
+            super::super::attachment_filename::image_content_type(&bytes),
+            Some("image/png")
+        );
+        let keys = crate::test_utils::test_encryption_keys();
+        let original =
+            prepare_channel_upload(&keys, "owner", "attachment", Some("image/png"), bytes)
+                .await
+                .unwrap();
+        assert_eq!(original.row.content_type, "application/octet-stream");
+        assert_eq!(original.row.label, "attachment");
+    }
+
     #[tokio::test]
     async fn opaque_channel_media_retains_encrypted_bytes_without_fabricated_text() {
         let mut keys = crate::test_utils::test_encryption_keys();

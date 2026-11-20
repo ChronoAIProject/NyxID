@@ -501,6 +501,9 @@ impl std::ops::DerefMut for BillingUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceRequest {
+    /// Platform administrator approval for the exact destination selected by this request.
+    pub approve_caller_token_destination:
+        Option<crate::services::caller_token_approval::ApprovalRequest>,
     /// Trusted, authenticated read-only verification operation. Null disables it.
     #[serde(
         default,
@@ -641,6 +644,7 @@ impl UpdateServiceRequest {
             supplier: None,
             import_source: None,
             destination_targets: None,
+            approve_caller_token_destination: None,
             name: None,
             description: None,
             base_url: None,
@@ -1952,6 +1956,7 @@ async fn create_service_inner(
                 .credential
                 .as_ref()
                 .is_some_and(|v| !v.trim().is_empty()),
+        caller_token_approved_destinations: Default::default(),
         catalog_manager_created: authority
             == super::catalog_authority::CatalogAuthority::CatalogManager,
         identity_propagation_mode: "none".to_string(),
@@ -3384,6 +3389,12 @@ pub(crate) async fn update_service_at_revision(
         next_resale_billable,
     )?;
 
+    crate::services::caller_token_approval::prepare_update(
+        &service,
+        &mut set_doc,
+        body.approve_caller_token_destination.as_ref(),
+    )?;
+
     if set_doc.is_empty() && !skill_update.is_present() {
         if body
             .credential
@@ -3516,6 +3527,7 @@ pub(crate) async fn update_service_at_revision(
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
         admin_required: ingress_admin
+            || body.approve_caller_token_destination.is_some()
             || (!tools_manager
                 && (service.offering_kind
                     == crate::models::downstream_service::OfferingKind::Tool

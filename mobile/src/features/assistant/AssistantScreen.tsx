@@ -1134,6 +1134,7 @@ export function AssistantScreen({
           <Label style={{ color: bubble.foreground }}>{translateApp("Steering · {{code}}", { code: steeringNotice(item.steering.code, item.steering.outcome) })}
           </Label>
         ) : null}
+        {item.continued_after_restart && <Label muted>{translateApp("Continued after a restart.")}</Label>}
         {isUser ? (
           item.text || voiceLabel ? (
             <Text
@@ -1690,6 +1691,7 @@ export function AssistantScreen({
                 ) : null}
                 {running && !streamPersisted ? (
                   <View style={styles.message}>
+                    {conversation?.active_turn?.continued_after_restart && <Label muted>{translateApp("Continued after a restart.")}</Label>}
                     <Label muted style={styles.messageLabel}>
                       {agentName}
                     </Label>

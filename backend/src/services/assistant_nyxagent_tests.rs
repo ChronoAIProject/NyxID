@@ -200,6 +200,13 @@ fn credential_watch_terminal_preserves_partial_and_redacts_upstream_details() {
 
 #[test]
 fn recovery_is_bounded_and_never_retries_uncertain_effects() {
+    assert!(!admission_refusal(429, "capacity_exceeded"));
+    for status in [400, 401, 403, 404, 503] {
+        assert_eq!(
+            Recovery::default().decide(status, "model_unavailable", true),
+            RecoveryAction::Fail
+        );
+    }
     let mut recovery = Recovery::default();
     assert_eq!(
         recovery.decide(404, "not_found", true),
@@ -2429,9 +2436,11 @@ async fn restart_offer_keeps_one_logical_turn_and_fences_competing_survivors_and
         .flatten()
         .collect();
     assert_eq!(winners.len(), 1);
+    let mut expected_admission = turn.restart_admission.clone().unwrap();
+    expected_admission.continued_after_restart = true;
     assert_eq!(
         winners[0].active_turn.as_ref().unwrap().restart_admission,
-        turn.restart_admission
+        Some(expected_admission)
     );
     let winner = &winners[0];
     let admitted_key = crate::services::assistant_agent_credential_service::load_for_conversation(

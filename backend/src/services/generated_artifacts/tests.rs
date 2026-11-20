@@ -493,6 +493,42 @@ async fn seeded_body(
 }
 
 #[tokio::test]
+async fn generated_artifact_capacity_excludes_tool_files_but_preserves_legacy_limit() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    for legacy_count in [7, 8] {
+        let db =
+            crate::test_utils::connect_transaction_test_database("artifact_file_capacity").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (w, mut row) = seeded(&db, &keys).await;
+        let existing = &mut row.active_turn.as_mut().unwrap().attachments;
+        for index in 0..8 + legacy_count {
+            existing.push(serde_json::from_value(json!({
+                "id": format!("existing-{index}"), "origin": "tool", "size": 10,
+                "label": "existing", "content_type": if index < 8 { "application/pdf" } else { "image/png" },
+                "chat_delivery": index >= 8,
+            })).unwrap());
+        }
+        let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bind_in_session(&db, &keys, &mut row, &w, &mut session, Some(&reservation))
+            .await
+            .unwrap();
+        assert_eq!(row.active_turn.as_ref().unwrap().attachments.len(), 16);
+        assert_eq!(
+            db.collection::<Document>(ATTACHMENTS)
+                .count_documents(doc! {"origin": "generated_artifact"})
+                .session(&mut session)
+                .await
+                .unwrap(),
+            u64::from(legacy_count == 7)
+        );
+        session.abort_transaction().await.unwrap();
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn generated_artifact_admission_abort_keeps_pending_bytes_and_rolls_back_retention_and_association()
  {
     let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;

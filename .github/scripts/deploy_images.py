@@ -1,5 +1,7 @@
-"""Deploy the two SHA-tagged staging images through the NyxID proxy."""
+"""Deploy SHA-tagged backend and frontend images through the NyxID proxy."""
 
+import argparse
+from dataclasses import dataclass
 import http.client
 import json
 import os
@@ -12,23 +14,46 @@ from urllib.parse import quote_plus, urlencode, urlsplit
 
 TOKEN_URL = "https://api.nyxid.ai/oauth/token"
 APPS = "https://api.nyxid.ai/api/v1/proxy/s/chrono-cd/api/v1/projects/nyxid/apps"
-SCOPE = "?org_id=internal%3Achrono-ai-staging"
-BACKEND = "staging-api"
-FRONTEND = "staging"
-COMPONENT = {BACKEND: "backend", FRONTEND: "frontend"}
-VERSION_URL = {
-    BACKEND: "https://staging-api.nyxid.ai/health",
-    FRONTEND: "https://staging.nyxid.ai/build-version.json",
-}
 POLL_SECONDS = 10
 REQUIRED_SAMPLES = 3
+
+
+@dataclass(frozen=True)
+class App:
+    name: str
+    service: str
+    version_url: str
+
+
+@dataclass(frozen=True)
+class Target:
+    name: str
+    branch: str
+    org_id: str
+    backend: App
+    frontend: App
+    timeout: int
+
+
+STAGING = Target(
+    "staging", "dev", "internal:chrono-ai-staging",
+    App("staging-api", "nyxid-backend", "https://staging-api.nyxid.ai/health"),
+    App("staging", "nyxid-frontend", "https://staging.nyxid.ai/build-version.json"),
+    900,
+)
+PRODUCTION = Target(
+    "production", "main", "internal:chrono-nyxid",
+    App("prod-api", "nyxid-backend-production-api-svc", "https://api.nyxid.ai/health"),
+    App("prod", "nyxid-frontend", "https://nyxid.ai/build-version.json"),
+    1800,
+)
 
 
 class DeployError(Exception):
     pass
 
 
-class StagingNewer(Exception):
+class NewerCommit(Exception):
     pass
 
 
@@ -39,18 +64,18 @@ def already_current(app, observed, target):
                               capture_output=True, text=True)
     full = resolved.stdout.strip()
     if resolved.returncode or not re.fullmatch(r"[0-9a-f]{40}", full):
-        raise DeployError(f"{app} commit {observed} cannot be resolved uniquely in the checkout")
+        raise DeployError(f"{app.name} commit {observed} cannot be resolved uniquely in the checkout")
     if full == target:
         return True
     base = subprocess.run(["git", "merge-base", full, target], capture_output=True, text=True)
     if base.returncode not in (0, 1):
-        raise DeployError(f"cannot compare {app} commit {observed} with {target[:12]}")
+        raise DeployError(f"cannot compare {app.name} commit {observed} with {target[:12]}")
     ancestor = base.stdout.strip()
     if ancestor == full:
         return False
     if ancestor == target:
-        raise StagingNewer(f"{app} already runs newer commit {observed}")
-    raise DeployError(f"{app} commit {observed} and candidate {target[:12]} have diverged")
+        raise NewerCommit(f"{app.name} already runs newer commit {observed}")
+    raise DeployError(f"{app.name} commit {observed} and candidate {target[:12]} have diverged")
 
 
 class RequestError(DeployError):
@@ -79,11 +104,12 @@ def mask_token(token):
 
 
 class Rollout:
-    def __init__(self, *, send=exchange, clock=time.monotonic, sleep=time.sleep, timeout=900):
+    def __init__(self, target, *, send=exchange, clock=time.monotonic, sleep=time.sleep, timeout=None):
+        self.target = target
         self.send = send
         self.clock = clock
         self.sleep = sleep
-        self.deadline = clock() + timeout
+        self.deadline = clock() + (target.timeout if timeout is None else timeout)
         self.token = ""
         self.redactions = []
         self.status = {}
@@ -92,7 +118,7 @@ class Rollout:
     def remaining(self):
         left = self.deadline - self.clock()
         if left <= 0:
-            raise DeployError("staging rollout timed out")
+            raise DeployError(f"{self.target.name} rollout timed out")
         return left
 
     def request(self, method, url, *, headers=None, body=None):
@@ -117,7 +143,7 @@ class Rollout:
 
     def login(self, client_id, secret):
         if not client_id or not secret:
-            raise DeployError("staging deployer credentials are missing")
+            raise DeployError(f"{self.target.name} deployer credentials are missing")
         self.redactions.extend((client_id, quote_plus(client_id), secret, quote_plus(secret)))
         form = urlencode({"grant_type": "client_credentials", "client_id": client_id,
                           "client_secret": secret, "scope": "proxy"})
@@ -131,7 +157,8 @@ class Rollout:
         mask_token(token)
 
     def app_request(self, app, method, *, body=None):
-        url = f"{APPS}/{app}" + ("/status" if method == "GET" else "") + SCOPE
+        url = f"{APPS}/{app.name}" + ("/status" if method == "GET" else "")
+        url += "?" + urlencode({"org_id": self.target.org_id})
         headers = {"Authorization": "Bearer " + self.token}
         if body is not None:
             headers["Content-Type"] = "application/json"
@@ -139,22 +166,22 @@ class Rollout:
 
     def version(self, app):
         try:
-            data = self.request("GET", VERSION_URL[app], headers={"Cache-Control": "no-cache"})
+            data = self.request("GET", app.version_url, headers={"Cache-Control": "no-cache"})
         except RequestError as error:
             # Old images and rolling replicas can temporarily lack the document.
             detail = f"HTTP {error.status}" if error.status else "connection error"
-            raise RequestError(f"{app} version unavailable ({detail})",
+            raise RequestError(f"{app.name} version unavailable ({detail})",
                                error.retryable or error.status in (200, 404)) from None
         commit = data.get("commit")
         if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{12}", commit):
-            raise RequestError(f"{app} version lacks a 12-hex commit", True)
+            raise RequestError(f"{app.name} version lacks a 12-hex commit", True)
         return data
 
     def check_pair(self, sha):
         while True:
             try:
                 return {app: already_current(app, self.version(app)["commit"], sha)
-                        for app in (BACKEND, FRONTEND)}
+                        for app in (self.target.backend, self.target.frontend)}
             except RequestError as error:
                 if not error.retryable:
                     raise
@@ -162,40 +189,39 @@ class Rollout:
                 self.sleep(min(POLL_SECONDS, self.remaining()))
 
     def sample(self, app, sha):
-        service = "nyxid-" + COMPONENT[app]
         state = self.app_request(app, "GET")
         phase = state.get("phase")
         if not isinstance(phase, str) or not phase:
-            raise DeployError(f"{app} status is missing the rollout phase")
+            raise DeployError(f"{app.name} status is missing the rollout phase")
         try:
             services = state.get("services") or {}
-            pods = (services.get(service) or {}).get("pods") or []
+            pods = (services.get(app.service) or {}).get("pods") or []
             reasons = sorted({str(pod["reason"]) for pod in pods if pod.get("reason")})
         except (TypeError, AttributeError):
-            raise DeployError(f"{app} phase={phase} returned invalid pod status") from None
-        self.status[app] = f"{app} phase={phase} pod reasons={', '.join(reasons) or 'none'}"
+            raise DeployError(f"{app.name} phase={phase} returned invalid pod status") from None
+        self.status[app] = f"{app.name} phase={phase} pod reasons={', '.join(reasons) or 'none'}"
         version = self.version(app)
         observed = version["commit"]
         self.status[app] += f" commit={observed}"
         current = already_current(app, observed, sha)
-        ready = phase == "ready" and (app != BACKEND or version.get("status") == "ok")
+        ready = phase == "ready" and (app != self.target.backend or version.get("status") == "ok")
         return current, current and ready
 
     def ensure(self, app, sha, was_current):
-        component = COMPONENT[app]
-        self.status[app] = f"{app} phase=unknown pod reasons=unknown"
+        component = "backend" if app == self.target.backend else "frontend"
+        self.status[app] = f"{app.name} phase=unknown pod reasons=unknown"
         patched = False
         consecutive = 0
         while consecutive < REQUIRED_SAMPLES:
             try:
                 current, ready = self.sample(app, sha)
                 if not was_current and not patched and not current:
-                    image = f"ghcr.io/chronoaiproject/nyxid/{component}:dev-{sha[:7]}"
-                    body = json.dumps({"services": {"nyxid-" + component: {"image": image}}}).encode()
+                    image = f"ghcr.io/chronoaiproject/nyxid/{component}:{self.target.branch}-{sha[:7]}"
+                    body = json.dumps({"services": {app.service: {"image": image}}}).encode()
                     self.app_request(app, "PATCH", body=body)
                     patched = True
-                if ready and app == FRONTEND:
-                    _, ready = self.sample(BACKEND, sha)
+                if ready and app == self.target.frontend:
+                    _, ready = self.sample(self.target.backend, sha)
                 consecutive = consecutive + 1 if ready else 0
                 self.last_error = ""
             except RequestError as error:
@@ -210,28 +236,38 @@ class Rollout:
 
     def run(self, sha, client_id, secret):
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
-            raise DeployError("expected the full dev commit SHA")
+            raise DeployError(f"expected the full {self.target.branch} commit SHA")
         try:
             current = self.check_pair(sha)
             self.login(client_id, secret)
-            backend = self.ensure(BACKEND, sha, current[BACKEND])
-            frontend = self.ensure(FRONTEND, sha, current[FRONTEND])
+            backend = self.ensure(self.target.backend, sha, current[self.target.backend])
+            frontend = self.ensure(self.target.frontend, sha, current[self.target.frontend])
             self.remaining()
-        except StagingNewer as error:
-            print(f"Skipping further staging updates for {sha[:12]}: {error}.")
+        except NewerCommit as error:
+            print(f"Skipping further {self.target.name} updates for {sha[:12]}: {error}.")
             return
         except DeployError as error:
             detail = " | ".join(filter(None, [str(error), *self.status.values(), self.last_error]))
             for private in sorted(self.redactions, key=len, reverse=True):
                 detail = detail.replace(private, "***")
             raise DeployError(" ".join(detail.splitlines())) from None
-        summary = "Skipping deployment, staging already ready" if all(current.values()) else "Staging ready"
+        summary = (f"Skipping deployment, {self.target.name} already ready" if all(current.values())
+                   else f"{self.target.name.capitalize()} ready")
         print(f"{summary} at {sha[:12]} (backend {backend}, frontend {frontend}).")
 
 
-if __name__ == "__main__":
+def main():
+    targets = {target.name: target for target in (STAGING, PRODUCTION)}
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("target", choices=targets)
+    target = targets[parser.parse_args().target]
+    credentials = f"NYXID_{target.name.upper()}_DEPLOY_CLIENT"
     try:
-        Rollout().run(os.environ["GITHUB_SHA"], os.getenv("NYXID_STAGING_DEPLOY_CLIENT_ID"),
-                      os.getenv("NYXID_STAGING_DEPLOY_CLIENT_SECRET"))
+        Rollout(target).run(os.environ["GITHUB_SHA"], os.getenv(credentials + "_ID"),
+                            os.getenv(credentials + "_SECRET"))
     except DeployError as exc:
         sys.exit(f"Deploy failed: {exc}")
+
+
+if __name__ == "__main__":
+    main()

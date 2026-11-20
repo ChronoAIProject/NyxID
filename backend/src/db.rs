@@ -6555,6 +6555,7 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

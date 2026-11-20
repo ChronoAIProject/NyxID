@@ -37,7 +37,7 @@ use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, channel_bot_service, channel_media_service,
     channel_platform::{OutboundEdit, OutboundReply},
-    channel_relay_service,
+    channel_relay_service, channel_reply_plan,
     channel_send_service::{self, is_concrete_platform_address},
     org_service,
 };
@@ -322,11 +322,12 @@ fn validate_reply_parts<'a>(
     >,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    if crate::services::channel_reply_plan::commonmark(metadata)
-        && !matches!(adapter.platform_id(), "telegram" | "telegram-new")
+    if channel_reply_plan::commonmark(metadata)
+        && !channel_reply_plan::supports_commonmark(adapter.platform_id())
     {
         return Err(AppError::ValidationError(
-            "CommonMark relay formatting is supported for Telegram".into(),
+            "CommonMark relay formatting is supported for Telegram, Lark, Feishu and Discord"
+                .into(),
         ));
     }
     let count = attachments.len();
@@ -395,7 +396,7 @@ fn is_device_reply_forbidden(original_platform: &str, conversation_platform: &st
     original_platform == "device" || conversation_platform == "device"
 }
 
-fn message_to_item(
+pub(crate) fn message_to_item(
     msg: &crate::models::channel_message::ChannelMessage,
     base_url: &str,
 ) -> MessageItem {
@@ -1725,6 +1726,12 @@ async fn prepare_reply_outbound(
         &mut outbound.metadata,
     );
 
+    if channel_reply_plan::uses_relay_renderer(adapter.platform_id(), outbound.metadata.as_ref())
+        && (!outbound.attachments.is_empty()
+            || channel_reply_plan::has_structured_content(&outbound))
+    {
+        return channel_reply_plan::single_text_part(&outbound, adapter.platform_id());
+    }
     Ok(outbound)
 }
 
@@ -1858,15 +1865,16 @@ async fn deliver_reply(
             platform_bot_id: Some(&bot.platform_bot_id),
             platform_secrets: platform_secrets.as_ref(),
         };
+        // Lark's format marker still describes the original literal notice.
+        // Any other metadata must go through the existing notice refusal.
+        let literal_notice = body.reply.metadata.is_none()
+            || (matches!(adapter.platform_id(), "lark" | "feishu")
+                && body.reply.metadata == Some(serde_json::json!({"text_format":"commonmark"})));
+        let plain_text = if prepared.is_none() && body.reply.attachments.is_empty() && literal_notice {
+            body.reply.text.as_deref()
+        } else { None };
         let target = crate::services::channel_thread_service::gateway::reply_target(
-            &state.db,
-            adapter,
-            &bot,
-            &credentials,
-            &original,
-            if prepared.is_none() && body.reply.metadata.is_none() && body.reply.attachments.is_empty() {
-                body.reply.text.as_deref()
-            } else { None },
+            &state.db, adapter, &bot, &credentials, &original, plain_text,
         )
         .await.map_err(|failure| { failure_class = failure.class; failure.error })?;
         Some(target)
@@ -2250,9 +2258,28 @@ async fn edit_resolved_reply(
     } else {
         None
     };
-    let edit = OutboundEdit {
-        text: body.reply.text,
-        metadata: body.reply.metadata,
+    let edit = if channel_reply_plan::uses_relay_renderer(
+        adapter.platform_id(),
+        body.reply.metadata.as_ref(),
+    ) {
+        let part = channel_reply_plan::single_text_part(
+            &OutboundReply {
+                text: body.reply.text,
+                metadata: body.reply.metadata,
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+            },
+            adapter.platform_id(),
+        )?;
+        OutboundEdit {
+            text: part.text,
+            metadata: part.metadata,
+        }
+    } else {
+        OutboundEdit {
+            text: body.reply.text,
+            metadata: body.reply.metadata,
+        }
     };
 
     crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
@@ -2365,33 +2392,53 @@ async fn fetch_resolved_attachment(
         None => load_active_bot(state, &context.original).await?,
     };
     validate_message_bot_scope(&context.original, &context.conversation, &bot)?;
-    let attachment = context
-        .original
-        .attachments
-        .get(index)
-        .filter(|_| context.original.direction == "inbound")
-        .ok_or(AppError::ChannelAttachmentNotFound)?;
+    if context.original.direction != "inbound" {
+        return Err(AppError::ChannelAttachmentNotFound);
+    }
+    let attachment =
+        crate::services::channel_media_fetch::selector(&context.original, index, false)?;
     let fetched = crate::services::channel_media_fetch::fetch(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
         &bot,
-        attachment,
+        &attachment,
         adapter,
         state.config.channel_media_max_bytes,
     )
     .await?;
     tracing::debug!(message_id = %context.original.id, index, byte_count = fetched.bytes.len(), "Channel attachment fetched");
-    let content_type = fetched
-        .mime_type
-        .as_deref()
+    let lark = matches!(bot.platform.as_str(), "lark" | "feishu");
+    let image_type = (lark && attachment.content_type == "image")
+        .then(|| crate::services::attachment_filename::image_content_type(&fetched.bytes))
+        .flatten();
+    let content_type = image_type
+        .or(fetched.mime_type.as_deref())
         .and_then(|value| axum::http::HeaderValue::from_str(value).ok())
         .unwrap_or_else(|| axum::http::HeaderValue::from_static("application/octet-stream"));
     let length = fetched.bytes.len();
-    let disposition = format!(
-        "attachment; filename=\"{}\"",
-        channel_media_service::safe_filename(fetched.filename.as_deref())
-    );
+    let name = if lark {
+        fetched.filename.clone().unwrap_or_else(|| {
+            crate::services::attachment_filename::default_name(
+                None,
+                image_type.unwrap_or("application/octet-stream"),
+                crate::services::assistant_upload_service::MAX_FILENAME_CHARS,
+            )
+        })
+    } else {
+        fetched
+            .filename
+            .clone()
+            .unwrap_or_else(|| "attachment".into())
+    };
+    let ascii_name = channel_media_service::safe_filename(Some(&name));
+    let mut disposition = format!("attachment; filename=\"{}\"", ascii_name);
+    if lark && ascii_name != name {
+        disposition.push_str(&format!(
+            "; filename*=UTF-8''{}",
+            urlencoding::encode(&name)
+        ));
+    }
     let mut response = axum::response::Response::new(axum::body::Body::from(fetched.bytes));
     let headers = response.headers_mut();
     headers.insert(axum::http::header::CONTENT_TYPE, content_type);
@@ -2547,6 +2594,11 @@ mod tests {
     mod complete_replies {
         use super::*;
         include!("channel_relay_complete_tests.rs");
+    }
+
+    mod attachment_downloads {
+        use super::*;
+        include!("channel_relay_attachment_tests.rs");
     }
 
     struct ReplyTokenFixture {
@@ -4290,14 +4342,25 @@ mod tests {
         .expect("generate relay reply token")
     }
 
-    async fn setup_reply_token_fixture(prefix: &str) -> Option<ReplyTokenFixture> {
+    fn setup_reply_token_fixture(prefix: &str) -> impl Future<Output = Option<ReplyTokenFixture>> {
+        setup_platform_reply_fixture(prefix, "telegram")
+    }
+
+    async fn setup_platform_reply_fixture(
+        prefix: &str,
+        platform: &str,
+    ) -> Option<ReplyTokenFixture> {
         let db = connect_test_database(prefix).await?;
         let state = test_app_state(db.clone());
         let now = Utc::now();
         let user_id = Uuid::new_v4().to_string();
         let bot_token_encrypted = state
             .encryption_keys
-            .encrypt(b"bot-token")
+            .encrypt(if matches!(platform, "lark" | "feishu") {
+                b"app:secret"
+            } else {
+                b"bot-token"
+            })
             .await
             .expect("encrypt test bot token");
 
@@ -4343,7 +4406,7 @@ mod tests {
             ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
-            platform: "telegram".to_string(),
+            platform: platform.to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
             connection_id: None,
@@ -4378,9 +4441,14 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot.id.clone()),
-            platform: "telegram".to_string(),
+            platform: platform.to_string(),
             platform_conversation_id: "chat_123".to_string(),
-            platform_conversation_type: "private".to_string(),
+            platform_conversation_type: if platform == "telegram" {
+                "private"
+            } else {
+                "group"
+            }
+            .into(),
             platform_sender_id: None,
             agent_api_key_id: api_key.id.clone(),
             default_agent: false,
@@ -4392,6 +4460,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4426,6 +4495,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4929,6 +4999,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -5545,6 +5616,7 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -5842,6 +5914,7 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

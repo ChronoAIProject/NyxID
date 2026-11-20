@@ -420,13 +420,8 @@ async fn shutdown_public_catalog_privacy_route(kind: &'static str) {
             .header("content-type", "application/json")
             .body(Body::from(r#"{"model":"gpt-4o","messages":[]}"#))
             .unwrap();
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            app.clone().oneshot(request),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        // The snapshot is taken inside the handler, while its guard is live.
+        let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
         assert_eq!(status, StatusCode::OK, "{kind}: {case}");
         to_bytes(response.into_body(), 1024 * 1024).await.unwrap();

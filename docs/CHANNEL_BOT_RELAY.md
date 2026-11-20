@@ -2750,7 +2750,7 @@ services and an org-paid daily budget. Groups/topics share public transcript
 context while execution keys remain isolated per actor. See
 [the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
 
-### Telegram CommonMark opt-in
+### CommonMark relay replies
 
 For original, unescaped assistant Markdown, use `POST /reply/commonmark`,
 `/thread-reply/commonmark`, or `/reply/update/commonmark` under
@@ -2761,6 +2761,18 @@ available to callers targeting a known upgraded replica. Do not combine it with
 `parse_mode` or `entities`. Send text before Markdown escaping or fragmentation;
 NyxID parses once and applies its shared platform budgets. Interactive metadata
 cannot be duplicated across multipart text; send long text separately.
+
+Lark and Feishu send the original source as plain text. Discord uses the same
+v2 renderer as proactive posts, which keeps URL bytes and formats literal
+punctuation for Discord. Edits must fit one platform message. Thread replies
+still require a negotiated, authorized target. The relay thread contract
+currently negotiates Lark and Feishu. Discord relay sends and edits can opt in
+independently of that contract.
+
+Enable the gateway opt-in for these additional platforms only after every
+serving NyxID replica supports them. Older replicas return HTTP 400. The
+existing Telegram opt-in can roll out independently. Send the complete source
+once so NyxID can plan up to 64 ordered parts.
 
 Opted-in Telegram sends and edits use explicit entities. Unopted legacy callers
 retain their text/default syntax, including this base's historical ignored

@@ -99,7 +99,12 @@ async fn terminal(f: &Fixture, id: &str) -> Value {
 
 #[tokio::test]
 async fn response_read_2588_live_consumer_preserves_text_marker_and_completion() {
-    let f = Box::pin(Fixture::new("response_read_live")).await;
+    let f = Box::pin(Fixture::with_reply(
+        "response_read_live",
+        false,
+        GATEWAY_LINK_REPLY,
+    ))
+    .await;
     advertised(&f).await;
     let (mut request, event) = f
         .input("live answer", ThreadAddress::Mention, false, true)
@@ -113,8 +118,7 @@ async fn response_read_2588_live_consumer_preserves_text_marker_and_completion()
     let accepted = submit_frozen_fixture(status, &headers, &prefix, &request["metadata"]);
     assert_eq!(accepted["thread_reply"], true);
     let rest = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
-    assert!(rest.contains("Here is your answer"));
-    assert_eq!(frames(&rest).last().unwrap()["type"], "response.completed");
+    assert_gateway_link_frames(&frames(&rest));
     let id = accepted["id"].as_str().unwrap();
     let completed = terminal(&f, id).await;
     assert_eq!(completed["output"], json!([]));
@@ -137,13 +141,18 @@ async fn response_read_2588_live_consumer_preserves_text_marker_and_completion()
             .unwrap(),
         "streamed"
     );
-    assert!(!raw.to_string().contains("Here is your answer"));
+    assert!(!raw.to_string().contains("booking.example"));
 }
 
 #[tokio::test]
 async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let f = Box::pin(Fixture::new("response_read_replica")).await;
+    let f = Box::pin(Fixture::with_reply(
+        "response_read_replica",
+        false,
+        GATEWAY_LINK_REPLY,
+    ))
+    .await;
     advertised(&f).await;
     let parent_completed = Arc::new(AtomicBool::new(false));
     Mock::given(method("POST")).and(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
@@ -217,7 +226,7 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
     drop(blocked);
     let completed = terminal(&f, id).await;
     assert_eq!(completed["output"], json!([]));
-    assert!(!completed.to_string().contains("Here is your answer"));
+    assert!(!completed.to_string().contains("booking.example"));
     assert_eq!(completed["conversation"], accepted["conversation"]);
     let saved: NyxbotEvent = f
         .state
@@ -258,10 +267,9 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
             .collect::<Vec<_>>()
     };
     let first_send = sends(f.gateway.received_requests().await.unwrap()).remove(0);
-    assert_eq!(
-        first_send.body_json::<Value>().unwrap()["thread_reply"],
-        true
-    );
+    let message = first_send.body_json::<Value>().unwrap();
+    assert_eq!(message["thread_reply"], true);
+    assert_eq!(message["text"], GATEWAY_LINK_REPLY);
     // The mock gateway closes only a parent accepted by submit_frozen whose
     // provider read is terminal. Its automatic replay has no chat effect.
     parent_completed.store(
@@ -312,7 +320,7 @@ async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
         if start < 3 {
             assert_eq!(actual.last().unwrap()["response"], completed);
         }
-        assert!(!body.contains("Here is your answer"));
+        assert!(!body.contains("booking.example"));
     }
     let bad = native_responses::events(
         State(f.state.clone()),

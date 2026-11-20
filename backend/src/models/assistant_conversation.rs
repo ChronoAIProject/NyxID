@@ -565,7 +565,8 @@ pub struct ActiveTurn {
     /// Bounded, oldest first; the newest entries are retained.
     #[serde(default)]
     pub activities: Vec<TurnActivity>,
-    /// Bounded; see `MAX_TURN_ATTACHMENTS`.
+    /// Bounded metadata: up to eight tool images and eight tool files can
+    /// coexist; other attachment origins retain their own admission limits.
     #[serde(default)]
     pub attachments: Vec<TurnAttachment>,
     /// Wake-up events drained into this turn (rendered into its instructions).
@@ -599,7 +600,13 @@ pub struct ExecutionAttempt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestartAdmission {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued_after_restart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub version: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<super::coordination::SlotToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reattach: Option<ReattachDeployment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -629,6 +636,8 @@ pub struct StoppedWindow {
     pub turn_id: String,
     pub credential_id: String,
     pub window_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_hash: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,7 +648,15 @@ pub struct ThreadSecretFence {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReattachWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<WindowRefusal>,
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_continuation: Option<Continuations>,
     pub key: String,
+    #[serde(default)]
+    pub terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<mongodb::bson::Binary>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -650,6 +667,25 @@ pub struct ReattachWindow {
         skip_serializing_if = "Option::is_none"
     )]
     pub absence_retry_before: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowRefusal {
+    pub status: u16,
+    pub code: String,
+    #[serde(
+        default,
+        with = "super::bson_datetime::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Continuations {
+    pub(crate) maximum: u32,
+    pub count: u32,
+    pub(crate) previous: Option<String>,
 }
 
 impl std::fmt::Debug for ReattachWindow {
@@ -699,6 +735,8 @@ pub enum RestartSource {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RestartOffer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     pub from_worker: String,
     pub reason: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

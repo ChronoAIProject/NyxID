@@ -1204,6 +1204,7 @@ mod tests {
             requires_user_credential: true,
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
+            caller_token_approved_destinations: Default::default(),
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

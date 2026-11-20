@@ -917,6 +917,15 @@ async fn server_run(cli: Cli) {
         "Platform role membership backfill complete"
     );
 
+    let approved = Box::pin(services::caller_token_approval::bootstrap(
+        &db,
+        audit_chain_hmac_key.as_slice(),
+    ))
+    .await
+    .expect("Failed to initialize catalog caller-token approvals");
+    for (service_id, slug) in approved {
+        tracing::info!(%service_id, %slug, "Approved existing catalog base destination for caller-token forwarding");
+    }
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db, &encryption_keys).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");

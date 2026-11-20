@@ -37,8 +37,16 @@ a replay starts at the questions. It then has three parts:
    other cards send their prompt to NyxBot as the user's message. NyxBot then
    does the work with its normal tools and confirmations. The same
    cards stay in **Suggested for you** on the NyxBot home until each step is
-   done. The section's **Hide** hides them all until the intro is retaken;
-   cards have no individual dismiss. On web, **Show me around** starts a
+   done. On web, **Hide** replaces the section with a quiet **Suggestions
+   hidden.** row and **Undo**. After a reload, the row says **Suggestions are
+   hidden.** and offers **Show suggestions**. Both restore the cards directly,
+   preserving the answers, intro version, memory note and composer draft.
+   Focus moves to the counterpart visibility control even while pending, and
+   changes are announced politely. Pending controls stay focusable but ignore
+   activation. Failed requests restore server state and
+   offer an inline retry. No restore row appears without recommendations.
+   Mobile still restores through replaying the intro. Cards have no individual
+   dismiss. On web, **Show me around** starts a
    spotlight tour of the live screen. The tour visits the composer, the
    suggestions, the agents, **Create new agent**, Approvals and Automations.
    Targets are found by their `data-tour` attributes, and steps whose target
@@ -64,6 +72,11 @@ a replay starts at the questions. It then has three parts:
   hidden-suggestions mark.
 - **`POST /api/v1/assistant/nyxagent/onboarding/suggestions/hide`** hides the
   home's suggestions and returns the refreshed state.
+- **`POST /api/v1/assistant/nyxagent/onboarding/suggestions/show`** clears the
+  hidden mark on the caller's existing row and returns refreshed state. With
+  no row it creates nothing. It changes only the hidden mark and update time;
+  answers, intro version, the NyxBot memory note and audit history are preserved.
+  Hide and Show requests share one client mutation scope to keep their order.
 - **Access:** all onboarding routes are human-only (first-party sessions) and
   follow the NyxAgent engine flag, like the other `/assistant/nyxagent` routes.
 

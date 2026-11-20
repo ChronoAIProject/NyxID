@@ -15,6 +15,19 @@ pub struct CoordinationHolder {
     pub generation_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotToken {
+    pub id: String,
+    pub namespace: String,
+    pub scope_hash: String,
+    pub slot: u32,
+    pub holder: CoordinationHolder,
+    pub lease_id: String,
+    pub order_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub acquired_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationLeaseKind {

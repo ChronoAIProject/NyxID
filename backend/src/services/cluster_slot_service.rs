@@ -17,6 +17,30 @@ pub struct RenewableSlotManager {
 }
 
 impl RenewableSlotManager {
+    pub(crate) async fn transfer(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &SlotToken,
+        namespace: &str,
+        owner: &str,
+        limit: u32,
+    ) -> AppResult<Option<SlotToken>> {
+        SlotStore::transfer(
+            &self.db,
+            session,
+            token,
+            namespace,
+            owner,
+            &self.holder,
+            self.ttl,
+            limit,
+        )
+        .await
+    }
+
+    pub(crate) fn guard(&self, token: SlotToken) -> RenewableSlotGuard {
+        RenewableSlotGuard::new(self.db.clone(), token, self.ttl, self.renew_interval)
+    }
     pub fn new(
         db: Database,
         holder: CoordinationHolder,
@@ -60,6 +84,9 @@ pub struct RenewableSlotGuard {
 }
 
 impl RenewableSlotGuard {
+    pub(crate) fn token(&self) -> &SlotToken {
+        &self.token
+    }
     fn new(db: Database, token: SlotToken, ttl: Duration, renew_interval: Duration) -> Self {
         let stop = CancellationToken::new();
         let lost = CancellationToken::new();

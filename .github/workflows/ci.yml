@@ -877,7 +877,16 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - if: matrix.lane == 'lint-and-build'
+        name: Frontend health and readiness contracts (nginx 1.27)
+        run: |
+          python3 scripts/test-frontend-readiness.py
+          python3 scripts/test-nginx-policy.py
+          python3 scripts/test-nginx-readiness.py
+      - if: matrix.lane == 'lint-and-build'
         run: npm run lint && npm run build
+      - if: matrix.lane == 'lint-and-build'
+        name: Validate readiness inventory against real build
+        run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
       - if: matrix.lane != 'lint-and-build'
         env:
           SHARD: ${{ matrix.lane }}
@@ -904,7 +913,14 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run test
+      - name: Frontend health and readiness contracts (nginx 1.27)
+        run: |
+          python3 scripts/test-frontend-readiness.py
+          python3 scripts/test-nginx-policy.py
+          python3 scripts/test-nginx-readiness.py
       - run: npm run build
+      - name: Validate readiness inventory against real build
+        run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
       - name: Build frontend Docker inputs
         working-directory: .
         run: docker build --target builder --file frontend/Dockerfile .

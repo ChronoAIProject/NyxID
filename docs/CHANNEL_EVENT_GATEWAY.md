@@ -1553,6 +1553,20 @@ types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
 #1152, #1156, #1157, #1159. CMA's broader features do not
 imply NyxID support for media, templates, reactions, controls or groups.
 
+### Formatting relay replies
+
+For a `nyxid_relay` address on Telegram (including `telegram-new`), Lark,
+Feishu or Discord, CMA can send original, unescaped CommonMark to `/reply/commonmark` and
+`/reply/update/commonmark` under `/api/v1/channel-relay`. A negotiated
+thread target uses `/thread-reply/commonmark` under the same prefix. Thread eligibility and
+reply-token or assigned-key authorization follow the ordinary route.
+
+NyxID plans Lark and Feishu text literally, Discord with renderer v2 and
+Telegram with explicit entities. Keep the Lark/Feishu/Discord selection
+separate from the Telegram flag until every serving NyxID replica supports it.
+Native CMA deliveries format their own provider messages. See the
+[relay format and multipart limits](CHANNEL_BOT_RELAY.md#commonmark-relay-replies).
+
 ### Locally delivered response lifecycle (#2588)
 
 New relay admissions without stored turn output retain a version-1

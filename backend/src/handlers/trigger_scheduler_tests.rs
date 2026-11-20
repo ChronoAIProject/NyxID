@@ -51,6 +51,7 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
             let sink = sink.clone();
             let reply = reply.clone();
             async move {
+                let background = body["background"] == true;
                 sink.lock().await.push(Call {
                     authorization: headers["authorization"].to_str().unwrap().into(),
                     body,
@@ -58,6 +59,11 @@ async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
+                    if background {
+                        let created = json!({"type":"response.created", "sequence_number":0,
+                            "response":{"id":response,"conversation":{"id":session}}});
+                        yield Ok::<_, Infallible>(Event::default().data(created.to_string()));
+                    }
                     let completed = json!({
                         "type": "response.completed",
                         "sequence_number": 1,
@@ -251,6 +257,7 @@ async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
         turn_id: Uuid::new_v4().to_string(),
         window_key: Uuid::new_v4().to_string(),
         credential_id: old.api_key_id.clone(),
+        destination_hash: None,
     };
     let updated = state
         .db
@@ -2045,7 +2052,9 @@ async fn schedule_long_downtime_records_skips_without_a_catchup_burst() {
     let (state, calls, server) = setup("schedule_downtime").await;
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let mut trigger = automation(&state, &agent.id, None).await;
-    let anchor = Utc::now() - Duration::days(3) - Duration::seconds(1);
+    // Recover inside the latest occurrence's two-minute grace period, after
+    // its dispatch offset (at most one quarter of the grace period).
+    let anchor = Utc::now() - Duration::days(3) - Duration::minutes(1);
     let spec = ScheduleSpec {
         timing: ScheduleKind::Every {
             amount: 5,
@@ -2081,31 +2090,57 @@ async fn schedule_long_downtime_records_skips_without_a_catchup_burst() {
         )
         .await
         .unwrap();
+    let now = Utc::now();
+    let due = schedules::due(&state.db, now).await.unwrap();
+    let [work] = due.as_slice() else {
+        panic!("expected one due schedule, found {}", due.len());
+    };
+    let id = work.get_str("_id").unwrap();
+    assert_eq!(id, format!("schedule:{}", trigger.id));
+    let job = schedules::claim(&state.db, id, now).await.unwrap().unwrap();
+
     let started = std::time::Instant::now();
-    tick(&state).await.unwrap();
+    let latest = schedules::claim_occurrence(&state.db, &job, now)
+        .await
+        .unwrap()
+        .expect("coalesce the backlog and enqueue its latest occurrence");
     let claim_elapsed = started.elapsed();
-    eprintln!("S7 3-day 5-minute catch-up: {claim_elapsed:?}");
-    assert!(claim_elapsed < std::time::Duration::from_secs(5));
+    assert!(
+        claim_elapsed < std::time::Duration::from_secs(5),
+        "coalescing 864 missed occurrences took {claim_elapsed:?}"
+    );
+    assert_eq!(latest.trigger_id, trigger.id);
+    assert!(latest.dispatch_at.expect("recurring dispatch time") <= now);
+    assert!(now < latest.deadline);
+    assert_eq!(
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .count_documents(doc! {"trigger_id": &trigger.id})
+            .await
+            .unwrap(),
+        2,
+        "the claim must write only the latest run and its missed-window summary"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        assert_eq!(tick(&state).await.unwrap(), 1, "expected one due run");
         loop {
-            tick(&state).await.unwrap();
-            if state
+            let run = state
                 .db
                 .collection::<TriggerRun>(RUNS)
-                .count_documents(
-                    doc! { "trigger_id": &trigger.id, "outcome": RunOutcome::Completed.as_str() },
-                )
+                .find_one(doc! { "_id": &latest.id })
                 .await
                 .unwrap()
-                == 1
-            {
+                .expect("latest occurrence must remain in history");
+            if !matches!(run.outcome, RunOutcome::Pending | RunOutcome::Started) {
+                assert_eq!(run.outcome, RunOutcome::Completed, "{:?}", run.reason);
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("latest run did not complete within 40 seconds of the catch-up claim");
     assert_eq!(calls.lock().await.len(), 1);
     assert_eq!(
         state

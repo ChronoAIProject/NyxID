@@ -8,6 +8,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 
 - [Prerequisites](#prerequisites)
 - [Local Development](#local-development)
+- [Releasing to production](#releasing-to-production)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
 - [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
@@ -96,6 +97,72 @@ The frontend starts on `http://localhost:3000`.
 curl http://localhost:3001/health
 # {"status":"ok","version":"0.5.0"}
 ```
+
+---
+
+## Releasing to production
+
+Feature PRs target `dev`. Pushes there trigger the staging build and deploy
+workflow for the backend and frontend. To promote the commit running on both, preview the rollup with
+`scripts/cut-release.sh --dry-run`, then run `scripts/cut-release.sh` to open
+the snapshot PR. The snapshot stays fixed while work continues on `dev`.
+
+**Main Merge Guard** accepts three sources from this repository for a PR into
+`main`. Each PR needs one approval, full **CI Pipeline**, a passing guard and
+**Create a merge commit**.
+
+| Source | What the guard checks |
+| --- | --- |
+| `dev` | The source is the integration branch. |
+| `release/YYYY-MM-DD` | The date is valid and the head is already in `dev` history. An optional numeric suffix starts at `-2`. |
+| `hotfix/<name>` | The head contains the current `main` tip and every commit it adds is absent from `dev`. The name has 1–64 ASCII characters, starts with a lowercase letter or digit, and may also contain `.`, `_` and `-`. |
+
+For an urgent production fix, branch from current `main` and open the hotfix
+PR back into `main`. If `main` advances during review, update the hotfix and
+rerun its checks. After it lands, open a PR **from `main` into `dev`** and
+choose **Create a merge commit** so the hotfix keeps its commit ancestry.
+The next rollup must use a snapshot containing that sync. Its notes follow
+the first parent of `dev` and list the sync PR once.
+
+### Automatic production deploys
+
+In GitHub, create the `production` environment with a deployment branch rule
+for `main` only. Store `NYXID_PRODUCTION_DEPLOY_CLIENT_ID` and
+`NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET` as environment secrets for the
+NyxID service account authorized to deploy the two production apps through
+the chrono-cd proxy (OAuth scope `proxy`).
+
+Open **Actions → Publish Images → the main run → deploy-production** for
+progress. A push to `main` or **Run workflow** on `main` deploys once the
+CI gate and multi-architecture manifests succeed. Version tags only publish
+images. Production deploy jobs serialize. Each compares the live versions
+to the candidate before updating either app and checks the app again before
+its PATCH. A newer observed commit stops the run. A divergent or unknown
+commit fails it.
+
+The job deploys the backend first. It requires three consecutive ready
+samples, ten seconds apart, with the candidate commit and backend health
+status `ok`. It then checks both apps together as the frontend rolls out.
+For a failed or partial rollout, use **Re-run failed jobs** on that run.
+An app already serving the candidate is checked for readiness and skipped
+for update.
+
+### Rolling back a production release
+
+Coordinate the rollback with any active or queued Publish Images deploys.
+In chrono-cd, select the production namespace `chrono-nyxid`, project
+`nyxid`, and the seven-character SHA of a known-good, rollback-compatible
+`main` build. Use these image references in order.
+
+| App | Service | Image |
+| --- | --- | --- |
+| `prod-api` | `nyxid-backend-production-api-svc` | `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>` |
+| `prod` | `nyxid-frontend` | `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>` |
+
+Wait for `prod-api` to report ready and for `https://api.nyxid.ai/health` to
+return `status: ok` and the expected 12-character commit before updating
+`prod`. Verify the same commit at `https://nyxid.ai/build-version.json`.
+Land the revert or fix on `main` so the next automatic deployment carries it.
 
 ---
 
@@ -432,8 +499,11 @@ SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready
 returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
 Both public and internal replica listeners continue serving during the work wait,
 including ordinary requests and new turns that arrive while routing converges.
-There is no drain rejection on these request paths and no database lookup in
-`/ready`.
+There is no drain rejection on these request paths and `/ready` never accesses
+the database. Staging chrono-cd readiness/load-balancer consumers retain this
+drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
+MongoDB availability is monitored separately (see
+[Health and readiness contract](HEALTH_READINESS.md)).
 
 The process stops taking new background queue claims, scheduled work and polls.
 Already claimed work finishes, with turn heartbeats, capacity renewal, node
@@ -584,7 +654,7 @@ Enrollment in `nyxagent-reattach-v1` defaults off. Keep the flag off in producti
 until PR 2's recovery, cancellation, publication and accounting checks land.
 Then an admin can enable `assistant:turn-handoff` for a person, an organization
 or globally in Feature Flags after every NyxID replica advertises
-`assistant:turn-handoff-v1` and every NyxAgent replica advertises
+`assistant:turn-handoff-v2` and every NyxAgent replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
 
@@ -604,6 +674,21 @@ subscribed, offered, claimed or stopped windows. A read error requires another
 check. A stopped window clears after confirmed cancellation or after the next
 authorized admission replaces the internal credential. Deleting its marker by
 hand could let an earlier execution use the next turn's authority.
+
+Admins can read `assistant_turn_handoff` entries in the audit log. Each committed
+offer, claim and settlement records the generation of the pod that offered the
+turn. A second handoff has its own offering generation. Count transitions by
+generation in the NyxID database with the following read-only aggregation.
+
+```javascript
+db.audit_log.aggregate([
+  { $match: { event_type: "assistant_turn_handoff" } },
+  { $group: { _id: { generation: "$event_data.generation",
+                     transition: "$event_data.transition", outcome: "$event_data.outcome" },
+              count: { $sum: 1 } } },
+  { $sort: { "_id.generation": 1, "_id.transition": 1, "_id.outcome": 1 } }
+], { readConcern: { level: "majority" } })
+```
 
 ## Environment Configuration
 
@@ -960,6 +1045,18 @@ npm run build
 
 ## Health Checks and Monitoring
 
+For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
+production/staging base URLs, chrono-probe assertions and staged rollout, see
+[Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
+its backend/version proxy; frontend-only probes are `/frontend/health` and
+`/frontend/ready`. Backend `/ready` remains drain-only for staging chrono-cd and
+chrono-probe; neither backend probe accesses MongoDB.
+Production Compose keeps backend `/health` and checks frontend `/frontend/ready`
+over loopback, exempt from its public rate/concurrency limits. Frontend
+orchestrators and load balancers must use `/frontend/health` for liveness and
+routing; `/frontend/ready` is for chrono-probe and local container healthchecks
+only, and must not drive replica eviction.
+
 Publish Images may reuse successful CI jobs from an identical pull-request
 merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
 Any uncertainty runs the complete release gate.
@@ -989,6 +1086,7 @@ readinessProbe:
   httpGet:
     path: /ready
     port: 3001
+  timeoutSeconds: 3
   initialDelaySeconds: 5
   periodSeconds: 5
 ```

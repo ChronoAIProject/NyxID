@@ -13,6 +13,7 @@ use super::channel_platform::{
 use crate::errors::{AppError, AppResult};
 
 pub const MAX_MEDIA_URL_BYTES: usize = 8192;
+pub(crate) const MAX_FILENAME_CHARS: usize = 180;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Returned when the provider outcome cannot be determined (for example a
@@ -195,6 +196,24 @@ pub async fn download(
     attachment: &InboundAttachment,
     max_bytes: u64,
 ) -> AppResult<FetchedMedia> {
+    let response =
+        download_response(target, hosts, trusted_base, bearer, attachment, max_bytes).await?;
+    let mut media = bounded_response(response, max_bytes).await?;
+    media.filename = attachment.filename.clone();
+    media.mime_type = media.mime_type.or_else(|| attachment.mime_type.clone());
+    Ok(media)
+}
+
+/// Shared request and SSRF/size gates. Lark additionally reads filename headers
+/// before consuming this response; other adapters retain their metadata policy.
+pub(crate) async fn download_response(
+    target: &str,
+    hosts: &[&str],
+    trusted_base: Option<&str>,
+    bearer: Option<&str>,
+    attachment: &InboundAttachment,
+    max_bytes: u64,
+) -> AppResult<reqwest::Response> {
     let client = media_client(target, Some(hosts), trusted_base).await?;
     if attachment.size_bytes.is_some_and(|size| size > max_bytes) {
         return Err(AppError::ChannelMediaTooLarge);
@@ -203,11 +222,7 @@ pub async fn download(
     if let Some(token) = bearer {
         request = request.bearer_auth(token);
     }
-    let response = request.send().await.map_err(|_| fetch_failed())?;
-    let mut media = bounded_response(response, max_bytes).await?;
-    media.filename = attachment.filename.clone();
-    media.mime_type = media.mime_type.or_else(|| attachment.mime_type.clone());
-    Ok(media)
+    request.send().await.map_err(|_| fetch_failed())
 }
 
 pub fn decode_base64(data: &str, max_bytes: u64) -> AppResult<Bytes> {
@@ -370,7 +385,7 @@ pub fn safe_filename(filename: Option<&str>) -> String {
     let name: String = filename
         .unwrap_or("attachment")
         .chars()
-        .take(180)
+        .take(MAX_FILENAME_CHARS)
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
                 c

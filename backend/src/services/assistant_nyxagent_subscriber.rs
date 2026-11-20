@@ -1,6 +1,7 @@
 use super::*;
 use crate::models::assistant_conversation::{
     InstructionBinding, ReattachWindow, RestartAdmission, RunningResponse, SubscriberCheckpoint,
+    WindowRefusal,
 };
 use mongodb::bson::{Binary, spec::BinarySubtype};
 
@@ -9,6 +10,38 @@ struct Input {
     body: Value,
     prefix: String,
     binding: InstructionBinding,
+    #[serde(default)]
+    follow_up: Option<FollowUp>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct FollowUp {
+    continuations: super::super::assistant_continuation::Continuations,
+    images: images::ToolImages,
+    base_text: Option<String>,
+    notes: String,
+    notes_with_memory: String,
+    #[serde(default)]
+    user_image_ids: Vec<String>,
+}
+
+impl FollowUp {
+    pub(super) fn capture(
+        continuations: &super::super::assistant_continuation::Continuations,
+        images: &images::ToolImages,
+        context: &super::super::assistant_instruction_context::Prepared,
+        listing: &str,
+        user_image_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            continuations: continuations.clone(),
+            images: images.clone(),
+            base_text: images.fallback.as_ref().map(|result| result.text.clone()),
+            notes: context.input_with_memory(listing, "", false),
+            notes_with_memory: context.input_with_memory(listing, "", true),
+            user_image_ids,
+        }
+    }
 }
 
 impl Input {
@@ -35,10 +68,182 @@ impl Input {
             None => text,
         }
     }
+
+    fn full_text(&self, safe: &str) -> Result<String, TurnError> {
+        if self.prefix.len().saturating_add(safe.len()) > engine::MAX_OUTPUT_BYTES {
+            return Err(TurnError::internal("output_too_large", "stream"));
+        }
+        Ok(format!("{}{safe}", self.prefix))
+    }
 }
 
 fn unknown() -> TurnError {
     TurnError::internal("outcome_unknown", "reattach")
+}
+
+fn before_admission(
+    value: &Value,
+    window: &ReattachWindow,
+    active: &crate::models::assistant_conversation::ActiveTurn,
+    version: i32,
+) -> bool {
+    let now = Utc::now();
+    !window.accepted
+        && !window.terminal
+        && active.running_response.is_none()
+        && !active
+            .reply
+            .as_ref()
+            .and_then(|reply| reply.upstream.as_ref())
+            .is_some_and(|cursor| cursor.window_key == window.key)
+        && !(version == 1
+            && (active.capacity_accepted_at.is_some()
+                || active.activity_total > 0
+                || active
+                    .reply
+                    .as_ref()
+                    .is_some_and(|reply| !reply.text.is_empty())))
+        && now >= active.started_at
+        && window
+            .absence_retry_before
+            .is_some_and(|cutoff| now < cutoff)
+        && [
+            "response",
+            "response_id",
+            "conversation_id",
+            "last_sequence_number",
+        ]
+        .iter()
+        .all(|field| value.get(*field).is_some_and(Value::is_null))
+}
+
+async fn confirm(
+    state: &AppState,
+    row: &AssistantConversation,
+    key: &str,
+) -> Result<(), TurnError> {
+    if super::super::assistant_turn_restart::confirm_window(&state.db, row, key)
+        .await
+        .map_err(|_| unknown())?
+    {
+        Ok(())
+    } else {
+        Err(TurnError::new("cancelled"))
+    }
+}
+
+pub(super) async fn resolve_budget_window(
+    state: &AppState,
+    egress: &dyn contract::NyxAgentEgress,
+    authority: &contract::NyxAgentExecutionContext,
+    row: &AssistantConversation,
+    credential: &AssistantCredential,
+    policy: Option<BillingRoutePolicy>,
+    key: &str,
+) -> Result<(), TurnError> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let filter = engine::WorkerFence::matching(
+            row,
+            doc! {
+                "active_turn.stop_requested":false, "active_turn.restart_admission.window.key":key,
+                "active_turn.restart_admission.credential_ended":{"$ne":true},
+            },
+        )
+        .map_err(|_| unknown())?;
+        let current = state
+            .db
+            .collection::<AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .find_one(filter)
+            .await
+            .map_err(|_| unknown())?
+            .ok_or_else(unknown)?;
+        let active = current.active_turn.as_ref().ok_or_else(unknown)?;
+        let admission = active.restart_admission.as_ref().ok_or_else(unknown)?;
+        let window = admission.window.as_ref().ok_or_else(unknown)?;
+        let deployment = admission.reattach.as_ref().ok_or_else(unknown)?;
+        if window.terminal {
+            return Ok(());
+        }
+        let response = request(
+            state,
+            egress,
+            authority,
+            credential,
+            "GET",
+            "v1/responses/lookup",
+            None,
+            Some(key),
+            Some(contract::NyxAgentDestination(
+                deployment.destination_hash.clone(),
+            )),
+            policy,
+        )
+        .await
+        .map_err(|_| unknown())?;
+        if !response.status().is_success() {
+            return Err(unknown());
+        }
+        let value = envelope(response).await?;
+        let absent = value["status"] == "not_found"
+            && before_admission(&value, window, active, admission.version);
+        let failed_budget = value["status"] == "failed"
+            && identity(&value, credential)
+                .and_then(|binding| terminal_snapshot(&value, &binding).ok())
+                .and_then(|result| result.error)
+                .is_some_and(|error| {
+                    matches!(error.code, "tool_budget_exhausted" | "turn_timeout")
+                });
+        if !absent && !failed_budget {
+            return Err(unknown());
+        }
+        confirm(state, &current, key).await
+    })
+    .await
+    .map_err(|_| unknown())?
+}
+
+pub(super) async fn save_refusal(
+    state: &AppState,
+    row: &AssistantConversation,
+    key: &str,
+    error: &TurnError,
+    delay: Option<Duration>,
+) -> Result<WindowRefusal, TurnError> {
+    let refusal = WindowRefusal {
+        status: error.http_status.ok_or_else(unknown)?,
+        code: error
+            .upstream_code
+            .as_deref()
+            .unwrap_or(error.code)
+            .to_owned(),
+        retry_at: delay
+            .map(|delay| chrono::Duration::from_std(delay).map(|delay| Utc::now() + delay))
+            .transpose()
+            .map_err(|_| unknown())?,
+    };
+    let filter = engine::WorkerFence::matching(row, doc! {
+        "active_turn.stop_requested":false,"active_turn.restart_admission.credential_ended":{"$ne":true},
+        "active_turn.restart_admission.window.key":key,"active_turn.restart_admission.window.accepted":{"$ne":true},
+    }).map_err(|_| unknown())?;
+    let encoded = mongodb::bson::to_bson(&refusal).map_err(|_| unknown())?;
+    let changed = state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            filter,
+            doc! {"$set":{"active_turn.restart_admission.window.refusal":encoded}},
+        )
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await
+        .map_err(|_| unknown())?;
+    if changed.matched_count != 1 {
+        return Err(unknown());
+    }
+    Ok(refusal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -94,12 +299,14 @@ pub(super) async fn seal(
     body: &Value,
     prefix: &str,
     binding: &InstructionBinding,
+    follow_up: Option<FollowUp>,
 ) -> Result<Binary, TurnError> {
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(&Input {
             body: body.clone(),
             prefix: prefix.into(),
             binding: binding.clone(),
+            follow_up,
         })
         .map_err(|_| unknown())?,
     );
@@ -197,6 +404,9 @@ pub(crate) async fn cancel_background(
     let turn = row.active_turn.as_ref()?;
     let admission = turn.restart_admission.as_deref()?;
     let window = admission.window.as_ref()?;
+    if window.terminal {
+        return Some(ConfirmedCancellation { terminal: None });
+    }
     let deployment = admission.reattach.as_ref()?;
     if admission.credential_id != credential.api_key_id {
         return None;
@@ -254,14 +464,7 @@ pub(crate) async fn cancel_background(
                     }
                     Some("cancelled")
                         if id.is_none()
-                            && [
-                                "response",
-                                "response_id",
-                                "conversation_id",
-                                "last_sequence_number",
-                            ]
-                            .iter()
-                            .all(|field| value.get(*field).is_some_and(Value::is_null)) =>
+                            && before_admission(&value, window, turn, admission.version) =>
                     {
                         outcome = "cancelled";
                         stopped_binding = Some((
@@ -277,14 +480,18 @@ pub(crate) async fn cancel_background(
                             return None;
                         }
                         let mut result = terminal_snapshot(&value, &binding).ok()?;
+                        if executor_lost(&result) {
+                            return None;
+                        }
                         outcome = if value["status"] == "cancelled" {
                             "cancelled"
                         } else {
                             "terminal"
                         };
                         let input = Input::open(state, row, window).await.ok()?;
-                        result.text =
-                            format!("{}{}", input.prefix, input.redact(&result.text, credential));
+                        result.text = input
+                            .full_text(&input.redact(&result.text, credential))
+                            .ok()?;
                         if value["status"] == "completed" && result.error.is_none() {
                             let mut prepared = input.binding;
                             prepared.session_id.clone_from(&binding.session_id);
@@ -305,6 +512,9 @@ pub(crate) async fn cancel_background(
     .await
     .ok()
     .flatten();
+    if !turn.stop_requested && outcome != "cancel_unconfirmed" {
+        let _ = confirm(state, row, &window.key).await;
+    }
     if turn.stop_requested && outcome != "cancel_unconfirmed" {
         let mut filter = doc! {
             "_id": &row.id, "user_id": &row.user_id, "active_turn": mongodb::bson::Bson::Null,
@@ -368,6 +578,228 @@ pub(super) async fn recover(
     partial: &mut String,
     recovered_binding: &mut Option<InstructionBinding>,
 ) -> Result<TurnResult, TurnError> {
+    let mut saved = row.clone();
+    let mut window = window.clone();
+    let mut post_first = false;
+    loop {
+        let input = Input::open(state, &saved, &window).await?;
+        *recovered_binding = Some(input.binding.clone());
+        let mut image_unsupported = false;
+        let result = recover_window(
+            state,
+            egress,
+            authority,
+            &saved,
+            credential,
+            policy,
+            admission,
+            &window,
+            events,
+            block,
+            partial,
+            &input,
+            post_first,
+            &mut image_unsupported,
+        )
+        .await;
+        let Some(mut plan) = input.follow_up else {
+            return result;
+        };
+        if image_unsupported {
+            for id in &plan.user_image_ids {
+                let _ = images::record_upload_outcome(
+                    state,
+                    &saved,
+                    id,
+                    "unavailable",
+                    Some("image_input_unsupported"),
+                )
+                .await;
+            }
+            plan.images.unsupported(state, &saved).await;
+            events.emit("turn.notice",json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
+        }
+        let failed = match &result {
+            Err(error) => Some(error),
+            Ok(result) => result.error.as_ref(),
+        };
+        if let Some(error) = failed
+            && let Some(base) = &plan.base_text
+            && allows_fallback(error)
+        {
+            plan.images.failed(state, &saved).await;
+            clear_session(state, &saved, "image_input_unavailable")
+                .await
+                .map_err(|_| unknown())?;
+            *recovered_binding = None;
+            *partial = base.clone();
+            return Ok(TurnResult {
+                text: base.clone(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            });
+        }
+        let mut result = result?;
+        let Some(session_id) = result.session_id.as_deref() else {
+            return Ok(result);
+        };
+        let turn = saved.active_turn.as_ref().ok_or_else(unknown)?;
+        let (key, text) = if let Some(error) = &result.error {
+            if !matches!(error.code, "tool_budget_exhausted" | "turn_timeout")
+                || plan.base_text.is_some()
+            {
+                return Ok(result);
+            }
+            if let Some(next) = &window.next_continuation {
+                plan.continuations = next.clone();
+            } else {
+                let suffix = result
+                    .text
+                    .strip_prefix(input.prefix.as_str())
+                    .unwrap_or(&result.text);
+                match continue_turn(
+                    state,
+                    &saved,
+                    events,
+                    &mut plan.continuations,
+                    Some(session_id),
+                    error,
+                    suffix,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(result),
+                    Err(error) => {
+                        result.error = Some(error);
+                        return Ok(result);
+                    }
+                }
+            }
+            (
+                format!("{}:continuation:{}", turn.turn_id, plan.continuations.count),
+                super::super::assistant_continuation::INSTRUCTION.to_owned(),
+            )
+        } else {
+            plan.images.sent(state, &saved).await;
+            if !plan
+                .images
+                .prepare(state, egress, authority, &saved, credential, policy)
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(result);
+            }
+            images::renew(state, &saved, session_id, events, plan.images.rounds).await?;
+            plan.images.attempted(state, &saved).await;
+            plan.base_text = Some(result.text.clone());
+            (
+                format!("{}:images:{}", turn.turn_id, plan.images.rounds),
+                format!(
+                    "Continue after viewing the tool images.\n\n{}",
+                    plan.images.note
+                ),
+            )
+        };
+        let notes = if plan.continuations.count == 0 {
+            &plan.notes_with_memory
+        } else {
+            &plan.notes
+        };
+        let text = text.replace(credential.raw_key.as_str(), "[redacted]");
+        let text = input.binding.marker.as_ref().map_or_else(
+            || text.clone(),
+            |marker| text.replace(marker, "[redacted context marker]"),
+        );
+        let text = format!("{notes}{text}");
+        let mut body = input.body;
+        body["conversation"] = json!(session_id);
+        body["input"] = if plan.images.parts.is_empty() {
+            json!(text)
+        } else {
+            let mut parts = vec![json!({"type":"input_text","text":text})];
+            parts.extend(plan.images.parts.iter().cloned());
+            json!([{"role":"user","content":parts}])
+        };
+        let prefix = if result.text.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", result.text)
+        };
+        let now = Utc::now();
+        let run_cap = (turn.trigger_run_id.is_some() && !turn.trigger_continuation).then(|| {
+            now + chrono::Duration::from_std(
+                super::super::assistant_engine_policy::AUTOMATION_CAPACITY_CAP,
+            )
+            .expect("bounded capacity cap")
+        });
+        let deadline = now
+            + chrono::Duration::from_std(engine::capacity_budget(now, run_cap, now))
+                .map_err(|_| unknown())?;
+        let sealed = seal(
+            state,
+            &saved,
+            &key,
+            &body,
+            &prefix,
+            &input.binding,
+            Some(plan),
+        )
+        .await?;
+        super::super::assistant_turn_observability::attempt(
+            &state.db,
+            &saved,
+            &key,
+            deadline,
+            Some(sealed),
+        )
+        .await
+        .map_err(|_| unknown())?;
+        let filter = engine::WorkerFence::matching(
+            &saved,
+            doc! {
+                "active_turn.stop_requested": false,
+                "active_turn.restart_admission.window.key": &key,
+            },
+        )
+        .map_err(|_| unknown())?;
+        saved = state
+            .db
+            .collection::<AssistantConversation>(
+                crate::models::assistant_conversation::COLLECTION_NAME,
+            )
+            .find_one(filter)
+            .await
+            .map_err(|_| unknown())?
+            .ok_or_else(unknown)?;
+        window = saved
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.restart_admission.as_ref()?.window.as_ref())
+            .cloned()
+            .ok_or_else(unknown)?;
+        post_first = true;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_window(
+    state: &AppState,
+    egress: &dyn contract::NyxAgentEgress,
+    authority: &contract::NyxAgentExecutionContext,
+    row: &AssistantConversation,
+    credential: &AssistantCredential,
+    policy: Option<BillingRoutePolicy>,
+    admission: &RestartAdmission,
+    window: &ReattachWindow,
+    events: &mut Events,
+    block: &str,
+    partial: &mut String,
+    input: &Input,
+    post_first: bool,
+    image_unsupported: &mut bool,
+) -> Result<TurnResult, TurnError> {
     let active = row.active_turn.as_ref().ok_or_else(unknown)?;
     let deployment = admission.reattach.as_ref().ok_or_else(unknown)?;
     if row.credential_api_key_id != admission.credential_id
@@ -376,11 +808,12 @@ pub(super) async fn recover(
         return Err(unknown());
     }
     let mut key = window.key.clone();
-    let input = Input::open(state, row, window).await?;
-    *recovered_binding = Some(input.binding.clone());
+    let mut accepted = window.accepted;
     let redact = |text: &str| input.redact(text, credential);
     let prior = active.reply.as_ref();
-    *partial = prior.map_or_else(|| input.prefix.clone(), |reply| reply.text.clone());
+    *partial = prior
+        .filter(|reply| reply.text.starts_with(&input.prefix))
+        .map_or_else(|| input.prefix.clone(), |reply| reply.text.clone());
     let cursor = prior
         .and_then(|reply| reply.upstream.as_ref())
         .filter(|cursor| cursor.window_key == key);
@@ -394,40 +827,142 @@ pub(super) async fn recover(
             .as_ref()
             .map(|running| running.response_id.clone())
     });
-    let deadline = active.started_at
-        + chrono::Duration::from_std(stream_bounds().turn_cap).map_err(|_| unknown())?;
+    let deadline = tokio::time::Instant::now() + turn_remaining(row);
     let destination = || {
         Some(contract::NyxAgentDestination(
             deployment.destination_hash.clone(),
         ))
     };
     let mut retry = false;
-    let mut fresh_post = false;
+    let mut fresh_post = post_first;
+    let mut recovery = engine::Recovery::default();
+    let mut refusal = window.refusal.clone();
     let mut bound = None;
     loop {
         if retry {
             tokio::time::sleep(Duration::from_millis(350)).await;
         }
         retry = true;
-        if Utc::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return Err(unknown());
+        }
+        if let Some(saved) = refusal.take() {
+            let error = post_refusal(saved.status, &saved.code, None);
+            if let Some(at) = saved.retry_at {
+                tokio::time::sleep(
+                    (at.min(window.capacity_deadline) - Utc::now())
+                        .to_std()
+                        .unwrap_or_default(),
+                )
+                .await;
+                if Utc::now() >= window.capacity_deadline {
+                    return Err(error);
+                }
+                let filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,
+                    "active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key,
+                    "active_turn.restart_admission.window.refusal.retry_at":mongodb::bson::DateTime::from_chrono(at)})
+                    .map_err(|_| unknown())?;
+                let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                    .update_one(filter, doc! {"$unset":{"active_turn.restart_admission.window.refusal":""},"$inc":{"active_turn.engine_attempts":1}})
+                    .write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_| unknown())?;
+                if changed.matched_count != 1 {
+                    return Err(unknown());
+                }
+                fresh_post = true;
+            } else if matches!(error.code, "turn_timeout" | "tool_budget_exhausted") {
+                let session_id = input.body["conversation"].as_str().map(str::to_owned);
+                if session_id.is_some()
+                    && input.follow_up.as_ref().is_some_and(|plan| {
+                        plan.base_text.is_none()
+                            && plan.continuations.count < plan.continuations.maximum
+                    })
+                {
+                    resolve_budget_window(state, egress, authority, row, credential, policy, &key)
+                        .await?;
+                }
+                return Ok(TurnResult {
+                    text: partial.clone(),
+                    session_id,
+                    response_id: None,
+                    error: Some(error),
+                });
+            } else {
+                return Err(error);
+            }
         }
         let mut reader = if fresh_post {
             fresh_post = false;
-            request(
-                state,
-                egress,
-                authority,
-                credential,
-                "POST",
-                "v1/responses",
-                Some(input.body.clone()),
-                Some(&key),
-                destination(),
-                policy,
-            )
-            .await
-            .ok()
+            if Utc::now() >= window.capacity_deadline {
+                return Err(TurnError::internal("capacity_exceeded", "capacity"));
+            }
+            let bounds = stream_bounds();
+            let mut first_byte = super::super::assistant_start_retry::FirstByteDeadline::new(
+                bounds.first_byte,
+                bounds.no_progress,
+            );
+            let response = first_byte
+                .wait(
+                    &state.db,
+                    row,
+                    request(
+                        state,
+                        egress,
+                        authority,
+                        credential,
+                        "POST",
+                        "v1/responses",
+                        Some(input.body.clone()),
+                        Some(&key),
+                        destination(),
+                        policy,
+                    ),
+                )
+                .await?
+                .ok();
+            if let Some(rejected) = response.as_ref().filter(|response| {
+                !response.status().is_success() && response.status().as_u16() != 410
+            }) {
+                let status = rejected.status().as_u16();
+                let headers = rejected.headers();
+                let retry_after = headers
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(engine::retry_after);
+                let request_id = headers
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(sanitize_upstream_request_id);
+                let bytes = tokio::time::timeout(
+                    crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_TIMEOUT,
+                    axum::body::to_bytes(
+                        response.expect("refusal").into_body(),
+                        crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES,
+                    ),
+                )
+                .await
+                .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?
+                .map_err(|_| TurnError::internal("invalid_stream", "upstream_response"))?;
+                let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                let code = upstream_error_code(status, &value);
+                let error = post_refusal(status, code, request_id);
+                let delay = engine::admission_refusal(status, code).then(|| {
+                    recovery.retries = recovery.retries.saturating_add(1);
+                    engine::capacity_delay(recovery.retries, retry_after, rand::random())
+                });
+                refusal = Some(save_refusal(state, row, &key, &error, delay).await?);
+                retry = false;
+                continue;
+            }
+            if response
+                .as_ref()
+                .is_some_and(|response| response.status().is_success())
+            {
+                super::super::assistant_turn_observability::accepted(&state.db, row)
+                    .await
+                    .map_err(|_| unknown())?;
+                accepted = true;
+            }
+            response
         } else {
             None
         };
@@ -463,11 +998,9 @@ pub(super) async fn recover(
             }) {
                 return Err(unknown());
             }
-            let absent = status == "not_found"
-                && value["response"].is_null()
-                && value["response_id"].is_null()
-                && value["conversation_id"].is_null()
-                && value["last_sequence_number"].is_null();
+            let absent = !accepted
+                && status == "not_found"
+                && before_admission(&value, window, active, admission.version);
             let not_started = status == "failed"
                 && sequence.is_none()
                 && binding.as_ref().is_some_and(|binding| {
@@ -478,10 +1011,8 @@ pub(super) async fn recover(
                 });
             if absent || not_started {
                 let now = Utc::now();
-                if (absent
-                    && (active.capacity_accepted_at.is_some()
-                        || !partial.is_empty()
-                        || active.activity_total > 0))
+                if window.terminal
+                    || (absent && (cursor.is_some() || expected.is_some()))
                     || now >= window.capacity_deadline
                     || (absent
                         && window
@@ -498,6 +1029,7 @@ pub(super) async fn recover(
                     &input.body,
                     &input.prefix,
                     &input.binding,
+                    input.follow_up.clone(),
                 )
                 .await?;
                 let mut filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,"credential_api_key_id":&admission.credential_id,"active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key}).map_err(|_| unknown())?;
@@ -507,11 +1039,12 @@ pub(super) async fn recover(
                         doc! {"$gt":mongodb::bson::DateTime::now()},
                     );
                 }
-                let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(filter,doc!{"$set":{"active_turn.restart_admission.window.key":&next,"active_turn.restart_admission.window.input":saved,"active_turn.running_response":null},"$unset":{"active_turn.reply.upstream":""}}).write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_|unknown())?;
+                let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(filter,doc!{"$set":{"active_turn.restart_admission.window.key":&next,"active_turn.restart_admission.window.terminal":false,"active_turn.restart_admission.window.accepted":false,"active_turn.restart_admission.window.input":saved,"active_turn.running_response":null},"$unset":{"active_turn.reply.upstream":"","active_turn.restart_admission.window.next_continuation":""}}).write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_|unknown())?;
                 if changed.matched_count != 1 {
                     return Err(unknown());
                 }
                 key = next;
+                accepted = false;
                 expected = None;
                 sequence = None;
                 text.clear();
@@ -519,7 +1052,12 @@ pub(super) async fn recover(
                 fresh_post = true;
                 continue;
             }
-            if status == "cancelled" && binding.is_none() && value["response"].is_null() {
+            if status == "cancelled"
+                && binding.is_none()
+                && !accepted
+                && before_admission(&value, window, active, admission.version)
+            {
+                confirm(state, row, &key).await?;
                 return Err(TurnError::new("cancelled"));
             }
             let Some(binding) = binding else {
@@ -530,12 +1068,16 @@ pub(super) async fn recover(
                 "running" => {}
                 "completed" | "failed" | "cancelled" | "lost" => {
                     let mut result = terminal_snapshot(&value, &binding)?;
-                    result.text = format!("{}{}", input.prefix, redact(&result.text));
+                    *image_unsupported = engine::unsupported_images(&value["response"]);
+                    result.text = input.full_text(&redact(&result.text))?;
                     if status == "lost" {
                         result.error = Some(TurnError::new("executor_lost"));
                         if partial.starts_with(&result.text) {
                             result.text = partial.clone();
                         }
+                    }
+                    if !executor_lost(&result) {
+                        confirm(state, row, &key).await?;
                     }
                     return Ok(result);
                 }
@@ -586,9 +1128,25 @@ pub(super) async fn recover(
             decoder.replay = true;
             decoder.sequence = sequence;
             decoder.text.clone_from(&text);
-            while let Some(Ok(bytes)) = body.next().await {
+            let bounds = stream_bounds();
+            let mut last_progress = tokio::time::Instant::now();
+            let mut received = false;
+            loop {
+                let timeout = if received {
+                    stream_timeout(bounds, Duration::ZERO, last_progress.elapsed())
+                } else {
+                    bounds.first_byte
+                };
+                let Ok(Some(Ok(bytes))) = tokio::time::timeout(timeout, body.next()).await else {
+                    break;
+                };
+                received = true;
+                let before = decoder.data_events;
                 if decoder.push(&bytes).is_err() {
                     break;
+                }
+                if decoder.data_events != before {
+                    last_progress = tokio::time::Instant::now();
                 }
                 if let Some(created) = decoder.created.take() {
                     if expected
@@ -600,10 +1158,14 @@ pub(super) async fn recover(
                     expected = Some(created.response_id);
                 }
                 if let Some(mut result) = decoder.terminal.take() {
+                    *image_unsupported = decoder.image_input_unsupported;
                     if expected.as_deref() != result.response_id.as_deref() {
                         return Err(unknown());
                     }
-                    result.text = format!("{}{}", input.prefix, redact(&result.text));
+                    result.text = input.full_text(&redact(&result.text))?;
+                    if !executor_lost(&result) {
+                        confirm(state, row, &key).await?;
+                    }
                     return Ok(result);
                 }
                 let safe = redact(&decoder.text);
@@ -617,7 +1179,7 @@ pub(super) async fn recover(
                 if held.is_empty()
                     && let (Some(id), Some(seq)) = (&expected, decoder.sequence)
                 {
-                    let full = format!("{}{safe}", input.prefix);
+                    let full = input.full_text(&safe)?;
                     if full != *partial {
                         events.emit_with_checkpoint("block.completed",json!({"block_id":block,"block":{"type":"text","block_id":block,"text":full}}), Some(checkpoint(&key, id, seq, &safe)));
                     }
@@ -638,7 +1200,11 @@ pub(super) async fn recover(
             let mut result = snapshot(response, id)?;
             let safe = redact(&result.text);
             if response["status"] != "in_progress" {
-                result.text = format!("{}{safe}", input.prefix);
+                *image_unsupported = engine::unsupported_images(response);
+                result.text = input.full_text(&safe)?;
+                if !executor_lost(&result) {
+                    confirm(state, row, &key).await?;
+                }
                 return Ok(result);
             }
             let next = gap["snapshot_sequence_number"]
@@ -657,7 +1223,7 @@ pub(super) async fn recover(
                 ],
             );
             if held.is_empty() {
-                *partial = format!("{}{safe}", input.prefix);
+                *partial = input.full_text(&safe)?;
                 events.emit_with_checkpoint(
                     "block.completed",
                     json!({"block_id":block,"block":{"type":"text","block_id":block,"text":partial}}),

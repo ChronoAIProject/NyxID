@@ -41,6 +41,11 @@ const INTERNAL_PATH_PREFIX: &str = "/internal/v1/nodes";
 const FENCE_REFUSED: &str = "x-nyxid-fence-refused";
 pub(crate) const HANDOVER_WAIT: Duration = Duration::from_secs(4);
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static WAITING_FOR_NODE_HANDOVER: Arc<tokio::sync::Notify>;
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct NodeHandover {
     previous: Option<String>,
@@ -120,6 +125,8 @@ impl NodeHandover {
                     }
                     _ => {}
                 }
+                #[cfg(test)]
+                let _ = WAITING_FOR_NODE_HANDOVER.try_with(|waiting| waiting.notify_one());
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
         })

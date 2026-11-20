@@ -258,6 +258,8 @@ impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyRes
 }
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    continued_after_restart: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<StreamReplyResponse>,
     /// Waiting for one of the owner's running slots; also reported through
@@ -386,6 +388,10 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            continued_after_restart: turn
+                .restart_admission
+                .as_ref()
+                .is_some_and(|source| source.continued_after_restart),
             reply: None,
             queued: turn.queued_at.is_some(),
             waiting_for_capacity: turn.waiting_for_capacity || turn.queued_at.is_some(),
@@ -696,6 +702,8 @@ impl ActionOutcomeResponse {
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    continued_after_restart: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_delivery: Option<ArtifactDeliveryResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -739,6 +747,10 @@ pub struct AutomationRunResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            continued_after_restart: row
+                .turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.continued_after_restart),
             artifact_delivery: None,
             action_outcome: ActionOutcomeResponse::from_message(&row),
             platform_origin: row
@@ -1870,6 +1882,8 @@ pub async fn delete(
     for row in &related {
         if let Some(stopped) = engine::request_stop_row_target(&state.db, row).await? {
             survivor::cancel(&state, &stopped).await;
+        } else if row.stopped_window.is_some() {
+            survivor::cancel(&state, row).await;
         }
         super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &row.id)
             .await?;
@@ -2245,6 +2259,30 @@ async fn proxy(
     .await
 }
 
+fn subscriber_control(method: &str, path: &str) -> bool {
+    if matches!(
+        (method, path),
+        ("GET", "v1/responses/lookup") | ("POST", "v1/responses/cancel")
+    ) {
+        return true;
+    }
+    let Some((id, operation)) = path
+        .strip_prefix("v1/responses/resp_")
+        .and_then(|path| path.split_once('/'))
+    else {
+        return false;
+    };
+    let Some((session, response)) = id.split_once('_') else {
+        return false;
+    };
+    [session, response].iter().all(|part| {
+        part.len() == 32
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) && matches!((method, operation), ("GET", "events") | ("POST", "cancel"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn proxy_raw(
     state: &AppState,
@@ -2314,6 +2352,11 @@ async fn proxy_raw(
         request.extensions_mut().insert(proof);
     }
     if let Some(destination) = destination {
+        if turn_id.is_some() && subscriber_control(method, path) {
+            request
+                .extensions_mut()
+                .insert(super::proxy::NyxAgentSubscriberControl);
+        }
         request.extensions_mut().insert(destination);
     }
     if method == "POST" && path == "v1/responses" {
@@ -2667,10 +2710,12 @@ pub(crate) async fn start_turn_with_voice(
     voice_request_id: Option<&str>,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
     let user_id = auth.user_id.to_string();
+    let mut admitted = start.clone();
+    admitted.capacity = permit.token().cloned();
     let claim = Box::pin(engine::claim_turn(
         &state.db,
         &user_id,
-        start,
+        &admitted,
         &state.encryption_keys,
         voice_request_id,
     ))

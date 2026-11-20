@@ -1,6 +1,11 @@
 import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 /** Matches the owner upload contract used by the Web composer. */
+import {
+  assistantUploadExtension,
+  assistantUploadNameHeader,
+  sanitizeAssistantUploadName,
+} from "../../../../shared/assistantUploadFilename";
 export const MAX_ASSISTANT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_ASSISTANT_ATTACHMENTS = 10;
 export const ASSISTANT_UPLOAD_TIMEOUT_MS = 60_000;
@@ -55,28 +60,13 @@ const CSV_TYPES = new Set(["application/csv", "application/vnd.ms-excel"]);
 
 /** Mirror `assistant_upload_service::safe_name`, including Unicode limits. */
 export function safeAttachmentName(name: string): string {
-  const leaf = name.split(/[/\\]/).pop() ?? "";
-  const kept = [...leaf.replace(/[^\p{L}\p{N}._\- ()]/gu, "")]
-    .slice(0, 120)
-    .join("");
-  return (
-    kept
-      .trim()
-      .replace(/^\.+|\.+$/g, "")
-      .trim() || "attachment"
-  );
-}
-
-function extension(name: string): string {
-  const clean = safeAttachmentName(name);
-  const dot = clean.lastIndexOf(".");
-  return dot < 0 ? "" : clean.slice(dot + 1).toLowerCase();
+  return sanitizeAssistantUploadName(name) ?? "attachment";
 }
 
 /** MIME and suffix only guide the picker; the server still checks the bytes. */
 export function isSupportedAttachment(file: AssistantUploadFile): boolean {
   const type = (file.mimeType?.split(";")[0] ?? "").trim().toLowerCase();
-  const suffix = extension(file.name);
+  const suffix = assistantUploadExtension(file.name);
   if (SNIFFED_TYPES.has(type)) return true;
   if (UNKNOWN_TYPES.has(type))
     return SNIFFED_EXTENSIONS.has(suffix) || TEXT_EXTENSIONS.has(suffix);
@@ -118,17 +108,10 @@ export function assistantAttachmentPath(
 
 /** Raw bytes, never multipart; preserve the dialect suffix under the header cap. */
 export function attachmentUploadHeaders(name: string): Record<string, string> {
-  let safeName = safeAttachmentName(name);
-  while (encodeURIComponent(safeName).length > 1024) {
-    const dot = safeName.lastIndexOf(".");
-    const stem = [...(dot > 0 ? safeName.slice(0, dot) : safeName)];
-    const suffix = dot > 0 ? safeName.slice(dot) : "";
-    if (stem.length > 1) safeName = stem.slice(0, -1).join("") + suffix;
-    else safeName = [...safeName].slice(0, -1).join("");
-  }
+  const nameHeader = assistantUploadNameHeader(name);
   return {
     "Content-Type": "application/octet-stream",
-    "X-Attachment-Name": encodeURIComponent(safeName),
+    ...(nameHeader === undefined ? {} : { "X-Attachment-Name": nameHeader }),
   };
 }
 

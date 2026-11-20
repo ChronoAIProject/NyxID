@@ -102,7 +102,7 @@ pub(crate) fn local_generation() -> Option<&'static str> {
         .map(|runtime| runtime.identity.generation_id.as_str())
 }
 
-pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v1";
+pub(crate) const TURN_HANDOFF: &str = "assistant:turn-handoff-v2";
 
 pub(crate) fn turn_restart_enrollment_ready() -> bool {
     RUNTIME
@@ -920,6 +920,22 @@ mod diagnostics;
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
     drop(ready_test_replica_inner(db, false, None).await);
+}
+
+#[cfg(test)]
+pub(crate) async fn refresh_test_replica_heartbeat(db: &Database) {
+    let result = db
+        .collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": "test-process"},
+            doc! {"$currentDate": {"observed_at": true}},
+        )
+        .await
+        .expect("refresh the fixture replica heartbeat");
+    assert_eq!(
+        result.matched_count, 1,
+        "fixture replica must be registered"
+    );
 }
 
 #[cfg(test)]
