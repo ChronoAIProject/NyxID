@@ -116,6 +116,12 @@ fn http_status(message: &str) -> Option<u16> {
         .ok()
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct MissingGatewayEvent {
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub message_at: Option<DateTime<Utc>>,
+}
+
 /// Facts the recommendation depends on. Build with [`HealthFacts::for_bot`].
 #[derive(Clone, Debug)]
 pub struct HealthFacts<'a> {
@@ -131,6 +137,7 @@ pub struct HealthFacts<'a> {
     pub backoff_active: bool,
     /// The bot is delivered through the Agent Event Gateway.
     pub gateway: bool,
+    pub gateway_not_received: Option<MissingGatewayEvent>,
     pub discord_intake: Option<discord::Intake>,
 }
 
@@ -163,6 +170,7 @@ impl<'a> HealthFacts<'a> {
                 .map(|state| state.registered),
             backoff_active: bot.poll_backoff_until.is_some_and(|until| until > now),
             gateway,
+            gateway_not_received: None,
             // Intake advice requires loaded flag, readiness and transport evidence.
             discord_intake: None,
         }
@@ -404,6 +412,8 @@ fn telegram_group_advice(outcome: &ChannelInboundOutcome) -> Option<Recommendati
     Some(advice(action, text))
 }
 
+pub(crate) const GATEWAY_NOT_RECEIVED_REASON: &str = "NyxID recorded a successful gateway callback and found no matching provider event when it checked after two minutes";
+
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     if let Some(code) = facts.failure_reason
@@ -476,6 +486,23 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     }
     // Preserve existing gateway advice when no org-guest billing fact was added.
     if facts.gateway && facts.org_guest_billing.is_none() {
+        if let Some(missing) = facts.gateway_not_received {
+            let message_time = missing
+                .message_at
+                .map(|at| {
+                    format!(
+                        " The affected message arrived at {} UTC.",
+                        at.format("%Y-%m-%d %H:%M:%S%.3f")
+                    )
+                })
+                .unwrap_or_default();
+            return advice(
+                "contact_admin",
+                format!(
+                    "{GATEWAY_NOT_RECEIVED_REASON}.{message_time} Ask your administrator to trace the delivery in gateway Activity using the bot ID and message time."
+                ),
+            );
+        }
         return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
     }
     if facts.failure_reason == Some(codes::BILLING_SUSPENDED) && is_x(facts.platform) {

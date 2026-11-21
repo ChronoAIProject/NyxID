@@ -571,6 +571,8 @@ struct NyxbotHealthRow {
     org_restore_attempts: i32,
     #[serde(default)]
     native_intake_refused: bool,
+    #[serde(default)]
+    gateway_not_received: Option<crate::services::channel_bot_health::MissingGatewayEvent>,
 }
 
 async fn latest_nyxbot_rows(
@@ -593,6 +595,10 @@ async fn latest_nyxbot_rows(
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
                 "org_restore_attempts": 1,
+                "gateway_not_received": {"$cond":[{"$and":[
+                    {"$eq":["$status","active"]},{"$eq":["$transport","gateway"]},
+                    {"$eq":["$delivery_status","failing"]},{"$eq":["$delivery_error","not_received"]}]},
+                    {"message_at":"$delivery_failed_at"},null]},
                 "native_intake_refused": {"$and":[{"$eq":["$transport","gateway"]},
                     {"$eq":["$status","active"]},{"$eq":["$gateway_native_phase","ready"]},
                     {"$in":["$gateway_source.type",["discord","whatsapp"]]},
@@ -601,14 +607,15 @@ async fn latest_nyxbot_rows(
                     {"$eq":["$gateway_native_delivery",crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED]}]},
             }},
             doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
-            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"}}},
-            doc! {"$replaceWith": "$row"},
+            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"},
+                "gateway_not_received": {"$max": "$gateway_not_received"}}},
+            doc! {"$replaceWith": {"$mergeObjects": ["$row", {"gateway_not_received": "$gateway_not_received"}]}},
             doc! {"$project": {
                 "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
                 "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
-                "org_restore_attempts": 1, "native_intake_refused": 1,
+                "org_restore_attempts": 1, "native_intake_refused": 1, "gateway_not_received": 1,
             }},
             doc! {"$limit": bot_ids.len() as i64},
         ])
@@ -705,6 +712,7 @@ fn health_with_nyxbot(
     }
     let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
     if let Some(row) = nyxbot {
+        facts.gateway_not_received = row.gateway_not_received;
         if row.native_intake_refused && facts.failure_reason.is_none() {
             facts.failure_reason =
                 Some(crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED);
@@ -2103,6 +2111,81 @@ mod tests {
         assert!(gateway.get("discord_intake").is_none());
         assert_eq!(gateway["recommended_action"], "gateway");
         assert_eq!(gateway["can_write"], false);
+    }
+
+    #[tokio::test]
+    async fn gateway_health_reports_missing_provider_event_until_delivery_recovers() {
+        let db = crate::test_utils::connect_test_database("bot_health_not_received")
+            .await
+            .unwrap();
+        crate::services::nyxbot_gateway_release_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut bot = make_telegram_bot();
+        bot.platform = "telegram-new".into();
+        bot.status = "active".into();
+        db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .insert_one(&bot)
+        .await
+        .unwrap();
+        let read_health = || {
+            health(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&bot.user_id),
+                Path(bot.id.clone()),
+            )
+        };
+        let message_at = bson::DateTime::parse_rfc3339_str("2026-01-02T03:04:05.678Z").unwrap();
+        let channels =
+            db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
+        channels
+            .insert_one(doc! {
+                "delivery_failed_at": message_at,
+                "_id": "binding", "channel_bot_id": &bot.id, "user_id": &bot.user_id,
+                "created_at": bson::DateTime::now(), "status": "active", "transport": "gateway",
+                "delivery_status": "failing", "delivery_error": "not_received",
+            })
+            .await
+            .unwrap();
+        // A later failed setup can coexist with the active gateway connection.
+        channels
+            .insert_one(doc! {
+                "_id": "later-attempt", "channel_bot_id": &bot.id, "user_id": &bot.user_id,
+                "created_at": bson::DateTime::now(), "status": "failed", "transport": "gateway",
+                "delivery_status": "failing", "delivery_error": "not_received",
+            })
+            .await
+            .unwrap();
+
+        let Json(failing) = read_health().await.unwrap();
+        assert_eq!(failing.status, "active");
+        assert_eq!(failing.recommended_action, "contact_admin");
+        assert!(
+            failing
+                .recommended_action_text
+                .contains("matching provider event")
+        );
+
+        channels
+            .update_one(
+                doc! {"_id": "binding"},
+                doc! {
+                    "$set": {"delivery_status": "ok"}, "$unset": {"delivery_error": ""},
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            failing
+                .recommended_action_text
+                .contains("2026-01-02 03:04:05.678 UTC")
+        );
+        let Json(recovered) = read_health().await.unwrap();
+        assert_eq!(recovered.recommended_action, "gateway");
+        db.drop().await.unwrap();
     }
 
     #[test]
