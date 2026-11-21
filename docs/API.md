@@ -3889,7 +3889,7 @@ For channel bot setup, see [Bot connection links](#bot-connection-links). Bot li
 1. Obtain a normal user OAuth access token through the authorization-code flow.
 2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
 3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
-4. On a terminal outcome, the browser returns to the stored callback URI after NyxID adds `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
+4. The browser that completes or declines the link returns to the stored callback URI. A later visit shows the outcome. The callback URI for each terminal state includes `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
 5. Use `GET /api/v1/connect-links/{id}` as the polling fallback. `POST /api/v1/connect-links/{id}/cancel` cancels an attempt from the creating app.
 
 **Create request:**

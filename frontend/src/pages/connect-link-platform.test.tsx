@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import { ConnectLinkPage } from "./connect-link";
+import { ConnectLinkPage, ConnectLinkReturnPage } from "./connect-link";
 import { ConnectLinkContent } from "@/components/connect-link/connect-link-content";
 import type { CompleteConnectLinkResponse } from "@/schemas/connect-links";
 
@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   preview: vi.fn(),
   navigate: vi.fn(),
+  terminal: null as "completed" | "cancelled" | "expired" | null,
+  callback: "desktop-app://return?state=123",
+  cancel: vi.fn(),
   actor: "person" as string | undefined,
   token: "hosted-token",
   available: true,
@@ -30,7 +33,7 @@ const mocks = vi.hoisted(() => ({
   fields: null as { name: string; label: string; secret: boolean }[] | null,
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useParams: () => ({ token: mocks.token }),
+  useParams: () => ({ token: mocks.token, linkId: "connect-link-1" }),
   useNavigate: () => mocks.navigate,
 }));
 vi.mock("@/stores/auth-store", () => ({
@@ -56,7 +59,8 @@ vi.mock("@/hooks/use-connect-links", () => ({
     mutateAsync: mocks.preview,
     isPending: false,
     data: {
-      status: "pending",
+      status: mocks.terminal ?? "pending",
+      callback_url: mocks.terminal ? mocks.callback : null,
       service_name: "xAI",
       service_slug: "llm-xai",
       scopes: mocks.scopes,
@@ -84,12 +88,26 @@ vi.mock("@/hooks/use-connect-links", () => ({
     }, []);
     return { mutateAsync, isPending: false, data };
   },
-  useCancelHostedConnectLink: () => ({ isPending: false }),
-  useConnectLinkStatus: () => ({}),
+  useCancelHostedConnectLink: () => {
+    const [data, setData] = useState();
+    return {
+      data,
+      isPending: false,
+      mutateAsync: async (token: string) => {
+        const result = await mocks.cancel(token);
+        setData(result);
+        return result;
+      },
+    };
+  },
+  useConnectLinkStatus: () => ({
+    data: { id: "connect-link-1", status: mocks.terminal ?? "pending", callback_url: mocks.callback },
+  }),
   connectLinkStorageKey: (id: string) => id,
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.terminal = null;
   mocks.available = true;
   mocks.actor = "person";
   mocks.token = "hosted-token";
@@ -103,6 +121,7 @@ beforeEach(() => {
   mocks.fields = null;
   mocks.catalogUnavailable = false;
   sessionStorage.clear();
+  window.history.replaceState(null, "", "/");
   mocks.preview.mockResolvedValue({});
   mocks.complete.mockResolvedValue({ status: "completed" });
   let now = 100_000;
@@ -491,3 +510,141 @@ it("a saved personal API key is not presented as Connected", async () => {
   expect(screen.getByText(/does not necessarily mean the key is invalid/)).toBeInTheDocument();
   expect(screen.queryByText("xAI connected")).toBeNull();
 });
+
+it.each(["completed", "cancelled", "expired"] as const)(
+  "shows the %s state to a later viewer on both hosted routes",
+  async (terminal) => {
+    mocks.terminal = terminal;
+    vi.useFakeTimers();
+    const assign = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    for (const Page of [ConnectLinkPage, ConnectLinkReturnPage]) {
+      const view = render(<Page />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      expect(assign).not.toHaveBeenCalled();
+      expect(screen.getByRole("status")).toBeInTheDocument();
+      expect(
+        screen.queryByText(/Returning to the requesting application/),
+      ).toBeNull();
+      view.unmount();
+    }
+  },
+);
+
+it("returns from an approved hosted connection only while that actor and link are open", async () => {
+  vi.useFakeTimers();
+  const assign = vi
+    .spyOn(window.location, "assign")
+    .mockImplementation(() => {});
+  mocks.complete.mockResolvedValue({
+    status: "completed",
+    callback_url: mocks.callback,
+  });
+  const view = render(<ConnectLinkPage />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Approve connection" }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1500);
+  });
+  expect(assign).toHaveBeenCalledExactlyOnceWith(mocks.callback);
+  mocks.actor = "other-person";
+  mocks.terminal = "completed";
+  view.rerender(<ConnectLinkPage />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1600);
+  });
+  expect(assign).toHaveBeenCalledTimes(1);
+});
+
+it.each([true, false])(
+  "returns only from a decline applied in this flow (%s)",
+  async (cancelledHere) => {
+    vi.useFakeTimers();
+    const assign = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    mocks.cancel.mockResolvedValue({
+      status: "cancelled",
+      callback_url: mocks.callback,
+      cancelled_here: cancelledHere,
+    });
+    render(<ConnectLinkPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    });
+    expect(mocks.cancel).toHaveBeenCalledWith("hosted-token");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(assign.mock.calls).toEqual(cancelledHere ? [[mocks.callback]] : []);
+  },
+);
+
+it.each(["same flow", "other account", "other attempt", "legacy callback"])(
+  "correlates a hosted OAuth return with its tab and account (%s)",
+  async (mode) => {
+    vi.useFakeTimers();
+    const assign = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    const authorization = "https://provider.example/authorize?state=abc";
+    mocks.connectMethod = "oauth";
+    mocks.complete.mockResolvedValue({
+      status: "oauth_required",
+      id: "connect-link-1",
+      authorization_url: authorization,
+    });
+    const hosted = render(<ConnectLinkPage />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Approve connection" }),
+      );
+    });
+    expect(assign).toHaveBeenCalledWith(authorization);
+    hosted.unmount();
+    assign.mockClear();
+
+    // SHA-256 of the synthetic OAuth state returned by the provider.
+    const receipt =
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const fragment =
+      mode === "legacy callback"
+        ? ""
+        : `#flow=${mode === "other attempt" ? "different" : receipt}`;
+    window.history.replaceState(
+      null,
+      "",
+      `/connect/return/connect-link-1?provider_status=success${fragment}`,
+    );
+    if (mode === "other account") mocks.actor = "other-person";
+    mocks.terminal = "completed";
+    const returned = render(
+      <StrictMode>
+        <ConnectLinkReturnPage />
+      </StrictMode>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(assign.mock.calls).toEqual(
+      mode === "same flow" ? [[mocks.callback]] : [],
+    );
+    if (mode === "legacy callback") {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Return to application" }),
+      );
+      expect(assign).toHaveBeenCalledExactlyOnceWith(mocks.callback);
+    }
+    returned.unmount();
+    assign.mockClear();
+    render(<ConnectLinkReturnPage />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(assign).not.toHaveBeenCalled();
+  },
+);

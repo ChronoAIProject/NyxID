@@ -20,7 +20,10 @@ const OPENAPI_PROBE_PATHS: &[&str] = &[
 ];
 
 const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
-const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
+const SCALAR_SCRIPT_URL: &str =
+    "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.82.1/dist/browser/standalone.js";
+const SCALAR_SCRIPT_INTEGRITY: &str =
+    "sha384-3llXraiLKrfG/eL4517CCzYH4wdaQ+bXhZeTcZKnEyJUu2vwIdsFBOVMa3m5lD4h";
 const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_SPEC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
@@ -399,7 +402,7 @@ pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
       data-layout="modern"
       data-proxy-url=""
     ></script>
-    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+    <script src="{SCALAR_SCRIPT_URL}" integrity="{SCALAR_SCRIPT_INTEGRITY}" crossorigin="anonymous"></script>
   </body>
 </html>"#
     )
@@ -610,8 +613,7 @@ pub fn render_catalog_html() -> &'static str {
 
 pub fn scalar_docs_csp() -> String {
     format!(
-        "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
-        SCALAR_SCRIPT_SRC
+        "default-src 'none'; script-src '{SCALAR_SCRIPT_INTEGRITY}'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
     )
 }
 
@@ -1651,9 +1653,23 @@ paths:
     }
 
     #[test]
-    fn scalar_docs_csp_allows_scalar_script_source() {
+    fn scalar_docs_csp_allows_the_integrity_checked_bundle() {
         let csp = scalar_docs_csp();
-        assert!(csp.contains("https://cdn.jsdelivr.net"));
+        let html = render_scalar_html("Docs", "/spec.json");
+        let integrity = html
+            .split_once("integrity=\"")
+            .expect("script integrity")
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        assert!(integrity.starts_with("sha384-"));
+        assert!(html.contains("@scalar/api-reference@1.82.1/dist/browser/standalone.js"));
+        assert!(html.contains("crossorigin=\"anonymous\""));
+        assert!(
+            csp.split(';')
+                .any(|d| d.trim() == format!("script-src '{integrity}'"))
+        );
         assert!(csp.contains("connect-src 'self'"));
     }
 

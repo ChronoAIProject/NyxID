@@ -40,9 +40,15 @@ pub(crate) async fn callback(request: Request<Body>, next: axum::middleware::Nex
         .extensions()
         .get::<RequestReceivedAt>()
         .map_or_else(chrono::Utc::now, |at| at.0);
-    crate::services::approval_service::CALLBACK_INGRESS
+    let mut response = crate::services::approval_service::CALLBACK_INGRESS
         .scope(received, next.run(request))
-        .await
+        .await;
+    // Apply the document sandbox regardless of the media type declared upstream.
+    response.headers_mut().append(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("sandbox; default-src 'none'; frame-ancestors 'none'"),
+    );
+    response
 }
 
 pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
@@ -132,6 +138,59 @@ fn caller_identity<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxy_documents_have_an_opaque_origin_and_preserve_response_bytes() {
+        use axum::{Router, http::header, middleware, routing::get};
+        use tower::ServiceExt;
+
+        for media_type in [
+            "text/html; charset=utf-8",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "application/xhtml+xml",
+            "application/json",
+            "application/octet-stream",
+        ] {
+            let route = Router::new()
+                .route(
+                    "/api/v1/proxy/s/cma/resource",
+                    get(move || async move { ([(header::CONTENT_TYPE, media_type)], "fixture") }),
+                )
+                .layer(middleware::from_fn(callback));
+            let response = crate::mw::security_headers::with_response_headers(route)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/proxy/s/cma/resource")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert_eq!(response.headers()[header::CONTENT_TYPE], media_type);
+            if !matches!(media_type, "application/json" | "application/octet-stream") {
+                assert!(
+                    response.headers()[header::CONTENT_SECURITY_POLICY]
+                        .to_str()
+                        .unwrap()
+                        .split(';')
+                        .any(|directive| directive.trim() == "sandbox"),
+                    "{media_type}"
+                );
+            }
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 32)
+                    .await
+                    .unwrap(),
+                "fixture"
+            );
+        }
+    }
 
     #[test]
     fn refusal_throttle_identity_uses_user_for_jwts_even_with_relay_parent_key() {

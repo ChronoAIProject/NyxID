@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { credentialVerificationMeta } from "@/lib/credential-verification";
 import type { CredentialVerification } from "@/schemas/credential-verification";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
@@ -60,6 +62,14 @@ import {
 } from "@/lib/token-exchange-credential";
 
 const CLICK_THROTTLE_MS = 750;
+
+function useHostedReturn(callback: string | null | undefined) {
+  useEffect(() => {
+    if (!callback) return;
+    const timer = window.setTimeout(() => window.location.assign(callback), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [callback]);
+}
 
 interface DeviceChallenge {
   readonly code: string;
@@ -243,18 +253,11 @@ function ConnectLinkSession({
     return () => window.clearInterval(timer);
   }, [oauthPopupOpen]);
 
-  useEffect(() => {
-    const callback =
-      complete.data?.status === "completed"
-        ? complete.data.callback_url
-        : (cancel.data?.callback_url ?? preview.data?.callback_url);
-    if (!callback || !redirectOnTerminal) return;
-    const timer = window.setTimeout(
-      () => window.location.assign(callback),
-      1_500,
-    );
-    return () => window.clearTimeout(timer);
-  }, [cancel.data, complete.data, preview.data, redirectOnTerminal]);
+  const actionCallback = complete.data?.status === "completed"
+    ? complete.data.callback_url
+    : cancel.data?.cancelled_here ? cancel.data.callback_url : null;
+  const callback = redirectOnTerminal && !embedded ? actionCallback : null;
+  useHostedReturn(callback);
 
   function withinCooldown(): boolean {
     const now = Date.now();
@@ -324,6 +327,11 @@ function ConnectLinkSession({
           setOauthPopupOpen(true);
           popup.location.assign(result.authorization_url);
           return;
+        }
+        const oauthState = new URL(result.authorization_url).searchParams.get("state");
+        if (oauthState && user) {
+          const receipt = bytesToHex(sha256(new TextEncoder().encode(oauthState)));
+          sessionStorage.setItem(`${connectLinkStorageKey(result.id)}:flow`, `${user.id}:${receipt}`);
         }
         sessionStorage.setItem(connectLinkStorageKey(result.id), token);
         window.location.assign(result.authorization_url);
@@ -471,29 +479,20 @@ function ConnectLinkSession({
     );
   }
 
-  const terminal =
-    complete.data?.status === "completed"
-      ? {
-          status: "completed" as const,
-          callbackUrl: complete.data.callback_url,
-        }
-      : cancel.data && cancel.data.status !== "pending"
-        ? { status: cancel.data.status, callbackUrl: cancel.data.callback_url }
-        : preview.data && preview.data.status !== "pending"
-          ? {
-              status: preview.data.status,
-              callbackUrl: preview.data.callback_url,
-            }
-          : null;
+  const status = complete.data?.status === "completed"
+    ? "completed"
+    : (cancel.data?.status ?? preview.data?.status);
   return (
     <ConnectShell embedded={embedded}>
-      {terminal ? (
+      {status && status !== "pending" ? (
         <TerminalPanel
-          status={terminal.status}
+          status={status}
           savedCredential={!usePlatformKey && preview.data?.connect_method === "api_key"}
           credentialVerification={complete.data?.credential_verification}
           serviceName={preview.data?.service_name}
-          callbackUrl={embedded ? null : (terminal.callbackUrl ?? null)}
+          callbackUrl={callback ?? null}
+          manualCallbackUrl={redirectOnTerminal && !embedded && cancel.data?.cancelled_here === undefined
+            ? cancel.data?.callback_url : null}
         />
       ) : (
         <Card className="connect-link-card border-border/70">
@@ -634,14 +633,30 @@ function ConnectLinkSession({
 export function ConnectLinkReturnPage() {
   useUiTranslation();
   const { linkId } = useParams({ strict: false }) as { linkId: string };
+  const { user } = useAuthStore();
+  return <ConnectLinkReturnSession key={`${user?.id ?? "anonymous"}:${linkId}`} linkId={linkId} />;
+}
+
+function ConnectLinkReturnSession({ linkId }: { readonly linkId: string }) {
   const navigate = useNavigate();
-  const { isAuthenticated, isLoading } = useAuthStore();
+  const { isAuthenticated, isLoading, user } = useAuthStore();
   const status = useConnectLinkStatus(linkId, isAuthenticated && !isLoading);
   const complete = useCompleteConnectLink();
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const recoveryAttemptedRef = useRef(false);
   const openerRequestSentRef = useRef(false);
   const providerError = connectLinkProviderError(window.location.search);
+
+  const storageKey = connectLinkStorageKey(linkId);
+  const [startedHere] = useState(() => sessionStorage.getItem(storageKey) !== null);
+  const [storedFlow] = useState(() => sessionStorage.getItem(`${storageKey}:flow`));
+  const receipt = new URLSearchParams(window.location.hash.slice(1)).get("flow");
+  const sameActor = !!user && !!storedFlow?.startsWith(`${user.id}:`);
+  const returnedHere = !!user && !!receipt && storedFlow === `${user.id}:${receipt}`;
+  const callback = sameActor && complete.data?.status === "completed"
+    ? complete.data.callback_url
+    : returnedHere && status.data?.status === "completed" ? status.data.callback_url : null;
+  useHostedReturn(isAuthenticated && !isLoading ? callback : null);
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
@@ -721,7 +736,9 @@ export function ConnectLinkReturnPage() {
       status.data?.status !== "expired"
     )
       return;
-    sessionStorage.removeItem(connectLinkStorageKey(linkId));
+    if (!isAuthenticated || isLoading) return;
+    sessionStorage.removeItem(storageKey);
+    sessionStorage.removeItem(`${storageKey}:flow`);
     if (window.opener) {
       window.opener.postMessage(
         {
@@ -732,14 +749,7 @@ export function ConnectLinkReturnPage() {
         window.location.origin,
       );
     }
-    const callback = status.data.callback_url;
-    if (!callback) return;
-    const timer = window.setTimeout(
-      () => window.location.assign(callback),
-      1_500,
-    );
-    return () => window.clearTimeout(timer);
-  }, [linkId, status.data]);
+  }, [isAuthenticated, isLoading, linkId, status.data, storageKey]);
 
   if (isLoading || !isAuthenticated || status.isLoading) {
     return (
@@ -765,7 +775,8 @@ export function ConnectLinkReturnPage() {
         <TerminalPanel
           status={status.data.status}
           serviceName={status.data.service_name}
-          callbackUrl={status.data.callback_url ?? null}
+          callbackUrl={callback ?? null}
+          manualCallbackUrl={startedHere ? status.data.callback_url : null}
         />
       </ConnectShell>
     );
@@ -1127,12 +1138,14 @@ export function TerminalPanel({
   status,
   serviceName,
   callbackUrl,
+  manualCallbackUrl,
 }: {
   readonly savedCredential?: boolean;
   readonly credentialVerification?: CredentialVerification | null;
   readonly status: "completed" | "cancelled" | "expired";
   readonly serviceName?: string;
   readonly callbackUrl: string | null;
+  readonly manualCallbackUrl?: string | null;
 }) {
   useUiTranslation();
   const completed = status === "completed";
@@ -1173,6 +1186,11 @@ export function TerminalPanel({
             ? translateUi("You may now close this page.")
             : translateUi("You may now close this page or return to the requesting application.")}
       </p>
+      {!callbackUrl && manualCallbackUrl ? (
+        <Button type="button" variant="secondary" onClick={() => window.location.assign(manualCallbackUrl)}>
+          {translateUi("Return to application")}
+        </Button>
+      ) : null}
       {completed && !callbackUrl ? (
         <p className="mt-2 text-13 text-muted-foreground">{translateUi("Your agent can now retry the original request.")}</p>
       ) : null}

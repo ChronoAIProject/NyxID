@@ -337,9 +337,7 @@ mod tests {
                 .headers()
                 .get(header::CONTENT_SECURITY_POLICY)
                 .and_then(|value| value.to_str().ok()),
-            Some(
-                "default-src 'none'; script-src https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
-            )
+            Some(crate::services::api_docs_service::scalar_docs_csp().as_str())
         );
 
         let body = body_string(response).await;

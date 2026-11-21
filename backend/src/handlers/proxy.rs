@@ -800,6 +800,7 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -1190,6 +1191,7 @@ pub async fn proxy_request_by_slug(
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    crate::mw::csrf::check_proxy_navigation(&state.config, &auth_user.auth_method, &request)?;
     ingress::execute(
         &state.refusal_throttle,
         &auth_user,
@@ -9777,6 +9779,95 @@ mod tests {
             claims.act.expect("delegation actor should be present").sub,
             "custom-sandbox"
         );
+    }
+
+    #[tokio::test]
+    async fn session_proxy_navigation_checks_the_browser_origin_before_service_lookup() {
+        use crate::mw::auth::AuthMethod;
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+        use axum::extract::{Path, State};
+
+        let mut state = test_app_state_no_db().await;
+        state.config.frontend_url = "https://front.example".into();
+        state.config.domain_aliases.frontend_urls = vec!["https://alias.test".into()];
+        let session = test_auth_user(&uuid::Uuid::new_v4().to_string());
+        for by_slug in [true, false] {
+            for (auth_method, site, origin, referer, blocked) in [
+                (AuthMethod::Session, "cross-site", None, None, true),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://other.example"),
+                    None,
+                    true,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-site",
+                    Some("https://front.example"),
+                    Some("https://other.example/doc"),
+                    true,
+                ),
+                (AuthMethod::Session, "same-site", Some("null"), None, true),
+                (
+                    AuthMethod::Session,
+                    "cross-site",
+                    None,
+                    Some("https://alias.test/docs"),
+                    false,
+                ),
+                (
+                    AuthMethod::Session,
+                    "same-origin",
+                    Some("https://front.example"),
+                    None,
+                    false,
+                ),
+                (AuthMethod::Session, "none", None, None, false),
+                (AuthMethod::AccessToken, "cross-site", None, None, false),
+                (AuthMethod::ApiKey, "cross-site", None, None, false),
+            ] {
+                let mut auth = session.clone();
+                auth.auth_method = auth_method;
+                auth.scope = "proxy".into();
+                let mut req = axum::http::Request::builder().header("sec-fetch-site", site);
+                if let Some(value) = origin {
+                    req = req.header("origin", value);
+                }
+                if let Some(value) = referer {
+                    req = req.header("referer", value);
+                }
+                let req = req.body(axum::body::Body::empty()).unwrap();
+                if !blocked {
+                    crate::mw::csrf::check_proxy_navigation(&state.config, &auth.auth_method, &req)
+                        .expect("allow this caller to enter proxy routing");
+                    continue;
+                }
+                let path = Path(("missing".into(), "resource".into()));
+                let result = if by_slug {
+                    Box::pin(super::proxy_request_by_slug(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                } else {
+                    Box::pin(super::proxy_request(
+                        State(state.clone()),
+                        auth,
+                        Default::default(),
+                        path,
+                        req,
+                    ))
+                    .await
+                };
+                assert!(
+                    matches!(result, Err(crate::errors::AppError::Forbidden(ref message)) if message == "Cross-site request blocked")
+                );
+            }
+        }
     }
 
     #[tokio::test]
