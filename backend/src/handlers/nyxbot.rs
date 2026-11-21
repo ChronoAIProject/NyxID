@@ -6772,6 +6772,21 @@ async fn gateway_inbound(
             admission_diagnostics::telegram_group_outcome(state, row, source, activity, code).await;
         }
     }
+    if row.platform == "whatsapp" && activity["conversation"]["kind"] == "private" {
+        if row.gateway_source.is_some() {
+            admission_diagnostics::native_whatsapp_outcome(
+                state,
+                row,
+                result.as_ref().map_err(|_| ()),
+            )
+            .await;
+        }
+        if matches!(result, Ok(Inbound::Busy)) {
+            return Ok(Inbound::Reply(
+                "NyxBot is busy. Please try again shortly.".into(),
+            ));
+        }
+    }
     result
 }
 
@@ -7631,7 +7646,7 @@ pub async fn relay_callback(
         .map(str::to_owned);
     let message_id = claims.message_id.clone();
     // Private chats are tracked only where inbound diagnostics exist.
-    let track_admission = kind != "private" || row.platform == "x";
+    let track_admission = kind != "private" || matches!(row.platform.as_str(), "x" | "whatsapp");
     let admission_facts = if track_admission {
         match crate::services::nyxbot_admission_service::begin(
             &state.db,

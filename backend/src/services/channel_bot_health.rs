@@ -147,7 +147,7 @@ impl<'a> HealthFacts<'a> {
             org_guest_billing: None,
             platform: &bot.platform,
             inbound_outcome: bot.diagnostics.last_inbound_outcome.as_ref().filter(|o| {
-                !o.code.starts_with("telegram_group_")
+                !(o.code.starts_with("telegram_group_") || o.code.starts_with("whatsapp_"))
                     || bot.diagnostics.last_inbound_at.is_none_or(|at| o.at >= at)
             }),
             status: &bot.status,
@@ -484,6 +484,14 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     {
         return recommendation;
     }
+    if facts.gateway
+        && facts.platform == "whatsapp"
+        && facts.org_guest_billing.is_none()
+        && let Some(outcome) = facts.inbound_outcome
+        && let Some(advice) = super::channel_inbound_diagnostics::recommendation(&outcome.code)
+    {
+        return advice;
+    }
     // Preserve existing gateway advice when no org-guest billing fact was added.
     if facts.gateway && facts.org_guest_billing.is_none() {
         if let Some(missing) = facts.gateway_not_received {
@@ -605,6 +613,40 @@ pub(crate) static TEST_NOTICES: std::sync::LazyLock<
         std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<RecordedNotice>>,
     >,
 > = std::sync::LazyLock::new(Default::default);
+
+/// Record the signed callback even though native ownership precludes relay admission.
+pub(crate) async fn record_native_relay_conflict(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    let code = codes::NATIVE_RELAY_CONFLICT;
+    let now = bson::DateTime::now();
+    let previous = db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":&bot.id,"user_id":&bot.user_id,"is_active":true,"platform":"whatsapp",
+            "platform_bot_id": &bot.platform_bot_id,
+            "$expr":{"$eq":[{"$ifNull":["$ownership_version",0_i64]},bot.ownership_version]}},
+            bson::doc! {"$set": {
+                "diagnostics.last_webhook_at":now, "diagnostics.failure_reason":code,
+                "diagnostics.last_webhook_error":{"code":code,"reason":code,"at":now},
+            }},
+        )
+        .projection(bson::doc! {"diagnostics.failure_reason":1})
+        .await?;
+    if let Some(previous) = previous
+        && previous
+            .get_document("diagnostics")
+            .ok()
+            .and_then(|d| d.get_str("failure_reason").ok())
+            != Some(code)
+    {
+        let mut facts = HealthFacts::for_bot(bot, Utc::now(), true);
+        facts.failure_reason = Some(code);
+        notify_failure(db, bot, &recommend(&facts));
+    }
+    Ok(())
+}
 
 /// Best-effort failure notice to the bot owner, or to every admin of an
 /// org-owned bot. Called once per failure transition; never fails the caller.
