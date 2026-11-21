@@ -1989,9 +1989,19 @@ async fn execution_permission_voice_hidden_task_retains_root_and_cancellation() 
 }
 
 #[tokio::test]
-async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
+async fn voice_backend_task_refuses_only_outstanding_manual_approval() {
+    use crate::models::{
+        assistant_settings::AccessMode,
+        service_approval_config::{ApprovalEffect, ApprovalMode},
+    };
+    use crate::services::{approval_service, assistant_settings_service as settings};
     use crate::services::{assistant_voice as voice, execution_permission_dispatch::phase_b_tests};
-    use axum::{Extension, Router, body::Body, http::Request, routing::any};
+    use axum::{
+        Extension, Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::any,
+    };
     use tower::ServiceExt;
     let (state, visible, mut call) = setup("proposal_voice_v2").await;
     phase_b_tests::enroll(&state.db, &visible.user_id).await;
@@ -2033,7 +2043,7 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})),
         )
-        .expect(0)
+        .expect(2)
         .mount(&server)
         .await;
     let mut service = test_auto_connected_catalog_service();
@@ -2073,7 +2083,19 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
         ))
         .await
         .unwrap();
-    state.db.collection::<bson::Document>("service_approval_configs").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"user_id":&visible.user_id,"service_id":&service.id,"service_name":"Status","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let policy = |required, effect| {
+        approval_service::set_service_approval_config(
+            &state.db,
+            &visible.user_id,
+            &service.id,
+            "Status",
+            Some(required),
+            Some(&ApprovalMode::PerRequest),
+            None,
+            effect,
+        )
+    };
+    policy(true, None).await.unwrap();
     let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
         &state.db,
         &state.encryption_keys,
@@ -2093,28 +2115,31 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
             )),
         )
         .with_state(state.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/proxy/s/voice-v2-status/status")
-                .header("x-api-key", credential.raw_key.as_str())
-                .body(Body::empty())
-                .unwrap(),
+    let read_status = || async {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/proxy/s/voice-v2-status/status")
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
         )
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        axum::http::StatusCode::FORBIDDEN,
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    };
+    let (status, body) = read_status().await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "approval_unsupported", "{body}");
+    assert_eq!(body["error_code"], 12502, "{body}");
     for collection in ["approval_requests", "assistant_acknowledgements"] {
         assert_eq!(
             state
@@ -2128,6 +2153,49 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
         );
     }
     assert!(server.received_requests().await.unwrap().is_empty());
+    let set_mode = |mode| {
+        settings::update(
+            &state.db,
+            &visible.user_id,
+            settings::Update {
+                access_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+    };
+    set_mode(AccessMode::Autopilot).await.unwrap();
+    let (status, body) = read_status().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Full access with a personal approval policy: {body}"
+    );
+    assert_eq!(body["ok"], true);
+
+    policy(true, Some(&ApprovalEffect::Deny)).await.unwrap();
+    let (status, body) = read_status().await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "forbidden", "{body}");
+
+    set_mode(AccessMode::Nyxmode).await.unwrap();
+    policy(false, Some(&ApprovalEffect::AutoAllow))
+        .await
+        .unwrap();
+    let (status, body) = read_status().await;
+    assert_eq!(status, StatusCode::OK, "No approval required: {body}");
+    assert_eq!(body["ok"], true);
+    for collection in ["approval_requests", "assistant_acknowledgements"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {"status":"pending"})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
     server.verify().await;
     state.db.drop().await.unwrap();
 }

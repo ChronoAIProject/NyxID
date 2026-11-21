@@ -628,6 +628,12 @@ fn error_result_inner(
                     "message": message}),
             };
         }
+        AppError::Unauthorized(_) if chat.is_some_and(|chat| chat.execution_voice_task) => {
+            "Authentication failed for this tool call."
+        }
+        AppError::Conflict(_) if chat.is_some_and(|chat| chat.execution_voice_task) => {
+            "The resource state conflicts with this tool call."
+        }
         AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
         }
