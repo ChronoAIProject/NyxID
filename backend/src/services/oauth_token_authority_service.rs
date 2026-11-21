@@ -101,26 +101,25 @@ impl<'a> AuthorityReads<'a> {
             .unwrap_or(None);
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            AUTHORITY_READ_BUDGET + std::time::Duration::from_millis(250),
-            async {
-                #[cfg(test)]
-                if matches!(fault, Some(ReadFaultKind::Timeout)) {
-                    std::future::pending::<()>().await;
-                }
-                let query = filter.clone();
-                #[cfg(test)]
-                let query = if matches!(fault, Some(ReadFaultKind::Database)) {
-                    doc! {"$invalidAuthorityTestOperator": true}
-                } else {
-                    query
-                };
-                collection
-                    .find_one(query)
-                    .max_time(AUTHORITY_READ_BUDGET)
-                    .await
-            },
-        )
+        let budget = AUTHORITY_READ_BUDGET;
+        #[cfg(test)]
+        let budget = FIXTURE_READ_BUDGET
+            .try_with(|budget| *budget)
+            .unwrap_or(budget);
+        let result = tokio::time::timeout(budget + std::time::Duration::from_millis(250), async {
+            #[cfg(test)]
+            if matches!(fault, Some(ReadFaultKind::Timeout)) {
+                std::future::pending::<()>().await;
+            }
+            let query = filter.clone();
+            #[cfg(test)]
+            let query = if matches!(fault, Some(ReadFaultKind::Database)) {
+                doc! {"$invalidAuthorityTestOperator": true}
+            } else {
+                query
+            };
+            collection.find_one(query).max_time(budget).await
+        })
         .await;
         #[cfg(test)]
         record_read_latency(
@@ -165,6 +164,30 @@ pub(super) struct ReadFault {
 
 #[cfg(test)]
 tokio::task_local! { pub(super) static READ_FAULT: ReadFault; }
+
+#[cfg(test)]
+tokio::task_local! { static FIXTURE_READ_BUDGET: std::time::Duration; }
+
+/// Functional router fixtures exercise real primary reads even on a stalled CI replica.
+#[cfg(test)]
+pub(crate) async fn with_fixture_read_budget<F: Future>(operation: F) -> F::Output {
+    FIXTURE_READ_BUDGET
+        .scope(std::time::Duration::from_secs(90), operation)
+        .await
+}
+
+#[cfg(test)]
+pub(crate) async fn with_unavailable_user_read<F: Future>(operation: F) -> F::Output {
+    READ_FAULT
+        .scope(
+            ReadFault {
+                collection: crate::models::user::COLLECTION_NAME,
+                kind: ReadFaultKind::Database,
+            },
+            operation,
+        )
+        .await
+}
 
 // Opt-in measurement for the real parallel test selection. Only collection,
 // duration and outcome are recorded; no query, user, token or credential data.
