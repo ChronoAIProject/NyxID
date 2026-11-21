@@ -2,7 +2,7 @@ import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../i18n/appTranslation";
 import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { Text,  Pressable, StyleSheet, View } from "react-native";
+import { Text, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -71,6 +71,8 @@ export function HistoryCard({
 }: HistoryCardProps) {
   useAppLanguage();
   const { colors } = useTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const compact = width / Math.max(1, fontScale) < 340;
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const summary =
@@ -84,6 +86,11 @@ export function HistoryCard({
   );
   const decision = decisionLabel(item.status);
 
+  const outcome = (
+    <Text style={[styles.value, { color: decisionColor(colors, item.status) }]}>
+      {decision}
+    </Text>
+  );
   return (
     <GroupedCell first={first} last={last}>
       <Pressable
@@ -102,7 +109,7 @@ export function HistoryCard({
           <ServiceIcon slug={item.service_slug} size="md" />
         </View>
         <View style={styles.body}>
-          <Text style={styles.title} numberOfLines={2}>
+          <Text style={styles.title} numberOfLines={compact ? undefined : 2}>
             {item.title}
           </Text>
           <Text style={styles.secondary}>{summary}</Text>
@@ -114,12 +121,9 @@ export function HistoryCard({
             {(channel ? (decidedAt
               ? (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Decided {{time}} · {{risk}} risk", { channel: channel, time: decidedAt, risk: riskLabel }) : translateApp("via {{channel}} · Decided {{time}}", { channel: channel, time: decidedAt })) : (requestedAt ? (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Requested {{time}} · {{risk}} risk", { channel: channel, time: requestedAt, risk: riskLabel }) : translateApp("via {{channel}} · Requested {{time}}", { channel: channel, time: requestedAt })) : (item.risk_level !== "unknown" ? translateApp("via {{channel}} · Time not recorded · {{risk}} risk", { channel: channel, risk: riskLabel }) : translateApp("via {{channel}} · Time not recorded", { channel: channel })))) : (decidedAt ? (item.risk_level !== "unknown" ? translateApp("Decided {{time}} · {{risk}} risk", { time: decidedAt, risk: riskLabel }) : translateApp("Decided {{time}}", { time: decidedAt })) : (requestedAt ? (item.risk_level !== "unknown" ? translateApp("Requested {{time}} · {{risk}} risk", { time: requestedAt, risk: riskLabel }) : translateApp("Requested {{time}}", { time: requestedAt })) : (item.risk_level !== "unknown" ? translateApp("Time not recorded · {{risk}} risk", { risk: riskLabel }) : translateApp("Time not recorded")))))}
           </Text>
+          {compact && outcome}
         </View>
-        <Text
-          style={[styles.value, { color: decisionColor(colors, item.status) }]}
-        >
-          {decision}
-        </Text>
+        {!compact && outcome}
         {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
       </Pressable>
     </GroupedCell>

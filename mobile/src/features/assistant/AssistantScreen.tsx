@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "./AttachmentSourcePicker";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -1427,6 +1428,35 @@ export function AssistantScreen({
         inset
         onRetry={() => void assistant.recover()}
       />
+      {homeVisible && uploads.otherDraft ? (
+        <View style={styles.errorRow}>
+          <ActionButton
+            label={t("Reopen chat with unfinished attachments")}
+            variant="secondary"
+            onPress={() => {
+              const target = uploads.otherDraft;
+              if (target?.name === "GroupChat")
+                navigation.push("GroupChat", target.params);
+              else if (target?.name === "Assistant")
+                navigation.push("Assistant", target.params);
+            }}
+          />
+          <ActionButton
+            label={t("Discard attachment draft")}
+            variant="secondary"
+            onPress={() =>
+              Alert.alert(t("Discard attachment draft?"), undefined, [
+                { text: t("Cancel"), style: "cancel" },
+                {
+                  text: t("Discard"),
+                  style: "destructive",
+                  onPress: () => void uploads.discardOtherDraft(),
+                },
+              ])
+            }
+          />
+        </View>
+      ) : null}
       {assistant.agentsError ? (
         <View style={styles.errorRow}>
           <Notice message={assistant.agentsError} tone="error" />
@@ -1906,6 +1936,13 @@ export function AssistantScreen({
             <ComposerConnectionPicker state={connection} />
             <AssistantPendingUploads
               files={uploads.files}
+              reselect={uploads.session.reselect}
+              choose={() => void uploads.pick("files")}
+              dismiss={() => uploads.session.dismissReselection()}
+              resume={() => uploads.session.resume()}
+              canResume={
+                canCompose && !uploads.picking && !uploads.session.sending
+              }
               remove={uploads.remove}
               disabled={running || uploads.session.sending}
               showMentionHandles={false}
@@ -2169,6 +2206,7 @@ export function AssistantScreen({
           <RightPanelSlot />
         </View>
       </RightPanelProvider>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

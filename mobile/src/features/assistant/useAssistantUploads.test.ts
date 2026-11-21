@@ -1,3 +1,4 @@
+import { createUploadDraftRecovery } from "./uploadDraftRecovery";
 import { createAssistantDraftStore } from "./assistantDraftStore";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -5,8 +6,34 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import type { useAssistantUploads } from "./useAssistantUploads";
 
-function harness(platform = "android") {
+function memoryDisk() {
+  const records = new Map<string, string>();
+  return {
+    getItem: async (key: string) => records.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      records.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      records.delete(key);
+    },
+    getAllKeys: async () => [...records.keys()],
+    multiRemove: async (keys: string[]) => {
+      for (const key of keys) records.delete(key);
+    },
+  };
+}
+function harness(
+  platform = "android",
+  recovery?: {
+    disk: ReturnType<typeof memoryDisk>;
+    owner: string;
+    key: string;
+    missing?: boolean;
+  },
+) {
   let state = "active";
+  let account = recovery?.owner ?? null;
+  const durable = createUploadDraftRecovery(recovery?.disk ?? memoryDisk());
   let epoch = 1;
   let focused = true;
   const listeners = new Set<(state: string) => void>();
@@ -30,11 +57,23 @@ function harness(platform = "android") {
     enabled: boolean;
     online: boolean;
     retainKey?: string;
-  } = { generation: 0, enabled: true, online: true };
+    groupId?: string;
+    conversationId?: string;
+    agentId?: string;
+  } = {
+    groupId: recovery?.key.startsWith("crew:")
+      ? recovery.key.slice(5)
+      : undefined,
+    conversationId: recovery?.key === privateKey ? "original-chat" : undefined,
+    generation: 0,
+    enabled: true,
+    online: true,
+    retainKey: recovery?.key,
+  };
   class File {
     constructor(readonly uri: string) {}
     get exists() {
-      return !disposed.includes(this.uri);
+      return !recovery?.missing && !disposed.includes(this.uri);
     }
     size = 3;
     delete() {
@@ -45,12 +84,17 @@ function harness(platform = "android") {
     }
   }
   const h = hookHarness<ReturnType<typeof useAssistantUploads>>({
+    "./uploadDraftStorage": { uploadDraftStorage: durable },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => account },
     "./assistantDraftStore": {
+      discardUploadDraft: (owner: string, key: string) =>
+        durable.save(owner, key, { rows: [], reselect: false }),
       assistantDraftStore: createAssistantDraftStore(() => epoch),
     },
     expo: { requireOptionalNativeModule: () => (installed ? {} : null) },
     "react-native": {
       Platform: { OS: platform },
+      Keyboard: { dismiss() {} },
       Alert: {
         alert: (title: unknown, _: unknown, buttons: typeof choices) => {
           alertTitle = title;
@@ -148,6 +192,7 @@ function harness(platform = "android") {
   h.mount(() => hook(props));
   return {
     h,
+    durable,
     props,
     requests,
     disposed,
@@ -165,31 +210,22 @@ function harness(platform = "android") {
       if (platform === "ios")
         iosChoice?.((iosOptions as any).options.indexOf(label));
       else {
-        choices.find((b) => b.text === "More options…")?.onPress?.();
-        choices.find((b) => b.text === label)?.onPress?.();
+        h.flush();
+        h.value().sourcePicker?.choices.find(b => b.label === label)?.onPress();
       }
     },
     cancelChooser: () => {
       if (platform === "ios") iosChoice?.(3);
-      else choices.find((b) => b.text === "Cancel")?.onPress?.();
+      else { h.flush(); h.value().sourcePicker?.onClose(); }
     },
     choose: (source: "files" | "photos" | "camera") => {
-      if (platform !== "ios" && source === "files")
-        choices.find((b) => b.text === "More options…")?.onPress?.();
       if (platform === "ios")
         iosChoice?.(source === "camera" ? 0 : source === "photos" ? 1 : 2);
-      else
-        choices
-          .find(
-            (button) =>
-              button.text ===
-              (source === "camera"
-                ? "Camera"
-                : source === "photos"
-                  ? "Photos"
-                  : "Files"),
-          )
-          ?.onPress?.();
+      else {
+        h.flush();
+        h.value().sourcePicker?.choices.find(b => b.label ===
+          (source === "camera" ? "Camera" : source === "photos" ? "Photos" : "Files"))?.onPress();
+      }
     },
     conversionError: () => {
       conversionError = true;
@@ -202,6 +238,7 @@ function harness(platform = "android") {
       for (const cb of listeners) cb(next);
     },
     changeOwner: () => {
+      account = account ? "other-account" : null;
       epoch++;
     },
     blur: () => {
@@ -248,15 +285,16 @@ test("plus chooser routes Camera, Photos and Files to their respective native pi
       const x = harness(platform);
       x.h.value().choose();
       assert.equal(x.calls.length, 0);
+      x.h.flush();
       assert.deepEqual(
         Array.from(
           platform === "ios"
             ? x.iosOptions().options
-            : x.choices().map((b) => b.text),
+            : x.h.value().sourcePicker?.choices.map((b) => b.label),
         ),
         platform === "ios"
           ? ["Camera", "Photos", "Files", "Cancel"]
-          : ["Camera", "Photos", "More options…"],
+          : ["Camera", "Photos", "Files"],
       );
       x.choose(source);
       x.cameraPermission.resolve({ granted: true });
@@ -277,6 +315,40 @@ test("plus chooser routes Camera, Photos and Files to their respective native pi
       x.h.unmount();
     }
   }
+});
+
+test("Android source rows reject captured stale authority and close after context changes", async () => {
+  for (const boundary of ["account", "chat", "permission", "offline", "blur"]) {
+    const x = harness();
+    x.h.value().choose();
+    x.h.flush();
+    const camera = x.h.value().sourcePicker!.choices[0]!;
+    if (boundary === "account") x.changeOwner();
+    if (boundary === "chat") x.props.generation++;
+    if (boundary === "permission") x.props.enabled = false;
+    if (boundary === "offline") x.props.online = false;
+    if (boundary === "blur") x.blur();
+    x.h.render();
+    assert.equal(x.h.value().sourcePicker, undefined);
+    camera.onPress();
+    x.cameraPermission.resolve({ granted: true });
+    await x.h.settle();
+    assert.equal(x.calls.length, 0);
+    assert.equal(x.requests.length, 0);
+    x.h.unmount();
+  }
+});
+
+test("Android attachment choices use a vertical list and retain Files without nested native dialog buttons", () => {
+  const x = harness("android");
+  x.h.value().choose();
+  x.h.flush();
+  assert.deepEqual(Array.from(x.h.value().sourcePicker?.choices.map((choice: { label: string }) => choice.label) ?? []), ["Camera", "Photos", "Files"]);
+  assert.equal(x.choices().length, 0, "large labels never enter Android Alert's button row");
+  x.h.value().sourcePicker!.onClose();
+  x.h.flush();
+  assert.equal(x.h.value().sourcePicker, undefined);
+  x.h.unmount();
 });
 
 test("late chooser actions cannot open a picker for an obsolete account, chat or disabled composer", async () => {
@@ -652,7 +724,7 @@ test("connection chooser action retains Camera/Photos/Files and rejects stale ac
         "Cancel",
       ]);
       assert.equal(x.iosOptions().cancelButtonIndex, 4);
-    } else assert.equal(x.choices().length, 3);
+    } else { x.h.flush(); assert.equal(x.h.value().sourcePicker?.choices.length, 4); }
     x.chooseExtra("Use a connection");
     assert.equal(connections, 1);
     assert.equal(x.calls.length, 0);
@@ -665,4 +737,172 @@ test("connection chooser action retains Camera/Photos/Files and rejects stale ac
     assert.equal(connections, 1);
     x.h.unmount();
   }
+});
+
+const privateKey = JSON.stringify(["private", "original-chat"]);
+for (const platform of ["android", "ios"]) {
+  test(`${platform} reopens an interrupted Files selection in its original chat and clears on dismissal`, async () => {
+    const recovery = { disk: memoryDisk(), owner: "owner-A", key: privateKey };
+    const old = harness(platform, recovery);
+    await old.h.settle();
+    void old.h.value().pick("files");
+    await old.h.settle();
+    assert.equal(old.calls[0]?.source, "files");
+    const home = harness(platform, { ...recovery, key: "nyxbot-home" });
+    await home.h.settle();
+    assert.equal(home.h.value().otherDraft?.name, "Assistant");
+    assert.equal(
+      (home.h.value().otherDraft?.params as { conversationId: string })
+        .conversationId,
+      "original-chat",
+    );
+    assert.equal(home.h.value().session.reselect, false);
+    const otherAccount = harness(platform, { ...recovery, owner: "owner-B" });
+    await otherAccount.h.settle();
+    assert.equal(otherAccount.h.value().session.reselect, false);
+    const reopened = harness(platform, recovery);
+    await reopened.h.settle();
+    assert.equal(reopened.h.value().session.reselect, true);
+    assert.equal(reopened.requests.length, 0);
+    reopened.h.value().session.dismissReselection();
+    await reopened.h.settle();
+    assert.equal(
+      await reopened.durable.load(recovery.owner, recovery.key),
+      undefined,
+    );
+  });
+  test(`${platform} ready upload survives process death and cache eviction with its original receipt`, async () => {
+    const recovery = {
+      disk: memoryDisk(),
+      owner: "owner-A",
+      key: "crew:crew-1",
+    };
+    const old = harness(platform, recovery);
+    await old.h.settle();
+    const pick = old.h.value().pick();
+    await old.h.settle();
+    old.finish();
+    await pick;
+    await old.h.settle();
+    assert.equal(old.h.value().files[0]?.item?.id, "file-1");
+    const cold = harness(platform, { ...recovery, missing: true });
+    await cold.h.settle();
+    assert.equal(cold.h.value().files[0]?.file.uri, "");
+    assert.equal(cold.h.value().files[0]?.item?.id, "file-1");
+    assert.equal(cold.requests.length, 0);
+    cold.props.agentId = "resolved-agent";
+    cold.h.render();
+    await cold.h.settle();
+    assert.equal(cold.h.value().files[0]?.item?.id, "file-1");
+    const refused = await cold.h.value().session.submit(async () => false);
+    assert.equal(refused, false);
+    assert.equal(
+      (await cold.durable.load(recovery.owner, recovery.key))?.rows.length,
+      1,
+    );
+    await cold.h.value().session.submit(async (payload) => {
+      assert.equal(
+        await cold.durable.load(recovery.owner, recovery.key),
+        undefined,
+      );
+      assert.equal(payload?.conversationId, "crew-1");
+      assert.deepEqual(payload?.attachmentIds, ["file-1"]);
+      return true;
+    });
+    assert.equal(
+      await cold.durable.load(recovery.owner, recovery.key),
+      undefined,
+    );
+  });
+}
+test("cold local copies resume only on request, and an evicted unuploaded file requests reselection", async () => {
+  const r = { disk: memoryDisk(), owner: "owner-A", key: privateKey };
+  await createUploadDraftRecovery(r.disk).save(r.owner, r.key, {
+    rows: [
+      {
+        handle: "file-1",
+        kind: "file",
+        file: { path: "DocumentPicker/abc.txt", name: "abc.txt" },
+      },
+    ],
+    reselect: false,
+  });
+  const missing = harness("ios", { ...r, missing: true });
+  await missing.h.settle();
+  assert.equal(missing.h.value().files.length, 0);
+  assert.equal(missing.h.value().session.reselect, true);
+  const cold = harness("android", r);
+  await cold.h.settle();
+  assert.equal(cold.h.value().files[0]?.resumable, true);
+  assert.equal(cold.requests.length, 0);
+  cold.h.value().session.resume();
+  await cold.h.settle();
+  assert.equal(cold.h.value().files[0]?.item?.id, "file-1");
+  cold.h.value().remove(cold.h.value().files[0]!.key);
+  assert.equal(await cold.durable.load(r.owner, r.key), undefined);
+});
+
+test("discarding an inaccessible draft at Home reveals the next draft and preserves other accounts", async () => {
+  const disk = memoryDisk();
+  const durable = createUploadDraftRecovery(disk);
+  const marker = { rows: [], reselect: true };
+  await durable.save("A", privateKey, marker);
+  await durable.save("A", "crew:remaining", marker);
+  await durable.save("B", privateKey, marker);
+  const home = harness("ios", { disk, owner: "A", key: "nyxbot-home" });
+  await home.h.settle();
+  assert.equal(home.h.value().otherDraft?.key, privateKey);
+  await home.h.value().discardOtherDraft();
+  await home.h.settle();
+  assert.equal(home.h.value().otherDraft?.key, "crew:remaining");
+  assert.equal((await durable.load("B", privateKey))?.reselect, true);
+  await durable.clear("A");
+  assert.equal(await durable.other("A"), undefined);
+  assert.ok(await durable.other("B"));
+});
+
+test("an expired upload receipt requires a cached copy or reselection", async () => {
+  const disk = memoryDisk();
+  const marker = {
+    rows: [
+      {
+        handle: "file-1",
+        kind: "file" as const,
+        file: { name: "note.txt", path: "DocumentPicker/note.txt" },
+        item: {
+          id: "expired-id",
+          size: 3,
+          label: "note.txt",
+          content_type: "text/plain",
+          expired: true,
+        },
+      },
+    ],
+    reselect: false,
+  };
+  await createUploadDraftRecovery(disk).save("A", privateKey, marker);
+  const r = { disk, owner: "A", key: privateKey };
+  const local = harness("android", r);
+  await local.h.settle();
+  assert.equal(local.h.value().files[0]?.resumable, true);
+  assert.equal(local.h.value().files[0]?.item, undefined);
+  const evicted = harness("ios", { ...r, missing: true });
+  await evicted.h.settle();
+  assert.equal(evicted.h.value().files.length, 0);
+  assert.equal(evicted.h.value().session.reselect, true);
+});
+
+test("text-only send clears an interrupted picker marker and a refused send restores it", async () => {
+  const r = { disk: memoryDisk(), owner: "A", key: privateKey };
+  const durable = createUploadDraftRecovery(r.disk);
+  await durable.save(r.owner, r.key, { rows: [], reselect: true });
+  const cold = harness("android", r);
+  await cold.h.settle();
+  await cold.h.value().session.submit(async () => false);
+  assert.equal((await cold.durable.load(r.owner, r.key))?.reselect, true);
+  await cold.h.value().session.submit(async () => {
+    assert.equal(await cold.durable.load(r.owner, r.key), undefined);
+    return true;
+  });
+  assert.equal(await cold.durable.load(r.owner, r.key), undefined);
 });

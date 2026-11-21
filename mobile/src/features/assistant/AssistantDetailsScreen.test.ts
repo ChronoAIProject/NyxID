@@ -15,6 +15,26 @@ function setup(page: "details" | "context" | "title" = "details") {
     alerts: any[] = [],
     accessChanges: any[] = [],
     invalidations: any[] = [];
+  const modelUpdate = deferred<any>();
+  const modelSource = {
+    data: [
+      { id: "nyxagent/chat", label: "Fast", available: true },
+      { id: "nyxagent/research", label: "Deep", available: true },
+      {
+        id: "nyxagent/off",
+        label: "Offline model",
+        available: false,
+        description: "Provider maintenance",
+      },
+    ],
+    isError: false,
+    refetch: async () => {},
+  };
+  const platformSource = {
+    data: [{ id: "nyxid/qa", label: "QA model", available: true }],
+    isError: false,
+    refetch: async () => {},
+  };
   const agent = {
     id: "specialist",
     name: "Research",
@@ -27,6 +47,7 @@ function setup(page: "details" | "context" | "title" = "details") {
     conversation: {
       id: "nyxa-thread",
       title: "Saved title",
+      model: "nyxagent/chat",
       agent,
       active_turn: null,
     },
@@ -54,14 +75,18 @@ function setup(page: "details" | "context" | "title" = "details") {
     "react-native": { Alert: { alert: (...a: any[]) => alerts.push(a) } },
     "@tanstack/react-query": {
       useQuery: (o: any) =>
-        o.queryKey[0] === "assistant"
-          ? {
-              data: history,
-              refetch: async () => {
-                throw new Error("offline after save");
-              },
-            }
-          : { data: { agents: [agent] }, refetch: async () => {} },
+        o.queryKey[1] === "models"
+          ? modelSource
+          : o.queryKey[1] === "platform-models"
+            ? platformSource
+            : o.queryKey[0] === "assistant"
+              ? {
+                  data: history,
+                  refetch: async () => {
+                    throw new Error("offline after save");
+                  },
+                }
+              : { data: { agents: [agent] }, refetch: async () => {} },
       useQueryClient: () => ({
         cancelQueries: async () => {},
         setQueryData: (_key: any, update: any) => {
@@ -97,6 +122,10 @@ function setup(page: "details" | "context" | "title" = "details") {
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/assistantApi": {
       assistantApi: {
+        changeModel: (id: string, model: string) => {
+          writes.push(["model", id, model]);
+          return modelUpdate.promise;
+        },
         rename: (id: string, title: string) => {
           writes.push(["rename", id, title]);
           return rename.promise;
@@ -108,6 +137,12 @@ function setup(page: "details" | "context" | "title" = "details") {
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "../../lib/auth/authAccount": { getAuthAccountId: () => "owner-a" },
+    "./assistantDraftStore": {
+      discardUploadDraft: async (owner: string, key: string) => {
+        writes.push(["clear", owner, key]);
+      },
+    },
     "../groups/useGroupRuntime": { useGroupAvailability: runtime },
     "./useComposerAccessChange": {
       COMPOSER_ACCESS_MODES: ["autopilot", "nyxmode", "ask_every_time"],
@@ -150,6 +185,9 @@ function setup(page: "details" | "context" | "title" = "details") {
     title,
     save,
     accessChanges,
+    modelUpdate,
+    modelSource,
+    platformSource,
     agent,
     rename,
     remove,
@@ -252,7 +290,10 @@ test("Delete Chat is a solid destructive row behind confirmation, and returns to
   assert.equal(x.guard().disabled, true);
   x.remove.resolve();
   await x.h.settle();
-  assert.deepEqual(x.writes, [["delete", "nyxa-thread"]]);
+  assert.deepEqual(x.writes, [
+    ["delete", "nyxa-thread"],
+    ["clear", "owner-a", JSON.stringify(["private", "nyxa-thread"])],
+  ]);
   assert.equal(x.actions.length, 1);
   assert.equal(x.actions[0][1].target.kind, "agent");
   assert.equal(x.actions[0][1].target.agentId, "specialist");
@@ -285,15 +326,72 @@ test("permissions are one pop-up menu row, and agent overrides are read-only", (
         n.props.footer.includes("This agent’s override is read-only here."),
     );
   assert.ok(group);
-  assert.equal(
-    x
-      .all()
-      .some(
-        (n) =>
-          typeof n.props.label === "string" && /model/i.test(n.props.label),
-      ),
-    false,
+  assert.ok(
+    x.button("Current model"),
+    "agent permissions do not hide the thread’s model",
   );
+  x.h.unmount();
+});
+
+test("details changes the saved thread model once and preserves its transcript metadata", async () => {
+  const x = setup();
+  assert.equal(x.button("Current model").props.value, "Fast");
+  assert.equal(x.button("Offline model").props.disabled, true);
+  assert.match(x.button("Offline model").props.detail, /Provider maintenance/);
+  x.button("Offline model").props.onPress();
+  assert.deepEqual(x.writes, []);
+  const choose = x.button("QA model").props.onPress;
+  choose();
+  choose();
+  assert.deepEqual(x.writes, [["model", "nyxa-thread", "nyxid/qa"]]);
+  x.modelUpdate.resolve({
+    model: "nyxid/qa",
+    context_reset_reason: "model_changed",
+  });
+  await x.h.settle();
+  assert.equal(x.data().conversation.model, "nyxid/qa");
+  assert.equal(x.data().conversation.context_reset_reason, "model_changed");
+  assert.equal(x.data().conversation.agent.id, x.agent.id);
+  assert.equal(x.button("Current model").props.value, "QA model");
+  x.h.unmount();
+});
+
+test("a stale model choice cannot change a busy, offline, destroyed, or different thread", async () => {
+  for (const transition of [
+    "turn",
+    "offline",
+    "destroyed",
+    "account",
+    "scope",
+    "catalog",
+  ]) {
+    const x = setup();
+    const choose = x.button("Deep").props.onPress;
+    if (transition === "turn")
+      x.data().conversation.active_turn = { turn_id: "active" };
+    if (transition === "destroyed") x.agent.status = "destroyed";
+    if (transition === "offline") x.offline();
+    if (transition === "account") x.accountChange();
+    if (transition === "scope") x.scopeChange();
+    if (transition === "catalog") x.modelSource.isError = true;
+    x.h.render();
+    choose();
+    assert.deepEqual(x.writes, [], transition);
+    x.h.unmount();
+  }
+});
+
+test("a model failure keeps the saved model and platform discovery failure leaves the legacy options", async () => {
+  const x = setup();
+  x.button("Deep").props.onPress();
+  x.modelUpdate.reject(new Error("Model unavailable"));
+  await x.h.settle();
+  assert.equal(x.button("Current model").props.value, "Fast");
+  x.platformSource.isError = true;
+  x.h.render();
+  assert.ok(x.button("Retry loading models"));
+  assert.ok(x.button("Deep"));
+  assert.equal(x.button("QA model"), undefined);
   x.h.unmount();
 });
 

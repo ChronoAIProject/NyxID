@@ -99,6 +99,7 @@ function recognizer(events: string[]) {
 
 function setup({
   chosen,
+  readChosen = async () => chosen,
   continuous = true,
   platform = "ios",
   preferred,
@@ -106,6 +107,7 @@ function setup({
   installed = [],
 }: {
   chosen?: string;
+  readChosen?: () => Promise<string | undefined>;
   continuous?: boolean;
   platform?: "ios" | "android";
   preferred?: string[];
@@ -173,7 +175,7 @@ function setup({
       },
       "./voice/dictationLanguage": {
         languageLabel: (value: string) => value,
-        savedDictationLanguage: async () => chosen,
+        savedDictationLanguage: readChosen,
       },
       "./voice/resolveDictationLanguage": {
         resolveDictationLanguage: (
@@ -1008,6 +1010,92 @@ test("a chosen dictation language the recognizer supports wins over the phone's"
   await unsupported.begin();
   assert.equal(unsupported.native.options?.lang, "en-GB");
   unsupported.h.unmount();
+});
+
+/** Exercise both production preference APIs with iOS AsyncStorage's serial operation order. */
+async function dictationWithPicker(chosen: string) {
+  const supported = ["zh-CN", "en-GB"];
+  const storage = new Map([["nyxid.dictation_language", chosen]]);
+  let pending = Promise.resolve();
+  function ordered<T>(next: () => T) {
+    const result = pending.then(next);
+    pending = result.then(() => {});
+    return result;
+  }
+  const picker = hookHarness<ReturnType<typeof import("./voice/useDictationLanguage").useDictationLanguage>>({
+    "../../../i18n/deviceLanguages": { deviceLanguages: () => ["en-GB"] },
+    "@react-native-async-storage/async-storage": {
+      getItem: (key: string) => ordered(() => storage.get(key) ?? null),
+      setItem: (key: string, value: string) => ordered(() => storage.set(key, value)),
+      removeItem: (key: string) => ordered(() => storage.delete(key)),
+    },
+    "react-native": { Platform: { OS: "ios" } },
+    "expo-speech-recognition": {
+      ExpoSpeechRecognitionModule: { getSupportedLocales: async () => ({ locales: supported }) },
+    },
+  });
+  const language = picker.load(fileURLToPath(new URL("./voice/dictationLanguage.ts", import.meta.url))) as typeof import("./voice/dictationLanguage");
+  picker.mock("./dictationLanguage", language);
+  picker.mock("./resolveDictationLanguage", { resolveDictationLanguage });
+  const x = setup({ supported, readChosen: language.savedDictationLanguage });
+  const { useDictationLanguage } = picker.load(
+    fileURLToPath(new URL("./voice/useDictationLanguage.ts", import.meta.url)),
+  ) as typeof import("./voice/useDictationLanguage");
+  picker.mount(() => useDictationLanguage(true));
+  await picker.settle();
+  return { ...x, picker };
+}
+
+for (const [from, to] of [["zh-CN", "en-GB"], ["en-GB", "zh-CN"]] as const) {
+  test(`changing preference from ${from} to ${to} preserves the current draft and starts the next recognizer in the last chosen language`, async () => {
+    const x = await dictationWithPicker(from);
+    await x.begin();
+    x.result("first words");
+    for (const value of [to, from, to]) x.picker.value().choose(value);
+    assert.equal(x.h.value().recognitionLocale, from);
+    assert.equal(x.native.options?.lang, from);
+    assert.equal(x.h.value().text, "first words");
+    assert.deepEqual(x.inserted, []);
+    x.h.value().stop();
+    x.result("first words", true);
+    x.emit("end");
+    x.emit("end");
+    assert.deepEqual(x.inserted, ["first words"]);
+    await x.begin();
+    assert.equal(x.native.options?.lang, to);
+    assert.equal(x.h.value().recognitionLocale, to);
+    await x.picker.settle();
+    assert.equal(x.picker.value().resolved, to);
+    x.picker.unmount();
+    x.h.unmount();
+  });
+}
+
+test("a failed start in the next language preserves the finished dictation and can retry the selection", async () => {
+  const x = await dictationWithPicker("zh-CN");
+  await x.begin();
+  x.result("draft", true);
+  x.picker.value().choose("en-GB");
+  x.h.value().stop();
+  x.emit("end");
+  const start = x.native.start;
+  x.native.start = (options) => {
+    assert.equal(options.lang, "en-GB");
+    throw new Error("recognizer unavailable");
+  };
+  await x.h.value().start();
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "idle");
+  assert.ok(x.h.value().error);
+  assert.deepEqual(x.inserted, ["draft"]);
+  x.emit("end");
+  x.native.start = start;
+  await x.h.value().retry();
+  await x.h.settle();
+  assert.equal(x.native.options?.lang, "en-GB");
+  assert.deepEqual(x.inserted, ["draft"]);
+  x.picker.unmount();
+  x.h.unmount();
 });
 
 test("crew speech uses native utterance boundaries and delivers the final words once", async () => {

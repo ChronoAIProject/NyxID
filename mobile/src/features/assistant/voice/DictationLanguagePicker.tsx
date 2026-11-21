@@ -21,9 +21,11 @@ type LanguageState = ReturnType<typeof useDictationLanguage>;
 /** Full-screen transient choice; choosing changes only the next recording. */
 export function DictationLanguagePicker({
   language,
+  currentRecordingLanguage,
   onClose,
 }: {
   language: LanguageState;
+  currentRecordingLanguage?: string;
   onClose(): void;
 }) {
   const { t } = useAppLanguage();
@@ -67,7 +69,9 @@ export function DictationLanguagePicker({
               accessibilityRole="header"
               style={[styles.title, { color: colors.textPrimary }]}
             >
-              {t("Dictation language")}
+              {currentRecordingLanguage
+                ? t("Language for the next recording")
+                : t("Dictation language")}
             </Text>
             <Pressable
               accessibilityRole="button"
@@ -78,6 +82,15 @@ export function DictationLanguagePicker({
               <X color={colors.textPrimary} size={22} />
             </Pressable>
           </View>
+          {currentRecordingLanguage && (
+            <Text
+              style={[styles.currentLanguage, { color: colors.textSecondary }]}
+            >
+              {t("This recording continues in {{language}}.", {
+                language: currentRecordingLanguage,
+              })}
+            </Text>
+          )}
           <TextInput
             accessibilityLabel={t("Search languages")}
             placeholder={t("Search languages")}
@@ -154,6 +167,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xxl,
   },
   title: { flex: 1, ...typeScale.pageHeader },
+  currentLanguage: { paddingHorizontal: spacing.xxl, ...typeScale.caption },
   close: {
     minWidth: 44,
     minHeight: 44,
