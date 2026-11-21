@@ -280,10 +280,12 @@ fn discarded_attempt_trimmed_snapshot_round_trips_item_indices_and_separators() 
         part_lengths: Some(output.layout()),
     };
     let saved = bson::from_bson(bson::to_bson(&cursor).unwrap()).unwrap();
-    let mut stream = ResponseStream::default();
-    stream.replay = true;
-    stream.sequence = Some(cursor.sequence);
-    stream.output = OutputText::restore(&saved).unwrap();
+    let mut stream = ResponseStream {
+        replay: true,
+        sequence: Some(cursor.sequence),
+        output: OutputText::restore(&saved).unwrap(),
+        ..ResponseStream::default()
+    };
     stream
         .event(
             json!({"type":"response.output_text.done","sequence_number":9,"output_index":0,
