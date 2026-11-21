@@ -2097,13 +2097,9 @@ async fn execute_turn_inner(
             .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
     );
     decisions.push_str(
-        &crate::services::async_service_operation::input_context(
-            &state.db,
-            &state.encryption_keys,
-            row,
-        )
-        .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+        &crate::services::async_service_operation::input_context(state, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
     );
     // Rollout-gated authoring rules are instructions, so they belong in the
     // stable (fingerprinted) part rather than the per-turn quoted context.
