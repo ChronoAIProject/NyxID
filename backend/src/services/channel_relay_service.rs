@@ -278,6 +278,7 @@ pub(crate) fn inbound_metadata(
         thread_id: inbound.thread_id.clone(),
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: None,
@@ -334,6 +335,7 @@ pub async fn store_outbound_message(
         thread_id: None,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
@@ -412,6 +414,7 @@ pub async fn store_device_event_message(
         thread_id: inherited_thread_id,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_failure_reason: None,
         callback_http_status: None,
         callback_disposition: None,
         reply_to_message_id: None,
@@ -474,6 +477,73 @@ pub(crate) async fn is_linked_org_nyxbot_route(
         .is_some())
 }
 
+pub(super) async fn callback_request(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    bot_id: Option<&str>,
+    key_id: &str,
+    raw: &str,
+) -> AppResult<reqwest::RequestBuilder> {
+    use super::{nyxbot_gateway_service, proxy_destination::http};
+    use crate::models::nyxbot_channel::COLLECTION_NAME as CHANNELS;
+
+    // Managed callbacks are constructed from the owning channel and the current
+    // server configuration. A matching host alone does not identify a route.
+    let direct_prefix = format!(
+        "{}/api/v1/nyxbot/relay/",
+        config.base_url.trim_end_matches('/')
+    );
+    let direct = raw
+        .strip_prefix(&direct_prefix)
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+    let gateway = raw
+        .rsplit_once("/callbacks/")
+        .map(|(_, id)| id)
+        .filter(|id| !id.is_empty() && !id.contains(['/', '?', '#']));
+    if let Some(bot) = bot_id
+        && (direct.is_some() || gateway.is_some())
+    {
+        let mut filter = doc! {"channel_bot_id":bot, "route_api_key_id":key_id, "status":"active"};
+        if let Some(id) = direct {
+            filter.insert("_id", id);
+        } else if let Some(id) = gateway {
+            filter.insert("transport", "gateway");
+            filter.insert("gateway_channel_id", id);
+        }
+        if db
+            .collection::<mongodb::bson::Document>(CHANNELS)
+            .find_one(filter)
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+        {
+            if direct.is_some() {
+                return Ok(nyxbot_gateway_service::GATEWAY_HTTP_CLIENT.post(raw));
+            }
+            if let Some(id) = gateway {
+                let service =
+                    super::assistant_service::resolve_admin_service_by_slug(db, "cmaeg").await?;
+                let base = nyxbot_gateway_service::validated_base(&service.base_url)?;
+                let target = format!("{base}/callbacks/{id}");
+                if target == raw {
+                    return Ok(nyxbot_gateway_service::GATEWAY_HTTP_CLIENT.post(target));
+                }
+            }
+        }
+    }
+    let (url, client) = http::public_delivery(raw).map_err(|err| match err {
+        AppError::ValidationError(_) => AppError::ChannelRelayFailed(
+            super::webhook_delivery_service::DESTINATION_REFUSED.into(),
+        ),
+        err => err,
+    })?;
+    Ok(client.post(url))
+}
+
+pub(super) fn destination_refused(error: &AppError) -> bool {
+    matches!(error, AppError::ChannelRelayFailed(reason) if reason == super::webhook_delivery_service::DESTINATION_REFUSED)
+}
+
 /// Forward an inbound message to the agent's callback URL.
 ///
 /// Emits an RS256 callback JWT in `X-NyxID-Callback-Token` whose
@@ -487,16 +557,25 @@ pub(crate) async fn is_linked_org_nyxbot_route(
 /// Returns a [`CallbackDelivery`] so callers can observe the actual upstream
 /// status code in addition to the success/error result.
 #[allow(clippy::too_many_arguments)]
-pub async fn forward_to_agent(
-    http_client: &reqwest::Client,
+pub(super) async fn forward_to_agent(
+    request: AppResult<reqwest::RequestBuilder>,
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
-    callback_url: &str,
     mut payload: CallbackPayload,
     api_key_id: &str,
     api_key_hash: &str,
     user_access_token: Option<&str>,
 ) -> CallbackDelivery {
+    let request = match request {
+        Ok(request) => request,
+        Err(err) => {
+            return CallbackDelivery {
+                http_status: None,
+                disposition: None,
+                result: Err(err),
+            };
+        }
+    };
     let jti = uuid::Uuid::new_v4().to_string();
     payload.correlation_id = jti.clone();
 
@@ -548,8 +627,7 @@ pub async fn forward_to_agent(
     let timeout =
         std::time::Duration::from_secs(u64::from(config.channel_relay_callback_timeout_secs));
 
-    let mut request = http_client
-        .post(callback_url)
+    let mut request = request
         .header("Content-Type", "application/json")
         .header("X-NyxID-Callback-Token", &callback_token)
         .header("X-NyxID-Signature", &signature)
@@ -570,9 +648,13 @@ pub async fn forward_to_agent(
             return CallbackDelivery {
                 http_status: None,
                 disposition: None,
-                result: Err(AppError::ChannelRelayFailed(format!(
-                    "callback request failed: {e}"
-                ))),
+                result: Err(AppError::ChannelRelayFailed(
+                    if super::proxy_destination::http::denied_address(&e) {
+                        super::webhook_delivery_service::DESTINATION_REFUSED.into()
+                    } else {
+                        "callback request failed".into()
+                    },
+                )),
             };
         }
     };
@@ -588,7 +670,6 @@ pub async fn forward_to_agent(
         },
         200 => {
             tracing::warn!(
-                callback_url = %callback_url,
                 message_id = %payload.message_id,
                 "Agent returned 200 with body; sync replies are no longer supported. \
                  Body discarded. Use POST /api/v1/channel-relay/reply for async replies."
@@ -599,6 +680,13 @@ pub async fn forward_to_agent(
                 result: Ok(()),
             }
         }
+        300..=399 => CallbackDelivery {
+            http_status: Some(code),
+            disposition: None,
+            result: Err(AppError::ChannelRelayFailed(
+                super::webhook_delivery_service::DESTINATION_REFUSED.into(),
+            )),
+        },
         _ => CallbackDelivery {
             http_status: Some(code),
             disposition: None,
@@ -1575,6 +1663,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some("key-1".to_string()),
             callback_status: Some("pending".to_string()),
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: None,
@@ -2213,10 +2302,9 @@ mod tests {
             ("oversized", CallbackDisposition::Unknown),
         ] {
             let delivery = forward_to_agent(
-                &client,
+                Ok(client.post(format!("http://{address}/{path}"))),
                 &config,
                 &keys,
-                &format!("http://{address}/{path}"),
                 test_payload(),
                 "key",
                 "hash",
@@ -2278,10 +2366,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2301,10 +2388,9 @@ mod tests {
         let keys = test_jwt_keys();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2330,10 +2416,9 @@ mod tests {
         let expected_platform = payload.platform.clone();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             payload,
             "key-1",
             "test_api_key_hash",
@@ -2368,10 +2453,9 @@ mod tests {
         let api_key_hash = "test_api_key_hash";
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             api_key_hash,
@@ -2404,10 +2488,9 @@ mod tests {
         let keys = test_jwt_keys();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2436,10 +2519,9 @@ mod tests {
         let keys = test_jwt_keys();
 
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2473,10 +2555,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2498,10 +2579,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2523,10 +2603,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post(&url)),
             &config,
             &keys,
-            &url,
             test_payload(),
             "key-1",
             "test_api_key_hash",
@@ -2548,10 +2627,9 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
         let delivery = forward_to_agent(
-            &client,
+            Ok(client.post("http://127.0.0.1:1/callback")),
             &config,
             &keys,
-            "http://127.0.0.1:1/callback",
             test_payload(),
             "key-1",
             "test_api_key_hash",

@@ -900,6 +900,8 @@ mod tests {
             .await
             .expect("bind blocking webhook receiver");
         let address = listener.local_addr().expect("webhook receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, receiver)
                 .await
@@ -926,10 +928,7 @@ mod tests {
         let mut notifier =
             ConnectionExpiryNotifier::with_test_delivery(Arc::new(test_app_config()), tx);
         notifier.developer_webhook_dispatcher = Some(Arc::new(
-            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
-                keys,
-            ),
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(keys),
         ));
 
         assert!(

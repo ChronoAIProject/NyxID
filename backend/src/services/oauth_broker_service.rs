@@ -2648,6 +2648,9 @@ mod tests {
             .await
             .unwrap();
         let target = url::Url::parse(&webhook_url).unwrap();
+        let _origin = crate::services::resource_adapter::register_test_origin(
+            &target.origin().ascii_serialization(),
+        );
         let address = format!("{}:{}", target.host_str().unwrap(), target.port().unwrap())
             .parse()
             .unwrap();

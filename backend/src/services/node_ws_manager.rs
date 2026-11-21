@@ -503,9 +503,10 @@ pub struct NodeWsManager {
     >,
     /// Proxy request timeout in seconds
     proxy_timeout_secs: u64,
-    /// Maximum concurrent WebSocket connections (authenticated + pending auth)
+    /// Maximum concurrent authenticated WebSocket connections
     max_connections: usize,
-    /// Reservations held from upgrade admission through socket teardown.
+    pending_handshakes: Arc<tokio::sync::Semaphore>,
+    /// Reservations held after authentication through socket teardown.
     connection_reservations: AtomicUsize,
     cancelled_proxy_requests: DashMap<String, std::time::Instant>,
     cluster_dispatch:
@@ -1644,6 +1645,7 @@ impl NodeWsManager {
             proxy_timeout_secs,
             max_connections,
             connection_reservations: AtomicUsize::new(0),
+            pending_handshakes: Arc::new(tokio::sync::Semaphore::new(32)),
             cancelled_proxy_requests: DashMap::new(),
             cluster_dispatch: std::sync::OnceLock::new(),
         }
@@ -1656,7 +1658,11 @@ impl NodeWsManager {
         let _ = self.cluster_dispatch.set(dispatch);
     }
 
-    /// Total sockets reserved before upgrade, including pending authentication.
+    pub fn try_reserve_handshake(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pending_handshakes.clone().try_acquire_owned().ok()
+    }
+
+    /// Authenticated sockets that hold an established connection slot.
     pub fn total_connection_count(&self) -> usize {
         self.connection_reservations.load(Ordering::Acquire)
     }
@@ -1666,7 +1672,7 @@ impl NodeWsManager {
         self.max_connections
     }
 
-    /// Atomically reserve one per-replica socket slot before the HTTP upgrade.
+    /// Reserve an established slot after authentication succeeds.
     pub fn try_reserve_connection(self: &Arc<Self>) -> Option<NodeConnectionReservation> {
         let mut current = self.connection_reservations.load(Ordering::Acquire);
         loop {

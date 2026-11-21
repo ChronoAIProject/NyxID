@@ -1417,6 +1417,7 @@ async fn platform_dispatcher_handshake_signature_and_multinumber_targets() {
 async fn platform_dispatcher_routes_two_bots_drops_unknown_and_preserves_dedup() {
     let (state, auth, _) = fixture().await;
     let callback = MockServer::start().await;
+    let _callback_origin = crate::services::resource_adapter::register_test_origin(&callback.uri());
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(202))
         .expect(2)

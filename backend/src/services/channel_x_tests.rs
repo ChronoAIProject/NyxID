@@ -270,6 +270,7 @@ async fn onboarding_initializes_cursor_checks_scopes_and_rejects_duplicate_accou
 #[tokio::test]
 async fn polling_sweeps_share_one_lease_and_deduplicate_overlapping_batches() {
     let (state, _, server, owner, key) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let bot = insert_bot(&state, &owner, &key).await;
     let agent = uuid::Uuid::new_v4().to_string();
     state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {

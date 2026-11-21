@@ -921,7 +921,7 @@ async fn fetch_json_spec_internal(
 async fn read_spec_body(mut response: reqwest::Response, log_url: &str) -> AppResult<bytes::Bytes> {
     let mut body = BytesMut::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
-        tracing::warn!(url = %log_url, %error, "Failed to read downstream API spec body");
+        tracing::warn!(url = %log_url, error = %error.without_url(), "Failed to read downstream API spec body");
         AppError::BadRequest("Failed to read spec body".to_string())
     })? {
         if body.len() + chunk.len() > MAX_SPEC_RESPONSE_BYTES {

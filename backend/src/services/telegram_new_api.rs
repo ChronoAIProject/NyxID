@@ -512,17 +512,19 @@ mod tests {
                 "openapi":"3.0.0", "info":{"title":"Fixture", "version":"1"},
                 "paths":{"/status":{"get":{"operationId":"status", "responses":{"200":{"description":"ok"}}}}}
             })))
-            .expect(1)
+            .expect(0)
             .mount(&target).await;
-        let endpoints = crate::services::openapi_parser::parse_openapi_spec(
-            &client,
+        let _origin = crate::services::resource_adapter::register_test_origin(&source.uri());
+        let refusal = crate::services::openapi_parser::parse_openapi_spec(
+            None,
+            "",
             &format!("{}/botcatalog/openapi.json", source.uri()),
         )
         .await
-        .unwrap();
-        assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].path, "/status");
-        assert_eq!(target.received_requests().await.unwrap().len(), 1);
+        .err()
+        .expect("spec redirect must fail");
+        assert!(refusal.to_string().contains("307"));
+        assert!(target.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -357,6 +357,7 @@ async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap(
 
     let (mut state, _, agent) = setup("relay_key_swap").await;
     let first = MockServer::start().await;
+    let _first_origin = crate::services::resource_adapter::register_test_origin(&first.uri());
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(503))
         .expect(1)
@@ -402,7 +403,6 @@ async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap(
         config: &state.config,
         jwt_keys: &state.jwt_keys,
         encryption_keys: &state.encryption_keys,
-        http: &state.http_client,
         rate_limiter: &state.per_channel_event_limiter,
     };
     let deliver = || {
