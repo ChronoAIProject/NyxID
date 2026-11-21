@@ -873,10 +873,18 @@ pub(super) const TEST_SIGNING_SECRET: &str =
 
 #[cfg(test)]
 pub(super) fn signed_test_request(request: &serde_json::Value) -> serde_json::Value {
+    signed_test_request_at(request, chrono::Utc::now())
+}
+
+#[cfg(test)]
+fn signed_test_request_at(
+    request: &serde_json::Value,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let mut request = request.clone();
-    request["timestamp"] = chrono::Utc::now().to_rfc3339().into();
+    request["timestamp"] = timestamp.to_rfc3339().into();
     request["nonce"] = uuid::Uuid::new_v4().to_string().into();
     let message = ["timestamp", "nonce", "method", "path", "query", "body"]
         .map(|name| request[name].as_str().unwrap_or_default())
@@ -952,19 +960,40 @@ mod tests {
         let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
         let request = serde_json::json!({"request_id":"test","service_slug":"unconfigured"});
         let (tx, mut rx) = mpsc::channel(1);
-        let mut tampered = signed_test_request(&request);
+        let signed = signed_test_request(&request);
+        let mut tampered = signed.clone();
         tampered["path"] = "/different".into();
-        for (frame, local_secret) in [
-            (&request, Some(TEST_SIGNING_SECRET)),
-            (&request, None),
-            (&tampered, Some(TEST_SIGNING_SECRET)),
-            (&signed_test_request(&request), None),
+        let mut empty_nonce = signed.clone();
+        empty_nonce["nonce"] = "".into();
+        let expired =
+            signed_test_request_at(&request, chrono::Utc::now() - chrono::Duration::hours(1));
+        let replay = tokio::sync::Mutex::new(ReplayGuard::new());
+        let key = Some(TEST_SIGNING_SECRET);
+        let no_key = "Node HTTP proxy requires a configured signing secret";
+        let unsigned = "Node HTTP proxy requires a signed request";
+        let bad_mac = "HMAC signature verification failed";
+        let stale = "Request rejected: replay or expired timestamp";
+        for (frame, local_secret, status, message) in [
+            (&request, key, 403, unsigned),
+            (&request, None, 403, no_key),
+            (&signed, None, 403, no_key),
+            (&signed, Some("short"), 403, no_key),
+            (&empty_nonce, key, 403, unsigned),
+            (&tampered, key, 403, bad_mac),
+            (&expired, key, 403, stale),
+            (
+                &signed,
+                key,
+                502,
+                "No credentials configured for service 'unconfigured'",
+            ),
+            (&signed, key, 403, stale),
         ] {
             execute_proxy_request(
                 frame,
                 &credentials,
                 local_secret,
-                &tokio::sync::Mutex::new(ReplayGuard::new()),
+                &replay,
                 &NodeMetrics::new(),
                 &tx,
                 false,
@@ -975,8 +1004,11 @@ mod tests {
                 panic!("expected response");
             };
             let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-            assert_eq!(frame["status"], 403);
-            assert_eq!(frame["retryable"], false);
+            assert_eq!(frame["type"], "proxy_error");
+            assert_eq!(frame["request_id"], "test");
+            assert_eq!(frame["status"], status);
+            assert_eq!(frame["error"], message);
+            assert_eq!(frame["retryable"], status == 502);
         }
     }
 

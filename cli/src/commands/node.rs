@@ -931,7 +931,14 @@ async fn docker_start(
     }
     if machine {
         let ca_args = docker_ca_args(&ca_environment)?;
-        return docker_machine_start(profile, restart, &ca_args, separation).await;
+        return docker_machine_start(
+            profile,
+            restart,
+            &ca_args,
+            separation,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await;
     }
     let config_dir = docker_config_dir(profile)?;
     let container = docker_container_name(profile, false);
@@ -1030,8 +1037,7 @@ fn machine_release_digest(pull_output: &str) -> Result<&str> {
     Ok(digest)
 }
 
-async fn verified_machine_image() -> Result<String> {
-    let version = env!("CARGO_PKG_VERSION");
+async fn verified_machine_image(version: &str) -> Result<String> {
     let tag = format!("{}:{version}", nyxid_machine::update::MACHINE_IMAGE);
     eprintln!("Pulling machine release {tag} for verification...");
     let output = tokio::process::Command::new("docker")
@@ -1124,6 +1130,7 @@ async fn docker_machine_start(
     restart: bool,
     ca_args: &[String],
     separation: Option<Separation>,
+    version: &str,
 ) -> Result<()> {
     let container = docker_container_name(profile, true);
     let existing = std::process::Command::new("docker")
@@ -1148,7 +1155,7 @@ async fn docker_machine_start(
         }
         return Ok(());
     }
-    let image = verified_machine_image().await?;
+    let image = verified_machine_image(version).await?;
     let mut sandbox = tempfile::NamedTempFile::new()?;
     std::io::Write::write_all(
         &mut sandbox,
@@ -1483,10 +1490,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn docker_machine_selection_never_infers_legacy_from_missing_evidence() {
-        use nyxid_machine::context::{Choice, EVIDENCE_VERSION, Evidence, MIN_LANDLOCK_ABI};
-        let supported = Evidence {
+    fn supported_machine_evidence() -> nyxid_machine::context::Evidence {
+        use nyxid_machine::context::{EVIDENCE_VERSION, Evidence, MIN_LANDLOCK_ABI};
+        Evidence {
             version: EVIDENCE_VERSION,
             os: "linux".into(),
             landlock_abi: Some(MIN_LANDLOCK_ABI),
@@ -1498,7 +1504,13 @@ mod tests {
             managed_browser_sandbox: Some(true),
             managed_browser_policy: Some(true),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn docker_machine_selection_never_infers_legacy_from_missing_evidence() {
+        use nyxid_machine::context::{Choice, Evidence};
+        let supported = supported_machine_evidence();
         for requested in [
             None,
             Some(Separation::Automatic),
@@ -1596,6 +1608,122 @@ mod tests {
             ["-v", "nyxid-node-machine-state:/var/lib/nyxid-machine"],
         ] {
             assert!(args.windows(2).any(|args| args == pair));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn machine_creation_requires_attested_digest_for_probe_and_container() {
+        use super::super::update_attestation::PUBLISHED_MACHINE_EVIDENCE;
+        use std::{fs, os::unix::fs::PermissionsExt};
+        const TEST: &str = "commands::node::tests::machine_creation_requires_attested_digest_for_probe_and_container";
+        const DIGEST: &str = "e634854db76b1f7230e79312bab23cb394831a4909920f8a93890878bffe0c1d";
+        if let Ok(version) = std::env::var("NYXID_TEST_MACHINE_RELEASE") {
+            let ca_args = docker_ca_args(&[("NYXID_CA_CERT", "/test/company.pem".into())]).unwrap();
+            let result = PUBLISHED_MACHINE_EVIDENCE
+                .scope(
+                    (),
+                    docker_machine_start(None, false, &ca_args, None, &version),
+                )
+                .await;
+            if std::env::var("PULL_DIGEST").unwrap() == DIGEST && version == "0.71.0" {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err().root_cause().to_string(),
+                    "attestation_invalid"
+                );
+            }
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        fs::write(
+            &docker,
+            r#"#!/bin/sh
+printf '%s\0' "$@" >> calls
+printf '\n' >> calls
+case "$1" in
+    inspect) exit 1 ;;
+    pull) printf 'Digest: sha256:%s\n' "$PULL_DIGEST" ;;
+    run) /bin/cat evidence ;;
+    --log-level) exit 0 ;;
+    *) exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(docker, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            dir.path().join("evidence"),
+            serde_json::to_vec(&supported_machine_evidence()).unwrap(),
+        )
+        .unwrap();
+        let wrong_digest = "0".repeat(64);
+        for (version, digest, verified) in [
+            ("0.71.0", DIGEST, true),
+            ("0.71.0", &wrong_digest, false),
+            ("0.71.1", DIGEST, false),
+        ] {
+            fs::write(dir.path().join("calls"), "").unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .current_dir(dir.path())
+                .env("PATH", dir.path())
+                .env("NYXID_TEST_MACHINE_RELEASE", version)
+                .env("PULL_DIGEST", digest)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let log = fs::read_to_string(dir.path().join("calls")).unwrap();
+            let calls: Vec<Vec<_>> = log
+                .lines()
+                .map(|line| line.trim_end_matches('\0').split('\0').collect())
+                .collect();
+            let tag = format!("{}:{version}", nyxid_machine::update::MACHINE_IMAGE);
+            assert_eq!(
+                calls[0],
+                [
+                    "inspect",
+                    "--format",
+                    "{{.State.Running}}",
+                    "nyxid-node-machine"
+                ]
+            );
+            assert_eq!(calls[1], ["pull", &tag]);
+            assert_eq!(calls.len(), if verified { 4 } else { 2 });
+            if verified {
+                let pinned = format!("{tag}@sha256:{digest}");
+                let probe = &calls[2];
+                assert!(
+                    probe
+                        .windows(3)
+                        .any(|args| args == [pinned.as_str(), "node", "setup"])
+                );
+                let run = &calls[3];
+                assert_eq!(run.last(), Some(&pinned.as_str()));
+                let seccomp = probe
+                    .iter()
+                    .find(|arg| arg.starts_with("seccomp="))
+                    .unwrap();
+                for pair in [
+                    ["--security-opt", seccomp],
+                    [
+                        "--mount",
+                        "type=bind,source=/test/company.pem,target=/etc/nyxid/tls/ca.pem,readonly",
+                    ],
+                    ["-e", "NYXID_CA_CERT=/etc/nyxid/tls/ca.pem"],
+                    ["-e", "NYXID_MACHINE_SEPARATION=automatic"],
+                    ["-v", "nyxid-node-machine-state:/var/lib/nyxid-machine"],
+                ] {
+                    assert!(run.windows(2).any(|args| args == pair), "{run:?}");
+                }
+            }
         }
     }
 
