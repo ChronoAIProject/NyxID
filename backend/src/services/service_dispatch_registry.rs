@@ -289,7 +289,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: Some("credential-connection".into()),

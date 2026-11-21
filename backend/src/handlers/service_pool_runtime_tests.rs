@@ -1063,7 +1063,7 @@ async fn pool_encoding_identity_is_final_and_compressed_rejection_still_retries(
             )
             .await
             .unwrap();
-        fixture.state.db.collection::<Document>("downstream_services").update_one(doc! {"slug":"pool-review-api"},doc! {"$set":{"default_request_headers":[{"name":"accept-encoding","value":"gzip","overridable":false,"sensitive":false}]}}).await.unwrap();
+        fixture.state.db.collection::<Document>("downstream_services").update_one(doc! {"slug":"pool-review-api"},doc! {"$set":{"base_url":server.uri(),"default_request_headers":[{"name":"accept-encoding","value":"gzip","overridable":false,"sensitive":false}]}}).await.unwrap();
         let response = try_call(&fixture, "{}").await;
         if status == 200 {
             assert!(matches!(

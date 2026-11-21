@@ -372,14 +372,15 @@ async fn org_audit_request_command_counts() {
             "ORG_COMMANDS {action:?} total={} commands={commands:?}",
             commands.len()
         );
-        // Add and Join check live membership and read both schedule timings.
+        // Add and Join read both schedule timings. Issue fences the org; Issue
+        // and Join each fence the issuer and read the active admin membership.
         let expected = match action {
             Action::Add => 20,
             Action::Update => 18,
             Action::Revoke => 14,
-            Action::Issue => 7,
+            Action::Issue => 10,
             Action::Cancel => 6,
-            Action::Join => 17,
+            Action::Join => 19,
         };
         assert_eq!(commands.len(), expected, "{action:?}");
         assert_eq!(

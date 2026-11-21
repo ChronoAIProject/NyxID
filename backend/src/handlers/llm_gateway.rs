@@ -3526,7 +3526,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: "test-token".to_owned().into(),
             service,
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,

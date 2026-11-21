@@ -6165,6 +6165,7 @@ pub fn execute_tool_resolved<'a>(
             && (node_route.is_some()
                 || target
                     .catalog_default_headers
+                    .configured()
                     .iter()
                     .chain(&target.user_service_default_headers)
                     .any(|header| header.name.eq_ignore_ascii_case("upgrade")))
@@ -6952,7 +6953,7 @@ async fn execute_tool_resolved_inner(
                     && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
                 &target,method.as_str(),&path,query.as_deref(),body.as_deref().unwrap_or_default(),|| {
                     let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
-                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_headers(), target.user_service_default_headers.as_slice()]);
                     Ok(proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers))
                 },node_route.is_some()).await?
         };
@@ -15852,7 +15853,7 @@ mod tests {
                 auth_key_name: service.auth_key_name.clone(),
                 credential: Default::default(),
                 service,
-                catalog_default_headers: Vec::new(),
+                catalog_default_headers: Default::default(),
                 user_service_default_headers: Vec::new(),
                 ws_frame_injections: Vec::new(),
                 connection_id: None,

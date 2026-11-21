@@ -2116,7 +2116,7 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
         auth_key_name: "Authorization".into(),
         credential: "server-secret".to_owned().into(),
         service,
-        catalog_default_headers: vec![],
+        catalog_default_headers: Default::default(),
         user_service_default_headers: vec![],
         ws_frame_injections: vec![],
         connection_id: None,

@@ -57,7 +57,7 @@ impl HttpProjection {
         let mut headers = crate::services::proxy_service::collect_forward_headers_with_defaults(
             headers,
             &[
-                target.catalog_default_headers.as_slice(),
+                target.catalog_headers(),
                 target.user_service_default_headers.as_slice(),
             ],
         );

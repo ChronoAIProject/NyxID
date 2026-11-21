@@ -412,7 +412,7 @@ pub(crate) async fn bound_target(
     owner: &str,
     bound: &crate::models::assistant_agent::OwnerModelRoute,
 ) -> AppResult<Option<crate::services::proxy_service::ProxyTarget>> {
-    use crate::services::{default_header_service, platform_key_service, proxy_service};
+    use crate::services::{platform_key_service, proxy_service};
     if let Some(id) = &bound.connection_id {
         return Ok(
             proxy_service::read_proxy_authority_snapshot_by_user_service_id(
@@ -475,7 +475,7 @@ pub(crate) async fn bound_target(
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
         credential: Default::default(),
-        catalog_default_headers: default_header_service::catalog(Some(keys), &service).await?,
+        catalog_default_headers: proxy_service::CatalogHeaders::load(Some(keys), &service).await?,
         user_service_default_headers: Vec::new(),
         ws_frame_injections: service.ws_frame_injections.clone(),
         connection_id: None,

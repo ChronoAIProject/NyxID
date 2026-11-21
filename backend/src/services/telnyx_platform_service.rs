@@ -404,7 +404,7 @@ pub(crate) fn execute<'a>(
             || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
             || target.auth_method != "bearer"
             || target.credential.is_empty()
-            || !target.catalog_default_headers.is_empty()
+            || !target.catalog_default_headers.configured().is_empty()
             || !target.user_service_default_headers.is_empty()
         {
             return Err(invalid(
@@ -716,7 +716,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: "test-only".to_owned().into(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,

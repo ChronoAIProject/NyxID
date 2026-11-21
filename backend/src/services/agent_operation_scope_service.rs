@@ -1560,6 +1560,7 @@ pub fn validate_target(target: &super::proxy_service::ProxyTarget, method: &str)
     let mut headers = axum::http::HeaderMap::new();
     for name in target
         .catalog_default_headers
+        .configured()
         .iter()
         .chain(&target.user_service_default_headers)
         .map(|header| header.name.as_str())

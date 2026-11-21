@@ -362,6 +362,71 @@ async fn provider_requirement(f: &Fixture, owner: &str, method: &str, key: &str)
 }
 
 #[tokio::test]
+async fn catalog_headers_follow_the_resolved_connection_destination_for_rest_and_mcp() {
+    let f = Box::pin(Fixture::new()).await;
+    let db = &f.state.db;
+    let endpoints = db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME);
+    let endpoint = endpoints
+        .find_one(doc! {"user_id": &f.owner})
+        .await
+        .unwrap()
+        .unwrap();
+    let services = db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME);
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.catalog},
+            doc! {"$set": {"default_request_headers": [
+                {"name": "X-Catalog", "value": "version"}
+            ]}},
+        )
+        .await
+        .unwrap();
+    services
+        .update_one(
+            doc! {"_id": &f.service},
+            doc! {"$set": {"default_request_headers": [
+                {"name": "X-Connection", "value": "instance"}
+            ]}},
+        )
+        .await
+        .unwrap();
+
+    for via_node in [false, true] {
+        let responder = if via_node {
+            services
+                .update_one(
+                    doc! {"_id": &f.service},
+                    doc! {"$set": {"node_id": &f.node}},
+                )
+                .await
+                .unwrap();
+            Some(node_responder(&f, 6).await)
+        } else {
+            None
+        };
+        for (url, catalog_destination) in [
+            (endpoint.url.clone(), true),
+            (format!("{}/instance", endpoint.url), false),
+        ] {
+            endpoints
+                .update_one(doc! {"_id": &endpoint.id}, doc! {"$set": {"url": url}})
+                .await
+                .unwrap();
+            for (mcp, universal) in [(false, false), (true, false), (true, true)] {
+                Box::pin(f.call(mcp, universal, &f.key_headers())).await;
+                let headers = f.headers.lock().unwrap().pop().unwrap();
+                assert_eq!(headers.contains_key("x-catalog"), catalog_destination);
+                assert_eq!(headers.get("x-connection").unwrap(), "instance");
+            }
+        }
+        if let Some(responder) = responder {
+            responder.await.unwrap();
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn mcp_proxy_node_provider_path_query_and_headers_match_rest() {
     let f = Box::pin(legacy_fixture()).await;
     let path = Box::pin(provider_requirement(&f, &f.owner, "path", "prefix-")).await;

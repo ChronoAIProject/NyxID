@@ -795,7 +795,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,

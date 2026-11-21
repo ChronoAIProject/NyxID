@@ -111,7 +111,7 @@ pub fn source(
         "base":target.base_url, "auth":target.auth_method, "key":target.auth_key_name,
         "scheme":target.service.auth_scheme,
         "credential":hex::encode(Sha256::digest(target.credential.as_bytes())),
-        "catalog_headers":target.catalog_default_headers, "headers":target.user_service_default_headers,
+        "catalog_headers":target.catalog_header_binding(std::convert::identity), "headers":target.user_service_default_headers,
         "connection":target.connection_id,
     }));
     Some(ResourceSource {

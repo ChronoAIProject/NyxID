@@ -467,6 +467,16 @@ async fn organization_joins_receive_the_current_week_once_across_paths_and_rejoi
     insert_owner(&db, "added", UserType::Person, now).await;
     join_org(&db, "org-a", "added").await;
     insert_owner(&db, "invited", UserType::Person, now).await;
+    insert_owner(&db, "admin-id", UserType::Person, now).await;
+    db.collection::<crate::models::org_membership::OrgMembership>("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            "org-b",
+            "admin-id",
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
     let invite = org_invite_service::create_invite(
         &db,
         "org-b",

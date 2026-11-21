@@ -219,7 +219,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: zeroize::Zeroizing::new(String::new()),
             service: catalog.clone(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,

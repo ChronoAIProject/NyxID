@@ -295,7 +295,10 @@ async fn redemption_held_at_kms_cannot_survive_issuer_revoke_or_personal_departu
                     .await
                     .unwrap();
                 crate::services::org_membership_authority::fence_person_authority_loss(
-                    &db, &actor, &mut tx, true,
+                    &db,
+                    &actor,
+                    &mut tx,
+                    Some(&actor),
                 )
                 .await
                 .unwrap();

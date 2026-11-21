@@ -323,7 +323,7 @@ async fn membership_join_role_revoke_reactivate_and_disabled_person_recompute_at
         &mut session,
         &f.person,
         false,
-        false,
+        None,
         None,
         Some(true),
     )
@@ -337,7 +337,7 @@ async fn membership_join_role_revoke_reactivate_and_disabled_person_recompute_at
         &mut session,
         &f.person,
         false,
-        false,
+        None,
         None,
         Some(true),
     )
