@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{
+    COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, User, UserProfileConfig,
+};
 
 /// Supported social login providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -499,6 +501,16 @@ enum SocialLoginOutcome {
     CreateNew(User),
 }
 
+fn sync_provider_name(update: &mut bson::Document, user: &User, profile: &SocialProfile) {
+    if let Some(name) = &profile.display_name
+        && (user.display_name.is_none()
+            || user.display_name == user.profile_config.provider_display_name)
+    {
+        update.insert("display_name", name);
+        update.insert(PROVIDER_DISPLAY_NAME, name);
+    }
+}
+
 /// Pure business-logic resolver: given DB lookup results and the incoming
 /// social profile, determine what action `find_or_create_user` should take.
 ///
@@ -519,9 +531,7 @@ fn resolve_social_login(
             "last_login_at": bson::DateTime::from_chrono(now),
             "updated_at": bson::DateTime::from_chrono(now),
         };
-        if let Some(ref name) = profile.display_name {
-            update.insert("display_name", name);
-        }
+        sync_provider_name(&mut update, &user, profile);
         if let Some(ref avatar) = profile.avatar_url {
             update.insert("avatar_url", avatar);
         }
@@ -549,11 +559,7 @@ fn resolve_social_login(
             "last_login_at": bson::DateTime::from_chrono(now),
             "updated_at": bson::DateTime::from_chrono(now),
         };
-        if user.display_name.is_none()
-            && let Some(ref name) = profile.display_name
-        {
-            update.insert("display_name", name);
-        }
+        sync_provider_name(&mut update, &user, profile);
         if user.avatar_url.is_none()
             && let Some(ref avatar) = profile.avatar_url
         {
@@ -596,7 +602,10 @@ fn resolve_social_login(
         created_at: now,
         updated_at: now,
         last_login_at: Some(now),
-        profile_config: Default::default(),
+        profile_config: UserProfileConfig {
+            provider_display_name: profile.display_name.clone(),
+            ..Default::default()
+        },
     };
 
     Ok(SocialLoginOutcome::CreateNew(new_user))
@@ -639,9 +648,7 @@ pub struct FindOrCreateUserResult {
 
 /// Find an existing user by social identity or email, or create a new one.
 ///
-/// NOTE: The returned `User` struct reflects the state *before* the update.
-/// Only `user.id` should be relied upon from the return value for downstream
-/// operations (e.g. session creation). Profile fields may be stale.
+/// The returned user includes the profile as stored by this login.
 ///
 /// When `allow_new_users` is `false`, first-time social sign-ups are rejected
 /// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
@@ -684,31 +691,11 @@ pub async fn find_or_create_user_with_invite(
     };
 
     match resolve_social_login(existing_social, existing_email, profile)? {
-        SocialLoginOutcome::UpdateReturning {
-            ref user,
-            ref update,
-        } => {
-            users
-                .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
-                .await?;
-            Ok(FindOrCreateUserResult {
-                user: user.clone(),
-                was_newly_created: false,
-            })
-        }
-        SocialLoginOutcome::LinkToExisting {
-            ref user,
-            ref update,
-        } => {
-            users
-                .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
-                .await
-                .map_err(map_social_link_error)?;
-            Ok(FindOrCreateUserResult {
-                user: user.clone(),
-                was_newly_created: false,
-            })
-        }
+        SocialLoginOutcome::UpdateReturning { user, update }
+        | SocialLoginOutcome::LinkToExisting { user, update } => Ok(FindOrCreateUserResult {
+            user: update_social_profile(&users, &user, update).await?,
+            was_newly_created: false,
+        }),
         SocialLoginOutcome::CreateNew(mut new_user) => {
             if !allow_new_users {
                 // Registration is gated by invite codes (issue #179). Social
@@ -758,6 +745,40 @@ pub async fn find_or_create_user_with_invite(
             })
         }
     }
+}
+
+async fn update_social_profile(
+    users: &mongodb::Collection<User>,
+    user: &User,
+    mut update: bson::Document,
+) -> AppResult<User> {
+    use mongodb::options::ReturnDocument;
+
+    if update.contains_key("display_name") {
+        // A profile save can confirm the same text between lookup and write.
+        let expected = doc! {
+            "_id": &user.id,
+            "display_name": &user.display_name,
+            PROVIDER_DISPLAY_NAME: &user.profile_config.provider_display_name,
+        };
+        if let Some(updated) = users
+            .find_one_and_update(expected, doc! { "$set": &update })
+            .return_document(ReturnDocument::After)
+            .await
+            .map_err(map_social_link_error)?
+        {
+            return Ok(updated);
+        }
+        update.remove("display_name");
+        update.remove(PROVIDER_DISPLAY_NAME);
+    }
+
+    users
+        .find_one_and_update(doc! { "_id": &user.id }, doc! { "$set": update })
+        .return_document(ReturnDocument::After)
+        .await
+        .map_err(map_social_link_error)?
+        .ok_or(AppError::SocialAuthDeactivated)
 }
 
 #[cfg(test)]
@@ -1146,6 +1167,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn social_relogin_keeps_name_saved_in_profile() {
+        use crate::handlers::users::{UpdateProfileRequest, update_me};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        use axum::{Json, extract::State};
+
+        let db = connect_test_database("social_profile_name").await.unwrap();
+        let state = test_app_state(db.clone());
+        for provider in [
+            SocialProvider::GitHub,
+            SocialProvider::Google,
+            SocialProvider::Apple,
+        ] {
+            let mut profile = SocialProfile {
+                provider,
+                email: format!("{}@example.test", provider.as_str()),
+                ..github_profile()
+            };
+            let signup = find_or_create_user(&db, &profile, true).await.unwrap();
+            assert!(signup.was_newly_created);
+            let id = &signup.user.id;
+            let saved = update_me(
+                State(state.clone()),
+                test_auth_user(id),
+                Json(UpdateProfileRequest {
+                    display_name: Some("小明".into()),
+                    avatar_url: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(saved.display_name.as_deref(), Some("小明"));
+            profile.avatar_url = Some("https://example.test/new-avatar".into());
+            let login = find_or_create_user(&db, &profile, false).await.unwrap();
+            assert_eq!(&login.user.id, id);
+            let stored = db
+                .collection::<User>(USERS)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.display_name.as_deref(), Some("小明"), "{provider:?}");
+            assert_eq!(stored.avatar_url, profile.avatar_url);
+        }
+    }
+
     #[test]
     fn resolve_returning_social_user() {
         let user = make_test_user("user@example.com", Some("github"), Some("gh_12345"));
@@ -1162,6 +1229,82 @@ mod tests {
             }
             other => panic!("expected UpdateReturning, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stale_social_login_respects_confirmation_of_the_prefilled_name() {
+        use crate::handlers::users::{UpdateProfileRequest, update_me};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        use axum::{Json, extract::State};
+
+        let db = connect_test_database("confirm_social_name").await.unwrap();
+        let users = db.collection::<User>(USERS);
+        let state = test_app_state(db.clone());
+        let mut profile = github_profile();
+        let signup = find_or_create_user(&db, &profile, true).await.unwrap().user;
+        let confirmed = profile.display_name.replace("$Renamed".into());
+        profile.avatar_url = Some("https://example.test/later".into());
+        let SocialLoginOutcome::UpdateReturning { user, update } =
+            resolve_social_login(Some(signup), None, &profile).unwrap()
+        else {
+            panic!("expected a returning user")
+        };
+
+        let saved = update_me(
+            State(state),
+            test_auth_user(&user.id),
+            Json(UpdateProfileRequest {
+                display_name: confirmed.clone(),
+                avatar_url: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.display_name, confirmed);
+        let updated = update_social_profile(&users, &user, update).await.unwrap();
+        assert_eq!(updated.display_name, confirmed);
+        assert_eq!(updated.avatar_url, profile.avatar_url);
+        assert_eq!(
+            find_or_create_user(&db, &profile, false)
+                .await
+                .unwrap()
+                .user
+                .display_name,
+            confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn social_name_refresh_respects_admin_edits_and_clears() {
+        use crate::services::admin_user_service::update_user;
+        let db = crate::test_utils::connect_test_database("admin_social_name")
+            .await
+            .unwrap();
+        let mut profile = github_profile();
+        let user = find_or_create_user(&db, &profile, true).await.unwrap().user;
+        profile.display_name = Some("$Renamed".into());
+        let refreshed = find_or_create_user(&db, &profile, false)
+            .await
+            .unwrap()
+            .user;
+        assert_eq!(refreshed.display_name, profile.display_name);
+        update_user(&db, &user.id, Some("$Renamed"), None, None)
+            .await
+            .unwrap();
+        profile.display_name = Some("Later".into());
+        let confirmed = find_or_create_user(&db, &profile, false)
+            .await
+            .unwrap()
+            .user;
+        assert_eq!(confirmed.display_name.as_deref(), Some("$Renamed"));
+        update_user(&db, &user.id, Some("  "), None, None)
+            .await
+            .unwrap();
+        let refilled = find_or_create_user(&db, &profile, false)
+            .await
+            .unwrap()
+            .user;
+        assert_eq!(refilled.display_name, profile.display_name);
     }
 
     #[test]
@@ -1295,6 +1438,26 @@ mod tests {
                 assert!(!update.contains_key("display_name"));
             }
             other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_and_older_profile_edits_keep_their_display_names() {
+        let mut profile = github_profile();
+        let mut user = make_test_user(&profile.email, Some("github"), Some(&profile.provider_id));
+        user.display_name = Some("Local name".into());
+        for last_default in [None, Some("Earlier provider name".to_owned())] {
+            user.profile_config.provider_display_name = last_default;
+            for provider_name in [Some("Changed provider name"), Some("Local name"), None] {
+                profile.display_name = provider_name.map(String::from);
+                let SocialLoginOutcome::UpdateReturning { update, .. } =
+                    resolve_social_login(Some(user.clone()), None, &profile).unwrap()
+                else {
+                    panic!("expected a returning user")
+                };
+                assert!(!update.contains_key("display_name"));
+                assert!(!update.contains_key(PROVIDER_DISPLAY_NAME));
+            }
         }
     }
 

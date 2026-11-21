@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{
-    COLLECTION_NAME as USERS, ServiceViewPreferences, ServiceViewSource, ServiceViewState,
-    ServiceViewType, User,
+    COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, ServiceViewPreferences, ServiceViewSource,
+    ServiceViewState, ServiceViewType, User,
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{admin_user_service, role_service};
@@ -953,6 +953,7 @@ pub async fn update_me(
             ));
         }
         set_doc.insert("display_name", name);
+        set_doc.insert(PROVIDER_DISPLAY_NAME, bson::Bson::Null);
     }
 
     if let Some(ref url) = body.avatar_url {
