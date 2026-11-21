@@ -46,6 +46,7 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
             (accepted - started).num_milliseconds().max(0) as u64
         });
     TurnMetadata {
+        channel_text_completeness: Default::default(),
         continued_after_restart: turn
             .restart_admission
             .as_ref()

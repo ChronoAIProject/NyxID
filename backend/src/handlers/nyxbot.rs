@@ -3688,6 +3688,7 @@ impl std::fmt::Display for InboundReply {
 }
 
 struct Sender<'a> {
+    truncated_original_bytes: Option<usize>,
     /// Provider classification before any normalization used by legacy chat.
     /// Only the new execution-source proof uses this distinction.
     original_kind: Option<crate::models::channel_thread::ThreadSenderKind>,
@@ -4211,7 +4212,19 @@ async fn start_chat_turn(
             Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
         }
     }
+    let original_bytes = sender.truncated_original_bytes.unwrap_or(text.len());
+    let unnamed = (!private && guest && sender.display_name.is_none())
+        .then(|| chats::unnamed_sender(&row.platform, sender.id));
+    let attributed = (!private)
+        .then(|| chats::attributed(sender.display_name.or(unnamed.as_deref()), text, guest));
+    let (message, completeness) = crate::services::channel_turn_context::bounded_message(
+        attributed.as_deref().unwrap_or(text),
+        engine::MAX_MESSAGE_CHARS,
+        original_bytes,
+        sender.truncated_original_bytes.is_some(),
+    );
     let source_context = crate::models::assistant_conversation::ChannelTurnContext {
+        text_completeness: Some(completeness),
         org_origin: execution.is_some().then(|| Box::new(origin.clone())),
         source_event_id: event_key.to_owned(),
         channel_id: row.id.clone(),
@@ -4274,25 +4287,6 @@ async fn start_chat_turn(
         } else {
             " With this message the owner declined the pending action; do not retry it."
         });
-    }
-    let mut message = if private {
-        excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
-    } else {
-        // Some platforms send no names: guests are still told apart.
-        let unnamed = (guest && sender.display_name.is_none())
-            .then(|| chats::unnamed_sender(&row.platform, sender.id));
-        excerpt(
-            &chats::attributed(sender.display_name.or(unnamed.as_deref()), text, guest),
-            engine::MAX_MESSAGE_CHARS - 16,
-        )
-    };
-    if text.contains("[post truncated]") && !message.contains("[post truncated]") {
-        const MARKER: &str = "\n[post truncated]";
-        message = message
-            .chars()
-            .take(engine::MAX_MESSAGE_CHARS - MARKER.len())
-            .collect();
-        message.push_str(MARKER);
     }
     let title = if shared {
         None
@@ -4469,13 +4463,15 @@ async fn start_chat_turn(
             // The chat is busy (or the owner's channel pool is full): queue the
             // message for the agent's next turn instead of bouncing it. Its
             // reply is an asynchronous update delivered back to this chat.
-            let note = format!(
-                "Queued verified channel message; answer it next. The individually verified sources \
-                are listed by event_id in this turn's context. Message (JSON quoted data): {}",
-                json!(excerpt(text, 3000))
+            let (body, completeness) = crate::services::channel_turn_context::bounded_message(
+                text,
+                engine::MAX_MESSAGE_CHARS,
+                original_bytes,
+                sender.truncated_original_bytes.is_some(),
             );
-            let mut event =
-                crate::services::assistant_team_service::bound_event("message", note, None, None);
+            let mut source_context = source_context;
+            source_context.text_completeness = Some(completeness);
+            let mut event = queued_channel_message(&body, original_bytes);
             event.question_key = question_key;
             event.reply_to = vec![origin.clone()];
             event.source_event_ids = vec![event_key.to_owned()];
@@ -4521,6 +4517,32 @@ async fn start_chat_turn(
         )),
         Err(error) => Err(error),
     }
+}
+
+fn queued_channel_message(
+    body: &str,
+    original_bytes: usize,
+) -> crate::models::assistant_conversation::AgentEvent {
+    const PREFIX: &str = "Queued verified channel message; answer it next. The individually verified sources are listed by event_id in this turn's context. Message (JSON quoted data): ";
+    let mut event = crate::services::assistant_team_service::bound_event(
+        "message",
+        format!("{PREFIX}{}", json!(body)),
+        None,
+        None,
+    );
+    let limit = engine::event_text_limit(&event);
+    if event.text.chars().nth(limit).is_some() {
+        // One input character can occupy six characters in a JSON string.
+        let (preview, _) = crate::services::channel_turn_context::bounded_message(
+            body,
+            (limit - PREFIX.len() - 2) / 6,
+            original_bytes,
+            true,
+        );
+        let legacy = format!("{PREFIX}{}", json!(preview));
+        event.channel_message = Some(std::mem::replace(&mut event.text, legacy));
+    }
+    event
 }
 
 /// When `key` is the question the thread is answering right now, or one
@@ -5885,6 +5907,7 @@ async fn custom_responses(
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
     let sender = Sender {
+        truncated_original_bytes: None,
         original_kind: None,
         original_message: true,
         media: Vec::new(),
@@ -6528,6 +6551,7 @@ async fn dispatch_relay_response(
         activity,
         context["event_ref"].as_str(),
         &Sender {
+            truncated_original_bytes: None,
             original_kind: None,
             media,
             kind: sender_kind,
@@ -6875,6 +6899,7 @@ async fn gateway_inbound_inner(
             &json!({"conversation":{"type":kind}}),
             message,
             text,
+            None,
             event_key,
             true,
         ))
@@ -7832,37 +7857,39 @@ pub async fn relay_callback(
                 "relay_before_media_text",
             )
             .await;
-            let text = if matches!(row.platform.as_str(), "lark" | "feishu")
-                && raw
-                    .pointer("/event/message/message_type")
-                    .and_then(Value::as_str)
-                    == Some("post")
-                && (admitted.source_media_declared.unwrap_or(0) > 0
-                    || feature_flag_service::personal_flag_enabled(
-                        &state.db,
-                        &row.user_id,
-                        feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
-                    )
-                    .await
-                    .unwrap_or(false))
-            {
-                let bot_id =
-                    match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
-                        Ok(bot) => own_user_id(&state, &bot).await,
-                        Err(_) => None,
-                    };
-                crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
-                    .map(|post| post.text)
-                    .unwrap_or_default()
-            } else {
-                chats::named_mentions(&text, &raw)
-            };
+            let (text, truncated_original_bytes) =
+                if matches!(row.platform.as_str(), "lark" | "feishu")
+                    && raw
+                        .pointer("/event/message/message_type")
+                        .and_then(Value::as_str)
+                        == Some("post")
+                    && (admitted.source_media_declared.unwrap_or(0) > 0
+                        || feature_flag_service::personal_flag_enabled(
+                            &state.db,
+                            &row.user_id,
+                            feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                        )
+                        .await
+                        .unwrap_or(false))
+                {
+                    let bot_id =
+                        match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+                            Ok(bot) => own_user_id(&state, &bot).await,
+                            Err(_) => None,
+                        };
+                    crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
+                        .map(|post| (post.text, post.truncated_original_bytes))
+                        .unwrap_or_default()
+                } else {
+                    (chats::named_mentions(&text, &raw), None)
+                };
             if Box::pin(thread_follow::inbound(
                 &state,
                 &row,
                 &payload,
                 &message_id,
                 &text,
+                truncated_original_bytes,
                 &admitted.id,
             ))
             .await?
@@ -7968,6 +7995,7 @@ pub async fn relay_callback(
                 }
             };
             let sender = Sender {
+                truncated_original_bytes,
                 original_kind: None,
                 media: if canonical_platform(&row.platform) == "telegram" {
                     chats::native_message(&raw)

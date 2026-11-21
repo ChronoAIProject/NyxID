@@ -174,6 +174,8 @@ pub struct UpdateReplyResponse {
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<crate::models::channel_message::TextCompleteness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery: Option<DeliveryItem>,
     pub attachments: Vec<MessageAttachmentItem>,
     pub id: String,
@@ -402,6 +404,7 @@ pub(crate) fn message_to_item(
     base_url: &str,
 ) -> MessageItem {
     MessageItem {
+        text_completeness: msg.text_completeness,
         delivery: None,
         attachments: msg
             .attachments
@@ -4465,6 +4468,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -4501,6 +4505,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5006,6 +5011,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5623,6 +5629,7 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5921,6 +5928,7 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,

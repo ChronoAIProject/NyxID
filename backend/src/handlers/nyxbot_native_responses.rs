@@ -385,6 +385,7 @@ async fn claim_message(
 pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
     use crate::models::channel_thread::ThreadSenderKind as Kind;
     Sender {
+        truncated_original_bytes: None,
         original_kind: Some(match activity["actor"]["kind"].as_str() {
             Some("human") => Kind::Human,
             Some("bot") => Kind::Bot,

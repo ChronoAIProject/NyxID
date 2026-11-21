@@ -159,6 +159,7 @@ pub(crate) fn specialist_settled_event(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        channel_message: None,
         wake: None,
         automation_work: None,
         execution_task: None,

@@ -946,7 +946,21 @@ fn event_turn_text(events: &[AgentEvent], shared_group_context: Option<&str>) ->
 }
 
 pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
-    let text = excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  ");
+    let mut text = match &event.channel_message {
+        Some(message) if event.kind == "message" && !event.channel_contexts.is_empty() => {
+            message.replace('\n', "\n  ")
+        }
+        _ => excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  "),
+    };
+    if event.kind == "message"
+        && !event.source_event_ids.is_empty()
+        && event
+            .channel_contexts
+            .iter()
+            .all(|source| source.text_completeness.is_none())
+    {
+        text.push_str("\n  [Legacy channel message, completeness and original length unknown]");
+    }
     if event.channel_contexts.is_empty() {
         text
     } else {
@@ -3518,6 +3532,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             &ids.message_id,
             &start.text,
             "user",
+            start
+                .channel_context
+                .as_ref()
+                .and_then(|source| source.text_completeness),
         )
         .await?;
     }
@@ -3896,6 +3914,14 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                channel_text_completeness: turn
+                    .channel_context
+                    .iter()
+                    .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
+                    .filter_map(|source| {
+                        Some((source.source_event_id.clone(), source.text_completeness?))
+                    })
+                    .collect(),
                 continued_after_restart: turn
                     .restart_admission
                     .as_ref()
@@ -5043,6 +5069,7 @@ pub(crate) async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                channel_text_completeness: Default::default(),
                                 continued_after_restart: saved.turn_metadata.as_ref().is_some_and(|metadata| metadata.continued_after_restart),
                                 voice_link_publication: None,
                                 links_in_chat: None,
@@ -5358,7 +5385,7 @@ artifact_recovery_target: None,
                 }
                 if message.status == "completed" && let Some(origin) = super::org_channel_service::origin(&row) {
                     match Box::pin(super::org_channel_service::validate_in_session(&db,session,origin,&row.user_id,row.agent_id.as_deref().unwrap_or_default(),true)).await {
-                        Ok(_) => super::org_channel_service::transcript::publish(&db,session,&row,&message.id,&message.text,"agent").await?,
+                        Ok(_) => super::org_channel_service::transcript::publish(&db,session,&row,&message.id,&message.text,"agent",None).await?,
                         Err(e @ AppError::DatabaseError(_)) => return Err(e),
                         // Lost exposure, membership or wallet readiness stops
                         // publication, never the turn's ordinary settlement.
@@ -7510,6 +7537,15 @@ struct RenderedRecapLine {
     truncated: bool,
 }
 
+fn channel_recap_marker(message: &AssistantMessage) -> Option<String> {
+    let channel = message.origin == Some(TurnOrigin::Channel)
+        || message
+            .turn_metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.channel_text_completeness.is_empty());
+    channel.then(|| format!(" [truncated=true, original_bytes={}]", message.text.len()))
+}
+
 fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLine {
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest) {
         "user (guest)"
@@ -7530,7 +7566,9 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
             ""
         }
     );
-    let room = limit.saturating_sub(prefix.len() + " [truncated]".len());
+    let marker = channel_recap_marker(message);
+    let marker = marker.as_deref().unwrap_or(" [truncated]");
+    let room = limit.saturating_sub(prefix.len() + marker.len());
     let mut end = message.text.len().min(room);
     while !message.text.is_char_boundary(end) {
         end -= 1;
@@ -7539,7 +7577,7 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
     let text = format!(
         "{prefix}{}{}",
         &message.text[..end],
-        if truncated { " [truncated]" } else { "" }
+        if truncated { marker } else { "" }
     );
     RenderedRecapLine {
         text: super::voice::links::message_text(message, &text).into_owned(),
@@ -7776,13 +7814,26 @@ pub async fn conversation_history_page(
         let mut end = chars.len();
         loop {
             let partial = end < chars.len();
-            let value = json!({
+            let mut value = json!({
                 "seq": row.seq,
                 "message_id": row.id,
                 "offset": start,
+                "truncated": start != 0 || partial,
+                "original_bytes": row.text.len(),
                 "next_offset": partial.then_some(end),
                 "text": chars[start..end].iter().collect::<String>(),
             });
+            if let Some(source) = row
+                .turn_metadata
+                .as_ref()
+                .filter(|m| {
+                    row.origin == Some(TurnOrigin::Channel)
+                        && m.channel_text_completeness.len() == 1
+                })
+                .and_then(|m| m.channel_text_completeness.values().next())
+            {
+                value["source_text_completeness"] = json!(source);
+            }
             let mut candidate = messages.clone();
             candidate.push(value);
             let has_more = partial || index + 1 < rows.len() || more_rows;
@@ -7892,7 +7943,7 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     let mut reserved = match window.iter().rev().find(|message| message.role == "user") {
         Some(goal) => {
             goal_id = Some(goal.id.as_str());
-            recap_line(goal, guest, remaining)
+            recap_line(goal, guest, RECAP_CHECKPOINT_BYTES.min(remaining))
                 .map(|line| line.text)
                 .unwrap_or_default()
         }
@@ -8084,9 +8135,15 @@ fn recap_line(
         &format!("{prefix}{body}{activities}{attachments}{error}"),
     )
     .into_owned();
-    if line.len() > remaining {
+    truncated |= line.len() > remaining;
+    if truncated && let Some(marker) = channel_recap_marker(message) {
+        if remaining < prefix.len() + marker.len() {
+            return None;
+        }
+        truncate_at_boundary(&mut line, remaining - marker.len());
+        line.push_str(&marker);
+    } else {
         truncate_at_boundary(&mut line, remaining);
-        truncated = true;
     }
     Some(RenderedRecapLine {
         text: line,

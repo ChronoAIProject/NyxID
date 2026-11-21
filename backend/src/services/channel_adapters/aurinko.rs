@@ -532,6 +532,7 @@ fn email_history(
         };
         let body = message["body"].as_str().unwrap_or_default().to_owned();
         let item = crate::services::channel_thread_service::ThreadHistoryMessage {
+            truncated_original_bytes: None,
             message_id: id.to_owned(),
             sender_id: sender.to_owned(),
             sender_kind: ThreadSenderKind::Human,

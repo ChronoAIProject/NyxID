@@ -603,6 +603,8 @@ fn default_per_page() -> u64 {
 /// longer persisted.
 pub struct ConversationMessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<crate::models::channel_message::TextCompleteness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery: Option<super::channel_relay::DeliveryItem>,
     pub id: String,
     pub direction: String,
@@ -663,6 +665,7 @@ pub async fn list_conversation_messages(
     let items = messages
         .into_iter()
         .map(|m| ConversationMessageItem {
+            text_completeness: m.text_completeness,
             delivery: delivery
                 .remove(&m.id)
                 .map(super::channel_relay::DeliveryItem::from),

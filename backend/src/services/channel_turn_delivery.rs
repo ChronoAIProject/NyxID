@@ -567,6 +567,10 @@ pub(crate) async fn enqueue_in_session(
             &format!("org-channel-source:{source}"),
             text,
             "user",
+            incoming
+                .channel_contexts
+                .first()
+                .and_then(|source| source.text_completeness),
         )
         .await?;
     }
