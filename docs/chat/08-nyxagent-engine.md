@@ -1735,6 +1735,16 @@ closed. Cached upstream replay may contain only a terminal response, so terminal
 output is authoritative. Returned `conversation.id` and `response.id` are always
 stored on success. Locally guessing the first session ID is incorrect.
 
+NyxAgent can discard a partial model attempt after a successful retry. NyxID
+applies `response.output_text.done` at its output and content index and clears
+all `discarded_output_indices` on that frame. Live deltas still concatenate.
+A correction that rewrites visible text sends a full `block.completed` snapshot
+on the same block. Web and mobile continue applying later deltas to it. The
+coalesced reattach checkpoint saves the corrected text and its part lengths.
+For older checkpoints or text changed by redaction, recovery reconstructs the
+indices from upstream replay or its retained snapshot before publishing updates.
+Empty incomplete messages contribute neither text nor separators to settlement.
+
 For a completed response, NyxID settles every assistant message marked
 `phase: final_answer`, preserving the order of its output-text parts and the
 two-newline separator. If the response has no explicit final answer, NyxID

@@ -3067,17 +3067,14 @@ async fn execute_turn_inner(
                 if decoder.data_events != before {
                     last_semantic_progress = tokio::time::Instant::now();
                 }
+                let raw = decoder.text();
                 *partial = completed.clone()
-                    + &context.redact(
-                        &decoder
-                            .text
-                            .replace(credential.raw_key.as_str(), "[redacted]"),
-                    );
+                    + &context.redact(&raw.replace(credential.raw_key.as_str(), "[redacted]"));
                 if partial.len() > engine::MAX_OUTPUT_BYTES {
                     return Err(TurnError::internal("output_too_large", "stream"));
                 }
                 decoded?;
-                if !first_output_recorded && !decoder.text.is_empty() {
+                if !first_output_recorded && !raw.is_empty() {
                     first_output_recorded = true;
                     let _ = super::assistant_turn_observability::first_output(&state.db, row).await;
                 }
@@ -3106,26 +3103,30 @@ async fn execute_turn_inner(
                     ],
                 );
                 let safe_end = partial.len() - held.len();
-                if background {
-                    if held.is_empty()
-                        && let (Some(id), Some(sequence)) = (&running_response_id, decoder.sequence)
-                        && let Some(suffix) = partial.strip_prefix(emitted.as_str())
-                        && !suffix.is_empty()
-                    {
+                let visible = &partial[..safe_end];
+                let cursor = running_response_id.as_deref().zip(decoder.sequence);
+                if visible != emitted
+                    && (!background || cursor.is_some())
+                    && (!background || held.is_empty() || !visible.starts_with(&emitted))
+                {
+                    let upstream = cursor.filter(|_| background).map(|(id, sequence)| {
+                        subscriber::checkpoint(
+                            &request_key, id, sequence, visible.strip_prefix(&completed).unwrap_or(""),
+                            &decoder.output, &raw,
+                        )
+                    });
+                    if let Some(suffix) = visible.strip_prefix(&emitted) {
                         events.emit_with_checkpoint(
-                            "block.delta",
-                            json!({"block_id":block_id,"text":suffix}),
-                            Some(subscriber::checkpoint(
-                                &request_key,
-                                id,
-                                sequence,
-                                &partial[completed.len()..],
-                            )),
+                            "block.delta", json!({"block_id":block_id,"text":suffix}), upstream,
                         );
-                        emitted.push_str(suffix);
+                    } else {
+                        events.emit_with_checkpoint(
+                            "block.completed",
+                            json!({"block_id":block_id,"block":{"type":"text","block_id":block_id,"text":visible}}),
+                            upstream,
+                        );
                     }
-                } else {
-                    emit_text_suffix(events, block_id, &mut emitted, &partial[..safe_end]);
+                    emitted = visible.to_owned();
                 }
                 if decoder.reader_error.is_some() {
                     break;

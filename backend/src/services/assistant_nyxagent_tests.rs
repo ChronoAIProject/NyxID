@@ -167,6 +167,149 @@ fn completed_response_keeps_lone_commentary_and_failed_response_keeps_partial_te
 }
 
 #[test]
+fn discarded_attempt_group_is_atomic_and_done_replaces_one_part() {
+    let mut stream = ResponseStream::default();
+    for (seq, (item, part, text)) in [(2, 0, "old"), (1, 1, "B"), (0, 0, "bad"), (1, 0, "A")]
+        .into_iter()
+        .enumerate()
+    {
+        stream
+            .event(
+                json!({"type":"response.output_text.delta","sequence_number":seq,
+            "output_index":item,"content_index":part,"delta":text}),
+            )
+            .unwrap();
+    }
+    assert_eq!(stream.text(), "badABold");
+    stream.event(json!({"type":"response.output_text.done","sequence_number":4,
+        "output_index":0,"content_index":0,"text":"","status":"incomplete","discarded_output_indices":[0,2]})).unwrap();
+    assert_eq!(stream.text(), "AB");
+    stream
+        .event(
+            json!({"type":"response.output_text.done","sequence_number":5,
+        "output_index":1,"content_index":0,"text":"甲"}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "甲B");
+    stream
+        .event(
+            json!({"type":"response.output_item.done","sequence_number":6,"output_index":1,
+        "item":{"type":"message","role":"assistant","status":"incomplete","content":[]}}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "");
+}
+
+#[test]
+fn discarded_attempt_releases_the_output_budget_before_a_full_size_retry() {
+    let mut stream = ResponseStream::default();
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.delta","sequence_number":0,
+        "output_index":0,"delta":"x".repeat(MAX_OUTPUT_BYTES)}),
+        ))
+        .unwrap();
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.done","sequence_number":1,
+        "output_index":0,"text":"","discarded_output_indices":[0]}),
+        ))
+        .unwrap();
+    let answer = "界".repeat(MAX_OUTPUT_BYTES / 3) + "ab";
+    assert_eq!(answer.len(), MAX_OUTPUT_BYTES);
+    stream
+        .push(&frame(
+            json!({"type":"response.output_text.delta","sequence_number":2,
+        "output_index":1,"delta":answer}),
+        ))
+        .unwrap();
+    let mut done = terminal("response.completed", 3, &answer);
+    done["response"]["output"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "type":"message","role":"assistant","status":"incomplete","phase":"final_answer",
+            "content":[{"type":"output_text","text":""}]
+        }),
+    );
+    stream.push(&frame(done)).unwrap();
+    assert_eq!(stream.terminal.unwrap().text, answer);
+}
+
+#[test]
+fn discarded_attempt_unsuccessful_retry_keeps_partial_and_original_joining() {
+    for kind in ["response.failed", "response.completed"] {
+        let mut stream = ResponseStream::default();
+        for (seq, text) in ["甲\n", "乙"].into_iter().enumerate() {
+            stream
+                .event(
+                    json!({"type":"response.output_text.delta","sequence_number":seq*2,
+                "output_index":seq,"delta":text}),
+                )
+                .unwrap();
+            stream
+                .event(
+                    json!({"type":"response.output_text.done","sequence_number":seq*2+1,
+                "output_index":seq,"text":text}),
+                )
+                .unwrap();
+        }
+        assert_eq!(stream.text(), "甲\n乙");
+        let mut done = terminal(kind, 4, "甲\n");
+        done["response"]["output"].as_array_mut().unwrap().push(json!({
+            "type":"message","role":"assistant","status":if kind == "response.failed" {"incomplete"} else {"completed"},
+            "content":[{"type":"output_text","text":"乙"}]
+        }));
+        stream.event(done).unwrap();
+        let result = stream.terminal.unwrap();
+        assert_eq!(result.text, "甲\n\n\n乙");
+        assert_eq!(result.error.is_some(), kind == "response.failed");
+    }
+}
+
+#[test]
+fn discarded_attempt_trimmed_snapshot_round_trips_item_indices_and_separators() {
+    let item = |text: &str| json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]});
+    let response = json!({"output":[item("丢"),{"type":"mcp_call"},item("kept"),item("tail")]});
+    let output = OutputText::from_snapshot(&response).unwrap();
+    assert_eq!(output.text(), "丢\n\nkept\n\ntail");
+    let cursor = crate::models::assistant_conversation::SubscriberCheckpoint {
+        window_key: "window".into(),
+        response_id: "response".into(),
+        sequence: 8,
+        window_text: output.text(),
+        part_lengths: Some(output.layout()),
+    };
+    let saved = bson::from_bson(bson::to_bson(&cursor).unwrap()).unwrap();
+    let mut stream = ResponseStream::default();
+    stream.replay = true;
+    stream.sequence = Some(cursor.sequence);
+    stream.output = OutputText::restore(&saved).unwrap();
+    stream
+        .event(
+            json!({"type":"response.output_text.done","sequence_number":9,"output_index":0,
+        "text":"","status":"incomplete","discarded_output_indices":[0,3]}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "kept");
+    stream
+        .event(
+            json!({"type":"response.output_text.delta","sequence_number":10,
+        "output_index":4,"delta":"!"}),
+        )
+        .unwrap();
+    assert_eq!(stream.text(), "kept!");
+    assert!(
+        OutputText::restore(
+            &crate::models::assistant_conversation::SubscriberCheckpoint {
+                part_lengths: None,
+                ..cursor
+            }
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn mixed_sse_line_endings_in_one_chunk_preserve_frame_order() {
     let mut bytes =
         frame(json!({"type":"response.output_text.delta","sequence_number":0,"delta":"hello"}));
@@ -183,7 +326,7 @@ fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
         frame(json!({"type":"response.output_text.delta","sequence_number":4,"delta":"partial"}));
     stream.push(&delta).unwrap();
     assert_eq!(stream.push(&delta).unwrap_err().code, "invalid_stream");
-    assert_eq!(stream.text, "partial");
+    assert_eq!(stream.text(), "partial");
     assert!(ResponseStream::default().push(b"data: broken\n\n").is_err());
     let mut wrong = terminal("response.completed", 1, "hi");
     wrong["response"]["conversation"]["id"] = json!("../../arbitrary");
@@ -198,7 +341,7 @@ fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
         oversized.push(&too_large).unwrap_err().code,
         "output_too_large"
     );
-    assert!(oversized.text.is_empty());
+    assert!(oversized.text().is_empty());
 }
 
 #[test]
@@ -8638,7 +8781,7 @@ fn response_notices_accept_only_the_bounded_known_image_code() {
         let mut decoder = ResponseStream::default();
         decoder.push(&frame(event)).unwrap();
         assert_eq!(decoder.image_input_unsupported, expected);
-        assert_eq!(decoder.text, "Answer");
+        assert_eq!(decoder.text(), "Answer");
     }
 }
 

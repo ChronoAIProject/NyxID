@@ -408,7 +408,7 @@ async fn scripted_windows_with_limit(
 
 #[tokio::test]
 async fn survivor_recovers_before_created_and_after_checkpoint_with_one_execution() {
-    for (mid_answer, review, trimmed, stop_reply, refusal) in [
+    for ((mid_answer, review, trimmed, stop_reply, refusal), discard_cursor) in [
         (false, None, false, None, Some("background_disabled")),
         (false, None, false, None, Some("idempotency_key_required")),
         (false, None, false, None, None),
@@ -425,7 +425,13 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
         (true, None, false, Some(StopReply::Rotate), None),
         (true, None, false, Some(StopReply::Disable), None),
         (true, None, false, Some(StopReply::Destroy), None),
-    ] {
+    ]
+    .into_iter()
+    .map(|case| (case, None))
+    .chain(
+        [BEFORE_DISCARD, AFTER_DISCARD]
+            .map(|cursor| ((true, None, false, None, None), Some(cursor))),
+    ) {
         let db = connect_transaction_test_database("handoff_subscriber").await;
         engine::ensure_indexes(&db).await.unwrap();
         db.collection(USERS)
@@ -460,7 +466,12 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                 keys.lock().await.push((headers["idempotency-key"].to_str().unwrap().into(),headers["authorization"].to_str().unwrap().into()));
                 admissions.fetch_add(1,Ordering::SeqCst);
                 let stream = async_stream::stream! {
-                    if mid_answer {
+                    if let Some(cursor) = discard_cursor {
+                        for frame in &discarded_attempt_frames()[..=cursor] {
+                            yield Ok::<_,Infallible>(axum::body::Bytes::from(format!("data: {frame}\n\n")));
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    } else if mid_answer {
                         let created = json!({"type":"response.created","sequence_number":0,"response":{"id":RESPONSE,"conversation":{"id":SESSION}}});
                         let delta = json!({"type":"response.output_text.delta","sequence_number":1,"delta":"hello"});
                         yield Ok::<_,Infallible>(axum::body::Bytes::from(format!("data: {created}\n\ndata: {delta}\n\n")));
@@ -492,6 +503,29 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
         })).route(&format!("/v1/responses/{RESPONSE}/events"),axum::routing::get(move |uri: Uri, headers: HeaderMap| {
             let terminal = terminal.clone(); let served = served.clone(); let replay_db = replay_db.clone(); async move {
                 let index = served.fetch_add(1, Ordering::SeqCst);
+                if let Some(cursor) = discard_cursor {
+                    // Force a second connection just after the replacement delta. Its
+                    // checkpoint must agree with the browser before a terminal is sent.
+                    let after = if index == 0 { cursor } else { RETRY_DELTA };
+                    assert_eq!(uri.query(), Some(format!("after={after}").as_str()));
+                    if index == 1 {
+                        tokio::time::timeout(Duration::from_secs(8), async {
+                            loop {
+                                let current = replay_db.collection::<AssistantConversation>(COLLECTION_NAME).find_one(doc! {"user_id":OWNER}).await.unwrap().unwrap();
+                                if let Some(reply) = current.active_turn.unwrap().reply
+                                    && reply.upstream.is_some_and(|c| c.sequence == RETRY_DELTA as u64 && c.window_text == RETRIED_ANSWER) {
+                                    assert_eq!(reply.text, RETRIED_ANSWER);
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(30)).await;
+                            }
+                        }).await.unwrap();
+                    }
+                    let frames = discarded_attempt_frames();
+                    let end = if index == 0 { RETRY_DELTA } else { frames.len()-1 };
+                    let stream = frames[after+1..=end].iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>();
+                    return ([("content-type","text/event-stream")], stream).into_response();
+                }
                 if trimmed {
                     assert_eq!(uri.query(), Some(if index == 3 { "after=2" } else { "after=1" }));
                     match index {
@@ -760,7 +794,14 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
             assert_eq!(messages.len(), 2);
             assert_eq!(messages[1].id, reply_id);
             assert_eq!(messages[1].status, "completed");
-            assert_eq!(messages[1].text, "hello world");
+            assert_eq!(
+                messages[1].text,
+                if discard_cursor.is_some() {
+                    RETRIED_ANSWER
+                } else {
+                    "hello world"
+                }
+            );
             assert_eq!(posts.load(Ordering::SeqCst), 2);
             assert_eq!(reads.load(Ordering::SeqCst), 0);
             server.abort();
@@ -779,7 +820,16 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                             .unwrap()
                             .reply
                             .is_some_and(|reply| {
-                                reply.upstream.is_some_and(|cursor| cursor.sequence == 1)
+                                let expected_text = match discard_cursor {
+                                    Some(BEFORE_DISCARD) => "abandoned attempt.",
+                                    Some(AFTER_DISCARD) => "",
+                                    _ => "hello",
+                                };
+                                reply.text == expected_text
+                                    && reply.upstream.is_some_and(|cursor| {
+                                        cursor.sequence == discard_cursor.unwrap_or(1) as u64
+                                            && cursor.window_text == expected_text
+                                    })
                             }))
                 {
                     break;
@@ -1274,7 +1324,14 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                 assert!(matches!(result, Err(AppError::Unauthorized(_))));
             }
         } else {
-            assert_eq!(messages[1].text, "hello world");
+            assert_eq!(
+                messages[1].text,
+                if discard_cursor.is_some() {
+                    RETRIED_ANSWER
+                } else {
+                    "hello world"
+                }
+            );
             assert_eq!(messages[1].status, "completed");
         }
         assert_eq!(posts.load(Ordering::SeqCst), 1);
@@ -1282,6 +1339,8 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
             reads.load(Ordering::SeqCst),
             if review.is_some() {
                 0
+            } else if discard_cursor.is_some() {
+                2
             } else if trimmed {
                 4
             } else {
