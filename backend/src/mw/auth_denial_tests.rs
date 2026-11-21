@@ -443,6 +443,9 @@ fn denial_guidance_verified_first_party_guard_matches_early_guard() {
 #[tokio::test]
 async fn notification_routes_are_first_party_human_only_and_require_both_flags() {
     use crate::services::feature_flag_service as flags;
+    use crate::services::oauth_token_authority_service::{
+        with_fixture_read_budget, with_unavailable_user_read,
+    };
     let db =
         crate::test_utils::connect_transaction_test_database("notifications_auth_matrix").await;
     crate::services::assistant_notification_service::ensure_indexes(&db)
@@ -473,6 +476,16 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state);
     let root = "/api/v1/assistant/nyxagent/notifications";
+    let human_request = |method: &str, uri: &str, body: String| {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {human}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        with_fixture_read_budget(app.clone().oneshot(request))
+    };
     for enabled in [false, true] {
         flags::set_platform_override(
             &db,
@@ -490,19 +503,7 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
             } else {
                 String::new()
             };
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(&uri)
-                        .header("authorization", format!("Bearer {human}"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = human_request(method, &uri, body.clone()).await.unwrap();
             if enabled {
                 assert!(
                     response.status().is_success(),
@@ -613,19 +614,18 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
     .await
     .unwrap();
     for suffix in ["", "/summary"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("{root}{suffix}"))
-                    .header("authorization", format!("Bearer {human}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let response = human_request("GET", &format!("{root}{suffix}"), String::new())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    let refused = with_unavailable_user_read(human_request("GET", root, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let error = json_body(refused).await;
+    assert_eq!(error["error"], "oauth_authority_unavailable");
+    assert_eq!(error["error_code"], 12900);
     db.drop().await.unwrap();
 }
 
