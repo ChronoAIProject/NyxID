@@ -261,7 +261,19 @@ pub fn schema(name: &str) -> Value {
                 },
             )
         }
-        "list_schedules" => (json!({}), vec![]),
+        "list_schedules" => (
+            json!({
+                "cursor": {
+                    "type":"object", "additionalProperties":false, "required":["created_at","id"],
+                    "properties":{"created_at":{"type":"string","format":"date-time"},"id":{"type":"string","format":"uuid"}},
+                    "description":"Pass the previous page's next_cursor with the same filters until next_cursor is null. If the result has a ref, first assemble the page with nyxid__read_tool_result(ref, part=next_part)."
+                },
+                "limit":{"type":"integer","minimum":1,"maximum":50,"default":20},
+                "enabled":{"type":"boolean","description":"True selects active automations and false selects disabled automations. Omit to include both."},
+                "agent_id":{"type":"string","format":"uuid","description":"Only assistant deliveries to this agent ID."}
+            }),
+            vec![],
+        ),
         "list_notifications" => (
             json!({
                 "since": {"type":"string","format":"date-time","maxLength":64,"description":"Only activity updated at or after this RFC3339 timestamp."},
@@ -660,7 +672,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Since selects rows by their latest update; a coalesced count covers its entire unread window, starting at created_at, and may include older activity. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
         }
         "list_schedules" => {
-            "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
+            "List the owner's schedules and assistant webhook automations with full details, newest first. If a page has a ref, concatenate its content with each nyxid__read_tool_result(ref, part=next_part) until complete. Pass the page's next_cursor as cursor with the same filters until next_cursor is null."
         }
         "update_schedule" => {
             "Edit a schedule or assistant webhook automation, including confirmation_policy and thread_policy. Webhooks default to dedicated; home requires explicit owner acceptance of untrusted text persisting into later full-authority turns. Pause/resume with paused. Read back returned next runs."
@@ -1274,6 +1286,41 @@ mod tests {
                 "openWorldHint":false
             })
         );
+    }
+
+    #[test]
+    fn list_schedules_advertises_continuation_and_read_only_annotations() {
+        let annotations =
+            crate::services::mcp_service::tool_annotations("nyxid__list_schedules", &[]).unwrap();
+        assert!(annotations["title"].is_string());
+        assert_eq!(annotations["readOnlyHint"], true);
+        assert_eq!(annotations["destructiveHint"], false);
+        assert_eq!(annotations["openWorldHint"], false);
+        let cursor = json!({"created_at":"2026-01-01T00:00:00Z","id":"e98c2ab2-8bdb-4bc9-b9a9-5b7614ca498c"});
+        assert!(
+            validate(
+                "list_schedules",
+                &json!({"cursor":cursor,"limit":50,"enabled":false})
+            )
+            .is_ok()
+        );
+        for args in [
+            json!({"limit":0}),
+            json!({"limit":51}),
+            json!({"cursor":{}}),
+            json!({"user_id":"other"}),
+        ] {
+            assert!(validate("list_schedules", &args).is_err());
+        }
+        for text in [
+            description("list_schedules"),
+            schema("list_schedules")["properties"]["cursor"]["description"]
+                .as_str()
+                .unwrap(),
+        ] {
+            assert!(text.contains("next_cursor"));
+            assert!(text.contains("nyxid__read_tool_result"));
+        }
     }
 
     #[test]

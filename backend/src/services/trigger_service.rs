@@ -328,6 +328,74 @@ pub async fn list_for_owner(db: &Database, owner_user_id: &str) -> AppResult<Vec
         .map_err(Into::into)
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct ScheduleListQuery {
+    pub cursor: Option<ScheduleCursor>,
+    pub limit: Option<u32>,
+    pub enabled: Option<bool>,
+    pub agent_id: Option<Uuid>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct ScheduleCursor {
+    created_at: chrono::DateTime<Utc>,
+    id: String,
+}
+
+pub(crate) async fn list_schedules_for_owner(
+    db: &Database,
+    owner: &str,
+    query: ScheduleListQuery,
+) -> AppResult<(Vec<Trigger>, Option<ScheduleCursor>)> {
+    let limit = query.limit.unwrap_or(20);
+    if !(1..=50).contains(&limit) {
+        return Err(AppError::ValidationError("Use a limit from 1 to 50".into()));
+    }
+    let mut filter = doc! {
+        "user_id": owner,
+        "$or": [{"source": "schedule"}, {"delivery.type": "assistant"}],
+    };
+    if let Some(enabled) = query.enabled {
+        filter.insert("status", if enabled { "active" } else { "disabled" });
+    }
+    if let Some(agent_id) = query.agent_id {
+        filter.insert("delivery.agent_id", agent_id.to_string());
+    }
+    if let Some(cursor) = query.cursor {
+        if Uuid::parse_str(&cursor.id).is_err() {
+            return Err(AppError::ValidationError(
+                "Invalid schedule cursor ID".into(),
+            ));
+        }
+        let at = bson::DateTime::from_chrono(cursor.created_at);
+        filter.insert(
+            "$and",
+            vec![doc! {"$or": [
+                {"created_at": {"$lt": at}},
+                {"created_at": at, "_id": {"$gt": cursor.id}},
+            ]}],
+        );
+    }
+    let mut rows: Vec<Trigger> = db
+        .collection(TRIGGERS)
+        .find(filter)
+        .sort(doc! {"created_at": -1, "_id": 1})
+        .limit(i64::from(limit) + 1)
+        .await?
+        .try_collect()
+        .await?;
+    let next_cursor = if rows.len() > limit as usize {
+        rows.pop();
+        rows.last().map(|row| ScheduleCursor {
+            created_at: row.created_at,
+            id: row.id.clone(),
+        })
+    } else {
+        None
+    };
+    Ok((rows, next_cursor))
+}
+
 pub async fn get_for_actor(db: &Database, actor_user_id: &str, id: &str) -> AppResult<Trigger> {
     let trigger = db
         .collection::<Trigger>(TRIGGERS)
