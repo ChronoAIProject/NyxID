@@ -621,14 +621,11 @@ async fn voice_skill_search_returns_the_unavailable_registry_cause_through_mcp()
         assert_eq!(missing["isError"], true, "{missing}");
         let cause: Value =
             serde_json::from_str(missing["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(cause["tool"], "nyxid__search_agent_skills", "{cause}");
-        assert_eq!(cause["error"], "skill_lookup_failed");
-        assert_eq!(cause["service"], "ornn-api");
-        assert_eq!(cause["cause"]["stage"], "skill_registry");
-        assert_eq!(cause["cause"]["cause"]["error"], "forbidden");
-        assert_eq!(cause["cause"]["cause"]["status"], 403);
+        assert_eq!(missing["tool"], "nyxid__search_agent_skills");
+        assert_eq!(cause["error"], "forbidden", "{cause}");
+        assert_eq!(cause["error_code"], 1002);
         assert!(
-            cause["cause"]["cause"]["message"]
+            cause["message"]
                 .as_str()
                 .unwrap()
                 .contains("Ornn is unavailable")
@@ -696,22 +693,10 @@ async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant(
             .await
             .unwrap();
         assert_eq!(refused["isError"], true, "{refused}");
-        let refusal: Value =
-            serde_json::from_str(refused["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(refusal["error"], "approval_unsupported", "{refusal}");
-        assert_eq!(refusal["error_code"], 12502);
-        assert_eq!(refusal["service"], "sensor");
-        assert_eq!(refusal["stage"], "service_policy");
-        let execution = &tools.active["delegation"].row;
-        let current = engine::get(&f.state.db, &f.owner, &execution.id)
-            .await
-            .unwrap();
-        let turn = current.active_turn.unwrap();
-        let activity = turn.activities.last().unwrap();
-        assert_eq!(activity.label, "sensor__request");
+        assert_eq!(refused["tool"], "sensor__request");
         assert_eq!(
-            activity.failure.as_ref().unwrap().reason.as_deref(),
-            Some("approval_unsupported")
+            refused["content"][0]["text"],
+            format!("Approval check failed: {}", AppError::ApprovalUnsupported)
         );
         assert!(upstream.received_requests().await.unwrap().is_empty());
         let auth = crate::mw::auth::api_key_auth_user_for_voice(

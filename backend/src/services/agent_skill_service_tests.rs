@@ -110,7 +110,7 @@ fn classified_outcomes_keep_native_read_error_contract() {
             Box::new(|e| matches!(e, AppError::NotFound(m) if m == "Conversation not found")),
         ),
         (
-            OrnnOutcome::ProxyError(AppError::Internal("private detail".into())),
+            OrnnOutcome::ProxyError,
             forbidden("Skill unavailable through your Ornn access; check the connection and retry"),
         ),
         (

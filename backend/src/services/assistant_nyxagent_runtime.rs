@@ -2170,8 +2170,6 @@ async fn execute_turn_inner(
         .is_some_and(|turn| turn.voice_request_id.is_some())
     {
         guidance.push_str(crate::services::voice::runtime::TASK_GUIDANCE);
-        guidance.push_str(crate::services::voice::runtime::APPROVAL_REPORTING);
-        guidance.push('\n');
     }
     if !row.guest_model_setup
         && !row.guest_turn

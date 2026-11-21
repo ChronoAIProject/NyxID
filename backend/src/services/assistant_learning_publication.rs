@@ -550,7 +550,7 @@ fn read_result(outcome: OrnnOutcome) -> PublicationResult<Vec<u8>> {
         OrnnOutcome::Response { status, .. } => Err(PublicationError::Unavailable(Some(status))),
         // Nothing was sent, as for a refused publication request.
         OrnnOutcome::LocalRefusal(_) | OrnnOutcome::LocalError(_) => Err(PublicationError::Refused),
-        OrnnOutcome::ProxyError(_) | OrnnOutcome::Interrupted | OrnnOutcome::Uncertain => {
+        OrnnOutcome::ProxyError | OrnnOutcome::Interrupted | OrnnOutcome::Uncertain => {
             Err(PublicationError::Unavailable(None))
         }
     }
@@ -748,7 +748,7 @@ pub(super) async fn publish_classified(
             status: None,
             rules: vec![],
         },
-        OrnnOutcome::Uncertain | OrnnOutcome::ProxyError(_) | OrnnOutcome::Interrupted => {
+        OrnnOutcome::Uncertain | OrnnOutcome::ProxyError | OrnnOutcome::Interrupted => {
             PublishOutcome::Uncertain { status: None }
         }
         OrnnOutcome::Response {

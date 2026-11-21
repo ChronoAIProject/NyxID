@@ -3875,12 +3875,6 @@ fn dispatch_service_tool<'a>(
         {
             return refused;
         }
-        update_activity_label(
-            state,
-            auth,
-            &format!("{}__{}", service.service_slug, endpoint.name),
-        )
-        .await;
         if auth.execution_permission.is_some() {
             let result = async {
                 let user = permission_dispatch_auth(auth)?;
@@ -3890,12 +3884,7 @@ fn dispatch_service_tool<'a>(
             }
             .await;
             if let Err(error) = result {
-                return permission_admission_failure(
-                    state,
-                    request.id.clone(),
-                    &service.service_slug,
-                    error,
-                );
+                return permission_admission_failure(state, request.id.clone(), error);
             }
         }
         let mut auto_allowed = match box_tool_future(|| {
@@ -3996,6 +3985,12 @@ fn dispatch_service_tool<'a>(
             exec_ctx.response_body_limit =
                 Some(crate::services::resource_adapter::MAX_SOURCE_BYTES);
         }
+        update_activity_label(
+            state,
+            auth,
+            &format!("{}__{}", service.service_slug, endpoint.name),
+        )
+        .await;
 
         let execution = mcp_service::execute_tool_response_with_outcome(
             &state.http_client,
@@ -4306,12 +4301,11 @@ async fn authorize_mcp_tool_operation(
         auth.org_agent_access.as_deref().and_then(|a| a.shared()),
     )
     .await
-    .map_err(|error| {
-        service_gate_error(
+    .map_err(|e| {
+        tool_result(
             request_id.clone(),
-            &error,
-            &service.service_slug,
-            "service_policy",
+            &format!("Approval check failed: {e}"),
+            true,
         )
     })?;
     authorize_mcp_operation(state, auth, target, operation, request_id).await
@@ -4330,14 +4324,6 @@ async fn authorize_mcp_operation(
     if guest_turn(auth) && operation.protocol == operation_descriptor::Protocol::Ssh {
         return Err(guest_refused(request_id));
     }
-    let policy_error = |error: crate::errors::AppError| {
-        service_gate_error(
-            request_id.clone(),
-            &error,
-            &target.service_slug,
-            "service_policy",
-        )
-    };
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
     let approval_requester_id = auth.approval_requester_id();
     let (approval_outcome, automatic) = box_tool_future(|| {
@@ -4356,7 +4342,13 @@ async fn authorize_mcp_operation(
         )
     })
     .await
-    .map_err(policy_error)?;
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
 
     let approval_outcome = crate::services::execution_permission_dispatch::approval_for_catalog(
         auth.execution_permission.as_ref(),
@@ -4372,9 +4364,11 @@ async fn authorize_mcp_operation(
         }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
-            return Err(policy_error(crate::errors::AppError::Forbidden(
-                "Operation denied by approval policy".into(),
-            )));
+            return Err(tool_result(
+                request_id,
+                "Operation denied by approval policy",
+                true,
+            ));
         }
         // Nobody but the owner asks the owner to approve: a guest's request
         // would look like the owner's own.
@@ -4390,7 +4384,13 @@ async fn authorize_mcp_operation(
         &pending,
     )
     .await
-    .map_err(policy_error)?;
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
     let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
         tool_result(
             request_id.clone(),
@@ -4429,7 +4429,13 @@ async fn authorize_mcp_operation(
         timeout_secs,
     )
     .await
-    .map_err(policy_error)?;
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -4941,37 +4947,9 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
         )
 }
 
-fn service_gate_error(
-    id: Option<serde_json::Value>,
-    error: &crate::errors::AppError,
-    service: &str,
-    stage: &'static str,
-) -> Response {
-    let body = error.response_body();
-    let result = serde_json::json!({
-        "error": body.error,
-        "error_code": body.error_code,
-        "message": body.message,
-        "service": service,
-        "stage": stage,
-    });
-    let mut response = tool_result(id, &result.to_string(), true);
-    if matches!(error, crate::errors::AppError::ApprovalUnsupported) {
-        response
-            .extensions_mut()
-            .insert(crate::models::assistant_conversation::ToolFailure {
-                kind: "tool_error".into(),
-                reason: Some(body.error),
-                status: Some(error.status_code().as_u16()),
-            });
-    }
-    response
-}
-
 fn permission_admission_failure(
     state: &AppState,
     id: Option<serde_json::Value>,
-    service: &str,
     error: crate::errors::AppError,
 ) -> Response {
     if let crate::errors::AppError::ApprovalFailed {
@@ -4985,7 +4963,7 @@ fn permission_admission_failure(
         );
         tool_result(id, &result.to_string(), true)
     } else {
-        service_gate_error(id, &error, service, "execution_permission")
+        tool_result(id, &error.to_string(), true)
     }
 }
 
@@ -5729,12 +5707,6 @@ async fn handle_meta_call_tool(
     {
         return refused;
     }
-    update_activity_label(
-        state,
-        auth,
-        &format!("{}__{}", service.service_slug, endpoint.name),
-    )
-    .await;
     if auth.execution_permission.is_some() {
         let result = async {
             let user = permission_dispatch_auth(auth)?;
@@ -5744,12 +5716,7 @@ async fn handle_meta_call_tool(
         }
         .await;
         if let Err(error) = result {
-            return permission_admission_failure(
-                state,
-                request_id.clone(),
-                &service.service_slug,
-                error,
-            );
+            return permission_admission_failure(state, request_id.clone(), error);
         }
     }
     let mut auto_allowed = match box_tool_future(|| {
@@ -5858,6 +5825,12 @@ async fn handle_meta_call_tool(
         prepared
     };
     let exec_ctx = mcp_exec_context(auth);
+    update_activity_label(
+        state,
+        auth,
+        &format!("{}__{}", service.service_slug, endpoint.name),
+    )
+    .await;
 
     let execution = mcp_service::execute_tool_response_with_outcome(
         &state.http_client,
@@ -8444,53 +8417,6 @@ mod tests {
                 assert_eq!(failure.kind, "service_status");
                 assert_eq!(failure.status, Some(status));
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn service_gate_failures_preserve_safe_cause_and_only_mark_actual_approval() {
-        use crate::errors::AppError;
-        let state = crate::test_utils::test_app_state_no_db().await;
-        for (error, key, stage) in [
-            (
-                AppError::Forbidden("Not available for this caller".into()),
-                "forbidden",
-                "service_policy",
-            ),
-            (
-                AppError::Internal("private diagnostic".into()),
-                "internal_error",
-                "service_policy",
-            ),
-            (
-                AppError::ApprovalUnsupported,
-                "approval_unsupported",
-                "execution_permission",
-            ),
-        ] {
-            let code = error.error_code();
-            let response = if stage == "execution_permission" {
-                permission_admission_failure(&state, None, "sensor", error)
-            } else {
-                service_gate_error(None, &error, "sensor", stage)
-            };
-            let failure = tool_failure(&response).unwrap();
-            assert_eq!(
-                failure.reason.as_deref(),
-                (key == "approval_unsupported").then_some(key)
-            );
-            let bytes = axum::body::to_bytes(response.into_body(), 4096)
-                .await
-                .unwrap();
-            let envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            let cause: serde_json::Value =
-                serde_json::from_str(envelope["result"]["content"][0]["text"].as_str().unwrap())
-                    .unwrap();
-            assert_eq!(cause["error"], key);
-            assert_eq!(cause["error_code"], code);
-            assert_eq!(cause["stage"], stage);
-            assert_eq!(cause["service"], "sensor");
-            assert!(!cause.to_string().contains("private diagnostic"));
         }
     }
 

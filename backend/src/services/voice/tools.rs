@@ -363,8 +363,8 @@ pub(super) struct Executions {
     active: HashMap<String, Execution>,
 }
 
-fn unavailable(cause: Value) -> Value {
-    json!({"status":"outcome_unknown", "retry_allowed":false, "cause":cause,
+fn unavailable(tool: &str, cause: Value) -> Value {
+    json!({"status":"outcome_unknown", "retry_allowed":false, "tool":tool, "cause":cause,
         "detail":"No verified tool result is available. The operation may have executed. Report that uncertainty. Do not repeat this operation or resubmit it as another task. A safe state query or other requested work may continue."})
 }
 
@@ -510,6 +510,8 @@ impl Executions {
             .as_ref()
             .ok_or(AppError::AssistantTurnRequired)?;
         validate_call(state, call).await?;
+        let tool = input.arguments["tool_name"].as_str().unwrap_or(&input.name);
+        let unavailable = |cause| unavailable(tool, cause);
         if tokio::time::Instant::now() >= execution.deadline {
             return Ok(unavailable(
                 json!({"stage":"voice_tool","error":"deadline_exceeded"}),
@@ -629,6 +631,9 @@ impl Executions {
             }
         };
         validate_call(state, call).await?;
+        if result["isError"] == true {
+            result["tool"] = json!(tool);
+        }
         // Optional image delivery cannot turn an already verified action into
         // a failed/unknown action or trigger replay.
         if let Err(error) = execution.append_images(state, &mut result).await {

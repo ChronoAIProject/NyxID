@@ -23,8 +23,7 @@ pub const MAX_ARCHIVE: usize = 4 * 1024 * 1024;
 const MAX_EXPANDED: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrnnCode {
     AuthMissing,
     Forbidden,
@@ -232,7 +231,7 @@ pub enum OrnnOutcome {
         rules: Vec<OrnnValidationRule>,
     },
     /// The proxy returned an error; the request may already have been sent.
-    ProxyError(AppError),
+    ProxyError,
     /// A 2xx response whose body exceeded the limit or was interrupted.
     Interrupted,
     /// Timed out or the request task failed.
@@ -285,7 +284,7 @@ impl OrnnOutcome {
             Self::Response { .. } => Err(AppError::Forbidden(
                 "Skill unavailable or not visible through your Ornn access".into(),
             )),
-            Self::ProxyError(_) => Err(AppError::Forbidden(
+            Self::ProxyError => Err(AppError::Forbidden(
                 "Skill unavailable through your Ornn access; check the connection and retry".into(),
             )),
             Self::Interrupted => Err(AppError::ValidationError(
@@ -544,15 +543,12 @@ pub fn validate(selection: &Selection) -> AppResult<()> {
 }
 
 async fn data(reader: &impl OrnnReader, path: &str) -> AppResult<Value> {
-    parse_data(&reader.get(path).await?)
-}
-
-fn parse_data(bytes: &[u8]) -> AppResult<Value> {
+    let bytes = reader.get(path).await?;
     if bytes.len() > MAX_ARCHIVE {
         return Err(invalid("Ornn response is too large"));
     }
     let value: Value =
-        serde_json::from_slice(bytes).map_err(|_| invalid("Invalid Ornn response"))?;
+        serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid Ornn response"))?;
     value
         .get("data")
         .cloned()
@@ -565,22 +561,14 @@ fn field<'a>(value: &'a Value, key: &str) -> AppResult<&'a str> {
 }
 
 pub async fn search(reader: &impl OrnnReader, query: &str, page: u32) -> AppResult<Value> {
-    let path = search_path(query, page)?;
-    search_result(&reader.get(&path).await?, page)
-}
-
-pub(crate) fn search_path(query: &str, page: u32) -> AppResult<String> {
     if query.chars().count() > 200 || page == 0 || page > 1000 {
         return Err(invalid("Search query or page is out of bounds"));
     }
-    Ok(format!(
+    let path = format!(
         "/api/v1/skill-search?scope=mixed&mode=keyword&pageSize=20&page={page}&q={}",
         urlencoding::encode(query)
-    ))
-}
-
-pub(crate) fn search_result(bytes: &[u8], page: u32) -> AppResult<Value> {
-    let result = parse_data(bytes)?;
+    );
+    let result = data(reader, &path).await?;
     let items = result["items"]
         .as_array()
         .ok_or_else(|| invalid("Invalid Ornn search results"))?;
