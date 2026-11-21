@@ -1,0 +1,31 @@
+[
+  {
+    "artifact": "Supplied iOS 1.0.4 (60) IPA",
+    "bundleId": "fun.chrono-ai.nyxid",
+    "version": "1.0.4",
+    "build": "60",
+    "entitlements": {
+      "application-identifier": "56DKXVFJS2.fun.chrono-ai.nyxid",
+      "com.apple.developer.team-identifier": "56DKXVFJS2",
+      "com.apple.developer.associated-domains": [
+        "applinks:nyx-api.chrono-ai.fun",
+        "applinks:api.nyxid.ai",
+        "applinks:nyxid.onelink.me"
+      ]
+    }
+  },
+  {
+    "artifact": "Supplied iOS 1.0.4 (61) IPA",
+    "bundleId": "fun.chrono-ai.nyxid",
+    "version": "1.0.4",
+    "build": "61",
+    "entitlements": {
+      "application-identifier": "56DKXVFJS2.fun.chrono-ai.nyxid",
+      "com.apple.developer.team-identifier": "56DKXVFJS2",
+      "com.apple.developer.associated-domains": [
+        "applinks:api.nyxid.ai",
+        "applinks:nyxid.ai"
+      ]
+    }
+  }
+]
