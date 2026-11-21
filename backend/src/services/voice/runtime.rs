@@ -553,6 +553,10 @@ struct PendingDelegation {
     received_at: tokio::time::Instant,
 }
 
+fn checkpoint_order(segment: &Segment) -> (i64, bool) {
+    (segment.end_ms, segment.speaker == Speaker::Assistant)
+}
+
 struct Coordinator {
     responses: super::responses::Responses,
     transcripts: Transcripts,
@@ -580,7 +584,7 @@ impl Coordinator {
             self.checkpoints.insert(segment.id.clone(), segment);
         }
         let mut segments: Vec<_> = self.checkpoints.drain().map(|(_, s)| s).collect();
-        segments.sort_by_key(|s| (s.end_ms, s.speaker == Speaker::User));
+        segments.sort_by_key(checkpoint_order);
         for segment in segments {
             // The shared persist path fences stale owners and is idempotent if
             // cancellation occurred after a prior checkpoint committed.
@@ -849,7 +853,7 @@ async fn active(
                 // Keep checkpoints until persistence completes: End/lease loss
                 // may cancel this future during database or classifier I/O.
                 let mut segments:Vec<_>=c.checkpoints.values().cloned().collect();
-                segments.sort_by_key(|s|(s.end_ms,s.speaker==Speaker::User));
+                segments.sort_by_key(checkpoint_order);
                 for segment in segments {
                     // Classification may ingest newer corrections for another
                     // segment. Persist its current checkpoint, not this snapshot.
@@ -1898,6 +1902,51 @@ mod tests {
         assert!(TASK_GUIDANCE.contains("Voice does not support approvals"));
         assert!(TASK_GUIDANCE.contains("do not create or wait for an approval request"));
         assert!(TASK_GUIDANCE.contains("requested findings, status and useful links"));
+    }
+
+    #[tokio::test]
+    async fn equal_end_ms_user_precedes_reply_in_snapshot_and_history() {
+        Box::pin(async {
+            let (state, _, call) = super::super::tests::setup("voice_order_equal_end_ms").await;
+            let mut c = Coordinator::new();
+            for (speaker, text) in [("output", "Hello!"), ("input", "你好")] {
+                let event = json!({
+                    "type": format!("session.{speaker}_transcript.delta"),
+                    "event_id": speaker, "delta": text, "start_ms": 100, "end_ms": 200
+                });
+                for segment in c.transcripts.ingest(&event, 500).unwrap() {
+                    c.checkpoints.insert(segment.id.clone(), segment);
+                }
+            }
+            c.persist_remaining(&state.db, &call).await;
+            let captions = transcript::snapshot_captions(&state.db, &call)
+                .await
+                .unwrap();
+            let (_, history) = crate::services::assistant_nyxagent::history_page(
+                &state.db,
+                &call.user_id,
+                &call.conversation_id,
+                16,
+                None,
+            )
+            .await
+            .unwrap();
+            let history: Vec<_> = history.iter().filter(|m| m.voice.is_some()).collect();
+            assert_eq!(
+                captions.iter().map(|m| (&m.id, m.seq)).collect::<Vec<_>>(),
+                history.iter().map(|m| (&m.id, m.seq)).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                captions
+                    .iter()
+                    .map(|m| (m.role.as_str(), m.text.as_str()))
+                    .collect::<Vec<_>>(),
+                [("user", "你好"), ("assistant", "Hello!")]
+            );
+            assert!(captions[0].seq < captions[1].seq);
+            state.db.drop().await.unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
