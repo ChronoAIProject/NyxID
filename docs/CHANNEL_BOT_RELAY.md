@@ -1720,6 +1720,15 @@ flowchart TD
 | `DELETE` | `/api/v1/channel-bots/{id}` | Delete bot (deregisters webhook) |
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
 
+Verify returns the bot's stored `status` and `webhook_registered` after the check.
+The response field `verification_scope` identifies the work performed. It is
+`credentials` for credential-only checks and `credentials_and_webhook` when
+Verify also checks or sets up the webhook. The legacy OpenClaw adapter can
+only read local credentials and reports `stored_credentials`. For Discord,
+Verify checks the token with `GET /users/@me`. A pending bot waits for
+authenticated ingress, and an active Gateway bot keeps its existing status
+and webhook registration flag.
+
 The list returns active (not deleted) bots, newest first, as `{ "bots": [...], "total": N }`.
 For Discord, list/detail responses include optional `gateway_state` from the stored
 relay Gateway diagnostics. The Channel Bots **Ingestion** column and cards show
