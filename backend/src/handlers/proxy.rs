@@ -668,10 +668,10 @@ fn effective_header_map(
     Ok(result)
 }
 
-fn strip_durable_idempotency_defaults(
-    headers: &mut Vec<crate::models::default_request_header::ResolvedDefaultRequestHeader>,
-) {
-    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+fn retain_durable_default(
+    header: &crate::models::default_request_header::ResolvedDefaultRequestHeader,
+) -> bool {
+    !header.name.eq_ignore_ascii_case("idempotency-key")
 }
 
 fn single_system_header(
@@ -4188,7 +4188,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 .is_some_and(|c| c.prepared_chat.is_some())
             && target.service.custom_user_agent.is_none()
             && !target
-                .catalog_default_headers
+                .catalog_headers()
                 .iter()
                 .chain(target.user_service_default_headers.iter())
                 .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
@@ -4622,8 +4622,12 @@ async fn execute_resolved_proxy_inner<'a>(
         // Idempotency forwarding is owned exclusively by the durable endpoint
         // contract. Service defaults cannot create replay semantics that the
         // selected operation did not authorize.
-        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
-        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+        target
+            .catalog_default_headers
+            .retain(retain_durable_default);
+        target
+            .user_service_default_headers
+            .retain(retain_durable_default);
     }
     if scheduled_api_key_id.is_none()
         && (durable_grant_id.is_some() || durable_operation_id.is_some())
@@ -4651,7 +4655,7 @@ async fn execute_resolved_proxy_inner<'a>(
     let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
         &all_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -8293,7 +8297,7 @@ pub(crate) fn build_downstream_ws_request(
     // set by layers 1–2; overridable defaults only fill in when the
     // handshake doesn't already carry that header.
     for h in target
-        .catalog_default_headers
+        .catalog_headers()
         .iter()
         .chain(target.user_service_default_headers.iter())
     {
@@ -9183,7 +9187,7 @@ async fn handle_ws_passthrough_via_node(
     enriched_headers = crate::models::default_request_header::merge_into_header_list(
         enriched_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -9685,9 +9689,9 @@ mod tests {
         compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
         final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
         is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
-        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        retain_durable_default, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -9866,7 +9870,7 @@ mod tests {
                 sensitive: false,
             },
         ];
-        strip_durable_idempotency_defaults(&mut headers);
+        headers.retain(retain_durable_default);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, "X-Amz-Target");
     }
@@ -10815,7 +10819,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -13974,6 +13978,13 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             assert!(default.overridable);
             assert_eq!(default.value.as_str(), default_version);
+            db.collection::<DownstreamService>(SERVICES)
+                .update_one(
+                    doc! {"_id": &catalog.id},
+                    doc! {"$set": {"base_url": &base_url}},
+                )
+                .await
+                .unwrap();
             for via_node in [false, true] {
                 for explicit_version in [None, Some("2025-09-03")] {
                     let node = if via_node {

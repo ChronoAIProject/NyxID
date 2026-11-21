@@ -574,6 +574,14 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
             ))
         };
     }
+    if api_key.purpose == ApiKeyPurpose::General
+        && !api_key.allow_all_services
+        && path_matches_prefix(path, "/api/v1/providers")
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Provider management requires provider-wide access. Use a human session or an unrestricted service allowlist.".into(),
+        ));
+    }
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
     }
@@ -2205,6 +2213,7 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
+                Err(error @ AppError::ApiKeyScopeForbidden(_)) => Err(error),
                 Err(error) if consent => Err(error),
                 Err(AppError::Forbidden(error))
                 | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
@@ -3418,6 +3427,43 @@ mod tests {
             assert!(delegated_read_denied_path(path));
         }
         db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn provider_management_requires_provider_wide_authority() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        for path in [
+            "/api/v1/providers",
+            "/api/v1/providers/my-tokens",
+            "/api/v1/providers/provider",
+            "/api/v1/providers/provider/icon",
+            "/api/v1/providers/provider/services",
+            "/api/v1/providers/provider/services/service",
+            "/api/v1/providers/provider/connect/api-key",
+            "/api/v1/providers/provider/connect/oauth",
+            "/api/v1/providers/provider/connect/device-code/initiate",
+            "/api/v1/providers/provider/connect/device-code/poll",
+            "/api/v1/providers/provider/connect/telegram",
+            "/api/v1/providers/provider/connect/telegram/callback",
+            "/api/v1/providers/provider/disconnect",
+            "/api/v1/providers/provider/authorization",
+            "/api/v1/providers/provider/refresh",
+            "/api/v1/providers/provider/credentials",
+            "/api/v1/providers/provider/credentials/authorization",
+            "/api/v1/providers/callback",
+        ] {
+            key.allow_all_services = true;
+            assert!(ensure_api_key_purpose_route(&key, path).is_ok(), "{path}");
+            key.allow_all_services = false;
+            key.allowed_service_ids = vec!["service".into()];
+            assert!(
+                matches!(
+                    ensure_api_key_purpose_route(&key, path),
+                    Err(AppError::ApiKeyScopeForbidden(_))
+                ),
+                "{path}"
+            );
+        }
     }
 
     pub(super) fn delegated_fixture_api_key(

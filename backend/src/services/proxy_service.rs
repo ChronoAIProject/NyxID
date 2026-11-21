@@ -85,10 +85,9 @@ pub struct ProxyTarget {
     pub credential: Zeroizing<String>,
     pub service: DownstreamService,
     /// Admin-configured catalog-level default headers resolved from the
-    /// owning `DownstreamService`. Applied to every outbound request in
-    /// both the direct and node-routed paths. See
+    /// owning `DownstreamService`. Applied only at its approved destinations. See
     /// [`crate::models::default_request_header`] for precedence semantics.
-    pub catalog_default_headers: Vec<DefaultRequestHeader>,
+    pub(crate) catalog_default_headers: CatalogHeaders,
     /// Per-user overrides sourced from `UserService.default_request_headers`.
     /// Applied after the catalog layer; non-overridable entries win against
     /// lower layers including the catalog defaults and caller-supplied headers.
@@ -105,6 +104,71 @@ pub struct ProxyTarget {
     /// `event_data` with the connection — answering "which Lark Custom
     /// App made this call?" without a second DB read per request.
     pub connection_id: Option<String>,
+}
+
+/// A catalog header layer carries the recipients authorized by the same catalog
+/// snapshot. A connection can be rerouted after its credentials are resolved.
+#[derive(Default, Clone)]
+pub(crate) struct CatalogHeaders {
+    base_url: String,
+    targets: std::collections::BTreeMap<String, String>,
+    values: Vec<DefaultRequestHeader>,
+}
+
+impl CatalogHeaders {
+    pub(crate) async fn load(
+        keys: Option<&EncryptionKeys>,
+        service: &DownstreamService,
+    ) -> AppResult<Self> {
+        if service
+            .default_request_headers
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+        {
+            return Ok(Self::default());
+        }
+        Ok(Self {
+            base_url: service.base_url.clone(),
+            targets: service.destination_targets.clone(),
+            values: super::default_header_service::catalog(keys, service).await?,
+        })
+    }
+
+    pub(crate) fn configured(&self) -> &[DefaultRequestHeader] {
+        &self.values
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&DefaultRequestHeader) -> bool) {
+        self.values.retain(f);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_base(base_url: &str, values: Vec<DefaultRequestHeader>) -> Self {
+        Self {
+            base_url: base_url.to_owned(),
+            values,
+            ..Self::default()
+        }
+    }
+}
+
+/// Keep the existing approval representation where defaults apply. A withheld
+/// layer still binds its configured values and a change in forwarding eligibility.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum CatalogHeaderBinding<T> {
+    Applied(T),
+    Withheld { withheld: T },
+}
+
+fn same_header_destination(left: &str, right: &str) -> bool {
+    !left.is_empty()
+        && !right.is_empty()
+        && left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 
 /// The effective owner used for catalog consent and proxy resource checks.
@@ -168,6 +232,33 @@ async fn decrypt_master_credential_string(
 }
 
 impl ProxyTarget {
+    fn catalog_header_destination(&self) -> bool {
+        let layer = &self.catalog_default_headers;
+        same_header_destination(&layer.base_url, &self.base_url)
+            || self.target_id.as_ref().and_then(|id| layer.targets.get(id)) == Some(&self.base_url)
+    }
+
+    pub(crate) fn catalog_headers(&self) -> &[DefaultRequestHeader] {
+        if self.catalog_header_destination() {
+            self.catalog_default_headers.configured()
+        } else {
+            &[]
+        }
+    }
+
+    pub(crate) fn catalog_header_binding<'a, T>(
+        &'a self,
+        project: impl FnOnce(&'a [DefaultRequestHeader]) -> T,
+    ) -> CatalogHeaderBinding<T> {
+        let configured = self.catalog_default_headers.configured();
+        let values = project(configured);
+        if configured.is_empty() || self.catalog_header_destination() {
+            CatalogHeaderBinding::Applied(values)
+        } else {
+            CatalogHeaderBinding::Withheld { withheld: values }
+        }
+    }
+
     fn approved_private_base(&self) -> Option<&str> {
         self.service
             .approved_private_base_url
@@ -478,7 +569,7 @@ pub(crate) fn build_effective_outbound_headers(
     outbound_headers = default_request_header::merge_into_header_list(
         outbound_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -1382,8 +1473,7 @@ pub async fn resolve_admin_proxy_target(
         )));
     }
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
 
     if service.auth_method == "none" {
@@ -1526,11 +1616,7 @@ pub async fn resolve_curation_proxy_target(
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential,
-            catalog_default_headers: super::default_header_service::catalog(
-                Some(encryption_keys),
-                &service,
-            )
-            .await?,
+            catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -1635,8 +1721,7 @@ pub async fn resolve_proxy_target(
         let base_url = resolve_gateway_url_override(db, user_id, &mut service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
-        let catalog_default_headers =
-            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+        let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
             catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
@@ -1691,8 +1776,7 @@ pub async fn resolve_proxy_target(
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
         catalog_is_public: super::catalog_service::is_public_unowned_discovery_entry(&service),
@@ -1740,11 +1824,7 @@ pub(crate) async fn resolve_catalog_platform_target(
             auth_method: "none".into(),
             auth_key_name: String::new(),
             credential: Default::default(),
-            catalog_default_headers: super::default_header_service::catalog(
-                Some(encryption_keys),
-                &service,
-            )
-            .await?,
+            catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
             user_service_default_headers: vec![],
             ws_frame_injections: service.ws_frame_injections.clone(),
             connection_id: None,
@@ -1775,11 +1855,7 @@ pub(crate) async fn resolve_catalog_platform_target(
         auth_method,
         auth_key_name,
         credential,
-        catalog_default_headers: super::default_header_service::catalog(
-            Some(encryption_keys),
-            &service,
-        )
-        .await?,
+        catalog_default_headers: CatalogHeaders::load(Some(encryption_keys), &service).await?,
         user_service_default_headers: vec![],
         ws_frame_injections: service.ws_frame_injections.clone(),
         connection_id: None,
@@ -1869,8 +1945,7 @@ pub async fn resolve_proxy_target_lenient(
                 Ok(None) => (service.base_url.clone(), true),
                 Err(_) => (String::new(), false),
             };
-        let catalog_default_headers =
-            super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+        let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
@@ -1949,8 +2024,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
-    let catalog_default_headers =
-        super::default_header_service::catalog(Some(encryption_keys), &service).await?;
+    let catalog_default_headers = CatalogHeaders::load(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
@@ -3336,7 +3410,7 @@ async fn finish_resolution(
     // Decode header values only after every local policy/ACL/credential branch
     // below has admitted this request. Read-only authority mode performs only
     // this bounded local decode and never provider credential effects.
-    let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
+    let catalog_default_headers = CatalogHeaders::default();
     let catalog_proxy_authorization =
         box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service, Some(&endpoint))).await?;
     if let Some((catalog_id, url, spec)) = &catalog_proxy_authorization.managed_target {
@@ -3889,16 +3963,16 @@ async fn load_catalog_default_headers_for_user_service(
     db: &mongodb::Database,
     encryption_keys: Option<&EncryptionKeys>,
     catalog_id: Option<&str>,
-) -> AppResult<Vec<DefaultRequestHeader>> {
+) -> AppResult<CatalogHeaders> {
     let Some(catalog_id) = catalog_id else {
-        return Ok(Vec::new());
+        return Ok(CatalogHeaders::default());
     };
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! {"_id":catalog_id})
         .await?
         .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
-    super::default_header_service::catalog(encryption_keys, &service).await
+    CatalogHeaders::load(encryption_keys, &service).await
 }
 
 async fn load_catalog_ws_frame_injections_for_user_service(
@@ -4949,7 +5023,7 @@ async fn forward_request_with_egress_guard_inner(
     let outbound_headers = collect_forward_headers_with_defaults(
         &headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -5643,12 +5717,15 @@ mod tests {
     fn actual_http_request_debug_redacts_injected_defaults_and_custom_credentials() {
         let secret = "distinctive-injected-header-6ac3";
         let mut target = make_proxy_target("https://example.invalid".into());
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "x-private-default".into(),
-            value: secret.to_owned().into(),
-            overridable: false,
-            sensitive: true,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "x-private-default".into(),
+                value: secret.to_owned().into(),
+                overridable: false,
+                sensitive: true,
+            }],
+        );
         let headers = build_effective_outbound_headers(
             &target,
             vec![],
@@ -6064,6 +6141,123 @@ mod tests {
             rejected.is_err(),
             "credential-bearing assistant rows without a credential must reach the gate"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_headers_follow_the_resolved_connection_destination() {
+        let db = connect_test_database("catalog_header_destination")
+            .await
+            .unwrap();
+        let mut catalog = dummy_service();
+        catalog.base_url = "https://catalog.example.test/v1".into();
+        catalog.default_request_headers = Some(
+            serde_json::from_value(serde_json::json!([
+                {"name":"X-Catalog", "value":"catalog"}
+            ]))
+            .unwrap(),
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let keys = test_encryption_keys();
+        let nodes = Arc::new(NodeWsManager::new(30, 100));
+        for (idx, (url, expected)) in [
+            (catalog.base_url.as_str(), true),
+            ("https://endpoint.example.test/v1", false),
+            ("https://catalog.example.test/another-service", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for node in [None, Some("node")] {
+                let id = format!("instance-{idx}-{}", node.unwrap_or("direct"));
+                let endpoint = test_user_endpoint(&id, &owner, &id, url, None, Some(&catalog.id));
+                let mut instance =
+                    test_user_service(&id, &owner, &id, &id, Some(&catalog.id), node);
+                instance.default_request_headers = Some(
+                    serde_json::from_value(serde_json::json!([
+                        {"name":"X-Instance", "value":"instance"}
+                    ]))
+                    .unwrap(),
+                );
+                db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                    .insert_one(endpoint)
+                    .await
+                    .unwrap();
+                db.collection::<UserService>(USER_SERVICES)
+                    .insert_one(instance)
+                    .await
+                    .unwrap();
+                let target = Box::pin(resolve_proxy_target_from_user_service(
+                    &db,
+                    &keys,
+                    &nodes,
+                    &owner,
+                    Some(&id),
+                    None,
+                    test_execution_context(),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .target;
+                assert_eq!(target.base_url, url);
+                let headers = build_effective_outbound_headers(&target, vec![], &[], &[], &[]);
+                assert_eq!(
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("X-Catalog")),
+                    expected
+                );
+                assert!(
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("X-Instance"))
+                );
+                let handshake = crate::handlers::proxy::build_downstream_ws_request(
+                    &url.replacen("https:", "wss:", 1),
+                    &target,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                )
+                .unwrap();
+                assert_eq!(handshake.headers().contains_key("x-catalog"), expected);
+                assert!(handshake.headers().contains_key("x-instance"));
+                assert_eq!(target.user_service_default_headers[0].name, "X-Instance");
+            }
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_defaults_follow_authorized_operation_targets() {
+        let mut service = dummy_service();
+        service.base_url = "https://catalog.example.test".into();
+        service
+            .destination_targets
+            .insert("editor".into(), "https://editor.example.test".into());
+        service.default_request_headers = Some(
+            serde_json::from_value(serde_json::json!([
+                {"name":"X-Catalog","value":"version"}
+            ]))
+            .unwrap(),
+        );
+        let mut target = make_proxy_target("https://endpoint.example.test".into());
+        target.catalog_default_headers =
+            CatalogHeaders::load(Some(&test_encryption_keys()), &service)
+                .await
+                .unwrap();
+        assert!(target.catalog_headers().is_empty());
+        target.target_id = Some("editor".into());
+        assert!(target.catalog_headers().is_empty());
+        target.base_url = service.destination_targets["editor"].clone();
+        assert_eq!(target.catalog_headers().len(), 1);
+        target.target_id = None;
+        assert!(target.catalog_headers().is_empty());
     }
 
     #[tokio::test]
@@ -8024,7 +8218,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -9695,7 +9889,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -10107,7 +10301,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -10359,7 +10553,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
             },
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -10733,7 +10927,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10759,7 +10953,7 @@ mod tests {
             auth_key_name: "X-Api-Key".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10785,7 +10979,7 @@ mod tests {
             auth_key_name: "  ".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10808,7 +11002,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10831,7 +11025,7 @@ mod tests {
             auth_key_name: "key".to_string(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10854,7 +11048,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10911,7 +11105,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: "tok".to_string().into(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -10936,7 +11130,7 @@ mod tests {
             auth_key_name: "bot".to_string(),
             credential: "TOKEN".to_string().into(),
             service: test_minimal_downstream(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -11164,7 +11358,7 @@ mod tests {
             auth_key_name: auth_key_name.into(),
             credential: "secret".to_owned().into(),
             service: ds,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -11205,12 +11399,15 @@ mod tests {
     fn assistant_authorization_survives_cookie_and_jwt_on_direct_and_node_paths() {
         let mut target = make_proxy_target_with_auth("none", "");
         target.service.forward_access_token = true;
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "Authorization".into(),
-            value: "Bearer catalog".to_owned().into(),
-            overridable: false,
-            sensitive: true,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "Authorization".into(),
+                value: "Bearer catalog".to_owned().into(),
+                overridable: false,
+                sensitive: true,
+            }],
+        );
         let extra = vec![("aUtHoRiZaTiOn".into(), "Bearer assistant-key".into())];
         for caller in [None, Some("human-jwt")] {
             // Direct HTTP assembles shared headers, then applies bearer forwarding.
@@ -11253,12 +11450,15 @@ mod tests {
     #[test]
     fn effective_headers_include_non_overridable_operation_defaults() {
         let mut target = make_proxy_target_with_auth("none", "");
-        target.catalog_default_headers = vec![DefaultRequestHeader {
-            name: "X-Amz-Target".to_string(),
-            value: "Catalog.Write".to_string().into(),
-            overridable: false,
-            sensitive: false,
-        }];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![DefaultRequestHeader {
+                name: "X-Amz-Target".to_string(),
+                value: "Catalog.Write".to_string().into(),
+                overridable: false,
+                sensitive: false,
+            }],
+        );
         let headers = build_effective_outbound_headers(
             &target,
             vec![("x-amz-target".to_string(), "Caller.Write".to_string())],
@@ -11277,26 +11477,29 @@ mod tests {
     #[test]
     fn effective_headers_apply_caller_and_default_precedence_after_shared_admission() {
         let mut target = make_proxy_target_with_auth("none", "");
-        target.catalog_default_headers = vec![
-            DefaultRequestHeader {
-                name: "Content-Type".to_string(),
-                value: "application/octet-stream".to_string().into(),
-                overridable: true,
-                sensitive: false,
-            },
-            DefaultRequestHeader {
-                name: "Idempotency-Key".to_string(),
-                value: "catalog-key".to_string().into(),
-                overridable: true,
-                sensitive: false,
-            },
-            DefaultRequestHeader {
-                name: "X-Trace-ID".to_string(),
-                value: "catalog-trace".to_string().into(),
-                overridable: false,
-                sensitive: false,
-            },
-        ];
+        target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+            &target.base_url,
+            vec![
+                DefaultRequestHeader {
+                    name: "Content-Type".to_string(),
+                    value: "application/octet-stream".to_string().into(),
+                    overridable: true,
+                    sensitive: false,
+                },
+                DefaultRequestHeader {
+                    name: "Idempotency-Key".to_string(),
+                    value: "catalog-key".to_string().into(),
+                    overridable: true,
+                    sensitive: false,
+                },
+                DefaultRequestHeader {
+                    name: "X-Trace-ID".to_string(),
+                    value: "catalog-trace".to_string().into(),
+                    overridable: false,
+                    sensitive: false,
+                },
+            ],
+        );
         target.user_service_default_headers = vec![DefaultRequestHeader {
             name: "x-trace-id".to_string(),
             value: "user-service-trace".to_string().into(),

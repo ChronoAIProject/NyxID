@@ -618,7 +618,7 @@ fn target_digest(target: &proxy_service::ProxyTarget) -> String {
     super::mcp_service::canonical_sha256(json!({
         "catalog":target.service.id,"base":target.base_url,"destination":target.target_id,
         "auth":target.auth_method,"key_name":target.auth_key_name,
-        "catalog_headers":target.catalog_default_headers,"connection_headers":target.user_service_default_headers,
+        "catalog_headers":target.catalog_header_binding(std::convert::identity),"connection_headers":target.user_service_default_headers,
         "policy":target.service.proxy_operation_policy,
         "forward_access_token":target.service.forward_access_token,
         "delegation":target.service.inject_delegation_token,
@@ -1436,7 +1436,7 @@ impl Permit {
         let actual = proxy_service::collect_forward_headers_with_defaults(
             headers,
             &[
-                target.catalog_default_headers.as_slice(),
+                target.catalog_headers(),
                 target.user_service_default_headers.as_slice(),
             ],
         );
@@ -1865,7 +1865,7 @@ pub(crate) fn admit_http<'a>(
                     &proxy_service::collect_forward_headers_with_defaults(
                         headers,
                         &[
-                            target.catalog_default_headers.as_slice(),
+                            target.catalog_headers(),
                             target.user_service_default_headers.as_slice(),
                         ],
                     ),
@@ -1954,7 +1954,7 @@ pub(crate) fn admit_http<'a>(
             proxy_service::collect_forward_headers_with_defaults(
                 headers,
                 &[
-                    target.catalog_default_headers.as_slice(),
+                    target.catalog_headers(),
                     target.user_service_default_headers.as_slice(),
                 ],
             )
