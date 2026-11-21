@@ -8153,6 +8153,10 @@ impl TurnError {
                 "credential_revoked",
                 "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.",
             ),
+            "channel_retry_attachment_unavailable" => (
+                "channel_retry_attachment_unavailable",
+                super::channel_notices::Notice::RetryAttachmentUnavailable.text(None),
+            ),
             "model_authority_changed" => (
                 "model_authority_changed",
                 "Your access settings or model connection changed during this task. Review the completed actions and try again.",

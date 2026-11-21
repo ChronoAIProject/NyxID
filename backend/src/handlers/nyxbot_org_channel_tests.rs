@@ -1039,6 +1039,16 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         .await
         .unwrap();
 
+    if route_retry {
+        let settings = chats::ChatSettings {
+            notice_language: Some("zh-CN".into()),
+            ..Default::default()
+        };
+        chats::update_chat(&state, OWNER, &parent.id, &settings)
+            .await
+            .unwrap();
+    }
+
     let mut event_id = Uuid::new_v4().to_string();
     let facts = ChannelThreadFacts {
         version: 1,
@@ -1231,6 +1241,12 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             .await
             .unwrap()
             .unwrap();
+        if route_retry {
+            assert_eq!(
+                event.delivery.as_ref().unwrap().notice_language,
+                Some(NoticeLanguage::Simplified)
+            );
+        }
         assert!(event.turn_id.is_some());
         let guest = state
             .db
@@ -1577,6 +1593,7 @@ async fn org_channel_native_discord_recovery_keeps_member_identity_and_refuses_r
             &stored.id,
             "already-settled",
             stored.reply_channel.as_ref().unwrap(),
+            None,
         )
         .await
         .unwrap()

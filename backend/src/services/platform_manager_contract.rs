@@ -881,6 +881,15 @@ pub trait NyxAgentEgress: Send + Sync {
         None
     }
 
+    /// Recheck the original admitted channel source and return its reply deadline.
+    async fn channel_retry_expiry(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _source: &str,
+    ) -> AppResult<chrono::DateTime<chrono::Utc>> {
+        Err(crate::errors::AppError::AssistantTurnRequired)
+    }
+
     /// Optional human-channel display note after the durable acknowledgement.
     /// The adapter owns delivery authorization; the runtime cancels this task on acceptance.
     fn admission_acknowledged(

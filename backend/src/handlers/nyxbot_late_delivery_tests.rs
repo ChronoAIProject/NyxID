@@ -97,6 +97,7 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: false,
         sender_kind: None,
@@ -1861,3 +1862,6 @@ mod gateway_reply_tests;
 
 #[path = "nyxbot_response_read_delivery_tests.rs"]
 mod response_read_delivery_tests;
+
+#[path = "nyxbot_channel_capacity_tests.rs"]
+mod channel_capacity_tests;

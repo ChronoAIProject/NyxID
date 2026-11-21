@@ -657,8 +657,10 @@ pub(super) async fn waiting_hint(
             doc! {"$set": {"guest_hint_at": bson::DateTime::from_chrono(now)}},
         )
         .await?;
-    Ok((claimed.modified_count == 1)
-        .then(|| "I'll answer everyone here once my owner has talked to me in this chat.".into()))
+    Ok(
+        (claimed.modified_count == 1)
+            .then(|| Notice::OwnerAbsent.text(chat.notice_language).into()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1165,7 @@ async fn reconcile_gateway_groups(
 
 #[derive(Serialize)]
 pub struct ChannelChatResponse {
+    notice_language: Option<NoticeLanguage>,
     guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     parent_chat_id: Option<String>,
     id: String,
@@ -1218,6 +1221,7 @@ impl ChannelChatResponse {
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
+        notice_language: chat.notice_language,
         guest_readiness: None,
         parent_chat_id: chat.follow.parent_chat_id.clone(),
         has_thread_history: chat.follow.has_thread_history,
@@ -1417,6 +1421,7 @@ async fn load_chat(
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSettings {
+    pub notice_language: Option<String>,
     #[serde(default, deserialize_with = "non_null_threads")]
     pub threads: Option<String>,
     pub reply_mode: Option<String>,
@@ -1452,6 +1457,21 @@ pub(crate) async fn update_chat(
     }
     let mut set = doc! {"updated_at": bson::DateTime::now()};
     let mut unset = doc! {};
+    if let Some(language) = &settings.notice_language {
+        match language.as_str() {
+            "en" | "zh-CN" | "zh-TW" => {
+                set.insert("notice_language", language);
+            }
+            "default" => {
+                unset.insert("notice_language", "");
+            }
+            _ => {
+                return Err(AppError::ValidationError(
+                    "notice_language must be en, zh-CN, zh-TW or default".into(),
+                ));
+            }
+        }
+    }
     if let Some(threads) = settings.threads.as_deref() {
         if !matches!(threads, "follow" | "off") || !group {
             return Err(AppError::ValidationError(
@@ -1566,7 +1586,7 @@ pub(crate) async fn update_chat(
         "nyxbot_channel_chat_updated",
         json!({"channel_agent_id": &row.id, "chat_id": &chat.id,
             "reply_mode": settings.reply_mode, "members": settings.members,
-            "allow_posts": settings.allow_posts, "threads":settings.threads, "agent_changed": agent_changed.is_some()}),
+            "notice_language":settings.notice_language,"allow_posts": settings.allow_posts, "threads":settings.threads, "agent_changed": agent_changed.is_some()}),
     )
     .await;
     let on = super::thread_follow::enabled(state, owner).await?;

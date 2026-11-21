@@ -996,6 +996,7 @@ store message text or the raw provider partition.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `notice_language` | English | Managers can set `en`, `zh-CN`, `zh-TW` or `default` through the chat PATCH or NyxBot tool. Followed threads share the settings chat’s language. |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |

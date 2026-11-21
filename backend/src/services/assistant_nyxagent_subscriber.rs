@@ -743,6 +743,7 @@ pub(super) async fn recover(
             &key,
             deadline,
             Some(sealed),
+            None,
         )
         .await
         .map_err(|_| unknown())?;
