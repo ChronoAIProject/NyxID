@@ -5126,6 +5126,16 @@ async fn handle_account_tool(
         };
         let (value, is_error) =
             Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
+        if name == "nyxid__list_schedules" && !is_error {
+            let content = vec![serde_json::json!({"type":"text","text":value.to_string()})];
+            let (content, digest) =
+                box_tool_future(|| retained_results::project(state, auth, content, false)).await;
+            let mut response = content_result(request_id, content, false);
+            if let Some(digest) = digest {
+                response.extensions_mut().insert(digest);
+            }
+            return response;
+        }
         return native_team_tool_result(request_id, name, &value, is_error);
     }
     let result = tools.execute(&user, name, args).await;

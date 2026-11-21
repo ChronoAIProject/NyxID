@@ -234,7 +234,12 @@ enabling the flag; old servers reject the additive notification settings.
     plain words ("every weekday at 8:00 Singapore time, starting tomorrow").
   - `nyxid__list_schedules`, `nyxid__update_schedule` (including pause and
     resume) and `nyxid__delete_schedule`. Listing and updating also expose
-    assistant webhook automations and their confirmation policy.
+    assistant webhook automations and their confirmation policy. The list returns
+    full records newest first, 20 per page by default (1–50). Use `enabled` or
+    `agent_id` to filter. If a page has a `ref`, concatenate its `content` with
+    each part from `nyxid__read_tool_result(ref, part=next_part)` in the same
+    turn. Pass the assembled page's `next_cursor` as `cursor` with the same
+    filters until `next_cursor` is null.
   - `nyxid__run_schedule_now`: run once now, to test.
 - **Webhook triggers to agents.** Creating one needs its inbound secret shown
   exactly once. Secrets never pass through chat, so NyxBot hands out a

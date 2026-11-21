@@ -87,6 +87,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             TRIGGERS,
+            doc! { "user_id": 1, "created_at": -1, "_id": 1 },
+            "trigger_owner_created",
+            false,
+        ),
+        (
+            TRIGGERS,
             doc! { "user_id": 1, "source": 1 },
             "trigger_owner_source",
             false,
