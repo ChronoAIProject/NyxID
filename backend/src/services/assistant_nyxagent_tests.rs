@@ -117,6 +117,56 @@ fn fragmented_sse_unicode_keepalive_unknown_events_and_terminal_replay() {
 }
 
 #[test]
+fn completed_response_preserves_multipart_answers_with_and_without_phases() {
+    let answer = json!([
+        {"type":"output_text","text":"第一段"},
+        {"type":"output_text","text":"第二段\n\n含有空行"}
+    ]);
+    for (phased, with_commentary) in [(true, true), (false, false), (false, true)] {
+        let mut items = json!([
+            {"type":"message","role":"assistant","content":answer},
+            {"type":"mcp_call","name":"read_booking"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"结论"}]}
+        ]);
+        if phased {
+            items[0]["phase"] = json!("final_answer");
+            items[2]["phase"] = json!("final_answer");
+        }
+        if with_commentary {
+            items.as_array_mut().unwrap().insert(
+                1,
+                json!({"type":"message","role":"assistant","phase":"commentary",
+                "content":[{"type":"output_text","text":"Checking."}]}),
+            );
+        }
+        let mut event = terminal("response.completed", 0, "");
+        event["response"]["output"] = items;
+        let mut stream = ResponseStream::default();
+        stream.push(&frame(event)).unwrap();
+        assert_eq!(
+            stream.terminal.unwrap().text,
+            "第一段\n\n第二段\n\n含有空行\n\n结论"
+        );
+    }
+}
+
+#[test]
+fn completed_response_keeps_lone_commentary_and_failed_response_keeps_partial_text() {
+    for kind in ["response.completed", "response.failed"] {
+        let mut event = terminal(kind, 0, "First part");
+        let item = &mut event["response"]["output"][0];
+        item["phase"] = json!("commentary");
+        item["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"output_text","text":"Second part"}));
+        let mut stream = ResponseStream::default();
+        stream.push(&frame(event)).unwrap();
+        assert_eq!(stream.terminal.unwrap().text, "First part\n\nSecond part");
+    }
+}
+
+#[test]
 fn mixed_sse_line_endings_in_one_chunk_preserve_frame_order() {
     let mut bytes =
         frame(json!({"type":"response.output_text.delta","sequence_number":0,"delta":"hello"}));
@@ -149,6 +199,25 @@ fn stream_rejects_invalid_sequences_json_identifiers_and_bounds() {
         "output_too_large"
     );
     assert!(oversized.text.is_empty());
+}
+
+#[test]
+fn completed_response_validates_and_bounds_commentary_before_selecting_the_answer() {
+    let mut event = terminal("response.completed", 0, "Answer");
+    let items = event["response"]["output"].as_array_mut().unwrap();
+    items[0]["phase"] = json!("final_answer");
+    items.push(
+        json!({"type":"message","role":"assistant","phase":"commentary",
+        "content":[{"type":"output_text","text":false}]}),
+    );
+    for (text, code) in [
+        (json!(false), "invalid_stream"),
+        (json!("x".repeat(MAX_OUTPUT_BYTES)), "output_too_large"),
+    ] {
+        event["response"]["output"][1]["content"][0]["text"] = text;
+        let mut stream = ResponseStream::default();
+        assert_eq!(stream.push(&frame(event.clone())).unwrap_err().code, code);
+    }
 }
 
 #[test]

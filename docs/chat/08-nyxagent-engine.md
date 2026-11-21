@@ -1732,6 +1732,18 @@ closed. Cached upstream replay may contain only a terminal response, so terminal
 output is authoritative. Returned `conversation.id` and `response.id` are always
 stored on success. Locally guessing the first session ID is incorrect.
 
+For a completed response, NyxID settles every assistant message marked
+`phase: final_answer`, preserving the order of its output-text parts and the
+two-newline separator. If the response has no explicit final answer, NyxID
+uses its unphased assistant messages. When both kinds are absent and the
+response contains commentary text, NyxID settles all assistant text in order
+so the guest receives the available reply. Older runtimes can split an answer
+over several messages. Tool position and paragraph breaks do not identify an answer
+boundary. Running snapshots and failed or cancelled responses retain partial
+text. Web history and channel delivery use the settled answer. During a rolling
+deploy the settling replica determines the text for a turn, including future
+receipt recovery or multipart delivery of that same reply.
+
 NyxID events have a strictly increasing `cursor`: `turn.status` (also carries
 `conversation_id`), `message.started`, `block.started`, `block.delta`,
 `block.completed`, `message.completed`, `turn.completed`, and `turn.continuing`. They reuse the Direct
