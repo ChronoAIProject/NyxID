@@ -358,6 +358,8 @@ async fn tracked_commands_and_wire_match_main() {
         f.db.drop().await.unwrap();
     }
     // Captured on origin/main 4a31e80cae8eb2aea8f1cae327bc3321551a54f2.
+    // Driver 3.7 places top-level writeConcern after command metadata. Moving
+    // that field back reproduced the original fingerprint for all 17 traces.
     // Normalize only session/time/fixture identities, ciphertext and signed JWTs.
     let expected: std::collections::BTreeMap<String, String> =
         serde_json::from_str(include_str!("assistant_cma_legacy_tracked_commands.json")).unwrap();
