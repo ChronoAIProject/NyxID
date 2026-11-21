@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { extractAuthDeviceUserCodeFromQr } from "../features/auth/deviceUserCode";
+import { loadTestModule } from "./api/apiUrlTestHarness";
 
 type ResolvedProfile = {
+  associatedUrls: string[];
   androidHttpsAppLinks: boolean;
   apiBaseUrl: string;
   frontendUrl: string;
@@ -14,6 +16,7 @@ type ResolvedProfile = {
   newApiBaseUrl: string;
   newFrontendUrl: string;
   newLegalBaseUrl: string;
+  nativeLinkHosts: "api" | "api+frontend";
   universalLinkHost: string;
   universalLinkPathPrefix: string;
   iosBundleId: string;
@@ -160,7 +163,7 @@ function productionEnv(
 function nativeLinks(resolved: ResolvedProfile) {
   return buildNativeLinks({
     ...resolved,
-    associatedUrls: [resolved.apiBaseUrl, resolved.newApiBaseUrl],
+    associatedUrls: resolved.associatedUrls,
     scheme: "nyxid",
   });
 }
@@ -290,6 +293,249 @@ test("native config associates both API hosts and preserves OneLink and its path
       category: ["BROWSABLE", "DEFAULT"],
     },
   ]);
+});
+
+test("native link host defaults preserve today's dev and prod associations", () => {
+  for (const [appEnv, env, expectedDomains, expectedFilters] of [
+    [
+      "dev" as const,
+      profileEnv({ DEV_FRONTEND_URL: "http://localhost:3000" }),
+      ["applinks:localhost:3001"],
+      [
+        {
+          action: "VIEW",
+          data: [{ scheme: "nyxid" }],
+          category: ["BROWSABLE", "DEFAULT"],
+        },
+      ],
+    ],
+    [
+      "prod" as const,
+      productionEnv(),
+      [
+        "applinks:nyx-api.chrono-ai.fun",
+        "applinks:api.nyxid.ai",
+        "applinks:nyxid.onelink.me",
+      ],
+      [
+        {
+          action: "VIEW",
+          autoVerify: true,
+          data: [
+            { scheme: "https", host: "nyxid.onelink.me", pathPrefix: "/REzJ" },
+          ],
+          category: ["BROWSABLE", "DEFAULT"],
+        },
+        {
+          action: "VIEW",
+          data: [{ scheme: "nyxid" }],
+          category: ["BROWSABLE", "DEFAULT"],
+        },
+      ],
+    ],
+  ] as const) {
+    for (const value of [undefined, "", "api"]) {
+      const overrides = value === undefined
+        ? {}
+        : { [`${appEnv.toUpperCase()}_NATIVE_LINK_HOSTS`]: value };
+      const resolved = resolveProfile(appEnv, { ...env, ...overrides });
+      assert.equal(resolved.nativeLinkHosts, "api");
+      const native = nativeLinks(resolved);
+      assert.deepEqual(native.associatedDomains, expectedDomains);
+      assert.deepEqual(native.androidIntentFilters, expectedFilters);
+    }
+  }
+});
+
+test("api+frontend associates both frontend hosts and shares the path manifest", () => {
+  const native = nativeLinks(
+    resolveProfile(
+      "prod",
+      productionEnv({
+        PROD_NATIVE_LINK_HOSTS: "api+frontend",
+        PROD_ANDROID_HTTPS_APP_LINKS: "true",
+      }),
+    ),
+  );
+  assert.deepEqual(native.associatedDomains, [
+    "applinks:nyx-api.chrono-ai.fun",
+    "applinks:api.nyxid.ai",
+    "applinks:nyx.chrono-ai.fun",
+    "applinks:nyxid.ai",
+    "applinks:nyxid.onelink.me",
+  ]);
+  const paths = require("../../../shared/native-app-links.json").paths as string[];
+  assert.deepEqual(
+    native.androidIntentFilters.slice(2).map((filter) =>
+      filter.data.map((data) =>
+        data.pathPrefix
+          ? data.pathPrefix + "*"
+          : (data as { path?: string }).path,
+      ),
+    ),
+    [paths, paths, paths, paths],
+  );
+  assert.deepEqual(
+    native.androidIntentFilters.slice(2).map((filter) => filter.data[0]?.host),
+    [
+      "nyx-api.chrono-ai.fun",
+      "api.nyxid.ai",
+      "nyx.chrono-ai.fun",
+      "nyxid.ai",
+    ],
+  );
+});
+
+test("Expo consumes the selected host list for iOS entitlements and Android Activity links", () => {
+  const env = productionEnv({
+    APP_ENV: "prod",
+    PROD_NATIVE_LINK_HOSTS: "api+frontend",
+    PROD_ANDROID_HTTPS_APP_LINKS: "true",
+  });
+  const config = loadTestModule<{ default: (context: { config: object }) => {
+    ios: { associatedDomains: string[] };
+    android: { intentFilters: { data: { host?: string; path?: string }[] }[] };
+  } }>("../../../app.config.ts", {
+    process: { env },
+    require: (name: string) => {
+      if (name === "./scripts/lib/load-env") return {
+        ...require("../../scripts/lib/load-env.js"),
+        loadEnv: () => env,
+      };
+      if (name === "./scripts/lib/native-links") return { buildNativeLinks };
+      throw new Error(`Unexpected Expo config dependency: ${name}`);
+    },
+  }).default({ config: {} });
+  for (const host of ["nyx.chrono-ai.fun", "nyxid.ai"]) {
+    assert.ok(config.ios.associatedDomains.includes(`applinks:${host}`));
+    assert.ok(config.android.intentFilters.some((filter) =>
+      filter.data.some((entry) => entry.host === host && entry.path === "/activity"),
+    ));
+  }
+});
+
+test("api+frontend does not add Android HTTPS filters when opt-in is false", () => {
+  const native = nativeLinks(
+    resolveProfile(
+      "prod",
+      productionEnv({ PROD_NATIVE_LINK_HOSTS: "api+frontend" }),
+    ),
+  );
+  assert.deepEqual(native.androidIntentFilters, [
+    {
+      action: "VIEW",
+      autoVerify: true,
+      data: [
+        { scheme: "https", host: "nyxid.onelink.me", pathPrefix: "/REzJ" },
+      ],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+    {
+      action: "VIEW",
+      data: [{ scheme: "nyxid" }],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+  ]);
+});
+
+test("api+frontend deduplicates frontend and API hosts", () => {
+  const resolved = resolveProfile(
+    "prod",
+    productionEnv({
+      PROD_NATIVE_LINK_HOSTS: "api+frontend",
+      PROD_FRONTEND_URL: "https://nyx-api.chrono-ai.fun",
+      PROD_NEW_FRONTEND_URL: "https://api.nyxid.ai",
+      PROD_ANDROID_HTTPS_APP_LINKS: "true",
+    }),
+  );
+  const native = nativeLinks(resolved);
+  assert.deepEqual(native.associatedDomains, [
+    "applinks:nyx-api.chrono-ai.fun",
+    "applinks:api.nyxid.ai",
+    "applinks:nyxid.onelink.me",
+  ]);
+  assert.deepEqual(
+    native.androidIntentFilters.slice(2).map((filter) => filter.data[0]?.host),
+    ["nyx-api.chrono-ai.fun", "api.nyxid.ai"],
+  );
+});
+
+test("http frontend URLs retain iOS association and skip Android HTTPS filters", () => {
+  const resolved = resolveProfile(
+    "dev",
+    profileEnv({
+      DEV_NATIVE_LINK_HOSTS: "api+frontend",
+      DEV_FRONTEND_URL: "http://localhost:3000",
+      DEV_ANDROID_HTTPS_APP_LINKS: "true",
+    }),
+  );
+  const native = nativeLinks(resolved);
+  assert.deepEqual(native.associatedDomains, [
+    "applinks:localhost:3001",
+    "applinks:localhost:3000",
+  ]);
+  assert.deepEqual(native.androidIntentFilters, [
+    {
+      action: "VIEW",
+      data: [{ scheme: "nyxid" }],
+      category: ["BROWSABLE", "DEFAULT"],
+    },
+  ]);
+});
+
+test("api+frontend requires an explicitly configured frontend URL", () => {
+  assert.throws(
+    () =>
+      resolveProfile(
+        "dev",
+        profileEnv({
+          DEV_NATIVE_LINK_HOSTS: "api+frontend",
+          DEV_LEGAL_BASE_URL: "http://legal.localhost:3000",
+        }),
+      ),
+    /DEV_FRONTEND_URL.*DEV_NATIVE_LINK_HOSTS.*api\+frontend/,
+  );
+});
+
+test("api+frontend never claims a frontend URL borrowed from the other build profile", () => {
+  for (const appEnv of ["dev", "prod"] as const) {
+    const env = productionEnv({
+      DEV_NATIVE_LINK_HOSTS: "api+frontend",
+      PROD_NATIVE_LINK_HOSTS: "api+frontend",
+      DEV_FRONTEND_URL: "https://dev.example.test",
+    });
+    delete env[`${appEnv.toUpperCase()}_FRONTEND_URL`];
+    assert.throws(
+      () => resolveProfile(appEnv, env),
+      new RegExp(`${appEnv.toUpperCase()}_FRONTEND_URL.*NATIVE_LINK_HOSTS`),
+    );
+  }
+});
+
+for (const value of ["A", "frontend", "api,frontend"]) {
+  test(`rejects invalid native link host set ${value}`, () => {
+    assert.throws(
+      () =>
+        resolveProfile(
+          "prod",
+          productionEnv({ PROD_NATIVE_LINK_HOSTS: value }),
+        ),
+      /PROD_NATIVE_LINK_HOSTS.*api.*api\+frontend/,
+    );
+  });
+}
+
+test("native link host selection never crosses profiles", () => {
+  const prod = resolveProfile(
+    "prod",
+    productionEnv({ DEV_NATIVE_LINK_HOSTS: "api+frontend" }),
+  );
+  const dev = resolveProfile(
+    "dev",
+    productionEnv({ PROD_NATIVE_LINK_HOSTS: "api+frontend" }),
+  );
+  assert.equal(prod.nativeLinkHosts, "api");
+  assert.equal(dev.nativeLinkHosts, "api");
 });
 
 test("does not claim a frontend host when no universal-link host is configured", () => {
