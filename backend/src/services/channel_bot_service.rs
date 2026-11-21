@@ -1672,6 +1672,24 @@ async fn register_webhook_inner(
     ).await
 }
 
+/// Finish a previously interrupted manual setup without overwriting an inbound activation.
+pub(crate) async fn resume_manual_registration(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    if bot.is_active && matches!(bot.status.as_str(), "pending" | "failed") {
+        store_webhook_registration(
+            db,
+            adapter,
+            doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true,
+            "status": &bot.status, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn store_webhook_registration(
     db: &mongodb::Database,
     adapter: &dyn PlatformAdapter,

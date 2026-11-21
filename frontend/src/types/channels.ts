@@ -97,6 +97,7 @@ export interface BotVerification {
 }
 
 export interface VerifyChannelBotResponse {
+  readonly verification_scope?: "credentials" | "credentials_and_webhook" | "stored_credentials";
   readonly id: string;
   readonly status: ChannelBotStatus;
   readonly webhook_registered: boolean;

@@ -174,7 +174,7 @@ for (const { viewport, retryRegistration } of [
                 message: managerError,
               },
             }
-          : { json: { id: botId, status: "active", webhook_registered: true } },
+          : { json: { id: botId, status: "active", webhook_registered: true, verification_scope: "credentials_and_webhook" } },
       );
     });
     await page.route("**/api/v1/channel-conversations**", (route) => {
@@ -410,7 +410,7 @@ for (const { viewport, retryRegistration } of [
     await expect(
       page
         .getByRole("status")
-        .filter({ hasText: "Verification complete. Status: Active." }),
+        .filter({ hasText: "Credentials verified. Webhook setup checked. Bot status: Active." }),
     ).toBeVisible();
     failVerify = true;
     await page.getByRole("button", { name: "Verify Bot", exact: true }).click();
@@ -422,7 +422,7 @@ for (const { viewport, retryRegistration } of [
       page.getByText("Not registered", { exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("Verification complete. Status: Active.", { exact: true }),
+      page.getByText("Credentials verified. Webhook setup checked. Bot status: Active.", { exact: true }),
     ).toHaveCount(0);
     await page.reload();
     await expect(
@@ -437,7 +437,7 @@ for (const { viewport, retryRegistration } of [
     await expect(
       page
         .getByRole("status")
-        .filter({ hasText: "Verification complete. Status: Active." }),
+        .filter({ hasText: "Credentials verified. Webhook setup checked. Bot status: Active." }),
     ).toBeVisible();
     await expect(
       page.getByRole("alert").filter({ hasText: managerError }),
