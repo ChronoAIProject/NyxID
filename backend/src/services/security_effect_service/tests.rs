@@ -376,6 +376,8 @@ async fn cae_unsent_claim_replays_stable_metadata_and_definite_rejection_backs_o
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let server = crate::services::shutdown::process()
         .spawn(async move { axum::serve(listener, router).await.unwrap() });
     let db = fixture("cae_retry_wire").await;
@@ -445,6 +447,8 @@ async fn cae_crash_after_receiver_acceptance_never_blindly_resends() {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let server = crate::services::shutdown::process()
         .spawn(async move { axum::serve(listener, router).await.unwrap() });
     let db = fixture("cae_crash_wire").await;
@@ -474,6 +478,8 @@ async fn cae_crash_after_receiver_acceptance_never_blindly_resends() {
 async fn cae_pre_dispatch_loser_sends_nothing_and_preserves_successor() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let db = fixture("cae_dispatch_loser").await;
     let app = crate::test_utils::test_app_state(db.clone());
     let row = cae_occurrence(&db, &app, address).await;
@@ -551,6 +557,8 @@ async fn cae_send_barrier_outcomes_are_terminal_or_bounded_safe_retries() {
         (429, IntentState::Failed),
     ] {
         let server = wiremock::MockServer::start().await;
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(status))
             .mount(&server)

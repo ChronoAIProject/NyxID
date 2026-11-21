@@ -29,6 +29,8 @@ pub struct TriggerDeliveryRecord {
     pub attempts: u32,
     #[serde(default)]
     pub last_status_code: Option<u16>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub envelope_encrypted: Option<Vec<u8>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -82,6 +84,7 @@ mod tests {
             status: TriggerDeliveryRecordStatus::Pending,
             attempts: 0,
             last_status_code: None,
+            failure_reason: None,
             envelope_encrypted: Some(vec![1, 2, 3]),
             created_at: now,
             updated_at: now,

@@ -380,6 +380,7 @@ async fn exact_group_route(same_key: bool, org: bool) {
     };
     let gateway = MockServer::start().await;
     let other = MockServer::start().await;
+    let _other_origin = crate::services::resource_adapter::register_test_origin(&other.uri());
     let routes = std::slice::from_ref(row.route_id.as_ref().unwrap());
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
@@ -829,6 +830,7 @@ async fn telegram_webhook(
     update: &Value,
     receiver: &MockServer,
 ) {
+    let _receiver_origin = crate::services::resource_adapter::register_test_origin(&receiver.uri());
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-telegram-bot-api-secret-token",

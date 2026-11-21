@@ -30,6 +30,7 @@ async fn channel_link_telegram_worker_reserves_callback_without_browser_polling(
         COLLECTION_NAME as LINKS, ChannelConnectLink, LinkStatus,
     };
     let (state, actor, server) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let created = links::create(
         &state.db,
         &state.encryption_keys,
@@ -2738,6 +2739,7 @@ async fn telegram_new_manager_channel_filters_setup_and_authenticates_before_rou
 #[tokio::test]
 async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_only_selected_chat() {
     let (state, actor, server) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let channel = register_manager_channel(&state, &actor, &server).await;
     let agent_id = uuid::Uuid::new_v4().to_string();
     state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {

@@ -424,6 +424,8 @@ async fn pending_relay_redelivery_completes_once_on_the_current_route() {
     platform(&state, &mut row, "aurinko").await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let app = axum::Router::new()
         .route("/relay/{id}", axum::routing::post(relay_callback))
         .with_state(state.clone());
@@ -461,7 +463,6 @@ async fn pending_relay_redelivery_completes_once_on_the_current_route() {
         config: &state.config,
         jwt_keys: &state.jwt_keys,
         encryption_keys: &state.encryption_keys,
-        http: &state.http_client,
         rate_limiter: &state.per_channel_event_limiter,
     };
     let id = Uuid::new_v4().to_string();

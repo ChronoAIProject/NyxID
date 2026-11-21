@@ -208,7 +208,6 @@ pub(crate) async fn channel_webhook_with_producers(
                 config: &state.config,
                 jwt_keys: &state.jwt_keys,
                 encryption_keys: &state.encryption_keys,
-                http: &state.http_client,
                 rate_limiter: &state.per_channel_event_limiter,
             };
             match tokio::time::timeout(
@@ -1926,6 +1925,10 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         crate::services::platform_native_reply_service::spawn_in_native_scope(async move {
+            let _origin = crate::services::resource_adapter::register_test_origin(&format!(
+                "http://{}",
+                listener.local_addr().unwrap()
+            ));
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;

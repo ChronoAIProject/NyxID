@@ -7,7 +7,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{FromRequestParts, Path, State},
 };
 use serde::Serialize;
 
@@ -26,6 +26,25 @@ pub struct EventAcceptedResponse {
     pub event_id: String,
 }
 
+pub struct ChannelEventCaller(AuthUser);
+
+impl FromRequestParts<AppState> for ChannelEventCaller {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> AppResult<Self> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        if user.auth_method != AuthMethod::ApiKey {
+            return Err(AppError::Unauthorized(
+                "API key required for channel events".into(),
+            ));
+        }
+        Ok(Self(user))
+    }
+}
+
 /// POST /api/v1/channel-events/{conversation_id}
 ///
 /// Accepts a device event envelope and forwards it through the channel relay
@@ -34,31 +53,14 @@ pub struct EventAcceptedResponse {
 pub async fn post_event(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
-    auth_user: AuthUser,
+    ChannelEventCaller(auth_user): ChannelEventCaller,
     tele: TelemetryContext,
     Json(envelope): Json<EventEnvelope>,
 ) -> AppResult<Json<EventAcceptedResponse>> {
-    // Auth: this endpoint only accepts a genuine `nyxid_ag_...` API key.
-    //
-    // Checking `api_key_id.is_some()` alone is not sufficient because relay
-    // JWTs issued to bot callback recipients also carry an api_key_id in
-    // their claims. If we allowed them through, a webhook callback target
-    // could reuse its `X-NyxID-User-Token` as Bearer auth and synthesize
-    // device events on any conversation it learned about — a privilege
-    // escalation beyond the relay token's intent. Gate strictly on
-    // `AuthMethod::ApiKey`.
-    if auth_user.auth_method != AuthMethod::ApiKey {
-        return Err(AppError::Unauthorized(
-            "API key required for channel events".to_string(),
-        ));
-    }
-    // Envelope shape validation. Per design doc §NOT in Scope, there is no
-    // payload-size limit; only structural validation.
     validate_envelope(&envelope)?;
 
     let outcome = channel_event_service::forward_event(
         &state.db,
-        &state.http_client,
         &state.config,
         &state.jwt_keys,
         &state.per_channel_event_limiter,

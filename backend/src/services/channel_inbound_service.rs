@@ -598,10 +598,16 @@ async fn process_messages(
             matched.record(Outcome::CallbackPending).await;
         }
         let delivery = channel_relay_service::forward_to_agent(
-            state.http_client,
+            channel_relay_service::callback_request(
+                state.db,
+                state.config,
+                Some(&bot.id),
+                &api_key.id,
+                &route.callback_url,
+            )
+            .await,
             state.config,
             state.jwt_keys,
-            &route.callback_url,
             payload,
             &api_key.id,
             &api_key.key_hash,
@@ -658,6 +664,7 @@ async fn process_messages(
                     state.db,
                     &stored_message,
                     delivery.http_status,
+                    &e,
                 )
                 .await;
             }

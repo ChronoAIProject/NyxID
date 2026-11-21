@@ -15,6 +15,8 @@ use wiremock::{
 async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() {
     for (billing_enabled, typed) in [(false, false), (true, false), (false, true), (true, true)] {
         let (mut state, adapter, server, owner, connection) = channel_x_tests::fixture().await;
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         if billing_enabled {
             channel_x_tests::billing::enable_billing(&mut state, &owner).await;
         }

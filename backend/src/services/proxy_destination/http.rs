@@ -23,15 +23,27 @@ const MAX_PRIVATE_POOLS: usize = 16;
 #[error("Direct proxy destination is not permitted")]
 struct DestinationRefused;
 
-pub(crate) fn refused_connection(error: &reqwest::Error) -> bool {
+#[derive(Debug, thiserror::Error)]
+#[error("Destination resolution unavailable")]
+struct ResolutionUnavailable;
+
+fn caused_by<T: std::error::Error + 'static>(error: &reqwest::Error) -> bool {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(cause) = source {
-        if cause.is::<DestinationRefused>() {
+        if cause.is::<T>() {
             return true;
         }
         source = cause.source();
     }
     false
+}
+
+pub(crate) fn denied_address(error: &reqwest::Error) -> bool {
+    caused_by::<DestinationRefused>(error)
+}
+
+pub(crate) fn refused_connection(error: &reqwest::Error) -> bool {
+    denied_address(error) || caused_by::<ResolutionUnavailable>(error)
 }
 
 struct SystemDns;
@@ -66,9 +78,12 @@ impl Resolve for CheckedDns {
             let addresses: Vec<SocketAddr> =
                 tokio::time::timeout(Duration::from_secs(10), lookup.resolve(name))
                     .await
-                    .map_err(|_| DestinationRefused)?
-                    .map_err(|_| DestinationRefused)?
+                    .map_err(|_| ResolutionUnavailable)?
+                    .map_err(|_| ResolutionUnavailable)?
                     .collect();
+            if addresses.is_empty() {
+                return Err(ResolutionUnavailable.into());
+            }
             if !access.permits_all(&addresses) {
                 return Err(DestinationRefused.into());
             }
@@ -90,6 +105,7 @@ pub(crate) struct Clients {
     #[cfg(test)]
     builder: Option<Arc<dyn Fn() -> ClientBuilder + Send + Sync>>,
     ordinary: Cached<Client>,
+    media: Cached<Client>,
     verification: Cached<Client>,
     cma: Cached<Client>,
     ifttt: Cached<ifttt::Client>,
@@ -107,6 +123,7 @@ impl Clients {
             #[cfg(test)]
             builder: network.builder.clone(),
             ordinary: OnceLock::new(),
+            media: OnceLock::new(),
             verification: OnceLock::new(),
             cma: OnceLock::new(),
             ifttt: OnceLock::new(),
@@ -135,6 +152,13 @@ impl Clients {
 
     pub(crate) fn ordinary(&self) -> AppResult<Client> {
         self.get(&self.ordinary, ClientBuilder::build).cloned()
+    }
+
+    pub(crate) fn media(&self) -> AppResult<Client> {
+        self.get(&self.media, |builder| {
+            builder.timeout(Duration::from_secs(30)).build()
+        })
+        .cloned()
     }
 
     pub(crate) fn verification(&self) -> AppResult<Client> {
@@ -245,6 +269,38 @@ pub(super) fn initialize() -> Result<(), &'static str> {
         .ordinary()
         .map(|_| ())
         .map_err(|_| "Direct proxy transport unavailable")
+}
+
+/// A caller-supplied delivery has no catalog or development authorization.
+pub(crate) fn public_delivery(raw: &str) -> AppResult<(Url, Client)> {
+    let url = Url::parse(raw).map_err(|_| refused())?;
+    let strict = true;
+    #[cfg(test)]
+    let strict = strict && crate::services::resource_adapter::test_media_origin(raw).is_none();
+    #[cfg(test)]
+    let strict = strict
+        && !crate::services::channel_media_service::TEST_PINNED_TRANSPORT
+            .try_with(|fixture| fixture.target == raw)
+            .unwrap_or(false);
+    let client = for_url(None, "", &url, strict)?.ordinary()?;
+    Ok((url, client))
+}
+
+pub(crate) fn signed_webhook(raw: &str) -> AppResult<(Url, Client)> {
+    let (url, client) = public_delivery(raw)?;
+    if url.scheme() != "https" {
+        #[cfg(test)]
+        if crate::services::resource_adapter::test_media_origin(raw).is_some()
+            || TEST_POOLS.try_with(|_| ()).is_ok()
+            || crate::services::channel_media_service::TEST_PINNED_TRANSPORT
+                .try_with(|fixture| fixture.target == raw)
+                .unwrap_or(false)
+        {
+            return Ok((url, client));
+        }
+        return Err(refused());
+    }
+    Ok((url, client))
 }
 
 pub(crate) fn for_url(

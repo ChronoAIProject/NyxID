@@ -1175,7 +1175,6 @@ async fn server_run(cli: Cli) {
         .expect("Failed to load platform broker policy");
     let developer_webhook_dispatcher = Arc::new(
         services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );

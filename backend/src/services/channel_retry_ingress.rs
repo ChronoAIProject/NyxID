@@ -24,7 +24,6 @@ pub struct IngressContext<'a> {
     pub config: &'a AppConfig,
     pub jwt_keys: &'a JwtKeys,
     pub encryption_keys: &'a EncryptionKeys,
-    pub http: &'a reqwest::Client,
     pub rate_limiter: &'a crate::mw::rate_limit::PerChannelEventLimiter,
 }
 
@@ -165,7 +164,10 @@ pub async fn deliver(
     {
         return Err(retry_later());
     }
-    if stored.callback_status.as_deref() == Some("delivered") {
+    if stored.callback_status.as_deref() == Some("delivered")
+        || stored.callback_failure_reason.as_deref()
+            == Some(super::webhook_delivery_service::DESTINATION_REFUSED)
+    {
         return Ok(());
     }
     // Pending retries follow the current owner-approved route while keeping the
@@ -230,29 +232,33 @@ pub async fn deliver(
         };
     let mut config = context.config.clone();
     config.channel_relay_callback_timeout_secs = config.channel_relay_callback_timeout_secs.min(10);
-    let result = channel_relay_service::forward_to_agent(
-        context.http,
+    let delivery = channel_relay_service::forward_to_agent(
+        channel_relay_service::callback_request(
+            db,
+            &config,
+            Some(&bot.id),
+            &api_key.id,
+            callback_url,
+        )
+        .await,
         &config,
         context.jwt_keys,
-        callback_url,
         payload,
         &api_key.id,
         &api_key.key_hash,
         access.as_deref(),
     )
-    .await
-    .result;
-    channel_relay_service::update_callback_status(
-        db,
-        &stored.id,
-        if result.is_ok() {
-            "delivered"
-        } else {
-            "failed"
-        },
-    )
-    .await?;
-    if result.is_ok() {
+    .await;
+    if let Err(error) = &delivery.result {
+        super::channel_activity_service::record_callback_failure(
+            db,
+            &stored,
+            delivery.http_status,
+            error,
+        )
+        .await?;
+    } else {
+        channel_relay_service::update_callback_status(db, &stored.id, "delivered").await?;
         channel_routing_service::touch_conversation(db, &route.conversation.id).await?;
     }
     super::audit_service::log_async(
@@ -261,12 +267,15 @@ pub async fn deliver(
         "channel_email_callback".into(),
         Some(
             serde_json::json!({"bot_id": bot.id, "message_id": stored.id, "conversation_id": route.conversation.id,
-            "outcome": if result.is_ok() { "delivered" } else { "failed" }}),
+            "outcome": if delivery.result.is_ok() { "delivered" } else { "failed" }}),
         ),
         None,
         None,
         Some(api_key.id),
         Some(api_key.name),
     );
-    result
+    match delivery.result {
+        Err(error) if channel_relay_service::destination_refused(&error) => Ok(()),
+        result => result,
+    }
 }

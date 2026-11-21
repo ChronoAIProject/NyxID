@@ -1326,7 +1326,7 @@ Admin routes under the admin router:
 
 ### Node Limits
 - Configurable max nodes per user (default: 10) prevents abuse
-- Configurable max concurrent node WebSocket connections per replica (default: 100)
+- Each replica admits up to 32 pending handshakes. Authenticated sockets use `NODE_MAX_WS_CONNECTIONS` (default 100).
 - Proxy requests through nodes have a timeout (default: 30s)
 - Streaming responses have a max duration (default: 300s)
 
