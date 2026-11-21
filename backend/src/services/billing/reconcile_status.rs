@@ -138,6 +138,7 @@ impl Pass {
 
     pub(super) fn observe<T>(&mut self, step: &'static str, result: AppResult<T>) -> AppResult<T> {
         debug_assert!(STEPS.contains(&step));
+        crate::services::job_health::checkpoint(result.is_ok());
         if step == "usage_comparison" && result.is_ok() && super::reconcile::continue_reconcile() {
             self.usage_warming = true;
         }

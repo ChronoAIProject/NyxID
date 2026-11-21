@@ -5471,6 +5471,7 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
         .await?;
     let mut settled = Vec::new();
     while let Some(row) = cursor.try_next().await? {
+        super::job_health::checkpoint(true);
         if row.active_turn.is_none() {
             continue;
         }

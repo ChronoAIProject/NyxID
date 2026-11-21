@@ -54,6 +54,29 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
+pub(crate) fn worker_health_router(
+    jobs: std::sync::Arc<crate::services::job_health::Jobs>,
+    shutdown: crate::services::shutdown::Runtime,
+) -> axum::Router {
+    #[derive(Serialize)]
+    struct WorkerHealth {
+        draining: bool,
+        jobs: std::collections::BTreeMap<&'static str, crate::services::job_health::JobStatus>,
+    }
+    axum::Router::new().route(
+        "/internal/v1/health/jobs",
+        axum::routing::get(move || async move {
+            (
+                [(CACHE_CONTROL, "no-store")],
+                Json(WorkerHealth {
+                    draining: shutdown.is_draining(),
+                    jobs: jobs.snapshot(),
+                }),
+            )
+        }),
+    )
+}
+
 /// GET /ready: preserve the drain-only, empty-body orchestration contract.
 pub async fn ready(State(state): State<AppState>) -> Response {
     let status = if state.shutdown.is_draining() {

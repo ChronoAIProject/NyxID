@@ -4185,11 +4185,52 @@ pub async fn put_profile_routes(
 /// How often NyxID resolves watches and retries deferred wake-ups.
 const SWEEP_SECS: u64 = 15;
 
+// Orphan recovery has its own cadence so a slow channel delivery or guest
+// migration in the maintenance loop cannot starve it.
+fn spawn_orphan_turn_sweep(state: AppState) {
+    state.shutdown.clone().spawn_worker(async move {
+        let job = &state.jobs.turn_sweep;
+        let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while let Some(_work) = job.tick(&state.shutdown, &mut interval).await {
+            if let Err(error) = job.observe(sweep_orphan_turns(&state)).await {
+                tracing::debug!(%error, "Assistant orphan sweep deferred");
+            }
+        }
+    });
+}
+
+async fn sweep_orphan_turns(state: &AppState) -> AppResult<()> {
+    for row in crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await? {
+        let stopped = row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.stop_requested);
+        if stopped {
+            super::assistant_nyxagent::survivor::cancel(state, &row).await;
+        }
+        after_turn_boxed(
+            state.clone(),
+            row,
+            String::new(),
+            Some(if stopped {
+                TurnError::internal("cancelled", "stop")
+            } else {
+                TurnError::internal("turn_lost", "sweep")
+            }),
+        )
+        .await;
+        crate::services::job_health::checkpoint(true);
+    }
+    Ok(())
+}
+
 /// Background task: resolve watches (bots created from setup links, finished
 /// connect links) and retry wake-ups whose pool was full (or whose replica
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    spawn_orphan_turn_sweep(state.clone());
     super::assistant_nyxagent::survivor::spawn(state.clone());
     crate::services::assistant_cma_reservation_recovery::spawn_worker(state.clone());
     crate::services::assistant_notification_service::spawn_worker(state.clone());
@@ -4296,34 +4337,6 @@ pub fn spawn_sweeps(state: AppState) {
             }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
-            }
-            if state.shutdown.is_draining() {
-                break;
-            }
-            match crate::services::assistant_nyxagent::sweep_orphaned_turn_rows(&state.db).await {
-                Ok(rows) => {
-                    for row in rows {
-                        let stopped = row
-                            .active_turn
-                            .as_ref()
-                            .is_some_and(|turn| turn.stop_requested);
-                        if stopped {
-                            super::assistant_nyxagent::survivor::cancel(&state, &row).await;
-                        }
-                        super::assistant_team::after_turn_boxed(
-                            state.clone(),
-                            row,
-                            String::new(),
-                            Some(if stopped {
-                                TurnError::internal("cancelled", "stop")
-                            } else {
-                                TurnError::internal("turn_lost", "sweep")
-                            }),
-                        )
-                        .await;
-                    }
-                }
-                Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
             if state.shutdown.is_draining() {
                 break;

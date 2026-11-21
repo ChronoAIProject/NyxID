@@ -34,7 +34,12 @@ tokio::task_local! {
 /// Check only BETWEEN recoverable units, never inside a financial write
 /// protocol. Once renewal fails, finish the current unit and admit no next one.
 pub(crate) fn continue_reconcile() -> bool {
-    CONTINUE_RECONCILE.try_with(Cell::get).unwrap_or(true)
+    CONTINUE_RECONCILE
+        .try_with(|running| {
+            crate::services::job_health::checkpoint(true);
+            running.get()
+        })
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -209,6 +214,7 @@ impl BillingReconciler {
         )
         .await?
         else {
+            crate::services::job_health::skipped();
             runtime.notify_contender_observed();
             return Ok(ReconcileStats::default());
         };
@@ -240,6 +246,7 @@ impl BillingReconciler {
                         CONTINUE_RECONCILE.with(|running| running.set(false));
                         #[cfg(test)]
                         let _ = LEASE_LOSS_OBSERVED.try_with(|notify| notify.notify_one());
+                        crate::services::job_health::checkpoint(false);
                         tracing::warn!("Billing reconcile lease lost; finishing current unit");
                         pass.await
                     }
@@ -911,9 +918,10 @@ impl BillingReconciler {
     }
 }
 
-pub fn spawn_reconcile_worker(
+pub(crate) fn spawn_reconcile_worker(
     reconciler: BillingReconciler,
     interval_secs: u64,
+    job: crate::services::job_health::Job,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if interval_secs == 0 {
         return None;
@@ -926,13 +934,13 @@ pub fn spawn_reconcile_worker(
             // The first tick fires immediately so a fresh deploy has rate-cache
             // rows and wallet balances before the first billable request.
             loop {
-                let Some(_work) = crate::services::shutdown::process()
-                    .tick(&mut interval)
+                let Some(_work) = job
+                    .tick(&crate::services::shutdown::process(), &mut interval)
                     .await
                 else {
                     break;
                 };
-                if let Err(error) = reconciler.run_once().await {
+                if let Err(error) = job.observe(reconciler.run_once()).await {
                     tracing::warn!(error = %error, "Billing reconcile sweep failed");
                 }
             }
