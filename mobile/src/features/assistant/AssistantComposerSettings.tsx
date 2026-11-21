@@ -25,6 +25,7 @@ import { assistantApi } from "../../lib/api/assistantApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useGroupAvailability } from "../groups/useGroupRuntime";
 import {
+  composerSettingsRecoveryInterval,
   COMPOSER_ACCESS_LABEL,
   COMPOSER_ACCESS_DESCRIPTION,
   type ComposerAccessMode,
@@ -54,6 +55,7 @@ export function AssistantComposerSettings(props: Props) {
     queryFn: ({ signal }) => assistantApi.settings(signal),
     enabled: availability.active,
     retry: false,
+    refetchInterval: composerSettingsRecoveryInterval,
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useLocalizedState<string>();
@@ -365,6 +367,7 @@ export function useComposerAccessMode(override?: ComposerAccessMode | null) {
     queryFn: ({ signal }) => assistantApi.settings(signal),
     enabled: availability.active,
     retry: false,
+    refetchInterval: composerSettingsRecoveryInterval,
   });
   return override ?? settings.data?.access_mode;
 }
