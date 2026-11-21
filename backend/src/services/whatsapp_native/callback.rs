@@ -339,21 +339,40 @@ pub fn relay_message_evidence(
     if !super::matches_bot(config, bot) || payload["object"] != "whatsapp_business_account" {
         return false;
     }
-    payload["entry"].as_array().into_iter().flatten().any(|entry| {
-        entry["id"].as_str() == Some(config.waba_id.as_str())
-            && entry["changes"].as_array().into_iter().flatten().any(|change| {
-                let value = &change["value"];
-                change["field"] == "messages" && value["messaging_product"] == "whatsapp"
-                    && value["metadata"]["phone_number_id"].as_str() == Some(config.phone_number_id.as_str())
-                    && value["messages"].as_array().into_iter().flatten().any(|message| {
-                        message["type"] == "text" && message["group_id"].is_null()
-                            && message["recipient_type"] != "group"
-                            && message["from"].as_str().is_some_and(super::numeric_id)
-                            && message["id"].as_str().is_some_and(crate::services::channel_delivery_service::valid_message_id)
-                            && message["timestamp"].as_str().and_then(|s| s.parse::<i64>().ok()).is_some()
+    payload["entry"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry["id"].as_str() == Some(config.waba_id.as_str())
+                && entry["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|change| {
+                        let value = &change["value"];
+                        change["field"] == "messages"
+                            && value["messaging_product"] == "whatsapp"
+                            && value["metadata"]["phone_number_id"].as_str()
+                                == Some(config.phone_number_id.as_str())
+                            && value["messages"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .any(|message| {
+                                    crate::services::channel_adapters::whatsapp::parse_message(
+                                        message,
+                                        &value["contacts"],
+                                    )
+                                    .is_some()
+                                        && message["from"].as_str().is_some_and(super::numeric_id)
+                                        && message["timestamp"]
+                                            .as_str()
+                                            .and_then(|s| s.parse::<i64>().ok())
+                                            .is_some()
+                                })
                     })
-            })
-    })
+        })
 }
 
 /// Apply only inside the shared, fenced build-beside/swap transaction.

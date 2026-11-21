@@ -325,7 +325,7 @@ async fn process_messages(
         let stored_message = match stored {
             Ok(Some(message)) => message,
             Ok(None) => {
-                if bot.platform != "x" {
+                if !matches!(bot.platform.as_str(), "x" | "whatsapp") {
                     continue;
                 }
                 let collection = if notification {
