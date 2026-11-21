@@ -304,7 +304,15 @@ async fn channel_guest_media_flag_revoked_after_decryption_denies_model_but_keep
     tokio::time::timeout(Duration::from_secs(10), decrypt.entered.notified())
         .await
         .unwrap();
+    guest::recheck_retry_inputs(&state.db, &row, std::slice::from_ref(&id))
+        .await
+        .unwrap();
     state.db.collection::<bson::Document>("feature_flag_overrides").update_one(doc! {"flag_key":crate::services::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY},doc! {"$set":{"enabled":false}}).await.unwrap();
+    assert!(
+        guest::recheck_retry_inputs(&state.db, &row, std::slice::from_ref(&id))
+            .await
+            .is_err()
+    );
     decrypt.release.notify_one();
     assert!(fetch.await.unwrap().is_err());
     let (inputs, note) = guest::input_for_turn(&state, &row, message.attachments)

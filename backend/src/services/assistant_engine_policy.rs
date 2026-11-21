@@ -5,6 +5,8 @@ use std::time::Duration;
 pub const ACK_DELAY: Duration = Duration::from_secs(10);
 /// Admission retry window from the first dispatch of each interactive, channel or event request.
 pub const INTERACTIVE_CAPACITY_BUDGET: Duration = Duration::from_secs(120);
+/// Total time from first dispatch for a source-bound channel question refused at capacity.
+pub const CHANNEL_CAPACITY_BUDGET: Duration = Duration::from_secs(600);
 /// Maximum automation request admission window; original run grace bounds only its first request.
 pub const AUTOMATION_CAPACITY_CAP: Duration = Duration::from_secs(600);
 /// Base of the exponential full-jitter admission backoff.

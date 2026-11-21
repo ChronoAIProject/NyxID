@@ -462,7 +462,14 @@ async fn execute(
                 &state.db,
                 &state.encryption_keys,
                 stored,
-                Some("NyxBot is busy. Please try again shortly."),
+                Some(
+                    Notice::NativeBusy.text(
+                        crate::services::channel_notices::chat_language(
+                            &state.db, &row.id, partition,
+                        )
+                        .await?,
+                    ),
+                ),
                 false,
             )
             .await?

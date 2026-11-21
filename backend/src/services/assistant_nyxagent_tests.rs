@@ -2592,6 +2592,7 @@ async fn restart_offer_keeps_one_logical_turn_and_fences_competing_survivors_and
         &window_key,
         window_deadline,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -2869,7 +2870,7 @@ async fn late_worker_cannot_renew_checkpoint_replace_or_finish_successor_attempt
     let now = Utc::now();
     let deadline = now + chrono::Duration::seconds(60);
     assert!(
-        observation::attempt(&db, &first, "old-window", deadline, None)
+        observation::attempt(&db, &first, "old-window", deadline, None, None)
             .await
             .is_err()
     );
@@ -7886,7 +7887,7 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
                 .capacity_wait_note_origin
                 .is_none()
         );
-        let first_attempt = observed::attempt(&db, &row, "first-window", Utc::now(), None)
+        let first_attempt = observed::attempt(&db, &row, "first-window", Utc::now(), None, None)
             .await
             .unwrap();
         assert_eq!(first_attempt, 1);
@@ -7964,7 +7965,7 @@ async fn capacity_wait_metadata_survives_reload_notice_claims_and_audits_are_ded
             );
             assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
             assert_eq!(
-                observed::attempt(&db, &row, "first-window", Utc::now(), None)
+                observed::attempt(&db, &row, "first-window", Utc::now(), None, None)
                     .await
                     .unwrap(),
                 2

@@ -3130,6 +3130,7 @@ async fn dispatch_channels(
                 None => None,
             };
             let settings = super::nyxbot::chats::ChatSettings {
+                notice_language: args["notice_language"].as_str().map(str::to_owned),
                 threads: args["threads"].as_str().map(str::to_owned),
                 reply_mode: args["reply_mode"].as_str().map(str::to_owned),
                 members: args["members"].as_str().map(str::to_owned),

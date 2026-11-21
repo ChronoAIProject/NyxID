@@ -2538,15 +2538,47 @@ async fn whatsapp_private_turns() {
     engine::push_events(&state.db, OWNER, &id, full)
         .await
         .unwrap();
-    let refused = whatsapp_request(&row, "wamid.refused", "7", "When will there be capacity?");
-    let refusal = respond(&state, &key, &refused, "wa-full").await;
-    let refused_frames = frames(&body_text(refusal).await);
-    assert!(
-        refused_frames.last().unwrap()["response"]["output"][0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("try again")
-    );
+    let chat = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&row.id, "platform_chat_id":"7"})
+        .await
+        .unwrap()
+        .unwrap();
+    for (event_id, language, expected) in [
+        (
+            "wamid.refused",
+            None,
+            "NyxBot is busy. Please try again shortly.",
+        ),
+        (
+            "wamid.refused.zh",
+            Some("zh-CN"),
+            "NyxBot 正忙，请稍后再试。",
+        ),
+    ] {
+        if let Some(language) = language {
+            chats::update_chat(
+                &state,
+                OWNER,
+                &chat.id,
+                &chats::ChatSettings {
+                    notice_language: Some(language.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let refused = whatsapp_request(&row, event_id, "7", "When will there be capacity?");
+        let refusal = respond(&state, &key, &refused, event_id).await;
+        assert_eq!(refusal.status(), StatusCode::OK);
+        let refused_frames = frames(&body_text(refusal).await);
+        assert_eq!(
+            refused_frames.last().unwrap()["response"]["output"][0]["content"][0]["text"],
+            expected
+        );
+    }
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
         .unwrap();

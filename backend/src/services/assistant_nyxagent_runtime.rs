@@ -1624,6 +1624,7 @@ impl EngineAttempt<'_> {
             turn_id = %turn.turn_id, origin = crate::services::assistant_turn_observability::origin(turn),
             worker_instance = %crate::services::assistant_engine_worker::instance().id,
             worker_hostname = crate::services::assistant_engine_worker::instance().hostname.as_deref(),
+            automation_run_id = turn.automation_work.as_ref().map(|work| work.run_id.as_str()).or(turn.trigger_run_id.as_deref()),
             attempt = self.number, http_status = self.http_status, upstream_code = self.upstream_code.as_deref(),
             decision, waited_ms = self.accrued_wait_ms.saturating_add(self.wait_started.map_or(0, |at| (self.wait_ended.unwrap_or_else(Utc::now) - at).num_milliseconds().max(0) as u64)),
             remaining_deadline_ms = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64,
@@ -2201,6 +2202,13 @@ async fn execute_turn_inner(
     let mut start_retries = 0;
     let mut admission: Option<(String, tokio::time::Instant, DateTime<Utc>)> = None;
     let mut capacity_error: Option<TurnError> = None;
+    let channel_source = turn.channel_event_id.as_deref().filter(|_| {
+        turn.origin == crate::models::assistant_conversation::TurnOrigin::Channel
+            && turn.trigger_run_id.is_none()
+            && turn.restart_admission.is_none()
+    });
+    let mut channel_retry_body: Option<Value> = None;
+    let mut guest_input_ids = Vec::new();
     let mut foreground = None;
     loop {
         let row = foreground.as_ref().unwrap_or(row);
@@ -2208,7 +2216,11 @@ async fn execute_turn_inner(
         // check. Recheck every bound source before model execution, including
         // continuations; stop/expiry alone preserve already admitted work.
         let turn = row.active_turn.as_ref().expect("claimed turn");
-        if row.guest_turn && row.collaboration.is_none() && !listed_attachments.is_empty() {
+        if channel_retry_body.is_none()
+            && row.guest_turn
+            && row.collaboration.is_none()
+            && !listed_attachments.is_empty()
+        {
             // Capabilities, admission waits and continuations can outlive the
             // initial check. Rebuild only this guest message's input from live
             // authority before every request; the image GET rechecks again.
@@ -2219,6 +2231,12 @@ async fn execute_turn_inner(
             )
             .await
             .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            if channel_source.is_some() {
+                guest_input_ids = current
+                    .iter()
+                    .map(|attachment| attachment.id.clone())
+                    .collect();
+            }
             let (parts, unavailable) = crate::services::assistant_upload_service::image_plan(
                 &current,
                 &capabilities,
@@ -2301,7 +2319,9 @@ async fn execute_turn_inner(
             format!("{base}:continuation:{}", continuations.count)
         };
         tool_images.attempted(state, row).await;
-        let mut request_body = {
+        let mut request_body = if let Some(original) = &channel_retry_body {
+            original.clone()
+        } else {
             let request_input = if tool_images.note.is_empty() {
                 input.to_owned()
             } else {
@@ -2369,6 +2389,17 @@ async fn execute_turn_inner(
             capacity_error = None;
             recovery.retries = 0;
         }
+        if let Some(source) = channel_source.filter(|_| channel_retry_body.is_some()) {
+            let expiry = egress
+                .channel_retry_expiry(row, source)
+                .await
+                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            let (_, deadline, at) = admission.as_mut().expect("channel request window");
+            *at = (*at).min(expiry);
+            *deadline = (*deadline).min(
+                tokio::time::Instant::now() + (expiry - Utc::now()).to_std().unwrap_or_default(),
+            );
+        }
         let (_, capacity_deadline, capacity_deadline_at) =
             admission.as_ref().expect("request window");
         let (capacity_deadline, capacity_deadline_at) = (*capacity_deadline, *capacity_deadline_at);
@@ -2376,6 +2407,15 @@ async fn execute_turn_inner(
             && let Some(error) = capacity_error.take()
         {
             return Err(error);
+        }
+        if channel_retry_body.is_some() && !guest_input_ids.is_empty() {
+            super::assistant_channel_media::guest::recheck_retry_inputs(
+                &state.db,
+                row,
+                &guest_input_ids,
+            )
+            .await
+            .map_err(|_| TurnError::internal("channel_retry_attachment_unavailable", "prepare"))?;
         }
         let saved_input = if turn.restart_admission.is_some() {
             request_body["background"] = json!(true);
@@ -2414,6 +2454,7 @@ async fn execute_turn_inner(
             &request_key,
             capacity_deadline_at,
             saved_input,
+            channel_retry_body.as_ref().map(|_| &binding),
         )
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
@@ -2447,6 +2488,10 @@ async fn execute_turn_inner(
             deadline.saturating_duration_since(tokio::time::Instant::now()),
             bounds.no_progress,
         );
+        let first_channel_body =
+            (number == 1 && channel_source.is_some()).then(|| request_body.clone());
+        let dispatched = tokio::time::Instant::now();
+        let dispatched_at = Utc::now();
         let response = acknowledgement
             .wait(
                 first_byte.wait(
@@ -2480,7 +2525,8 @@ async fn execute_turn_inner(
             Ok(response) => response,
             Err(AppError::PoolAttemptTransport(
                 crate::errors::PoolAttemptTransportKind::Connect,
-            )) if partial.is_empty()
+            )) if channel_retry_body.is_none()
+                && partial.is_empty()
                 && super::assistant_start_retry::untouched(&state.db, row)
                     .await
                     .unwrap_or(false) =>
@@ -2522,6 +2568,32 @@ async fn execute_turn_inner(
             let envelope: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             let code = upstream_error_code(status, &envelope);
             attempt.upstream_code = TurnError::new(code).upstream_code;
+            let exact_capacity = status == 503 && code == "capacity_exceeded";
+            if channel_retry_body.is_some() && !engine::admission_refusal(status, code) {
+                return Err(post_refusal(status, code, upstream_request_id));
+            }
+            let (capacity_deadline, capacity_deadline_at) = if exact_capacity
+                && let (Some(original), Some(source)) = (first_channel_body, channel_source)
+            {
+                let expiry = egress
+                    .channel_retry_expiry(row, source)
+                    .await
+                    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+                let budget = (expiry - dispatched_at)
+                    .to_std()
+                    .unwrap_or_default()
+                    .min(super::assistant_engine_policy::CHANNEL_CAPACITY_BUDGET);
+                let until = dispatched + budget;
+                let until_at = dispatched_at
+                    + chrono::Duration::from_std(budget).expect("bounded capacity wait");
+                admission = Some((request_key.clone(), until, until_at));
+                channel_retry_body = Some(original);
+                acknowledgement.enabled = false;
+                attempt.deadline = until;
+                (until, until_at)
+            } else {
+                (capacity_deadline, capacity_deadline_at)
+            };
             if turn.restart_admission.is_some()
                 && number == 1
                 && status == 400
@@ -2718,6 +2790,7 @@ async fn execute_turn_inner(
         // The short deadline belongs only to startup refusal retries. Accepted
         // work and its later continuations retain the normal response budget.
         start_retries = 0;
+        channel_retry_body = None;
         attempt.wait_ended = Some(Utc::now());
         attempt.log("accepted");
         acknowledgement.accepted();

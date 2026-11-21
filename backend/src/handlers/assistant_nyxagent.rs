@@ -2591,6 +2591,14 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         }))
     }
 
+    async fn channel_retry_expiry(
+        &self,
+        row: &AssistantConversation,
+        source: &str,
+    ) -> AppResult<chrono::DateTime<Utc>> {
+        super::nyxbot::late_delivery::retry_expiry(&self.state, row, source).await
+    }
+
     fn admission_acknowledged(
         &self,
         row: &AssistantConversation,
