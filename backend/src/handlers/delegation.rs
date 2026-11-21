@@ -274,6 +274,7 @@ mod tests {
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::services::oauth_token_authority_service::with_fixture_read_budget;
     use crate::services::{approval_service, consent_service, token_exchange_service};
 
     use super::*;
@@ -503,43 +504,24 @@ mod tests {
             Some(&reference),
         )
         .expect("mint full-router source token");
-        let exchanged = crate::test_utils::retry_oauth_authority(
-            async || {
-                token_exchange_service::exchange_token_with_authority(
-                    &db,
-                    &state.config,
-                    &state.jwt_keys,
-                    &receiver_client_id,
-                    &receiver_secret,
-                    &source_token,
-                    "urn:ietf:params:oauth:token-type:access_token",
-                    Some(&delegated_scope),
-                    &[],
-                    Some(false),
-                    &requested_service_ids,
-                    Some(false),
-                    &requested_node_ids,
-                )
-                .await
-            },
-            async || {
-                for collection in [
-                    crate::models::catalog_delegation_grant::COLLECTION_NAME,
-                    crate::models::oauth_delegation_authority::COLLECTION_NAME,
-                ] {
-                    assert_eq!(
-                        db.collection::<mongodb::bson::Document>(collection)
-                            .count_documents(doc! {"receiving_client_id": &receiver_client_id})
-                            .await
-                            .unwrap(),
-                        0,
-                        "refused exchange wrote to {collection}"
-                    );
-                }
-            },
-        )
-        .await
-        .expect("exchange full-router delegated token");
+        let exchange = token_exchange_service::exchange_token_with_authority(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &receiver_client_id,
+            &receiver_secret,
+            &source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(&delegated_scope),
+            &[],
+            Some(false),
+            &requested_service_ids,
+            Some(false),
+            &requested_node_ids,
+        );
+        let exchanged = with_fixture_read_budget(exchange)
+            .await
+            .expect("exchange full-router delegated token");
 
         let (_, private) = crate::routes::build_router();
         let sent_authorizations: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -739,11 +721,12 @@ mod tests {
         } else {
             Body::empty()
         };
-        let response = app
-            .clone()
-            .oneshot(builder.body(body).expect("build router request"))
-            .await
-            .expect("full router response");
+        let response = with_fixture_read_budget(
+            app.clone()
+                .oneshot(builder.body(body).expect("build router request")),
+        )
+        .await
+        .expect("full router response");
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -771,7 +754,7 @@ mod tests {
     /// mutation would hand the request a brand new valid grant and the
     /// assertion would prove nothing.
     async fn refresh_full_router_delegation(fixture: &mut FullRouterFixture) {
-        let exchanged = token_exchange_service::exchange_token_with_authority(
+        let exchange = token_exchange_service::exchange_token_with_authority(
             &fixture.db,
             &fixture.state.config,
             &fixture.state.jwt_keys,
@@ -785,9 +768,10 @@ mod tests {
             &fixture.requested_service_ids,
             Some(false),
             &fixture.requested_node_ids,
-        )
-        .await
-        .expect("re-exchange full-router delegated token");
+        );
+        let exchanged = with_fixture_read_budget(exchange)
+            .await
+            .expect("re-exchange full-router delegated token");
         let delegated_auth = delegated_auth_from_token(&fixture.state, &exchanged.access_token);
         let grant = fixture
             .db
@@ -1886,7 +1870,7 @@ mod tests {
             Some(&reference),
         )
         .expect("mint direct source token");
-        let exchanged = token_exchange_service::exchange_token_with_authority(
+        let exchange = token_exchange_service::exchange_token_with_authority(
             &db,
             &state.config,
             &state.jwt_keys,
@@ -1900,9 +1884,10 @@ mod tests {
             &requested_service_ids,
             Some(true),
             &[],
-        )
-        .await
-        .expect("mint delegated token and persist live catalog grant");
+        );
+        let exchanged = with_fixture_read_budget(exchange)
+            .await
+            .expect("mint delegated token and persist live catalog grant");
         let delegated_auth = delegated_auth_from_token(&state, &exchanged.access_token);
         crate::services::catalog_delegation_service::validate_live_grant(
             &db,
@@ -4701,7 +4686,7 @@ mod tests {
             .to_string();
         approve_full_router_request(&fixture, &request_id).await;
 
-        let proxy_only = token_exchange_service::exchange_token_with_authority(
+        let exchange = token_exchange_service::exchange_token_with_authority(
             &fixture.db,
             &fixture.state.config,
             &fixture.state.jwt_keys,
@@ -4715,9 +4700,10 @@ mod tests {
             &fixture.requested_service_ids,
             Some(false),
             &fixture.requested_node_ids,
-        )
-        .await
-        .expect("mint proxy-only delegated token");
+        );
+        let proxy_only = with_fixture_read_budget(exchange)
+            .await
+            .expect("mint proxy-only delegated token");
         let proxy_claims = jwt::verify_token(
             &fixture.state.jwt_keys,
             &fixture.state.config,
