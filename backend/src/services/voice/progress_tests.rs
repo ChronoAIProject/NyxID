@@ -1402,6 +1402,16 @@ async fn voice_loads_selected_bot_profile_and_service_guidance_for_all_clients()
         .await
         .unwrap();
     let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.live.contains(APPROVAL_REPORTING));
+    for context in [None, Some(original.delegation.as_str())] {
+        let config = super::super::responses::configuration("test-model", context);
+        assert!(
+            config["responses"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(APPROVAL_REPORTING)
+        );
+    }
     assert!(original.live.contains("Root display"));
     assert!(original.live.contains(root.persona.as_deref().unwrap()));
     for context in [&original.live, &original.delegation] {
@@ -1805,13 +1815,15 @@ async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_fol
         call=session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
         let mcp=MockServer::start().await;
         state.config.base_url=mcp.uri();
+        let tool_failure = json!({"tool":"nyxid__search_agent_skills","error":"skill_lookup_failed",
+            "service":"ornn-api","cause":{"stage":"skill_registry","cause":{"status":403,"error":"forbidden"}}});
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "jsonrpc":"2.0","id":"native-call","result":{"isError":true,
-                "content":[{"type":"text","text":"Invalid service arguments; no operation dispatched."}]}
+                "content":[{"type":"text","text":tool_failure.to_string()}]}
         }))).mount(&mcp).await;
         let (mut socket,server,events)=fixture_socket().await;
         let mut native=native_state();
-        let mut item=native_item(json!({"tool_name":"sandbox__submit_execution_handler","arguments_json":"{}"}));
+        let mut item=native_item(json!({"tool_name":"nyxid__search_agent_skills","arguments_json":"{}"}));
         item["event"]["item"]["name"]=json!("nyx__call_tool");
         for event in [native_created(),item,native_completed()] {
             native.event(&state,&mut call,&mut socket,&event,false).await.unwrap();
@@ -1841,6 +1853,14 @@ async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_fol
         tokio::time::timeout(std::time::Duration::from_secs(3),async {
             while events.lock().await.len()<4 {tokio::task::yield_now().await;}
         }).await.unwrap();
+        let commands = events.lock().await;
+        let item = commands.iter().map(|command| &command["item"])
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "native-call").unwrap();
+        let output: Value = serde_json::from_str(item["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["isError"], true);
+        let spoken_context: Value = serde_json::from_str(output["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(spoken_context, tool_failure);
+        drop(commands);
         native.close(&state).await;
         server.abort();
     }).await;

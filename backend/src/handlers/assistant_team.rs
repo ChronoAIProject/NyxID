@@ -1352,6 +1352,13 @@ pub(crate) async fn execute_tool(
     args: &Value,
 ) -> (Value, bool) {
     let (mut value, error) = execute_tool_inner(state, chat, tool_name, args).await;
+    if chat.execution_voice_task
+        && error
+        && assistant_team_tools::is_team_tool(tool_name)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("tool".into(), json!(tool_name));
+    }
     if tool_name == "nyxid__remember"
         && error
         && (chat.guest || chat.collaboration_thread)

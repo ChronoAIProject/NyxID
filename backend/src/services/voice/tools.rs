@@ -363,8 +363,8 @@ pub(super) struct Executions {
     active: HashMap<String, Execution>,
 }
 
-fn unavailable() -> Value {
-    json!({"status":"outcome_unknown", "retry_allowed":false,
+fn unavailable(cause: Value) -> Value {
+    json!({"status":"outcome_unknown", "retry_allowed":false, "cause":cause,
         "detail":"No verified tool result is available. The operation may have executed. Report that uncertainty. Do not repeat this operation or resubmit it as another task. A safe state query or other requested work may continue."})
 }
 
@@ -511,7 +511,9 @@ impl Executions {
             .ok_or(AppError::AssistantTurnRequired)?;
         validate_call(state, call).await?;
         if tokio::time::Instant::now() >= execution.deadline {
-            return Ok(unavailable());
+            return Ok(unavailable(
+                json!({"stage":"voice_tool","error":"deadline_exceeded"}),
+            ));
         }
         let credential = credentials::load_for_conversation(
             &state.db,
@@ -537,29 +539,42 @@ impl Executions {
                     )
                     .send()
                     .await
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
-                if !response.status().is_success()
-                    || response
-                        .content_length()
-                        .is_some_and(|n| n > MAX_BYTES as u64)
+                    .map_err(|error| {
+                        let reason = if error.is_timeout() {
+                            "timeout"
+                        } else if error.is_connect() {
+                            "connection_failed"
+                        } else {
+                            "request_failed"
+                        };
+                        json!({"stage":"mcp_transport", "error":reason})
+                    })?;
+                if !response.status().is_success() {
+                    return Err(
+                        json!({"stage":"mcp_transport","error":"http_error","status":response.status().as_u16()}),
+                    );
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|n| n > MAX_BYTES as u64)
                 {
-                    return Err(AppError::VoiceProviderUnavailable);
+                    return Err(json!({"stage":"mcp_transport","error":"response_too_large"}));
                 }
                 let mut bytes = Vec::new();
                 while let Some(chunk) = response
                     .chunk()
                     .await
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?
+                    .map_err(|_| json!({"stage":"mcp_transport","error":"response_interrupted"}))?
                 {
                     if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
-                        return Err(AppError::VoiceProviderUnavailable);
+                        return Err(json!({"stage":"mcp_transport","error":"response_too_large"}));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
                 let result: Value = serde_json::from_slice(&bytes)
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
+                    .map_err(|_| json!({"stage":"mcp_transport","error":"invalid_json"}))?;
                 if result["jsonrpc"] != "2.0" || result["id"] != call_id {
-                    return Err(AppError::VoiceProviderUnavailable);
+                    return Err(json!({"stage":"mcp_transport","error":"unexpected_envelope"}));
                 }
                 if let Some(error) = result.get("error") {
                     return Ok(
@@ -569,7 +584,7 @@ impl Executions {
                 let mut result = result
                     .get("result")
                     .cloned()
-                    .ok_or(AppError::VoiceProviderUnavailable)?;
+                    .ok_or_else(|| json!({"stage":"mcp_transport","error":"missing_result"}))?;
                 if result["isError"] == true {
                     return Ok(result);
                 }
@@ -583,7 +598,7 @@ impl Executions {
                             &state.encryption_keys,
                             &execution.row,
                         )
-                        .await?
+                        .await.map_err(|error| json!({"stage":"async_result","error":error.error_key(),"error_code":error.error_code()}))?
                     {
                         if !results.contexts.is_empty() {
                             result = json!({"isError": !results.succeeded, "content":results.contexts.iter().map(|text|
@@ -600,14 +615,14 @@ impl Executions {
             let mut renew = tokio::time::interval(Duration::from_secs(3));
             loop {
                 tokio::select! {
-                    result = &mut request => break result.unwrap_or_else(|_| unavailable()),
-                    _ = &mut limit => break unavailable(),
-                    _ = execution.permit.cancelled() => break unavailable(),
+                    result = &mut request => break result.unwrap_or_else(unavailable),
+                    _ = &mut limit => break unavailable(json!({"stage":"voice_tool","error":"deadline_exceeded"})),
+                    _ = execution.permit.cancelled() => break unavailable(json!({"stage":"voice_tool","error":"cancelled"})),
                     _ = renew.tick() => {
                         validate_call(state, call).await?;
                         if engine::stop_requested(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await?
                             || !engine::heartbeat(&state.db, &engine::WorkerFence::capture(&execution.row)?).await? {
-                            break unavailable();
+                            break unavailable(json!({"stage":"voice_tool","error":"turn_stopped"}));
                         }
                     }
                 }

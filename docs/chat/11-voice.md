@@ -208,7 +208,15 @@ revocation. Stop outstanding turns and close voice on detected access loss.
   materializing notification settings or creating new requests.
   An operation needing a new decision returns
   `approval_unsupported` before creating a card, proposal, consent request or
-  dispatching the operation. Ordinary text and other MCP clients retain their
+  dispatching the operation. Voice attributes this code to the specific call that
+  returned it. MCP service errors identify the service and the check that failed
+  (`execution_permission` or `service_policy`). A failed skill lookup alone leaves
+  the target service’s approval requirement unknown. When an authorized read is
+  available, the assistant can still use it to answer the caller. Skill-search
+  failures carry a nested `cause` with the registry or proxy stage and its
+  caller-visible error. Direct MCP transport failures carry their cause alongside
+  `outcome_unknown` and `retry_allowed: false` when the outcome is unverified.
+  Ordinary text and other MCP clients retain their
   approval behavior. The option is independent of Voice and available to other
   noninteractive callers; omitted options keep the existing request flow. No MCP
   protocol extension is needed.

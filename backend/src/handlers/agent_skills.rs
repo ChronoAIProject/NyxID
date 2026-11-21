@@ -473,17 +473,17 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
             }
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::ScopeForbidden(message));
         }
-        Err(AppError::Forbidden(_) | AppError::Unauthorized(_)) => {
+        Err(error @ (AppError::Forbidden(_) | AppError::Unauthorized(_))) => {
             if bound_skill_read {
                 audit_skill_read_refusal(state, person, "grant_refused");
             }
-            return OrnnOutcome::ProxyError;
+            return OrnnOutcome::ProxyError(error);
         }
-        Err(_) => {
+        Err(error) => {
             if bound_skill_read {
                 audit_skill_read_refusal(state, person, "proxy_error");
             }
-            return OrnnOutcome::ProxyError;
+            return OrnnOutcome::ProxyError(error);
         }
     };
     if !response.status().is_success() {
@@ -995,6 +995,50 @@ async fn read_attached(
     }
 }
 
+// Keep the registry response or the NyxID proxy refusal attached to this lookup
+// so the voice model can distinguish it from a later service operation.
+fn voice_search_result(
+    outcome: OrnnOutcome,
+    page: u32,
+    chat: &ChatAuthority,
+    frontend: &str,
+) -> (Value, bool) {
+    let failed = |stage: &str, cause: Value| {
+        (
+            json!({"error":"skill_lookup_failed","service":"ornn-api","cause":{"stage":stage,"cause":cause}}),
+            true,
+        )
+    };
+    let (stage, read) = match outcome {
+        OrnnOutcome::Response { status, code, .. } => {
+            return failed("skill_registry", json!({"status":status,"error":code}));
+        }
+        OrnnOutcome::Uncertain => {
+            return failed(
+                "skill_registry",
+                json!({"error":"outcome_unknown",
+                "message":"The skill registry lookup ended without a verified response."}),
+            );
+        }
+        OrnnOutcome::ProxyError(error) => ("registry_proxy", Err(error)),
+        other => ("skill_registry", other.into_app_result()),
+    };
+    match read.and_then(|bytes| skills::search_result(&bytes, page)) {
+        Ok(result) => (result, false),
+        Err(error) => {
+            let status = error.status_code().as_u16();
+            let mut cause = crate::services::assistant_account_tools::error_result_for(
+                error,
+                Some(chat),
+                frontend,
+            )
+            .value;
+            cause["status"] = json!(status);
+            failed(stage, cause)
+        }
+    }
+}
+
 pub(crate) async fn dispatch(
     state: &AppState,
     chat: &ChatAuthority,
@@ -1091,12 +1135,21 @@ pub(crate) async fn dispatch(
             }
         }
         "search_agent_skills" => {
-            skills::search(
-                &reader,
-                arg(args, "query"),
-                args["page"].as_u64().unwrap_or(1) as u32,
-            )
-            .await?
+            let query = arg(args, "query");
+            let page = args["page"].as_u64().unwrap_or(1) as u32;
+            if chat.execution_voice_task {
+                let path = skills::search_path(query, page)?;
+                let outcome = reader
+                    .classified_request(http::Method::GET, &path, Vec::new(), false, None)
+                    .await;
+                return Ok(voice_search_result(
+                    outcome,
+                    page,
+                    chat,
+                    &state.config.frontend_url,
+                ));
+            }
+            skills::search(&reader, query, page).await?
         }
         "agent_skill_versions" => {
             skills::versions(
@@ -1498,6 +1551,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn voice_skill_search_keeps_registry_errors_distinct_from_proxy_approval() {
+        let mut chat = authority(
+            crate::models::assistant_conversation::AgentRole::Orchestrator,
+            false,
+        );
+        chat.execution_voice_task = true;
+        for (outcome, stage, key, status) in [
+            (
+                OrnnOutcome::Response {
+                    status: 403,
+                    code: OrnnCode::Forbidden,
+                    rules: vec![],
+                },
+                "skill_registry",
+                "forbidden",
+                403,
+            ),
+            (
+                OrnnOutcome::ProxyError(AppError::ApprovalUnsupported),
+                "registry_proxy",
+                "approval_unsupported",
+                403,
+            ),
+            (
+                OrnnOutcome::ProxyError(AppError::Unauthorized(
+                    "private authentication detail".into(),
+                )),
+                "registry_proxy",
+                "unauthorized",
+                401,
+            ),
+            (
+                OrnnOutcome::ProxyError(AppError::Internal("private diagnostic".into())),
+                "registry_proxy",
+                "internal_error",
+                500,
+            ),
+        ] {
+            let (result, failed) = voice_search_result(outcome, 1, &chat, "");
+            assert!(failed);
+            assert_eq!(result["error"], "skill_lookup_failed");
+            assert_eq!(result["cause"]["stage"], stage);
+            let cause = &result["cause"]["cause"];
+            assert_eq!(cause["error"], key);
+            assert_eq!(cause["status"], status);
+            assert!(!result.to_string().contains("private"));
+            assert!(!result.to_string().contains("human acknowledgement"));
+        }
+    }
+
     #[tokio::test]
     async fn guest_skill_mutation_is_denied_before_state_access() {
         let f = orchestrator_fixture("guest_skill_mutation").await;
@@ -1606,7 +1710,7 @@ mod tests {
                     vec![]
                 )
                 .await,
-            OrnnOutcome::ProxyError
+            OrnnOutcome::ProxyError(_)
         ));
         assert!(matches!(
             reader.get("/api/v1/skill-search?scope=private&mode=keyword&pageSize=1&page=1&q=private").await,

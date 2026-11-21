@@ -352,6 +352,50 @@ async fn voice_tool_wait_keeps_coordinator_pollable_and_close_settles_pending_tu
 }
 
 #[tokio::test]
+async fn voice_tool_transport_errors_reach_the_model_with_an_unknown_outcome() {
+    Box::pin(async {
+        let (mut state, _, call) = super::super::tests::setup("voice_mcp_transport_cause").await;
+        let upstream = MockServer::start().await;
+        state.config.base_url = upstream.uri();
+        let input = invocation("nyx__list_connected_services", json!({}));
+        for (reply, reason, status) in [
+            (
+                ResponseTemplate::new(503).set_body_string("private origin diagnostic"),
+                "http_error",
+                Some(503),
+            ),
+            (
+                ResponseTemplate::new(200).set_body_string("broken JSON"),
+                "invalid_json",
+                None,
+            ),
+        ] {
+            upstream.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(reply)
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let mut workers = Workers::default();
+            workers
+                .start(&state, &call, "delegation", "lookup", &input)
+                .unwrap();
+            let output = workers.next().await.unwrap().result.unwrap();
+            let (output, _) = presentation(output);
+            let output = workers.present_output(&state, output);
+            assert_eq!(output["status"], "outcome_unknown");
+            assert_eq!(output["retry_allowed"], false);
+            assert_eq!(output["cause"]["stage"], "mcp_transport");
+            assert_eq!(output["cause"]["error"], reason);
+            assert_eq!(output["cause"]["status"].as_u64(), status);
+            assert!(!output.to_string().contains("private origin diagnostic"));
+            upstream.verify().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn voice_tool_settlement_failure_retains_context_for_call_cleanup() {
     Box::pin(async {
         let (mut state, _, call) = super::super::tests::setup("voice_tools_cleanup_retry").await;
@@ -556,6 +600,46 @@ async fn voice_async_tool_reuses_existing_watch_without_a_second_task() {
 }
 
 #[tokio::test]
+async fn voice_skill_search_returns_the_unavailable_registry_cause_through_mcp() {
+    Box::pin(async {
+        let mut f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "voice_skill_registry_failure",
+        )
+        .await;
+        let call = call(&f.state, &f.owner, &f.row.id).await;
+        let server = mcp_server(&mut f.state).await;
+        let mut tools = Executions::default();
+        let lookup = invocation(
+            "nyx__call_tool",
+            json!({"tool_name":"nyxid__search_agent_skills",
+            "arguments_json":json!({"query":"temperature"}).to_string()}),
+        );
+        let missing = tools
+            .invoke(&f.state, &call, "delegation", "lookup", &lookup)
+            .await
+            .unwrap();
+        assert_eq!(missing["isError"], true, "{missing}");
+        let cause: Value =
+            serde_json::from_str(missing["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(cause["tool"], "nyxid__search_agent_skills", "{cause}");
+        assert_eq!(cause["error"], "skill_lookup_failed");
+        assert_eq!(cause["service"], "ornn-api");
+        assert_eq!(cause["cause"]["stage"], "skill_registry");
+        assert_eq!(cause["cause"]["cause"]["error"], "forbidden");
+        assert_eq!(cause["cause"]["cause"]["status"], 403);
+        assert!(
+            cause["cause"]["cause"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Ornn is unavailable")
+        );
+        tools.close(&f.state).await;
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant() {
     Box::pin(async {
         use crate::services::approval_service as approvals;
@@ -612,11 +696,22 @@ async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant(
             .await
             .unwrap();
         assert_eq!(refused["isError"], true, "{refused}");
-        assert!(
-            refused
-                .to_string()
-                .contains(&AppError::ApprovalUnsupported.to_string()),
-            "{refused}"
+        let refusal: Value =
+            serde_json::from_str(refused["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(refusal["error"], "approval_unsupported", "{refusal}");
+        assert_eq!(refusal["error_code"], 12502);
+        assert_eq!(refusal["service"], "sensor");
+        assert_eq!(refusal["stage"], "service_policy");
+        let execution = &tools.active["delegation"].row;
+        let current = engine::get(&f.state.db, &f.owner, &execution.id)
+            .await
+            .unwrap();
+        let turn = current.active_turn.unwrap();
+        let activity = turn.activities.last().unwrap();
+        assert_eq!(activity.label, "sensor__request");
+        assert_eq!(
+            activity.failure.as_ref().unwrap().reason.as_deref(),
+            Some("approval_unsupported")
         );
         assert!(upstream.received_requests().await.unwrap().is_empty());
         let auth = crate::mw::auth::api_key_auth_user_for_voice(
