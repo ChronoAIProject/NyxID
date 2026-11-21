@@ -248,6 +248,8 @@ pub struct McpDurableEndpointMetadata {
     /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
     /// edits, a PUT that only acts); `None` leaves it to the method.
     pub changes_existing: Option<bool>,
+    /// Generic proxy calls use the resolved catalog's compiled routes.
+    pub generic_spec_key: Option<&'static str>,
     /// Compiled NyxID overlay only; remote specs cannot assert this.
     pub append_only: bool,
     pub append_only_query: Option<&'static serde_json::Map<String, serde_json::Value>>,
@@ -276,6 +278,26 @@ pub fn operation_effects(
     method: &reqwest::Method,
     metadata: McpDurableEndpointMetadata,
 ) -> OperationEffects {
+    request_effects(method, metadata, None, false)
+}
+
+pub(super) fn request_effects(
+    method: &reqwest::Method,
+    mut metadata: McpDurableEndpointMetadata,
+    query: Option<&str>,
+    method_override: bool,
+) -> OperationEffects {
+    metadata.append_only = metadata.append_only
+        && !method_override
+        && append_query_allowed(metadata.append_only_query, query);
+    possible_operation_effects(method, metadata)
+}
+
+/// Discovery includes operations whose conditions can be satisfied at execution.
+pub(super) fn possible_operation_effects(
+    method: &reqwest::Method,
+    metadata: McpDurableEndpointMetadata,
+) -> OperationEffects {
     let safe = matches!(
         *method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
@@ -289,16 +311,14 @@ pub fn operation_effects(
         Some(false) if metadata.catalog_contract => false,
         _ => !(safe || *method == reqwest::Method::POST),
     };
-    let destructive = *method == reqwest::Method::DELETE || metadata.destructive;
+    let append = metadata.catalog_contract
+        && metadata.append_only
+        && *method == reqwest::Method::POST
+        && !changes;
+    let destructive = *method == reqwest::Method::DELETE || (metadata.destructive && !append);
     OperationEffects {
-        reads: reads && !changes && !destructive,
-        // Keep Aevatar's destructive classification for approvals/webhooks.
-        // Only this NyxID contract permits additive guest use despite it.
-        uses: !changes
-            && (!destructive
-                || (metadata.catalog_contract
-                    && metadata.append_only
-                    && *method == reqwest::Method::POST)),
+        reads: reads && !changes && !destructive && !append,
+        uses: !changes && !destructive,
         destructive,
     }
 }
@@ -2003,6 +2023,7 @@ fn service_endpoint_durable_metadata(
                     catalog_contract: true,
                     destructive: marks.destructive,
                     changes_existing: marks.changes_existing,
+                    generic_spec_key: None,
                     append_only: marks.append_only,
                     append_only_query: marks.append_only_query,
                     supports_idempotency_key: endpoint.supports_idempotency_key,
@@ -2026,6 +2047,10 @@ fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &st
             &endpoint.name,
         );
         if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
+            if endpoint.endpoint_id == GENERIC_PROXY_ENDPOINT_ID {
+                metadata.generic_spec_key =
+                    super::catalog_spec_registry::spec_key_for_slug(catalog_slug);
+            }
             metadata.append_only = metadata.catalog_contract && marks.append_only;
             metadata.append_only_query = marks.append_only_query;
             metadata.destructive |= marks.destructive;
@@ -2051,6 +2076,7 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
             risk: None,
             destructive: false,
             changes_existing: None,
+            generic_spec_key: None,
             append_only: false,
             append_only_query: None,
             catalog_contract: false,
@@ -2147,6 +2173,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
                 changes_existing: parsed_endpoint.changes_existing,
+                generic_spec_key: None,
                 append_only: false,
                 append_only_query: None,
                 catalog_contract: false,
@@ -4320,7 +4347,7 @@ impl PreparedProxyCall {
         );
         operation_descriptor::apply_operation_effects(
             &mut descriptor,
-            operation_effects(&self.method, self.approval_metadata),
+            self.effects(),
             self.carries_method_override(),
         );
         descriptor
@@ -4405,13 +4432,29 @@ impl PreparedProxyCall {
         )
     }
 
-    pub(crate) fn guest_effects(
-        &self,
-        mut metadata: McpDurableEndpointMetadata,
-    ) -> OperationEffects {
-        metadata.append_only &=
-            append_query_allowed(metadata.append_only_query, self.query.as_deref());
-        operation_effects(&self.method, metadata)
+    pub(crate) fn effects(&self) -> OperationEffects {
+        let metadata = self.approval_metadata;
+        let method_override = (metadata.append_only || metadata.generic_spec_key.is_some())
+            && self.carries_method_override();
+        let effects = request_effects(&self.method, metadata, self.query(), method_override);
+        if let Some(key) = metadata.generic_spec_key
+            && let Ok(path) = self.canonical_path()
+            && super::catalog_spec_registry::compiled_effects(
+                key,
+                &self.method,
+                &path,
+                self.query(),
+                method_override,
+            )
+            .is_some_and(|compiled| compiled.destructive)
+        {
+            return OperationEffects {
+                reads: false,
+                uses: false,
+                destructive: true,
+            };
+        }
+        effects
     }
 
     pub(crate) fn query(&self) -> Option<&str> {
@@ -4692,15 +4735,11 @@ fn prepare_proxy_tool_call_inner(
             .then(|| request_content_type_or_default(endpoint).to_string()),
         body,
         is_generic_proxy_endpoint,
-        approval_metadata: if is_generic_proxy_endpoint {
-            Default::default()
-        } else {
-            service
-                .durable_endpoint_metadata
-                .get(&endpoint.endpoint_id)
-                .copied()
-                .unwrap_or_default()
-        },
+        approval_metadata: service
+            .durable_endpoint_metadata
+            .get(&endpoint.endpoint_id)
+            .copied()
+            .unwrap_or_default(),
     })
 }
 
@@ -6551,12 +6590,7 @@ async fn execute_tool_resolved_inner(
                 super::assistant_service_execution::async_contract_binding(service, endpoint)?
             );
         }
-        let metadata = service
-            .durable_endpoint_metadata
-            .get(&endpoint.endpoint_id)
-            .copied()
-            .unwrap_or_default();
-        let effects = operation_effects(prepared.method(), metadata);
+        let effects = prepared.effects();
         let read = effects.reads && !prepared.carries_method_override();
         let destructive = effects.destructive || prepared.carries_method_override();
         let summary = super::cma_operation::control_confirmation(
@@ -9825,6 +9859,7 @@ mod tests {
                         risk: None,
                         destructive: false,
                         changes_existing: None,
+                        generic_spec_key: None,
                         append_only: false,
                         append_only_query: None,
                         catalog_contract: true,
@@ -16619,6 +16654,10 @@ mod guest_append_classification_tests {
             spec["paths"][path]["post"]["x-aevatar-tool"]["destructive"],
             true
         );
+        assert_eq!(
+            spec["paths"][path]["post"]["x-aevatar-tool"]["requiresApproval"],
+            true
+        );
         let marks = super::super::catalog_spec_registry::operation_marks(
             "api-google-workspace",
             "POST",
@@ -16632,7 +16671,7 @@ mod guest_append_classification_tests {
             append_only_query: marks.append_only_query,
             ..Default::default()
         };
-        assert!(operation_effects(&reqwest::Method::POST, metadata).uses);
+        assert!(possible_operation_effects(&reqwest::Method::POST, metadata).uses);
         assert!(operation_effects(&reqwest::Method::POST, metadata).destructive);
         for (query, allowed) in [
             (None, false),
@@ -16645,21 +16684,18 @@ mod guest_append_classification_tests {
             (Some("insertDataOption=INSERT_ROWS%26x"), false),
         ] {
             assert_eq!(
-                append_query_allowed(metadata.append_only_query, query),
-                allowed
+                request_effects(&reqwest::Method::POST, metadata, query, false).destructive,
+                !allowed
             );
         }
-        assert!(!operation_effects(&reqwest::Method::DELETE, metadata).uses);
-        assert!(
-            !operation_effects(
-                &reqwest::Method::POST,
-                McpDurableEndpointMetadata {
-                    changes_existing: Some(true),
-                    ..metadata
-                }
-            )
-            .uses
-        );
+        let query = Some("insertDataOption=INSERT_ROWS");
+        assert!(request_effects(&reqwest::Method::DELETE, metadata, query, false).destructive);
+        assert!(request_effects(&reqwest::Method::POST, metadata, query, true).destructive);
+        let changes = McpDurableEndpointMetadata {
+            changes_existing: Some(true),
+            ..metadata
+        };
+        assert!(request_effects(&reqwest::Method::POST, changes, query, false).destructive);
         for (method, path) in [
             ("POST", "/v4/spreadsheets/{spreadsheetId}:batchUpdate"),
             ("PUT", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
@@ -16681,7 +16717,8 @@ mod guest_append_classification_tests {
                 append_only: marks.append_only,
                 ..Default::default()
             };
-            assert!(!operation_effects(&method.parse().unwrap(), metadata).uses);
+            let effects = request_effects(&method.parse().unwrap(), metadata, query, false);
+            assert!(effects.destructive && !effects.uses);
         }
     }
 
@@ -16701,7 +16738,13 @@ mod guest_append_classification_tests {
             let metadata = published.durable_metadata[&endpoint.endpoint_id];
             assert!(!metadata.append_only);
             if endpoint.path.ends_with(":append") || endpoint.path.ends_with(":batchUpdate") {
-                assert!(!operation_effects(&reqwest::Method::POST, metadata).uses);
+                let effects = request_effects(
+                    &reqwest::Method::POST,
+                    metadata,
+                    Some("insertDataOption=INSERT_ROWS"),
+                    false,
+                );
+                assert!(effects.destructive && !effects.uses);
             }
         }
         let forged = super::super::catalog_spec_registry::operation_marks(

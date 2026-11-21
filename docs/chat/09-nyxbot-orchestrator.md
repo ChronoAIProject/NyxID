@@ -1093,8 +1093,8 @@ guest authorization; their catalog inclusion grants no execution access.
     Sheets' `values:clear`, Docs' `batchUpdate`, IFTTT's
     triggers and tool calls), never, except a POST with a compiled NyxID
     `x-nyxid-append-only: true` attestation. This attests adding data without
-    changing or removing existing data; it does not clear Aevatar's marker or
-    bypass owner approvals. A compiled `x-nyxid-append-only-query` object may
+    changing or removing existing data. NyxID classifies a matching request as
+    a write for owner access modes and service approval rules. A compiled `x-nyxid-append-only-query` object may
     require exact query values. Sheets `values:append` requires
     `insertDataOption=INSERT_ROWS`; absent, duplicate, or overwrite values are
     refused under `use`. DELETE and `changes-existing: true` always win.

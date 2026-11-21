@@ -84,6 +84,12 @@ See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for reader/UI co
 | Auto (`nyxmode`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing sensitive/destructive classification |
 | Ask every time (`ask_every_time`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing change/sensitive/destructive classification |
 
+A Sheets append with `insertDataOption=INSERT_ROWS` satisfies NyxID's compiled
+append-only contract. Auto treats it as a change and a deny-destructive rule
+allows it. Omitting that option, overwriting cells, clearing values or editing
+the sheet structure is destructive. Ask every time and independent write
+approval policies still apply to matching appends.
+
 Organization ownership comes from the resolved effective owner and authoritative
 User type, never a model flag or an unrelated catalog creator. Public Person-owned
 Oracle pools are not organization resources. Platform/BYO credential-source
