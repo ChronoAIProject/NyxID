@@ -329,15 +329,30 @@ struct GoogleUserInfo {
     picture: Option<String>,
 }
 
+pub struct FetchedSocialProfile {
+    pub profile: SocialProfile,
+    /// GitHub can supply a login handle as the stored default without supplying a name.
+    pub has_provider_name: bool,
+}
+
 /// Fetch the user profile from the social provider using the access token.
 pub async fn fetch_user_profile(
     provider: SocialProvider,
     access_token: &str,
     http_client: &reqwest::Client,
-) -> AppResult<SocialProfile> {
+) -> AppResult<FetchedSocialProfile> {
     match provider {
         SocialProvider::GitHub => fetch_github_profile(access_token, http_client).await,
-        SocialProvider::Google => fetch_google_profile(access_token, http_client).await,
+        SocialProvider::Google => {
+            let profile = fetch_google_profile(access_token, http_client).await?;
+            Ok(FetchedSocialProfile {
+                has_provider_name: profile
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|n| !n.trim().is_empty()),
+                profile,
+            })
+        }
         SocialProvider::Apple => Err(AppError::SocialAuthFailed(
             "Apple does not support userinfo endpoint. Use ID token flow.".to_string(),
         )),
@@ -373,7 +388,7 @@ pub fn profile_from_apple_id_token(
 async fn fetch_github_profile(
     access_token: &str,
     http_client: &reqwest::Client,
-) -> AppResult<SocialProfile> {
+) -> AppResult<FetchedSocialProfile> {
     let user: GitHubUser = http_client
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -398,13 +413,20 @@ async fn fetch_github_profile(
     // address.
     let email = fetch_github_primary_email(access_token, http_client).await?;
 
-    Ok(SocialProfile {
-        provider: SocialProvider::GitHub,
-        provider_id: user.id.to_string(),
-        email,
-        display_name: user.name.or(Some(user.login)),
-        avatar_url: user.avatar_url,
-    })
+    Ok(github_social_profile(user, email))
+}
+
+fn github_social_profile(user: GitHubUser, email: String) -> FetchedSocialProfile {
+    FetchedSocialProfile {
+        has_provider_name: user.name.as_deref().is_some_and(|n| !n.trim().is_empty()),
+        profile: SocialProfile {
+            provider: SocialProvider::GitHub,
+            provider_id: user.id.to_string(),
+            email,
+            display_name: user.name.or(Some(user.login)),
+            avatar_url: user.avatar_url,
+        },
+    }
 }
 
 async fn fetch_github_primary_email(
@@ -763,6 +785,27 @@ pub async fn find_or_create_user_with_invite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_login_fallback_is_not_a_signup_name() {
+        for (name, has_provider_name) in [(None, false), (Some("  "), false), (Some("Octo"), true)]
+        {
+            let fetched = github_social_profile(
+                GitHubUser {
+                    id: 1,
+                    login: "octocat".into(),
+                    name: name.map(str::to_owned),
+                    avatar_url: None,
+                },
+                "octo@example.test".into(),
+            );
+            assert_eq!(fetched.has_provider_name, has_provider_name);
+            assert_eq!(
+                fetched.profile.display_name.as_deref(),
+                name.or(Some("octocat"))
+            );
+        }
+    }
 
     #[test]
     fn provider_from_str_valid() {
