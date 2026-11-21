@@ -2099,9 +2099,14 @@ async fn execute_turn_inner(
             attachments.retain(|a| !expired.contains(&a.id));
         }
     }
-    let has_images = attachments
-        .iter()
-        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
+    let has_images = attachments.iter().any(|a| {
+        a.origin == "user_upload"
+            && (a.content_type.starts_with("image/")
+                || (a.content_type == "application/pdf"
+                    && a.pdf
+                        .as_ref()
+                        .is_none_or(|pdf| !pdf.unread_pages.is_empty())))
+    });
     let model_text_only = has_images
         && match platform_plan.as_ref() {
             Some(plan) => plan.image_limits().is_none(),
@@ -2136,11 +2141,28 @@ async fn execute_turn_inner(
     } else {
         crate::services::assistant_upload_service::IMAGE_FALLBACK
     };
+    let mut pdf_input = Box::pin(
+        crate::services::assistant_upload_service::pdf_vision::prepare(
+            state,
+            row,
+            &attachments,
+            &capabilities,
+            model_text_only,
+        ),
+    )
+    .await
+    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    let mut image_attachments = attachments.clone();
+    image_attachments.extend(pdf_input.images.clone());
     let (mut image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
-        &attachments,
+        &image_attachments,
         &capabilities,
         &state.config.base_url,
     );
+    pdf_input.finalize(&omitted, "image_limit");
+    let pdf_notice = pdf_input.notice();
+    listing.push_str(&pdf_notice);
+    images::record_pdf_outcomes(state, row, &pdf_input.reports).await?;
     if !omitted.is_empty() {
         let notice = image_notice;
         listing.push_str(&format!(
@@ -2356,7 +2378,7 @@ async fn execute_turn_inner(
             };
             if !parts.is_empty() {
                 let mut content = vec![json!({"type":"input_text", "text":input})];
-                content.extend(parts.clone());
+                content.extend(pdf_input.with_page_labels(parts));
                 body["input"] = json!([{"role":"user", "content":content}]);
             }
             body
@@ -2947,6 +2969,22 @@ async fn execute_turn_inner(
             return Err(TurnError::new("cancelled"));
         }
         if decoder.image_input_unsupported {
+            pdf_input.finalize(
+                &pdf_input
+                    .images
+                    .iter()
+                    .map(|a| a.id.clone())
+                    .collect::<Vec<_>>(),
+                "image_input_unsupported",
+            );
+            images::record_pdf_outcomes(state, row, &pdf_input.reports).await?;
+            image_parts.clear();
+            if !pdf_notice.is_empty() {
+                let updated = pdf_input.notice();
+                listing = listing.replacen(&pdf_notice, &updated, 1);
+            }
+            decisions.truncate(media_decision_offset);
+            decisions.push_str(&listing);
             for item in attachments.iter().filter(|a| {
                 a.origin == "user_upload"
                     && a.content_type.starts_with("image/")

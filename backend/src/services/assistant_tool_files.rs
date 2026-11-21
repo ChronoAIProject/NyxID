@@ -243,6 +243,7 @@ pub(crate) async fn retain(
         size: bytes.len() as i64,
         pages: None,
         chat_delivery: Some(false),
+        pdf: None,
         image_input: None,
         image_input_reason: None,
         image_inspection: Some(false),
