@@ -34,6 +34,7 @@ bson = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
+serde_json_canonicalizer = "=0.3.2"
 pulldown-cmark = "0.13"
 linkify = "0.10"
 uuid = { workspace = true }
@@ -114,6 +115,7 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+jsonschema = { version = "0.33.0", default-features = false }
 serde_urlencoded = "0.7.1"
 nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
 flate2 = "1"

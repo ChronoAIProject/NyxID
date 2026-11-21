@@ -87,6 +87,14 @@ const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// N3 prepares shadow pricing only; this switch cannot authorize a charge.
+pub const CMA_SANDBOX_USAGE_CHARGE_FLAG_KEY: &str = "experimental:cma-sandbox-usage-charge";
+const CMA_SANDBOX_USAGE_CHARGE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_USAGE_CHARGE_FLAG_KEY,
+    description: "Prepare v1 Sandbox usage tariffs, policies and shadow price plans (global only). Does not activate wallet or provider charging.",
+    default_enabled: false,
+};
+
 /// Lago plan writes are shared across owners and have an independent runtime gate.
 pub const CMA_SANDBOX_RATE_SYNC_FLAG_KEY: &str = "experimental:cma-sandbox-rate-sync";
 const CMA_SANDBOX_RATE_SYNC_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -415,6 +423,7 @@ const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
     APP_TOKEN_MANAGEMENT_FLAG_KEY,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+    CMA_SANDBOX_USAGE_CHARGE_FLAG_KEY,
 ];
 
 pub(crate) fn is_global_only(flag_key: &str) -> bool {
@@ -529,6 +538,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     BILLING_FLAG,
     CMA_SANDBOX_BILLING_FLAG,
     CMA_SANDBOX_RATE_SYNC_FLAG,
+    CMA_SANDBOX_USAGE_CHARGE_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     CRASH_REPORTS_FLAG,
@@ -595,6 +605,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     BILLING_FLAG_TEST,
     CMA_SANDBOX_BILLING_FLAG,
     CMA_SANDBOX_RATE_SYNC_FLAG,
+    CMA_SANDBOX_USAGE_CHARGE_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     CRASH_REPORTS_FLAG,
@@ -1164,6 +1175,10 @@ pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<boo
 /// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
 pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
+}
+
+pub async fn cma_sandbox_usage_charge_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CMA_SANDBOX_USAGE_CHARGE_FLAG).await
 }
 
 pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<bool> {
@@ -3439,6 +3454,7 @@ mod tests {
                 "experimental:billing",
                 "experimental:cma-sandbox-billing",
                 "experimental:cma-sandbox-rate-sync",
+                "experimental:cma-sandbox-usage-charge",
                 "experimental:remote-machines",
                 "services:monitoring",
                 "diagnostics:crash-reports",
