@@ -160,6 +160,7 @@ async fn exchange_social_token_inner(
                 http_client,
             )
             .await?
+            .profile
         }
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };

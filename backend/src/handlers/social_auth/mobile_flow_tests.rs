@@ -250,6 +250,7 @@ async fn code_delivery_releases_tokens_once_with_the_matching_verifier() {
             user: &user,
             provider: "google",
             redirect_target: &target,
+            signup_has_name: Some(true),
             ip: None,
             ua: None,
             tele_social: &TelemetryContext::pre_auth(&HeaderMap::new()),

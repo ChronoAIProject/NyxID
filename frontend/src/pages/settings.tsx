@@ -1,3 +1,4 @@
+import { useUpdateDisplayName } from "@/hooks/use-update-display-name";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -259,23 +260,11 @@ function ProfileForm({ user }: { readonly user: User }) {
   const form = useAppForm({
     defaultValues: { display_name: user.display_name ?? "" },
   });
-  const setUser = useAuthStore((s) => s.setUser);
-  const queryClient = useQueryClient();
+  const updateName = useUpdateDisplayName(user.id);
   async function save(values: { display_name: string }) {
     form.clearErrors("root");
     try {
-      const updated = await api.put<Pick<User, "id" | "email" | "display_name" | "avatar_url">>("/users/me", values, {
-        authorityGuard: () => {
-          if (useAuthStore.getState().user?.id !== user.id) throw new Error("Account changed; try again from the current account.");
-        },
-      });
-      const current = useAuthStore.getState().user;
-      if (!current || current.id !== user.id || updated.id !== user.id) throw new Error("Profile response did not match the current account.");
-      // PUT returns only editable profile fields. Retain account preferences
-      // and capabilities from the current full profile, including consent.
-      const merged = { ...current, email: updated.email, display_name: updated.display_name, avatar_url: updated.avatar_url };
-      setUser(merged);
-      queryClient.setQueryData(["user", "me"], merged);
+      const updated = await updateName.mutateAsync(values);
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });
       if (draft !== values.display_name) form.setValue("display_name", draft);
