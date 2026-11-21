@@ -2371,7 +2371,7 @@ async fn native_discord_notification_health_ignores_legacy_and_concurrent_messag
     state.db.drop().await.unwrap();
 }
 
-async fn native_whatsapp_channel(state: &AppState) -> (NyxbotChannel, String) {
+pub(super) async fn native_whatsapp_channel(state: &AppState) -> (NyxbotChannel, String) {
     use crate::models::channel_whatsapp_native as wa;
     let (mut row, key) = native_channel(state).await;
     row.platform = "whatsapp".into();
@@ -2465,7 +2465,7 @@ async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_
     state.db.drop().await.unwrap();
 }
 
-fn whatsapp_request(row: &NyxbotChannel, id: &str, sender: &str, text: &str) -> Value {
+pub(super) fn whatsapp_request(row: &NyxbotChannel, id: &str, sender: &str, text: &str) -> Value {
     let mut request = native_event(row, id, text);
     request["metadata"]["cmaeg.event"] = json!(id);
     request["metadata"]["cmaeg.actor"] = json!(sender);

@@ -49,6 +49,19 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let mut metadata = ChannelTurnDelivery {
+        restart_owner_verified: sender.owner_eligible
+            && sender.original_message
+            && !guest
+            && channel.bot_owner_id.is_none()
+            && channel.org_specialist.is_none()
+            && origin.native_event_id.as_deref() == Some(event)
+            && origin.thread.is_none()
+            && channel.gateway_source.is_some()
+            && sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Bot
+            && channel
+                .owner_sender_ids
+                .iter()
+                .any(|owner| owner == sender.id),
         notice_language,
         execution_source_bound: false,
         execution_owner_verified: crate::services::execution_permission_channel::verified_owner(
@@ -212,6 +225,12 @@ fn provider_stream_inner(
     sse(async_stream::stream! {
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
+            Ok(Err(error)) if error.stage == "subscriber_closed" && may_detach(&state, &event_key).await.unwrap_or(true) => {
+                let _ = delivery::detach(&state.db, &event_key).await;
+                guard.disarm();
+                for frame in message_frames(&response_id, None) { yield frame; }
+                process(&state, &event_key).await;
+            }
             Ok(outcome) => {
                 let (allowed,org_guest,language)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false,None));
                 if !allowed {
@@ -315,6 +334,23 @@ fn provider_stream_inner(
     })
 }
 
+async fn may_detach(state: &AppState, event_key: &str) -> AppResult<bool> {
+    let Some(event) = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":event_key})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let (Some(conversation), Some(turn)) = (event.conversation_id, event.turn_id) else {
+        return Ok(false);
+    };
+    if state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&conversation,"user_id":&event.user_id,"active_turn.turn_id":&turn,"active_turn.restart_admission.version":4}).projection(doc! {"_id":1}).await?.is_some() {return Ok(true)}
+    Ok(state.db.collection::<bson::Document>(MESSAGES).find_one(doc! {"conversation_id":conversation,"user_id":event.user_id,"turn_id":turn,"role":"assistant","settled_by_attempt":{"$exists":true}}).projection(doc! {"_id":1}).await?.is_some())
+}
+
 /// A separate bounded worker: provider I/O must never stall the shared live
 /// change stream or the team wake-up sweep. Old events have no delivery version
 /// and are deliberately never picked up (old stream writers cannot claim it).
@@ -328,6 +364,9 @@ pub(crate) fn spawn_sweep(state: AppState) {
             };
             if sweep(&state).await.is_err() {
                 tracing::warn!(stage = "sweep", "Channel answer delivery deferred");
+            }
+            if super::handoff_delivery::sweep(&state).await.is_err() {
+                tracing::warn!(stage = "sweep", "Saved channel reply delivery deferred");
             }
             if super::images::recovery::sweep(&state).await.is_err() {
                 tracing::warn!(stage = "sweep", "Attachment recovery deferred");

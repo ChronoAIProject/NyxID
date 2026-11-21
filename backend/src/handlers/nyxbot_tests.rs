@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 #[path = "nyxbot_fence_tests.rs"]
 mod fence_tests;
+#[path = "nyxbot_private_handoff_tests.rs"]
+mod private_handoff_tests;
 
 #[path = "nyxbot_provider_refusal_tests.rs"]
 mod provider_refusal_tests;
@@ -188,6 +190,14 @@ async fn setup_with_database(
     db: mongodb::Database,
     output: Value,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_with_engine(db, output, None).await
+}
+
+async fn setup_with_engine(
+    db: mongodb::Database,
+    output: Value,
+    engine_router: Option<Router>,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     Box::pin(engine::ensure_indexes(&db)).await.unwrap();
     db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
         .create_index(
@@ -283,6 +293,7 @@ async fn setup_with_database(
         post(|| async { Json(json!({"id":"fixture-model-response","output":[]})) }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = engine_router.unwrap_or(upstream);
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, upstream).await.unwrap();

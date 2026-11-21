@@ -557,9 +557,15 @@ pub(crate) async fn after_turn(
     }
     // Chats that asked the same question while it was being answered get the
     // answer too (taken once, whatever the outcome).
-    let also = engine::take_deliveries(&state.db, owner, &row.id)
-        .await
-        .unwrap_or_default();
+    let managed_delivery =
+        crate::services::channel_supplemental_delivery::managed_source(turn).is_some();
+    let also = if !managed_delivery {
+        engine::take_deliveries(&state.db, owner, &row.id)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if turn
         .execution_task
         .as_ref()
@@ -570,6 +576,17 @@ pub(crate) async fn after_turn(
         // it through a mutable home-thread target or the original stream claim.
         if crate::services::execution_permission_channel::deliveries::owns_result(row, turn) {
             super::nyxbot::execution_delivery::for_turn(state, &turn.turn_id).await;
+        }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+        return;
+    }
+    if managed_delivery {
+        if let Some(admission) = &turn.restart_admission
+            && super::nyxbot::handoff_delivery::deliver(state, &admission.reply_id)
+                .await
+                .is_err()
+        {
+            tracing::warn!(turn_id = %turn.turn_id, "Saved channel reply delivery deferred");
         }
         let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;

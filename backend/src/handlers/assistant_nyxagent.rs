@@ -15,11 +15,9 @@ use futures::StreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    convert::Infallible,
-    time::{Duration, Instant},
-};
+#[cfg(test)]
+use std::time::Instant;
+use std::{collections::HashMap, convert::Infallible, time::Duration};
 #[cfg(test)]
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
@@ -1978,7 +1976,9 @@ pub struct ModelResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     input_modalities: Option<Vec<String>>,
 }
-use crate::services::assistant_nyxagent_model_cache::{InferenceCredential, MODELS, ModelInfo};
+#[cfg(test)]
+use crate::services::assistant_nyxagent_model_cache::MODELS;
+use crate::services::assistant_nyxagent_model_cache::{InferenceCredential, ModelInfo};
 impl From<ModelInfo> for ModelResponse {
     fn from(row: ModelInfo) -> Self {
         Self {
@@ -2004,58 +2004,9 @@ impl From<ModelResponse> for ModelInfo {
     }
 }
 
-/// Keep upstream display metadata; the routing alias is not a model name.
+#[cfg(test)]
 fn model_response(row: &Value) -> Option<ModelResponse> {
-    let id = row["id"]
-        .as_str()
-        .filter(|id| engine::valid_legacy_model(id))?;
-    let label = ["display_name", "label", "name"]
-        .into_iter()
-        .filter_map(|key| row[key].as_str())
-        .map(str::trim)
-        .find(|name| !name.is_empty());
-    Some(ModelResponse {
-        id: id.into(),
-        label: label
-            .unwrap_or_else(|| {
-                if id == engine::DEFAULT_MODEL {
-                    "Default model"
-                } else {
-                    id.trim_start_matches("nyxagent/")
-                }
-            })
-            .into(),
-        available: row["available"].as_bool() != Some(false),
-        inference_credential: match row["inference_credential"].as_str() {
-            Some("thread") => Some(InferenceCredential::Thread),
-            Some("platform") => Some(InferenceCredential::Platform),
-            _ => None,
-        },
-        description: row["description"].as_str().map(str::to_owned),
-        input_modalities: input_modalities(row),
-    })
-}
-
-// Malformed optional metadata is unknown, never proof that images are unsupported.
-fn input_modalities(row: &Value) -> Option<Vec<String>> {
-    let values = row["input_modalities"]
-        .as_array()
-        .filter(|values| values.len() <= 16)?;
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .filter(|value| {
-                    !value.is_empty()
-                        && value.len() <= 32
-                        && value
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                })
-                .map(str::to_owned)
-        })
-        .collect()
+    ModelInfo::parse(row).map(ModelResponse::from)
 }
 
 /// The models NyxAgent currently offers this owner, or `None` when its list
@@ -2085,13 +2036,7 @@ async fn live_model_info(
     credential: Option<&AssistantCredential>,
 ) -> Option<Vec<ModelInfo>> {
     let user_id = auth.user_id.to_string();
-    let cache_key = format!("{}:{user_id}", state.db.name());
-    if let Some((time, models)) = MODELS.lock().await.get(&cache_key)
-        && time.elapsed() < Duration::from_secs(60)
-    {
-        return models.clone();
-    }
-    let loaded: AppResult<Vec<ModelInfo>> = async {
+    crate::services::assistant_nyxagent_model_cache::load(&state.db, &user_id, async {
         let loaded;
         let credential = match credential {
             Some(credential) => credential,
@@ -2100,62 +2045,19 @@ async fn live_model_info(
                 &loaded
             }
         };
-        let response = tokio::time::timeout(
-            Duration::from_secs(10),
-            proxy(
-                state,
-                auth,
-                credential,
-                "GET",
-                "v1/models?include_capabilities=true",
-                None,
-                None,
-                policy,
-            ),
+        proxy(
+            state,
+            auth,
+            credential,
+            "GET",
+            "v1/models?include_capabilities=true",
+            None,
+            None,
+            policy,
         )
         .await
-        .map_err(|_| AppError::Internal("Assistant profiles unavailable".into()))??;
-        if !response.status().is_success() {
-            return Err(AppError::Internal("Assistant profiles unavailable".into()));
-        }
-        let bytes = tokio::time::timeout(
-            Duration::from_secs(10),
-            axum::body::to_bytes(response.into_body(), 65536),
-        )
-        .await
-        .map_err(|_| AppError::Internal("Assistant profiles unavailable".into()))?
-        .map_err(|_| AppError::Internal("Assistant profiles unavailable".into()))?;
-        let data: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| AppError::Internal("Assistant profiles unavailable".into()))?;
-        let rows: Vec<_> = data["data"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(model_response)
-            .take(50)
-            .map(ModelInfo::from)
-            .collect();
-        if rows.is_empty() {
-            return Err(AppError::Internal("Assistant profiles unavailable".into()));
-        }
-        Ok(rows)
-    }
-    .await;
-    let rows = loaded.ok();
-    let mut cache = MODELS.lock().await;
-    if cache.len() >= 64 {
-        cache.retain(|_, (time, _)| time.elapsed() < Duration::from_secs(60));
-        if cache.len() >= 64
-            && let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (time, _))| *time)
-                .map(|(key, _)| key.clone())
-        {
-            cache.remove(&oldest);
-        }
-    }
-    cache.insert(cache_key, (Instant::now(), rows.clone()));
-    rows
+    })
+    .await
 }
 
 /// Validate a model selection against the live list. When NyxAgent's list is
@@ -2758,8 +2660,15 @@ pub(crate) async fn start_turn_with_voice(
         && start.automation_work.is_none()
         && start.automation_parent.is_none();
     let team_ready = readiness::team_restart_enrollment_ready();
+    let channel_candidate = start.origin == TurnOrigin::Channel
+        && start.owner_instruction_source
+            == Some(engine::OwnerInstructionSource::VerifiedPrivateChannel)
+        && start.org_access.is_none()
+        && !start.guest;
+    let channel_ready = channel_candidate && readiness::chat_restart_enrollment_ready();
     if (start.origin == TurnOrigin::Event && readiness::turn_restart_enrollment_ready())
         || (team_candidate && team_ready)
+        || channel_ready
     {
         let _ = crate::services::assistant_notification_service::enabled(&state.db, &user_id).await;
     }
@@ -2767,10 +2676,11 @@ pub(crate) async fn start_turn_with_voice(
         && (!team_candidate || team_ready)
         && voice_request_id.is_none()
         && !start.guest
-        && start.channel.is_none()
-        && start.reply_channel.is_none()
+        && (channel_ready
+            || (start.channel.is_none()
+                && start.reply_channel.is_none()
+                && start.origin != TurnOrigin::Channel))
         && start.invocation_id.is_none()
-        && start.origin != crate::models::assistant_conversation::TurnOrigin::Channel
     {
         Some(Box::pin(restart_metadata(state, &auth, policy)).await)
     } else {
@@ -2822,9 +2732,6 @@ pub(crate) async fn start_turn_with_voice(
         },
     )
     .in_current_span();
-    #[cfg(test)]
-    let driver = crate::services::assistant_engine_worker::TEST_WORKER
-        .scope(crate::services::assistant_engine_worker::instance(), driver);
     state.shutdown.spawn(driver);
     Ok((row, receiver))
 }
@@ -3005,6 +2912,16 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
     Ok(response)
 }
 
+fn manager_egress(
+    state: &AppState,
+) -> std::sync::Arc<dyn crate::services::platform_manager_contract::NyxAgentEgress> {
+    crate::services::assistant_nyxagent_egress::producer(
+        state.clone(),
+        crate::services::platform_personal_binding_service::producer(state.clone()),
+        super::agent_skills::preload_context(state.clone()),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn(
     state: AppState,
@@ -3021,11 +2938,7 @@ pub(crate) async fn run_turn(
         .as_ref()
         .is_some_and(|turn| turn.platform_origin.is_some())
     {
-        crate::services::assistant_nyxagent_egress::producer(
-            state.clone(),
-            crate::services::platform_personal_binding_service::producer(state.clone()),
-            super::agent_skills::preload_context(state.clone()),
-        )
+        manager_egress(&state)
     } else {
         http_egress(state.clone(), auth.clone())
     };

@@ -321,6 +321,7 @@ pub struct PublicExecutionContext {
 #[derive(Clone, Debug)]
 pub enum NyxAgentExecutionContext {
     Owner {
+        attempt: Option<crate::models::assistant_conversation::ExecutionAttempt>,
         user_id: String,
         turn: TurnRef,
         platform_origin: Option<PlatformTurnOrigin>,

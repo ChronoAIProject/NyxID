@@ -1945,11 +1945,14 @@ async fn deliver_reply(
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: platform_secrets.as_ref(),
     };
-    let send_result = if let Some(parts) = crate::services::channel_reply_plan::ordinary(
+    let parts = crate::services::channel_reply_plan::ordinary(
         &outbound,
         adapter.platform_id(),
         platform_conversation_id,
-    )? {
+    )?;
+    let send_result = if let Ok(key) = crate::services::channel_supplemental_delivery::SAVED_RELAY_KEY.try_with(Clone::clone) {
+        Box::pin(crate::services::channel_reply_delivery::send_saved_parts(&key,&state.db,&state.http_client,adapter,&bot,&original,&attributed_api_key_id,platform_conversation_id,&credentials,parts.unwrap_or_else(||vec![outbound.clone()]))).await.map(|(stored,outcome)| {stored_parts=Some(stored);outcome})
+    } else if let Some(parts) = parts {
         Box::pin(crate::services::channel_reply_delivery::send_parts(
             &state.db,
             &state.http_client,

@@ -622,6 +622,25 @@ impl DirectChatRateLimiter {
             .await
     }
 
+    pub(crate) async fn transfer_channel_capacity(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &crate::models::coordination::SlotToken,
+        owner: &str,
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
+        self.slot_manager
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .transfer(
+                session,
+                token,
+                "assistant_channel",
+                owner,
+                crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+            )
+            .await
+    }
+
     pub(crate) fn transferred_permit(
         &self,
         owner: &str,

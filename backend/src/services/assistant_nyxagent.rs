@@ -1622,6 +1622,21 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             .await?;
     }
     // One NyxBot per owner.
+    db.collection::<bson::Document>(MESSAGES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"handoff_delivery_due_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("assistant_handoff_delivery_due".to_owned())
+                        .partial_filter_expression(
+                            doc! {"handoff_delivery_due_at":{"$type":"date"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -3466,6 +3481,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
     }
     let mut trace_sources = Vec::new();
+    let mut owner_channel_sources = true;
     if let Some(event_id) = start.channel_event_id.as_deref() {
         Box::pin(
             super::channel_turn_delivery::validate_guest_setup_in_session(
@@ -3482,7 +3498,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             turn_id,
         )
         .await?;
-        trace_sources.extend(trace_source);
+        owner_channel_sources = trace_source.owner_origin.is_some()
+            && trace_source.owner_origin.as_ref()
+                == start.reply_channel.as_ref().or(start.channel.as_ref());
+        trace_sources.extend(trace_source.trace_request);
     }
     if start.channel_event_id.is_some() {
         super::org_channel_service::transcript::publish(
@@ -3508,7 +3527,12 @@ pub(crate) async fn begin_owner_turn_in_session(
                 turn_id,
             )
             .await?;
-            trace_sources.extend(trace_source);
+            owner_channel_sources &= trace_source.owner_origin.as_ref().is_some_and(|origin| {
+                turn.events.iter().any(|event| {
+                    event.source_event_ids.contains(source) && event.reply_to.contains(origin)
+                })
+            });
+            trace_sources.extend(trace_source.trace_request);
         }
         if turn.channel_event_id.is_none() {
             turn.channel_event_id = turn
@@ -3655,7 +3679,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.message_count += 1;
     }
     if restart_enabled(db, user_id) {
-        if let Some(metadata) = metadata {
+        if !owner_channel_sources {
+            if let Some(active) = &mut row.active_turn {
+                active.restart_eligibility = Some("lane_ineligible".into());
+            }
+        } else if let Some(metadata) = metadata {
             let profile = metadata.profile(&row.model);
             negotiate_restart(
                 &mut row,
@@ -4587,7 +4615,7 @@ pub(crate) struct RestartMetadata {
 }
 
 impl RestartMetadata {
-    fn profile(
+    pub(super) fn profile(
         &self,
         model: &str,
     ) -> Option<super::assistant_nyxagent_model_cache::InferenceCredential> {
@@ -4638,45 +4666,44 @@ pub(crate) fn enroll_restart(
     deployment: crate::models::assistant_conversation::ReattachDeployment,
     draining: bool,
 ) {
-    use crate::models::assistant_conversation::{
-        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource, TeamRestartSource,
-    };
+    use crate::models::assistant_conversation::{RestartSource, TeamRestartSource};
     let specialist = row.is_subagent();
+    let chat_source = super::assistant_turn_restart::chat_source(row, start);
     let Some(turn) = row.active_turn.as_mut() else {
         return;
     };
     if row.shared_agent_thread
         || row.guest_turn
         || row.guest_model_setup
-        || row.channel.is_some()
+        || (row.channel.is_some() && chat_source.is_none())
         || row.invocation_controlled
         || row.platform_thread.is_some()
         || row.platform_cleanup_pending
         || row.collaboration.is_some()
         || row.voice_parent_conversation_id.is_some()
         || start.guest
-        || start.channel.is_some()
-        || start.reply_channel.is_some()
+        || ((start.channel.is_some() || start.reply_channel.is_some()) && chat_source.is_none())
         || start
             .org_access
             .as_ref()
             .is_some_and(|access| access.shared().is_some() || access.channel().is_some())
-        || turn.channel_context.is_some()
+        || (turn.channel_context.is_some() && chat_source.is_none())
         || turn.channel_adapter_origin.is_some()
         || turn.platform_origin.is_some()
         || turn.invocation_id.is_some()
         || turn.voice_request_id.is_some()
-        || turn.channel_event_id.is_some()
+        || (turn.channel_event_id.is_some() && chat_source.is_none())
         || turn.events.iter().any(|event| {
             event.invocation_id.is_some()
-                || !event.channel_contexts.is_empty()
-                || !event.source_event_ids.is_empty()
+                || (chat_source.is_none()
+                    && (!event.channel_contexts.is_empty() || !event.source_event_ids.is_empty()))
         })
     {
         return;
     }
     let mut team_source = None;
     let source = match (&turn.automation_work, turn.origin) {
+        (None, _) if chat_source.is_some() => RestartSource::FirstPartyOwner,
         (Some(work), _)
             if matches!(work.role.as_str(), "coordinator" | "direct" | "group")
                 && !work.run_id.is_empty()
@@ -4750,6 +4777,33 @@ pub(crate) fn enroll_restart(
         }
         _ => return,
     };
+    install_restart(
+        row,
+        message_id,
+        deployment,
+        draining,
+        start.capacity.clone(),
+        source,
+        team_source,
+        chat_source,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn install_restart(
+    row: &mut AssistantConversation,
+    message_id: &str,
+    deployment: crate::models::assistant_conversation::ReattachDeployment,
+    draining: bool,
+    capacity: Option<crate::models::coordination::SlotToken>,
+    source: crate::models::assistant_conversation::RestartSource,
+    team_source: Option<crate::models::assistant_conversation::TeamRestartSource>,
+    chat_source: Option<crate::models::assistant_conversation::ChatRestartSource>,
+) {
+    use crate::models::assistant_conversation::{ExecutionAttempt, RestartAdmission, RestartOffer};
+    let Some(turn) = row.active_turn.as_mut() else {
+        return;
+    };
     let (Some(initiating_seq), Some(agent_id), Some(worker)) = (
         turn.initiating_message_seq,
         &row.agent_id,
@@ -4760,12 +4814,19 @@ pub(crate) fn enroll_restart(
     turn.restart_admission = Some(Box::new(RestartAdmission {
         continued_after_restart: false,
         generation: super::security_readiness_service::local_generation().map(str::to_owned),
-        version: if team_source.is_some() { 3 } else { 2 },
-        capacity: start.capacity.clone(),
+        version: if chat_source.is_some() {
+            4
+        } else if team_source.is_some() {
+            3
+        } else {
+            2
+        },
+        capacity,
         reattach: Some(deployment),
         window: None,
         source,
         team_source,
+        chat_source: chat_source.map(Box::new),
         initiating_message_id: message_id.into(),
         initiating_seq,
         reply_id: Uuid::new_v4().to_string(),
@@ -4780,6 +4841,7 @@ pub(crate) fn enroll_restart(
     turn.execution_attempt = Some(ExecutionAttempt {
         epoch: 0,
         claim_id: Uuid::new_v4().to_string(),
+        foreground_delivery: None,
     });
     if draining {
         let now = Utc::now();
@@ -5118,9 +5180,14 @@ artifact_recovery_target: None,
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                let saved_destinations = current.active_turn.as_ref().and_then(|turn| {
+                    let source = super::channel_supplemental_delivery::managed_source(turn)?;
+                    Some(super::channel_supplemental_delivery::saved_destinations(&current, turn, source, error.is_some()))
+                });
                 current.deliver_also = current
                     .active_turn
                     .as_ref()
+                    .filter(|_| saved_destinations.is_none())
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
                 super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
@@ -5305,6 +5372,10 @@ artifact_recovery_target: None,
                 if let Some(attempt) = attempt {
                     let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
                     saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
+                    if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
+                        saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
+                        saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                    }
                     db.collection::<bson::Document>(MESSAGES).insert_one(saved).session(&mut *session).await?;
                 } else {
                     db.collection::<AssistantMessage>(MESSAGES).insert_one(message).session(&mut *session).await?;
@@ -5346,6 +5417,7 @@ pub(crate) fn unconfirmed_window(
     let window = source.window.as_ref()?;
     (!source.credential_ended && !window.terminal).then(|| {
         crate::models::assistant_conversation::StoppedWindow {
+            manager_origin: turn.platform_origin.clone().map(Box::new),
             turn_id: turn.turn_id.clone(),
             credential_id: source.credential_id.clone(),
             window_key: window.key.clone(),

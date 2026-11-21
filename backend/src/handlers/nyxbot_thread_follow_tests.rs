@@ -821,6 +821,7 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
             .clone(),
     );
     source_event.delivery = Some(crate::models::nyxbot_channel::ChannelTurnDelivery {
+        restart_owner_verified: false,
         notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: false,

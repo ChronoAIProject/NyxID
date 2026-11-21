@@ -30,7 +30,6 @@ pub async fn load(db: &Database, key: &str) -> AppResult<Option<ChannelTextDeliv
         .await?)
 }
 
-#[cfg(test)]
 pub async fn begin(
     db: &Database,
     key: &str,

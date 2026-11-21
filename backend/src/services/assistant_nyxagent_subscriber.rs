@@ -210,6 +210,8 @@ pub(super) async fn save_refusal(
     key: &str,
     error: &TurnError,
     delay: Option<Duration>,
+    capacity_deadline: DateTime<Utc>,
+    channel_capacity_retry: bool,
 ) -> Result<WindowRefusal, TurnError> {
     let refusal = WindowRefusal {
         status: error.http_status.ok_or_else(unknown)?,
@@ -228,15 +230,19 @@ pub(super) async fn save_refusal(
         "active_turn.restart_admission.window.key":key,"active_turn.restart_admission.window.accepted":{"$ne":true},
     }).map_err(|_| unknown())?;
     let encoded = mongodb::bson::to_bson(&refusal).map_err(|_| unknown())?;
+    let mut fields = doc! {"active_turn.restart_admission.window.refusal":encoded,"active_turn.restart_admission.window.capacity_deadline":mongodb::bson::DateTime::from_chrono(capacity_deadline)};
+    if channel_capacity_retry {
+        fields.insert(
+            "active_turn.restart_admission.window.channel_capacity_retry",
+            true,
+        );
+    }
     let changed = state
         .db
         .collection::<mongodb::bson::Document>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .update_one(
-            filter,
-            doc! {"$set":{"active_turn.restart_admission.window.refusal":encoded}},
-        )
+        .update_one(filter, doc! {"$set":fields})
         .write_concern(mongodb::options::WriteConcern::majority())
         .await
         .map_err(|_| unknown())?;
@@ -414,7 +420,7 @@ pub(crate) async fn cancel_background(
                 )
         })
         .map(|binding| binding.response_id.as_str());
-    let path = id.map_or_else(
+    let path = id.filter(|_| turn.platform_origin.is_none()).map_or_else(
         || "v1/responses/cancel".into(),
         |id| format!("v1/responses/{id}/cancel"),
     );
@@ -828,6 +834,16 @@ async fn recover_window(
     let mut fresh_post = post_first;
     let mut recovery = engine::Recovery::default();
     let mut refusal = window.refusal.clone();
+    let mut capacity_deadline = window.capacity_deadline;
+    let mut channel_capacity_retry = window.channel_capacity_retry;
+    let mut first_channel_refusal =
+        active.engine_attempts == 1 && !accepted && refusal.is_none() && !channel_capacity_retry;
+    let channel_guard = || {
+        super::super::assistant_turn_observability::channel_retry_guard(
+            row,
+            input.body["conversation"].as_str(),
+        )
+    };
     let mut bound = None;
     loop {
         if retry {
@@ -841,18 +857,21 @@ async fn recover_window(
             let error = post_refusal(saved.status, &saved.code, None);
             if let Some(at) = saved.retry_at {
                 tokio::time::sleep(
-                    (at.min(window.capacity_deadline) - Utc::now())
+                    (at.min(capacity_deadline) - Utc::now())
                         .to_std()
                         .unwrap_or_default(),
                 )
                 .await;
-                if Utc::now() >= window.capacity_deadline {
+                if Utc::now() >= capacity_deadline {
                     return Err(error);
                 }
-                let filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,
+                let mut filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,
                     "active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key,
                     "active_turn.restart_admission.window.refusal.retry_at":mongodb::bson::DateTime::from_chrono(at)})
                     .map_err(|_| unknown())?;
+                if channel_capacity_retry {
+                    filter.extend(channel_guard());
+                }
                 let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
                     .update_one(filter, doc! {"$unset":{"active_turn.restart_admission.window.refusal":""},"$inc":{"active_turn.engine_attempts":1}})
                     .write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_| unknown())?;
@@ -883,7 +902,25 @@ async fn recover_window(
         }
         let mut reader = if fresh_post {
             fresh_post = false;
-            if Utc::now() >= window.capacity_deadline {
+            let source_expiry = if let Some(
+                crate::models::assistant_conversation::ChatRestartSource::PrivateChannel {
+                    event_id,
+                    ..
+                },
+            ) = admission.chat_source.as_deref()
+            {
+                Some(
+                    egress
+                        .channel_retry_expiry(row, event_id)
+                        .await
+                        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+                )
+            } else {
+                None
+            };
+            if Utc::now()
+                >= source_expiry.map_or(capacity_deadline, |expiry| capacity_deadline.min(expiry))
+            {
                 return Err(TurnError::internal("capacity_exceeded", "capacity"));
             }
             let bounds = stream_bounds();
@@ -935,12 +972,38 @@ async fn recover_window(
                 .map_err(|_| TurnError::internal("invalid_stream", "upstream_response"))?;
                 let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 let code = upstream_error_code(status, &value);
+                if let Some(expiry) = source_expiry {
+                    if first_channel_refusal && status == 503 && code == "capacity_exceeded" {
+                        let started = active
+                            .engine_request_started_at
+                            .unwrap_or(active.started_at);
+                        capacity_deadline = started
+                            + chrono::Duration::from_std(
+                                crate::services::assistant_engine_policy::CHANNEL_CAPACITY_BUDGET,
+                            )
+                            .expect("bounded channel budget");
+                        channel_capacity_retry = true;
+                    }
+                    capacity_deadline = capacity_deadline.min(expiry);
+                    first_channel_refusal = false;
+                }
                 let error = post_refusal(status, code, request_id);
                 let delay = engine::admission_refusal(status, code).then(|| {
                     recovery.retries = recovery.retries.saturating_add(1);
                     engine::capacity_delay(recovery.retries, retry_after, rand::random())
                 });
-                refusal = Some(save_refusal(state, row, &key, &error, delay).await?);
+                refusal = Some(
+                    save_refusal(
+                        state,
+                        row,
+                        &key,
+                        &error,
+                        delay,
+                        capacity_deadline,
+                        channel_capacity_retry,
+                    )
+                    .await?,
+                );
                 retry = false;
                 continue;
             }
@@ -1004,7 +1067,7 @@ async fn recover_window(
                 let now = Utc::now();
                 if window.terminal
                     || (absent && (cursor.is_some() || expected.is_some()))
-                    || now >= window.capacity_deadline
+                    || now >= capacity_deadline
                     || (absent
                         && window
                             .absence_retry_before
@@ -1024,6 +1087,9 @@ async fn recover_window(
                 )
                 .await?;
                 let mut filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,"credential_api_key_id":&admission.credential_id,"active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key}).map_err(|_| unknown())?;
+                if channel_capacity_retry {
+                    filter.extend(channel_guard());
+                }
                 if absent {
                     filter.insert(
                         "active_turn.restart_admission.window.absence_retry_before",

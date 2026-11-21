@@ -140,6 +140,7 @@ impl InspectOwnerEgress {
             user_id,
             turn,
             platform_origin,
+            ..
         } = context
         else {
             panic!("expected admitted personal owner turn");

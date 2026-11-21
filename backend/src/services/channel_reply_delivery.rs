@@ -372,6 +372,74 @@ pub async fn send_parts(
     last.ok_or_else(unconfirmed)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_saved_parts(
+    key: &str,
+    db: &mongodb::Database,
+    http: &reqwest::Client,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
+    bot: &ChannelBot,
+    original: &ChannelMessage,
+    attributed_key: &str,
+    chat: &str,
+    credentials: &super::channel_platform::BotCredentials<'_>,
+    parts: Vec<super::channel_platform::OutboundReply>,
+) -> AppResult<(ChannelMessage, super::channel_platform::SendOutcome)> {
+    use super::{channel_text_delivery as journal, channel_text_preparation as preparation};
+    let plan = journal::begin(
+        db,
+        key,
+        &bot.user_id,
+        &original.id,
+        &super::channel_reply_plan::fingerprint(&parts),
+        parts.len(),
+    )
+    .await?;
+    let mut last = None;
+    for (index, part) in parts.into_iter().enumerate() {
+        match preparation::claim(db, &plan, index).await? {
+            journal::PartClaim::Sent(previous) => {
+                let id = previous.outbound_message_id.ok_or_else(unconfirmed)?;
+                last = Some((
+                    super::channel_relay_service::get_message(db, &id).await?,
+                    super::channel_platform::SendOutcome::legacy(previous.platform_message_id),
+                ));
+            }
+            journal::PartClaim::Send(attempt) => {
+                let (stored, outcome) =
+                    Box::pin(preparation::with_part(db, &plan, index, &attempt, async {
+                        preparation::effect().await?;
+                        send_parts(
+                            db,
+                            http,
+                            adapter,
+                            bot,
+                            original,
+                            attributed_key,
+                            chat,
+                            credentials,
+                            vec![part],
+                        )
+                        .await
+                    }))
+                    .await?;
+                journal::finish(
+                    db,
+                    &plan,
+                    index,
+                    &attempt,
+                    crate::models::channel_text_delivery::TextPartState::Sent,
+                    outcome.final_id.as_deref(),
+                    Some(&stored.id),
+                )
+                .await?;
+                last = Some((stored, outcome));
+            }
+        }
+    }
+    last.ok_or_else(unconfirmed)
+}
+
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     let collection = db.collection::<ChannelReplyDelivery>(COLLECTION_NAME);
