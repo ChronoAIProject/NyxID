@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
-use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, PlatformRole, User};
 use crate::services::{api_key_mutation_service as key_mutations, role_service};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
@@ -262,6 +262,7 @@ async fn update_user_with_actor(
                 bson::Bson::String(name.to_string())
             },
         );
+        set_doc.insert(PROVIDER_DISPLAY_NAME, bson::Bson::Null);
     }
 
     if let Some(new_email) = email {
