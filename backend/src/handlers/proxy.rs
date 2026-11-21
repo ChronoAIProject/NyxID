@@ -13604,33 +13604,26 @@ mod proxy_resolution_integration_tests {
         node
     }
 
-    async fn wait_for_node_audit_event(
+    async fn node_audit_after_write(
         db: &mongodb::Database,
         node_id: &str,
-        event_type: &str,
-    ) -> Option<AuditLog> {
-        for _ in 0..100 {
-            let found = db
-                .collection::<AuditLog>(AUDIT_LOG)
-                .find_one(doc! {
-                    "event_type": event_type,
-                    "event_data.routed_via": "node",
-                    "event_data.node_id": node_id,
-                })
-                .await
-                .expect("query audit log");
-            if found.is_some() {
-                return found;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-
-        None
-    }
-
-    async fn wait_for_node_proxy_audit(db: &mongodb::Database, node_id: &str) -> Option<AuditLog> {
-        wait_for_node_audit_event(db, node_id, "proxy_request").await
+        mut written: tokio::sync::oneshot::Receiver<String>,
+    ) -> AuditLog {
+        let writers = crate::services::shutdown::process();
+        let id = tokio::select! {
+            biased;
+            result = &mut written => result.expect("node audit writer closed"),
+            () = writers.idle() => written.try_recv().expect("node audit writer finished without a committed row"),
+        };
+        db.collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "_id": id,
+                "event_data.routed_via": "node",
+                "event_data.node_id": node_id,
+            })
+            .await
+            .expect("query committed node audit")
+            .expect("audit must identify the node that handled the request")
     }
 
     async fn find_org_routing_audit(
@@ -13781,9 +13774,8 @@ mod proxy_resolution_integration_tests {
             .insert_one(approval_config(&owner, &service.id))
             .await
             .unwrap();
-        // Model 68 seconds of callback preparation without sleeping through it.
-        // The real card is then created and the real decision/wait timers run.
-        let ingress = Utc::now() - chrono::Duration::seconds(68);
+        let ingress = Utc::now();
+        let (clock, at) = tokio::sync::watch::channel(ingress + chrono::Duration::seconds(68));
         let proxy = Router::new()
             .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
             .route_layer(axum::Extension(
@@ -13794,6 +13786,17 @@ mod proxy_resolution_integration_tests {
             .layer(axum::middleware::from_fn(super::ingress::callback))
             .layer(axum::Extension(super::ingress::RequestReceivedAt(ingress)))
             .with_state((state.clone(), auth.clone()));
+        let proxy = if nyxbot {
+            let at = at.clone();
+            proxy.layer(axum::middleware::from_fn(
+                move |request: Request<Body>, next: axum::middleware::Next| {
+                    crate::services::approval_service::APPROVAL_CLOCK
+                        .scope(at.clone(), next.run(request))
+                },
+            ))
+        } else {
+            proxy
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let origin = tokio::spawn(async move {
@@ -13807,16 +13810,12 @@ mod proxy_resolution_integration_tests {
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
         client.write_all(b"POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
-        let card = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
-                    break row;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let card = loop {
+            if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
+                break row;
             }
-        })
-        .await
-        .expect("proxy created a service approval");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         if nyxbot {
             assert_eq!(
                 card.expires_at.timestamp_millis(),
@@ -13827,20 +13826,15 @@ mod proxy_resolution_integration_tests {
             } else {
                 85
             };
-            tokio::time::sleep(
-                (ingress + chrono::Duration::seconds(decision_second) - Utc::now())
-                    .to_std()
-                    .unwrap_or_default(),
-            )
-            .await;
+            clock.send_replace(ingress + chrono::Duration::seconds(decision_second));
         } else {
             assert_eq!(
                 (card.expires_at - card.created_at).num_seconds(),
                 i64::from(timeout)
             );
         }
-        let decide = || {
-            crate::handlers::approvals::decide_request(
+        let decide = || async {
+            let decision = crate::handlers::approvals::decide_request(
                 State(state.clone()),
                 crate::test_utils::test_auth_user(&owner),
                 Path(card.id.clone()),
@@ -13850,7 +13844,14 @@ mod proxy_resolution_integration_tests {
                     approved: true,
                     duration_sec: None,
                 }),
-            )
+            );
+            if nyxbot {
+                crate::services::approval_service::APPROVAL_CLOCK
+                    .scope(at.clone(), decision)
+                    .await
+            } else {
+                decision.await
+            }
         };
         match case {
             ApprovalWaitCase::Disconnect => {
@@ -13944,12 +13945,18 @@ mod proxy_resolution_integration_tests {
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
             }
             ApprovalWaitCase::Approve | ApprovalWaitCase::NyxbotAt70 => {
-                assert_eq!(decide().await.unwrap().0.status, "approved");
+                let decision = decide().await.unwrap().0;
+                assert_eq!(decision.status, "approved");
+                if nyxbot {
+                    assert_eq!(
+                        chrono::DateTime::parse_from_rfc3339(&decision.decided_at.unwrap())
+                            .unwrap()
+                            .timestamp_millis(),
+                        (ingress + chrono::Duration::seconds(70)).timestamp_millis()
+                    );
+                }
                 let mut response = String::new();
-                tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
-                    .await
-                    .unwrap()
-                    .unwrap();
+                client.read_to_string(&mut response).await.unwrap();
                 assert!(response.contains("created"), "{response}");
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
             }
@@ -14648,7 +14655,6 @@ mod proxy_resolution_integration_tests {
             eprintln!("skipping proxy integration test: no local MongoDB available");
             return;
         };
-
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
         crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
@@ -14687,6 +14693,10 @@ mod proxy_resolution_integration_tests {
         let (executor, ws_server) =
             start_node_executor(state.clone(), &node, &service.slug, &base_url).await;
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_request",
+            &member_id,
+        );
         let mut resolved_slug = String::new();
         let response = proxy_request_by_slug_inner(
             &state,
@@ -14715,9 +14725,7 @@ mod proxy_resolution_integration_tests {
         assert_eq!(observed["body"], r#"{"operation":"probe"}"#);
         executor.await.expect("node executor task");
 
-        let audit = wait_for_node_proxy_audit(&db, &node.id)
-            .await
-            .expect("node-routed proxy audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -14797,6 +14805,8 @@ mod proxy_resolution_integration_tests {
     #[tokio::test]
     async fn org_bound_slug_route_prefers_granted_org_service_and_falls_back_for_ungranted() {
         let f = crate::services::org_agent_tests::Fixture::new("proxy_org_slug_collision").await;
+        crate::services::security_readiness_service::refresh_test_replica_heartbeat(&f.state.db)
+            .await;
         let (agent, row) = f.create().await;
         let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
             &f.state,
@@ -15030,6 +15040,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &member_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&member_id),
@@ -15038,9 +15052,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),
@@ -15089,6 +15101,10 @@ mod proxy_resolution_integration_tests {
         crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
+        let written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "proxy_ws_upgrade",
+            &owner_id,
+        );
         assert_ws_proxy_upgrade(
             state.clone(),
             access_token_auth(&owner_id),
@@ -15097,9 +15113,7 @@ mod proxy_resolution_integration_tests {
         .await;
         responder.await.expect("node ws responder task");
 
-        let audit = wait_for_node_audit_event(&db, &node.id, "proxy_ws_upgrade")
-            .await
-            .expect("node-routed ws upgrade audit should be written");
+        let audit = node_audit_after_write(&db, &node.id, written).await;
         let data = audit.event_data.expect("event data");
         assert_eq!(
             data.get("routed_via").and_then(|v| v.as_str()),

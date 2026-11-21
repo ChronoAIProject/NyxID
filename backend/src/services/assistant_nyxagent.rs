@@ -1732,6 +1732,9 @@ pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantC
     get_authorized(db, user_id, id).await.map(|(row, _)| row)
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(super) static STOP_POLL: (); }
+
 pub(crate) async fn get_authorized(
     db: &Database,
     user_id: &str,
@@ -1740,11 +1743,15 @@ pub(crate) async fn get_authorized(
     AssistantConversation,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
-    let row = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(owner_filter(user_id, id)?)
-        .await?
-        .ok_or_else(not_found)?;
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let query = collection.find_one(owner_filter(user_id, id)?);
+    #[cfg(test)]
+    let query = if STOP_POLL.try_with(|_| ()).is_ok() {
+        query.comment("stop_poll")
+    } else {
+        query
+    };
+    let row = query.await?.ok_or_else(not_found)?;
     let access = authorize_thread_read(db, &row).await?;
     Ok((row, access))
 }

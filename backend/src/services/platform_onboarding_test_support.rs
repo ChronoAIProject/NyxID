@@ -204,22 +204,20 @@ impl Fixture {
     pub(crate) async fn claim(&self) -> SetupStepJob {
         use std::time::Duration;
 
-        // Enqueue and eligibility use application and MongoDB clocks. Like the
-        // worker, wait for a real claim instead of assuming immediate eligibility.
-        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(job) = provisioning::claim_step(&self.state.db)
-                    .await
-                    .expect("provisioning claim query must succeed")
-                {
-                    return job;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // A slow acknowledgement can arrive after the claim has committed.
+        // Bound the wait for eligibility only after a completed empty claim.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(job) = provisioning::claim_step(&self.state.db)
+                .await
+                .expect("provisioning claim query must succeed")
+            {
+                return job;
             }
-        })
-        .await;
-        if let Ok(job) = claimed {
-            return job;
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let diagnostic = tokio::time::timeout(Duration::from_secs(1), async {
             self.state

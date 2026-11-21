@@ -1368,61 +1368,56 @@ mod tests {
         config.telemetry_dsn = Some("test-ingest".into());
         config.telemetry_host = Some(clients.0.values().next().unwrap().api_host.clone());
         let telemetry = TelemetryClient::from_config(&config, Some(db.clone())).unwrap();
-        telemetry
-            .track(
-                &user,
-                TelemetryEvent::KeyCreated {
-                    source: "catalog".into(),
-                    catalog_slug: None,
-                    has_node_binding: false,
-                },
-                &TelemetryContext {
-                    surface: "ui",
-                    client_version: None,
-                    analytics_allowed: true,
-                    analytics_account: Some(user.clone()),
-                },
-                None,
-            )
-            .await;
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            server.state.capture_started.notified(),
-        )
-        .await
-        .unwrap();
-        let root = ensure_job(&db, &user, None).await.unwrap();
-        db.collection::<Document>("users")
-            .delete_one(doc! {"_id":&user})
-            .await
-            .unwrap();
-        drain_once(&db, &clients).await.unwrap();
-        assert_eq!(
-            server.state.deletes.load(Ordering::SeqCst),
-            0,
-            "DELETE raced an in-flight capture"
-        );
-        assert_ne!(
-            jobs(&db)
-                .find_one(doc! {"_id":&root})
+        let root = crate::test_utils::with_manual_clock(async {
+            telemetry
+                .track(
+                    &user,
+                    TelemetryEvent::KeyCreated {
+                        source: "catalog".into(),
+                        catalog_slug: None,
+                        has_node_binding: false,
+                    },
+                    &TelemetryContext {
+                        surface: "ui",
+                        client_version: None,
+                        analytics_allowed: true,
+                        analytics_account: Some(user.clone()),
+                    },
+                    None,
+                )
+                .await;
+            server.state.capture_started.notified().await;
+            let root = ensure_job(&db, &user, None).await.unwrap();
+            db.collection::<Document>("users")
+                .delete_one(doc! {"_id":&user})
                 .await
-                .unwrap()
-                .unwrap()
-                .get_str("status")
-                .unwrap(),
-            "completed"
-        );
-        server.state.capture_release.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
+                .unwrap();
+            drain_once(&db, &clients).await.unwrap();
+            assert_eq!(
+                server.state.deletes.load(Ordering::SeqCst),
+                0,
+                "DELETE raced an in-flight capture"
+            );
+            assert_ne!(
+                jobs(&db)
+                    .find_one(doc! {"_id":&root})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_str("status")
+                    .unwrap(),
+                "completed"
+            );
+            server.state.capture_release.notify_one();
             while super::super::analytics_dispatch_service::has_unsettled(&db, &user)
                 .await
                 .unwrap()
             {
                 tokio::task::yield_now().await;
             }
+            root
         })
-        .await
-        .unwrap();
+        .await;
         assert!(
             super::super::analytics_dispatch_service::needs_provider_drain(&db, &user)
                 .await

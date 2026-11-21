@@ -49,6 +49,13 @@ pub(crate) async fn resume_after(
 pub(crate) type Commands = Arc<std::sync::Mutex<std::collections::BTreeMap<String, usize>>>;
 
 pub(crate) async fn monitored(db: &mongodb::Database) -> (mongodb::Database, Commands) {
+    monitored_with_stop_polls(db, false).await
+}
+
+pub(crate) async fn monitored_with_stop_polls(
+    db: &mongodb::Database,
+    count_polls: bool,
+) -> (mongodb::Database, Commands) {
     use mongodb::event::{EventHandler, command::CommandEvent};
     let commands: Commands = Arc::new(std::sync::Mutex::new(Default::default()));
     let observed = commands.clone();
@@ -59,11 +66,12 @@ pub(crate) async fn monitored(db: &mongodb::Database) -> (mongodb::Database, Com
     options.command_event_handler = Some(EventHandler::callback(move |event| {
         if let CommandEvent::Started(event) = event {
             let collection = event.command.get_str(&event.command_name).unwrap_or("");
-            *observed
-                .lock()
-                .unwrap()
-                .entry(format!("{}:{collection}", event.command_name))
-                .or_default() += 1;
+            let key = if count_polls && event.command.get_str("comment") == Ok("stop_poll") {
+                "stop_poll".to_owned()
+            } else {
+                format!("{}:{collection}", event.command_name)
+            };
+            *observed.lock().unwrap().entry(key).or_default() += 1;
         }
     }));
     (

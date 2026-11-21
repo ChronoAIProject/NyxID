@@ -28,7 +28,8 @@ async fn exercise(
     let upstream = Upstream::default();
     let (fixture, _, server) =
         setup_with_response_router("team_handoff", upstream.router(cut, flag && compatible)).await;
-    let (monitored, counts) = crate::services::durable_wake_tests::monitored(&fixture.db).await;
+    let (monitored, counts) =
+        crate::services::durable_wake_tests::monitored_with_stop_polls(&fixture.db, true).await;
     let mut first = test_app_state(monitored);
     first.encryption_keys = fixture.encryption_keys.clone();
     let parent = engine::begin_turn(
@@ -139,51 +140,63 @@ async fn exercise(
         id: Uuid::new_v4().to_string(),
         hostname: None,
     }));
+    if cut == Cut::None {
+        first.db.run_command(doc! {"ping":1}).await.unwrap();
+    }
     counts.lock().unwrap().clear();
-    let id = workers::TEST_WORKER
-        .scope(previous, async {
-            if lane == Lane::Wake {
-                assistant_team::wake(&first, OWNER, &parent.id).await;
-                parent.id.clone()
-            } else if let Some(group) = &group {
-                assistant_group::post_and_follow(
-                    &first,
-                    OWNER,
-                    &group.id,
-                    &format!("@{} answer please", agent.name),
-                    None,
-                    &parent.id,
-                )
+    let start = workers::TEST_WORKER.scope(previous, async {
+        if lane == Lane::Wake {
+            assistant_team::wake(&first, OWNER, &parent.id).await;
+            parent.id.clone()
+        } else if let Some(group) = &group {
+            assistant_group::post_and_follow(
+                &first,
+                OWNER,
+                &group.id,
+                &format!("@{} answer please", agent.name),
+                None,
+                &parent.id,
+            )
+            .await
+            .unwrap();
+            groups::member_thread(&fixture.db, OWNER, &group.id, &agent.id)
                 .await
-                .unwrap();
-                groups::member_thread(&fixture.db, OWNER, &group.id, &agent.id)
-                    .await
-                    .unwrap()
-                    .expect("member admitted")
-                    .id
-            } else {
-                let assistant_team::Started::Turn { conversation, .. } = assistant_team::assign(
-                    &first,
-                    OWNER,
-                    &agent,
-                    "answer please",
-                    Some(&parent.id),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap() else {
-                    panic!("assignment admission")
-                };
-                conversation.id
-            }
+                .unwrap()
+                .expect("member admitted")
+                .id
+        } else {
+            let assistant_team::Started::Turn { conversation, .. } = assistant_team::assign(
+                &first,
+                OWNER,
+                &agent,
+                "answer please",
+                Some(&parent.id),
+                None,
+                None,
+            )
+            .await
+            .unwrap() else {
+                panic!("assignment admission")
+            };
+            conversation.id
+        }
+    });
+    let (id, mut measured) = if cut == Cut::None {
+        // Measure the real request after both clients are connected. Holding
+        // periodic timers prevents renewals from racing the settlement transaction.
+        crate::test_utils::with_manual_clock(async {
+            let id = start.await;
+            first.shutdown.idle().await;
+            (id, crate::services::durable_wake_tests::take(&counts))
         })
-        .await;
+        .await
+    } else {
+        (start.await, Default::default())
+    };
     let collection = fixture
         .db
         .collection::<AssistantConversation>(CONVERSATIONS);
     let limit = Wait::from_secs(35);
-    let mut measured = Default::default();
     let mut report_source = None;
     if cut != Cut::None {
         let row = tokio::time::timeout(limit, async {
@@ -455,14 +468,17 @@ async fn exercise(
             .expect("survivor finished");
         drop(occupied);
     } else {
-        tokio::time::timeout(limit, first.shutdown.idle())
-            .await
-            .expect("first replica finished");
-        measured = crate::services::durable_wake_tests::take(&counts);
         let total: usize = measured.values().sum();
         eprintln!(
             "team_handoff_commands lane={lane:?} flag={flag} compatible={compatible} warm={warm} total={total} by_command={}",
             serde_json::to_string(&measured).unwrap()
+        );
+        // Only the watcher's first read can race the response. Every subsequent
+        // read requires a 250 ms tick which the measured request never advances.
+        let polls = measured.remove("stop_poll").unwrap_or_default();
+        assert!(
+            polls <= 1,
+            "{lane:?}: {polls} stop polls with the clock held"
         );
     }
     assert_eq!(

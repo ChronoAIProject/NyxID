@@ -5631,28 +5631,24 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         };
-        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::select! {
-                response = &mut action => {
-                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                        .await
-                        .unwrap();
-                    let body: Value = serde_json::from_slice(&bytes).unwrap();
-                    // These fixtures send no secret-bearing arguments. Report
-                    // only the tool's safe error text, never auth/fixture state.
-                    panic!(
-                        "{dispatch} ({credential_header}) returned before service approval: {}",
-                        body["result"]["content"][0]["text"]
-                            .as_str()
-                            .or_else(|| body["message"].as_str())
-                            .unwrap_or("missing error result")
-                    );
-                }
-                pending = pending_approval => pending,
+        let pending = tokio::select! {
+            response = &mut action => {
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                // These fixtures send no secret-bearing arguments. Report
+                // only the tool's safe error text, never auth/fixture state.
+                panic!(
+                    "{dispatch} ({credential_header}) returned before service approval: {}",
+                    body["result"]["content"][0]["text"]
+                        .as_str()
+                        .or_else(|| body["message"].as_str())
+                        .unwrap_or("missing error result")
+                );
             }
-        })
-        .await
-        .expect("tool must reach service approval before cancellation");
+            pending = pending_approval => pending,
+        };
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         receipts::cancel(&f.state, &f.owner, &key).await.unwrap();
         f.state
@@ -5664,9 +5660,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
             )
             .await
             .unwrap();
-        let response = tokio::time::timeout(std::time::Duration::from_secs(5), action)
-            .await
-            .expect("approved cancelled request must resume and refuse dispatch");
+        let response = action.await;
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
