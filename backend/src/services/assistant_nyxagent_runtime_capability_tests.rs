@@ -261,6 +261,7 @@ async fn failed_owner_lookup_does_not_suppress_another_owners_image_and_success_
         chat_delivery: None,
         image_input: None,
         image_input_reason: None,
+        pdf: None,
         image_inspection: None,
     };
     let failed = lookup(&state, &egress, &a).await;

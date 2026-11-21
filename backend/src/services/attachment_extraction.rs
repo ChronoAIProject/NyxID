@@ -26,6 +26,8 @@ pub struct Section {
 }
 #[derive(Serialize, Deserialize)]
 pub struct Extracted {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<crate::models::assistant_upload::PdfCoverage>,
     pub content_type: String,
     pub text: String,
     pub sections: Vec<Section>,
@@ -79,6 +81,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
         reader.limits(limits);
         reader.decode().map_err(|_| malformed())?;
         return Ok(Extracted {
+            pdf: None,
             content_type: mime.into(),
             text: String::new(),
             sections: vec![],
@@ -96,13 +99,20 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             return Err(bad("PDF must contain at most 200 pages."));
         }
         let mut out = Extracted {
+            pdf: None,
             content_type: "application/pdf".into(),
             text: String::new(),
             sections: vec![],
         };
+        let mut coverage = crate::models::assistant_upload::PdfCoverage::default();
         let mut chars = 0;
         for page in pages.keys() {
             let text = document.extract_text(&[*page]).map_err(|_| malformed())?;
+            if text.chars().any(|c| !c.is_whitespace()) {
+                coverage.text_pages.push(*page);
+            } else {
+                coverage.unread_pages.push(*page);
+            }
             out.sections.push(Section {
                 offset: chars,
                 label: format!("Page {page}"),
@@ -114,6 +124,15 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             out.text.push_str(&text);
             out.text.push('\n');
         }
+        coverage.classification = if coverage.text_pages.is_empty() {
+            "no_text"
+        } else if coverage.unread_pages.is_empty() {
+            "text"
+        } else {
+            "mixed"
+        }
+        .into();
+        out.pdf = Some(coverage);
         return Ok(out);
     }
     if bytes.starts_with(b"PK") {
@@ -247,6 +266,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             return Err(malformed());
         }
         return Ok(Extracted {
+            pdf: None,
             content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 .into(),
             text,
@@ -291,6 +311,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
         _ => return Err(malformed()),
     };
     Ok(Extracted {
+        pdf: None,
         content_type: mime.into(),
         text: text.into(),
         sections: vec![Section {
@@ -619,5 +640,95 @@ mod tests {
             .text,
             "Hello & bye\n"
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn pdf_fixture(text: &[Option<&str>], rotation: i64) -> Vec<u8> {
+    use lopdf::{
+        Document, Object, Stream,
+        content::{Content, Operation},
+        dictionary,
+    };
+    let mut pdf = Document::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let font =
+        pdf.add_object(dictionary! {"Type"=>"Font","Subtype"=>"Type1","BaseFont"=>"Helvetica"});
+    let raster = pdf.add_object(Stream::new(dictionary! {"Type"=>"XObject","Subtype"=>"Image","Width"=>16,"Height"=>16,"ColorSpace"=>"DeviceRGB","BitsPerComponent"=>8}, vec![80; 16*16*3]));
+    let mut kids = Vec::new();
+    for value in text {
+        let mut operations = vec![
+            Operation::new("q", vec![]),
+            Operation::new(
+                "cm",
+                vec![
+                    200.into(),
+                    0.into(),
+                    0.into(),
+                    150.into(),
+                    20.into(),
+                    20.into(),
+                ],
+            ),
+            Operation::new("Do", vec![Object::Name(b"Im0".to_vec())]),
+            Operation::new("Q", vec![]),
+        ];
+        if let Some(text) = value {
+            operations.extend([
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Td", vec![20.into(), 200.into()]),
+                Operation::new("Tj", vec![Object::string_literal(*text)]),
+                Operation::new("ET", vec![]),
+            ]);
+        }
+        let content = pdf.add_object(Stream::new(
+            dictionary! {},
+            Content { operations }.encode().unwrap(),
+        ));
+        let page = pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages_id,"MediaBox"=>vec![0.into(),0.into(),300.into(),400.into()],"Rotate"=>rotation,"Contents"=>content,"Resources"=>dictionary!{"Font"=>dictionary!{"F1"=>font},"XObject"=>dictionary!{"Im0"=>raster}}});
+        kids.push(page.into());
+    }
+    pdf.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>kids,"Count"=>text.len() as i64}),
+    );
+    let catalog = pdf.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages_id});
+    pdf.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    pdf.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[cfg(test)]
+mod pdf_classification_tests {
+    use super::*;
+    #[test]
+    fn pdf_classifies_page_spans_including_whitespace_and_preserves_text() {
+        for (pages, class, text_pages, unread) in [
+            (vec![None, None], "no_text", vec![], vec![1, 2]),
+            (vec![Some("  "), None], "no_text", vec![], vec![1, 2]),
+            (vec![Some("invoice"), None], "mixed", vec![1], vec![2]),
+            (
+                vec![Some("first"), Some("second")],
+                "text",
+                vec![1, 2],
+                vec![],
+            ),
+        ] {
+            let parsed = parse(&pdf_fixture(&pages, 90), "pdf").unwrap();
+            let pdf = parsed.pdf.as_ref().unwrap();
+            assert_eq!(pdf.classification, class);
+            assert_eq!(pdf.text_pages, text_pages);
+            assert_eq!(pdf.unread_pages, unread);
+            assert_eq!(parsed.sections.len(), pages.len());
+            for text in pages.into_iter().flatten() {
+                assert!(parsed.text.contains(text));
+            }
+        }
+    }
+    #[test]
+    fn pdf_page_limit_is_enforced_before_extraction() {
+        assert!(parse(&pdf_fixture(&vec![None; 201], 0), "pdf").is_err());
     }
 }

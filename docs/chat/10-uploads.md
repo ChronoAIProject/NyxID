@@ -559,7 +559,8 @@ untrusted data and every read is re-authorized against the active assistant
 turn.
 
 Use maintained, pure-Rust `lopdf` for PDF parsing/text and `zip` plus `quick-xml`
-for DOCX. They avoid external converters, shell commands and Office execution;
+for DOCX. Text extraction avoids external converters, shell commands and Office execution;
+the opt-in PDF image fallback below separately uses the packaged Poppler worker.
 DOCX extraction needs only bounded ZIP entries and WordprocessingML paragraphs.
 UTF-8 text, CSV and JSON receive bounded structural validation. Pin compatible
 versions in Cargo.lock. `lopdf` 0.38 is a compatible release in this workspace:
@@ -619,6 +620,63 @@ extractions persist their character count; only legacy rows need decryption to
 compute it and back-fill the count once. Unreadable legacy text leaves that upload’s
 coverage unavailable without hiding the draft. A complete scope declaration is the author's
 claim, not a server guarantee; reduced scope needs separate owner acceptance.
+
+### Scanned PDF pages
+
+PDF extraction classifies each page using non-whitespace characters, preserving
+page numbers, extracted text and sections. The additive `pdf` metadata reports
+`no_text`, `mixed` or `text`, `text_pages`, `image_pages`, `unread_pages` and a
+bounded failure reason. `text_pages` means text is available for on-demand reads;
+`image_pages` means this turn submitted a page image, not proof that a model read
+or correctly understood it. A mixed PDF retains text extraction and only renders
+pages without text. Whitespace separators and empty sections are never evidence
+of usable text. Legacy rows are classified from their encrypted page spans.
+
+The default-off `assistant:pdf-vision` personal/org/global feature flag enables
+this fallback. Upgrade every API replica and encrypted-record migration worker
+before enabling it. The renderer adapter uses Debian Bookworm `poppler-utils`
+(`pdftoppm`) in the backend runtime image on both linux/amd64 and linux/arm64;
+CI test execution installs it explicitly. Native development may set the absolute
+`NYXID_PDF_RENDERER` path; the default is `/usr/bin/pdftoppm`. No shell, inherited
+credentials, remote converter, OCR service or automatic downloads are used.
+Missing dependencies produce an explicit unread-page outcome and metadata-only
+logs keyed by conversation, turn, parent attachment and page, never parser stderr
+or document content.
+
+At most eight pages per PDF are rendered at 2048 pixels on the long edge, JPEG
+quality 85, at most 2 MiB per encoded page. Ordinary images and derived pages share
+the upstream/model image-count, per-image and total-byte limits (ten images and
+16 MiB maximum for PDF planning). A page gets eight wall seconds and six CPU
+seconds; a PDF gets twenty wall seconds. Linux workers have a 128 MiB address-space
+limit. Before loading the PDF, each render operation reserves 160 MiB of the
+existing 192 MiB byte budget, covering the worker, source and encoded/encrypted
+buffers. Two worker slots are additionally bounded by that shared byte budget.
+Stop/future cancellation and deadlines kill the converter process group and
+reap the direct child. Attachment HTTP buffers retain their byte reservation
+until consumed or dropped.
+
+A derived `pdf_page` is one inline encrypted row with `parent_attachment_id`,
+`page` and `render_version`, never a payload chunk or another user attachment.
+It has no children. Parent/page/version are bound in contextual encryption and
+the migration adapter distinguishes it from chunks. Creation serializes with
+parent deletion and live-turn changes. Reads and platform-model image proofs
+resolve the parent PDF through the same thread Agent Key, live turn, document
+ACL and current document-retention policy, including policy shortening before
+cleanup. Group/channel guests cannot turn a forbidden document into an allowed
+image. Parent cleanup and owner/conversation erasure remove direct page rows.
+Startup installs separate partial unique indexes for chunks and PDF pages before
+retiring the legacy sparse chunk index, which would otherwise reject a second
+page with the same parent. Old binaries must not restart while derived pages
+remain: they recreate that incompatible sparse index.
+
+Flag-off, text-only/unsupported models, renderer failures, page/image/byte limits
+and upstream image-unsupported notices retain explicit unread page numbers in
+turn context and the one parent attachment's history metadata. The document read
+tool reports unavailable text without denying valid current-turn visual input;
+text pagination completion does not imply a complete document review. Disable
+the flag to return to text-only input; retain compatible readers/migration code
+while any derived rows remain. Real NyxAgent/provider and Lark delivery acceptance
+is separate from local fixtures and container rendering smoke tests.
 
 ## Images and upstream compatibility
 
@@ -714,7 +772,7 @@ shared byte budget described above.
 - `DELETE` the corresponding attachment URL removes only an unbound upload;
   owner `GET` serves bytes with `nosniff` and sandbox CSP.
 - `GET /assistant-attachments/{uuid}/content` accepts only the bound thread Agent
-  Key and only user-upload images. Delegated account-read credentials are denied.
+  Key and bound user-upload images or derived PDF pages. Delegated account-read credentials are denied.
 
 Paths above are relative to `/api/v1`. Deploy NyxID and the separate NyxAgent
 image PR independently: missing capability metadata is a supported fallback.

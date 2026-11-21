@@ -161,6 +161,8 @@ pub struct AttachmentResponse {
     image_input_reason: Option<String>,
     origin: String,
     pages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pdf: Option<crate::models::assistant_upload::PdfCoverage>,
     id: String,
     content_type: String,
     size: i64,
@@ -179,6 +181,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
             image_input_reason: row.image_input_reason,
             origin: row.origin,
             pages: row.pages,
+            pdf: row.pdf,
             id: row.id,
             content_type: row.content_type,
             size: row.size,
