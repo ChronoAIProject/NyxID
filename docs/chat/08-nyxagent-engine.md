@@ -608,7 +608,9 @@ call returns `approval_expired`, `approval_denied`, `approval_wait_timed_out`, o
 `approval_unavailable` on failure and links to `/assistant/approvals` (pending
 and history). The web history response adds bounded `approval_history`, scoped
 to the same owner/chat key as before, while `approvals` stays pending-only for
-older clients. New clients render terminal proxy cards after reload; an approval
+older clients. History also loads exact service approvals linked by server-recorded
+activities on the requested page and its active turn, including HTTP cards without
+a key label. New clients render terminal proxy cards after reload; an approval
 receipt says “Approved”, not that execution or delivery succeeded.
 
 The turn summary's “Completed” describes the model turn, “actions” counts tool
@@ -1022,12 +1024,19 @@ Acknowledgement DTO adds `decider`, `decided_by` and `reason`.
 `{id,service_slug,service_name,summary,approval_mode,agent_key_prefix,created_at,expires_at}`.
 Per-service approval policies (per_request or grant, decided on the approvals
 page, Telegram or the mobile app) are enforced in the execution path and block
-the tool call for the channel's approval timeout. The chat now surfaces those
-requests as approval cards at the transcript tail, matched by the key's name in
-`requester_label` and the owner as request owner or notified approver; the card
-decides through the ordinary `POST /approvals/requests/{id}/decide`, and the
-waiting tool call then proceeds within the same turn. Known gap: renaming the
-assistant key hides cards for requests created under the old name.
+the tool call for the channel's approval timeout. For an interactive NyxBot
+per-request service write over HTTP or MCP, the deadline is the earlier of
+the owner's timeout and 80 seconds, both measured from callback ingress.
+The card counts down to the stored deadline in seconds. After expiry the
+tool reports that nothing was sent and the owner must make a fresh request.
+The chat surfaces these
+requests as approval cards at the transcript tail. Server-recorded activity
+links identify current API-key calls, and the key name still identifies older
+labelled cards. Both paths check the acting user and the owner or notified
+approver. The card decides through `POST /approvals/requests/{id}/decide`.
+On a live connection the tool then proceeds within the same turn. Losing an
+HTTP or MCP waiter or reaching the card deadline expires its undispatched
+per-request card. Grant-mode decisions can serve several connected callers.
 
 `activities` lists the tool calls the chat's key made during that turn, oldest
 first: `{id,label,status,started_at,ended_at}` with status `running`, `completed`

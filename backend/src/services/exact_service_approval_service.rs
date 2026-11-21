@@ -2372,6 +2372,8 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                connected_request_id: None,
+                connected_deadline: None,
                 approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),

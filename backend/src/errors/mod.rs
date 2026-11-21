@@ -1782,6 +1782,15 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ApprovalFailed {
+                reason,
+                request_id,
+                approve_url,
+            } => Some(crate::services::approval_service::wait_failure_details(
+                reason,
+                request_id,
+                approve_url,
+            )),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }

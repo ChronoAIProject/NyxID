@@ -2425,6 +2425,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
         .layer(axum::Extension(handlers::proxy::ingress::HttpIngress))
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
@@ -4012,6 +4015,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // MCP payloads may contain proxied tool inputs. The handlers retain explicit
     // PROXY_MAX_BODY_SIZE / PUBLIC_PROXY_MAX_BODY_SIZE bounds.
     let mcp_transport_routes = mcp_billing_routes!(register_billing_routes, Router::new())
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
     let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
         .layer(DefaultBodyLimit::disable());

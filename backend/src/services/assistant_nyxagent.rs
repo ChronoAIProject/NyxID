@@ -5537,7 +5537,7 @@ pub async fn pending_approvals(
     user_id: &str,
     credential_api_key_id: &str,
 ) -> AppResult<Vec<ChatApproval>> {
-    chat_approvals(db, user_id, credential_api_key_id, false).await
+    chat_approvals(db, user_id, credential_api_key_id, false, &[]).await
 }
 
 /// Keep terminal requests visible after expiry/decision and after a reload.
@@ -5546,8 +5546,9 @@ pub async fn approval_history(
     db: &Database,
     user_id: &str,
     credential_api_key_id: &str,
+    linked_ids: &[&str],
 ) -> AppResult<Vec<ChatApproval>> {
-    chat_approvals(db, user_id, credential_api_key_id, true).await
+    chat_approvals(db, user_id, credential_api_key_id, true, linked_ids).await
 }
 
 async fn chat_approvals(
@@ -5555,6 +5556,7 @@ async fn chat_approvals(
     user_id: &str,
     credential_api_key_id: &str,
     include_decided: bool,
+    linked_ids: &[&str],
 ) -> AppResult<Vec<ChatApproval>> {
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
     if credential_api_key_id.is_empty() {
@@ -5593,6 +5595,27 @@ async fn chat_approvals(
             .try_collect()
             .await?;
         rows.extend(recent);
+        // Activity IDs come from the authenticated conversation page. They
+        // also identify legacy HTTP cards that have no requester label.
+        let present: std::collections::HashSet<_> =
+            rows.iter().map(|row| row.id.as_str()).collect();
+        let missing: Vec<_> = linked_ids
+            .iter()
+            .copied()
+            .filter(|id| !present.contains(id))
+            .collect();
+        if !missing.is_empty() {
+            let linked: Vec<ApprovalRequest> = collection
+                .find(doc! {
+                    "_id":{"$in":missing}, "execution_proposal":null,
+                    "requester_type":"api_key", "requester_id":user_id,
+                    "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+                })
+                .await?
+                .try_collect()
+                .await?;
+            rows.extend(linked);
+        }
         rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     }
     Ok(rows

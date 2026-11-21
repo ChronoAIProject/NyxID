@@ -2821,7 +2821,7 @@ async fn history_keeps_user_decisions_and_receipts_with_their_message_pages() {
 }
 
 #[tokio::test]
-async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
+async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
     use crate::models::{
         approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS},
         service_approval_config::ApprovalMode,
@@ -2898,6 +2898,34 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         ])
         .await
         .unwrap();
+    let mut linked = Vec::new();
+    let mut activities = Vec::new();
+    for _ in 0..12 {
+        let mut card = request("", "pending", 5);
+        card.requester_type = "api_key".into();
+        card.requester_label = None;
+        activities.push(doc! {
+            "id": uuid::Uuid::new_v4().to_string(), "label":"service_request", "status":"running",
+            "started_at": bson::DateTime::now(),
+            "decision": {"kind":"approval","id":&card.id,"state":"waiting"},
+        });
+        linked.push(card);
+    }
+    state
+        .db
+        .collection::<ApprovalRequest>(APPROVALS)
+        .insert_many(&linked)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set":{"active_turn.activities":activities}},
+        )
+        .await
+        .unwrap();
     let Json(page) = history(
         State(state),
         test_auth_user(OWNER),
@@ -2907,8 +2935,14 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
     .await
     .unwrap();
     let approvals = serde_json::to_value(&page.approvals).unwrap();
-    assert_eq!(approvals.as_array().unwrap().len(), 1, "{approvals}");
-    assert_eq!(approvals[0]["id"], mine.id);
+    assert_eq!(approvals.as_array().unwrap().len(), 13, "{approvals}");
+    assert!(
+        approvals
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|card| card["id"] == mine.id)
+    );
     assert_eq!(approvals[0]["summary"], "GET /user");
     assert_eq!(approvals[0]["approval_mode"], "per_request");
     assert_eq!(approvals[0]["agent_key_prefix"], key.key_prefix);
