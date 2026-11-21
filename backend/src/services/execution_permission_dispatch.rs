@@ -1026,6 +1026,12 @@ pub(crate) fn prepare<'a>(
                 .copied()
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
+        // Voice can continue through ordinary dispatch when there is no
+        // outstanding approval to request, even without an execution grant.
+        if effect.floors.is_empty() && chat.is_some_and(|c| c.execution_voice_task) {
+            let _ = context.decision.set(Resolution::Gap);
+            return Ok(None);
+        }
         context.observation.stage(diagnostics::Stage::Proposal);
         super::assistant_model_observer::before_approval_request(None).await?;
         chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
