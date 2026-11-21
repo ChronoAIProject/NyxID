@@ -1,5 +1,6 @@
 import { translateApp } from "../../../i18n/appTranslation";
 import type { VoiceOption, VoicePreferences } from "./voiceContracts";
+import { billingMetricName } from "../../billing/billingMetric";
 
 // Server capability and per-thread eligibility still gate every voice entry.
 export const NATIVE_VOICE_ENTRY_ENABLED = true;
@@ -68,17 +69,16 @@ export function voiceTariff(option: VoiceOption) {
             price.sync_status === "synced" && price.metric.includes("tokens"),
         )
       : [];
-    return (tokens.length ? translateApp("No NyxID duration charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
-      .map(
-        (price) =>
-          ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
-      )
-      .join("") }) : translateApp("No NyxID voice charge. Your provider’s charges still apply.{{amount}}", { amount: tokens
-          .map(
-            (price) =>
-              ` ${price.credits_per_unit} credits per ${price.metric.replaceAll("_", " ")}.`,
-          )
-          .join("") }));
+    const amount = tokens.map((price) =>
+      translateApp("{{credits}} credits per {{metric}}.", {
+        credits: price.credits_per_unit,
+        metric: billingMetricName(price.metric),
+      }),
+    ).join(" ");
+    return translateApp(tokens.length
+      ? "No NyxID duration charge. Your provider’s charges still apply. {{amount}}"
+      : "No NyxID voice charge. Your provider’s charges still apply.{{amount}}",
+      { amount });
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -97,14 +97,19 @@ export function voiceTariff(option: VoiceOption) {
           price.metric.includes("tokens")) ||
         option.voice.billing_metrics.some((metric) => metric === price.metric)),
   );
-  return translateApp("{{credits}} credits per second{{totalCost}}.", {
+  return translateApp(extras.length
+    ? "{{credits}} credits per second {{totalCost}}."
+    : "{{credits}} credits per second.", {
     credits: duration.credits_per_unit,
     totalCost: extras
     .map(
       (price) =>
-        ` plus ${price.credits_per_unit} per ${price.metric === "requests" ? "start" : price.metric.replaceAll("_", " ")}`,
+        translateApp("plus {{credits}} per {{metric}}", {
+          credits: price.credits_per_unit,
+          metric: price.metric === "requests" ? translateApp("start") : billingMetricName(price.metric),
+        }),
     )
-    .join(""),
+    .join(" "),
   });
 }
 
