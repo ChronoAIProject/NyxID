@@ -110,7 +110,16 @@ impl Fixture {
     }
 
     async fn refresh(&self, token: &str) -> AppResult<IssuedTokens> {
-        refresh_tokens(&self.db, &self.config, &self.keys, token, None, None).await
+        refresh_tokens_for_client(
+            &self.db,
+            &self.config,
+            &self.keys,
+            token,
+            None,
+            None,
+            crate::services::token_service::RefreshClient::Identified(&self.client, None),
+        )
+        .await
     }
 }
 
@@ -687,7 +696,15 @@ async fn concurrent_legacy_refresh_has_one_winner_across_replicas() {
         .database(f.db.name());
     let (a, b) = tokio::join!(
         f.refresh(&legacy),
-        refresh_tokens(&other, &f.config, &f.keys, &legacy, None, None)
+        refresh_tokens_for_client(
+            &other,
+            &f.config,
+            &f.keys,
+            &legacy,
+            None,
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None)
+        )
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert_eq!(
@@ -728,7 +745,9 @@ async fn legacy_oauth_access_is_rejected_while_first_party_refresh_still_rotates
         create_session_and_issue_tokens(&f.db, &f.config, &f.keys, &f.user.to_string(), None, None)
             .await
             .unwrap();
-    let refreshed = f.refresh(&issued.refresh_token).await.unwrap();
+    let refreshed = refresh_tokens(&f.db, &f.config, &f.keys, &issued.refresh_token, None, None)
+        .await
+        .unwrap();
     let claims = jwt::verify_token(&f.keys, &f.config, &refreshed.access_token).unwrap();
     assert!(claims.client_id.is_none());
     assert!(claims.protected_consent.is_none());

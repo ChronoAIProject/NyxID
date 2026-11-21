@@ -20,7 +20,9 @@ import type { User } from "@/types/api";
 export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
+  OAUTH_REFRESH_CLIENT_AUTH: "auth:oauth-refresh-client-auth-v1",
   INVITATION_CODE: "auth:invitation-code",
+  OAUTH_EXACT_REDIRECTS: "auth:oauth-exact-redirects-v1",
   APP_TOKEN_MANAGEMENT: "auth:app-token-management-v1",
   // Global only: mobile builds with both domain sets read it at launch.
   MOBILE_NEW_DOMAINS: "mobile:new-domains",
@@ -96,7 +98,9 @@ export function userHasFeature(
 
 /** Resolved without a user or organization; only a global override applies. */
 const GLOBAL_ONLY_FLAGS: readonly string[] = [
+  FEATURE_FLAG.OAUTH_REFRESH_CLIENT_AUTH,
   FEATURE_FLAG.INVITATION_CODE,
+  FEATURE_FLAG.OAUTH_EXACT_REDIRECTS,
   FEATURE_FLAG.APP_TOKEN_MANAGEMENT,
   FEATURE_FLAG.MOBILE_NEW_DOMAINS,
   FEATURE_FLAG.CMA_SANDBOX_RATE_SYNC,

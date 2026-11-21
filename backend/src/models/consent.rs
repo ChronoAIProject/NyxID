@@ -19,6 +19,9 @@ pub struct Consent {
     /// Independent CAS version; authority revisions remain stable on broadening.
     #[serde(default)]
     pub write_version: Option<String>,
+    /// Digest of the exact callback in the most recent public-client review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_redirect_hash: Option<String>,
     /// Serializes incremental token issuance with transactional revocation.
     #[serde(default)]
     pub issuance_fence: Option<String>,
@@ -88,6 +91,7 @@ mod tests {
             scopes: "openid profile email".to_string(),
             revision: None,
             write_version: None,
+            reviewed_redirect_hash: None,
             issuance_fence: None,
             allow_all_services: false,
             allowed_service_ids: None,
