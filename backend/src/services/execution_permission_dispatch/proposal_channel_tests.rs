@@ -4,7 +4,10 @@ use crate::models::{
     execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     nyxbot_channel::{ChannelTurnDelivery, NyxbotEvent},
 };
-use crate::services::execution_permission_channel as channel;
+use crate::services::{
+    execution_permission_channel as channel,
+    security_readiness_service::refresh_test_replica_heartbeat,
+};
 use serde_json::Value;
 
 async fn channel_turn(name: &str, native: bool) -> (Fixture, AssistantConversation, String) {
@@ -161,6 +164,7 @@ async fn channel_turn_transport(
     start.execution_enrollment = true;
     start.channel_event_id = Some(event.clone());
     start.reply_channel = Some(origin);
+    refresh_test_replica_heartbeat(db).await;
     let row = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
         .await
         .unwrap();
@@ -188,6 +192,7 @@ async fn channel_proposal(f: &Fixture) -> ApprovalRequest {
         .unwrap()
 }
 async fn approve(f: &Fixture, request: &ApprovalRequest, choice: &str) {
+    refresh_test_replica_heartbeat(&f.state.db).await;
     let response = crate::handlers::approvals::decide_execution_request(
         axum::extract::State(f.state.clone()),
         test_utils::test_auth_user(&f.owner),
@@ -613,6 +618,7 @@ async fn migration_channel_readiness_loss_after_review_never_downgrades() {
 }
 
 async fn result_ready(f: &Fixture, row: &AssistantConversation) -> Delivery {
+    refresh_test_replica_heartbeat(&f.state.db).await;
     assert_eq!(write_call(f).await.0, StatusCode::FORBIDDEN);
     let request = channel_proposal(f).await;
     approve(f, &request, "operation").await;
