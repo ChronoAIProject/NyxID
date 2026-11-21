@@ -9,9 +9,11 @@ export type UploadStatus = {
 
 /** Completion and errors take precedence over stale transport progress. */
 export function assistantUploadStatus(
-  row: Pick<PendingAssistantUpload, "item" | "error" | "progress">,
+  row: Pick<PendingAssistantUpload, "item" | "error" | "progress" | "resumable">,
 ): UploadStatus {
   if (row.error) return { text: row.error, loader: "none", progress: 0 };
+  if (row.resumable)
+    return { text: translateApp("Ready to resume"), loader: "none", progress: 0 };
   if (row.item) return { loader: "none", progress: 100 };
   const progress = Number.isFinite(row.progress)
     ? Math.max(0, Math.min(100, row.progress))

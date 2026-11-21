@@ -1,3 +1,5 @@
+import { discardUploadDraft } from "./assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
@@ -249,7 +251,9 @@ export function AssistantDetailsScreen({
     setAction("delete");
     setError(undefined);
     try {
+      const owner = getAuthAccountId();
       await assistantApi.delete(conversationId);
+      void discardUploadDraft(owner, JSON.stringify(["private", conversationId])).catch(() => {});
       if (!alive()) return;
       await Promise.allSettled([
         client.invalidateQueries({ queryKey: ["workspace", "drawer-chats"] }),

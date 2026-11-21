@@ -1,3 +1,5 @@
+import type { AssistantUploadSession } from "./AssistantUploadSession";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 
 /** Session-only drafts are scoped to an account and never written to disk. */
@@ -41,4 +43,14 @@ export function assistantDraftKey(
   if (conversationId) return JSON.stringify(["private", conversationId]);
   if (home) return "nyxbot-home";
   return JSON.stringify(["private", agentId ?? "nyxbot", draftId ?? "new"]);
+}
+
+/** Release an explicitly discarded draft or the attachments of a removed chat. */
+export async function discardUploadDraft(owner: string | null, key: string) {
+  if (!owner || getAuthAccountId() !== owner) return;
+  assistantDraftStore.get<AssistantUploadSession>(`uploads:${key}`)?.dispose();
+  assistantDraftStore.delete(`uploads:${key}`);
+  const { uploadDraftStorage } = await import("./uploadDraftStorage");
+  if (getAuthAccountId() === owner)
+    await uploadDraftStorage.save(owner, key, { rows: [], reselect: false });
 }

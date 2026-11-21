@@ -9,7 +9,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { FileText, X } from "lucide-react-native";
-import { Label } from "../../components/workspace/WorkspaceUI";
+import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
@@ -22,11 +22,21 @@ export function AssistantPendingUploads({
   remove,
   disabled,
   showMentionHandles = true,
+  reselect,
+  choose,
+  dismiss,
+  resume,
+  canResume,
 }: {
   files: PendingAssistantUpload[];
   remove: (key: string) => void;
   disabled: boolean;
   showMentionHandles?: boolean;
+  reselect: boolean;
+  choose: () => void;
+  dismiss: () => void;
+  resume: () => void;
+  canResume: boolean;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
@@ -41,6 +51,34 @@ export function AssistantPendingUploads({
   }, [files, preview]);
   return (
     <>
+      {reselect && (
+        <View style={styles.content}>
+          <Label>
+            {t(
+              "An attachment selection was interrupted. Choose the file again.",
+            )}
+          </Label>
+          <ActionButton
+            label={t("Choose files")}
+            onPress={choose}
+            disabled={!canResume}
+            variant="secondary"
+          />
+          <ActionButton
+            label={t("Dismiss")}
+            onPress={dismiss}
+            variant="secondary"
+          />
+        </View>
+      )}
+      {files.some((row) => row.resumable) && (
+        <ActionButton
+          label={t("Resume attachment uploads")}
+          onPress={resume}
+          disabled={!canResume}
+          variant="secondary"
+        />
+      )}
       {files.length ? (
         <OverflowScrollView
           fadeColor={colors.card}
@@ -54,6 +92,7 @@ export function AssistantPendingUploads({
             // Some native document providers omit MIME metadata. Preserve the
             // image preview without changing an already assigned handle.
             const image =
+              !!row.file.uri &&
               !row.error &&
               (row.kind === "image" ||
                 /\.(png|jpe?g|gif|webp)$/i.test(row.file.name));
