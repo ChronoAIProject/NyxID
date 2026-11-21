@@ -207,6 +207,7 @@ function setup(
     sent: () => events.push(["connection-sent"]),
   };
   const uploads = {
+    sourcePicker: undefined as undefined | { choices: { label: string; onPress: () => void }[]; onClose: () => void },
     files: [] as any[],
     session: {
       sending: false,
@@ -457,6 +458,7 @@ function setup(
         return assistant;
       },
     },
+    "./AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "./useAssistantUploads": { useAssistantUploads: () => uploads },
     "./useComposerDictation": {
       useComposerDictation: () =>
@@ -3459,5 +3461,16 @@ test("P9 ordinary floating identity retains the base thread detail", () => {
     (n) => n.type === "Text" && n.props.ellipsizeMode === "tail",
   );
   assert.equal(lines.length, 2, "name and thread details stay visible");
+  x.harness.unmount();
+});
+
+test("private chat mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup("chat");
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploads.sourcePicker = sourcePicker;
+  x.harness.render();
+  const picker = x.all().find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
   x.harness.unmount();
 });

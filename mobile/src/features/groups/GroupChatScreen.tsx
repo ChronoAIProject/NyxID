@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "../assistant/AttachmentSourcePicker";
 import { useContext } from "react";
 import { useIsFocused } from "@react-navigation/native";
 import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
@@ -1381,6 +1382,7 @@ function GroupChat({
           </View>
         </View>
       </Modal>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

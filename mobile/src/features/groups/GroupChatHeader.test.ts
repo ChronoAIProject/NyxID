@@ -76,6 +76,12 @@ function setup({
   const uploads = {
     files: [] as any[],
     picking: false,
+    sourcePicker: undefined as
+      | {
+          choices: { label: string; onPress: () => void }[];
+          onClose: () => void;
+        }
+      | undefined,
     session: {
       sending: false,
       submit: (send: (files?: unknown) => Promise<boolean>) => send(),
@@ -226,6 +232,7 @@ function setup({
       AssistantMessageTime: "Time",
     },
     "../assistant/assistantSelectableMarkdown": {},
+    "../assistant/AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
         choose: (...actions: unknown[]) => attachmentChoices.push(actions),
@@ -1040,4 +1047,15 @@ test("P9 ordinary crew transcript keeps its base identity across text size chang
   f.setFontScale(3.12);
   assert.equal(list().key, before);
   f.h.unmount();
+});
+
+test("crew mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup();
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploads.sourcePicker = sourcePicker;
+  x.h.render();
+  const picker = nodes(x.h.value()).find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.h.unmount();
 });

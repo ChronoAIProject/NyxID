@@ -15,6 +15,7 @@ import {
   ScrollView,
   StyleSheet,
   View,
+  useWindowDimensions,
   type ScrollViewProps,
 } from "react-native";
 import { ChevronRight, Plus } from "lucide-react-native";
@@ -790,6 +791,9 @@ function HomeRow({
 }) {
   useAppLanguage();
   const { colors } = useTheme();
+  const { width, fontScale } = useWindowDimensions();
+  const compact = width / Math.max(1, fontScale) < 360;
+  const metadata = meta ? <Label muted style={styles.metadata}>{meta}</Label> : null;
   return (
     <Pressable
       accessibilityRole="button"
@@ -805,23 +809,20 @@ function HomeRow({
     >
       <View style={styles.leading}>{leading}</View>
       <View style={styles.rowBody}>
-        <View style={styles.rowTitle}>
-          <Label numberOfLines={1} style={styles.name}>
+        <View style={[styles.rowTitle, compact && styles.stackedTitle]}>
+          <Label numberOfLines={compact ? undefined : 1} style={styles.name}>
             {title}
           </Label>
           {badge}
         </View>
         {detail ? (
-          <Label muted numberOfLines={2} style={styles.body}>
+          <Label muted numberOfLines={compact ? undefined : 2} style={styles.body}>
             {detail}
           </Label>
         ) : null}
+        {compact ? metadata : null}
       </View>
-      {meta ? (
-        <Label muted style={styles.metadata}>
-          {meta}
-        </Label>
-      ) : null}
+      {compact ? null : metadata}
       <ChevronRight size={18} color={colors.textMuted} />
     </Pressable>
   );
@@ -964,6 +965,7 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8,
   },
+  stackedTitle: { flexDirection: "column", alignItems: "flex-start" },
   name: {
     flexShrink: 1,
     fontFamily: fonts.bodySemi,
