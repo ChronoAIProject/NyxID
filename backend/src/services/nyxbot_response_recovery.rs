@@ -198,17 +198,31 @@ pub async fn finish(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&row.event_key})
         .await?;
-    let text = text.map(|text| {
-        if event.as_ref().is_some_and(|event| {
-            event.relay_message_id.is_none() && event.source_media_declared.unwrap_or(0) > 0
-        }) && !text.contains(MEDIA_UNAVAILABLE)
-        {
-            let prefix: String = text.chars().take(MAX_TEXT_CHARS - 512).collect();
-            format!("{prefix}\n\n{MEDIA_UNAVAILABLE}")
-        } else {
-            text.to_owned()
+    let mut text = text.map(str::to_owned);
+    if let (Some(event), Some(text)) = (event.as_ref(), text.as_mut())
+        && event.relay_message_id.is_none()
+        && event.source_media_declared.unwrap_or(0) > 0
+    {
+        use super::channel_notices::Notice;
+        use crate::models::nyxbot_channel::NoticeLanguage;
+        let has_notice = [
+            NoticeLanguage::English,
+            NoticeLanguage::Simplified,
+            NoticeLanguage::Traditional,
+        ]
+        .into_iter()
+        .any(|language| text.contains(Notice::MediaUnavailable.text(Some(language))));
+        if !has_notice {
+            let language = if let Some(delivery) = &event.delivery {
+                delivery.notice_language
+            } else {
+                super::channel_notices::chat_language(db, &row.channel_id, &row.partition).await?
+            };
+            *text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
+            text.push_str("\n\n");
+            text.push_str(Notice::MediaUnavailable.text(language));
         }
-    });
+    }
     if event
         .as_ref()
         .is_some_and(|event| event.relay_message_id.is_some())
@@ -249,13 +263,14 @@ pub async fn finish(
 
 /// The provider successfully returns a notice for a failed relay turn. Only a
 /// proven start refusal may tell the caller that nothing was done.
-fn relay_failure_reply(message: &AssistantMessage, org_guest: bool) -> String {
-    use super::assistant_nyxagent::TurnError;
+fn relay_failure_reply(
+    message: &AssistantMessage,
+    org_guest: bool,
+    language: Option<crate::models::nyxbot_channel::NoticeLanguage>,
+) -> String {
+    use super::channel_notices::Notice;
 
     let code = message.error_code.as_deref();
-    if code == Some("assistant_start_unavailable") {
-        return TurnError::new("assistant_start_unavailable").message;
-    }
     if code == Some("guest_model_route_required")
         && message.activity_count == Some(0)
         && message.activities.is_empty()
@@ -273,17 +288,33 @@ fn relay_failure_reply(message: &AssistantMessage, org_guest: bool) -> String {
             .and_then(|m| m.failure_reason.as_ref())
             .and_then(|r| r.model_route.as_ref())
             .map(|route| route.reason.as_str());
-        return if !org_guest && reason.is_some_and(super::assistant_guest_model_setup::failure_code)
-        {
-            "Visitor setup could not finish. No tool ran for this request. The owner has been notified.".into()
+        let notice = if org_guest {
+            Notice::GuestModelRouteNoTools
+        } else if reason.is_some_and(super::assistant_guest_model_setup::failure_code) {
+            Notice::GuestSetupNoTools
         } else {
-            "I couldn't answer this message. No tool ran for this request.".into()
+            Notice::NoTools
         };
+        return notice.text(language).into();
     }
 
-    let notice = TurnError::new("outcome_unknown").message;
+    let notice = if org_guest
+        && matches!(
+            code,
+            Some(
+                "capacity_exceeded"
+                    | "session_busy"
+                    | "queue_timeout"
+                    | "guest_model_route_required"
+            )
+        ) {
+        Notice::org_guest_failure(code)
+    } else {
+        Notice::OutcomeUnknown
+    }
+    .text(language);
     if org_guest || message.text.trim().is_empty() {
-        notice
+        notice.into()
     } else {
         format!("{}\n\n{notice}", message.text)
     }
@@ -322,21 +353,29 @@ where
         if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":super::org_channel_service::event_actor(&event),
             "conversation_id":conversation,"turn_id":turn,"role":"assistant", "status":{"$in":["completed","failed","cancelled","interrupted"]}}).await? {
             let org_guest = event.delivery.as_ref().and_then(|d| d.origin.org_execution.as_ref()).is_some_and(|e| e.guest);
+            let language = event.delivery.as_ref().and_then(|d| d.notice_language);
             let (mut text, failed) = if message.status == "completed" {
                 (message.text, false)
+            } else if message.error_code.as_deref() == Some("channel_retry_attachment_unavailable") && !org_guest {
+                (super::channel_notices::Notice::RetryAttachmentUnavailable.text(language).into(), false)
+            } else if message.error_code.as_deref() == Some("capacity_exceeded") && !org_guest {
+                let notice = super::channel_notices::capacity(language,message.error_detail.as_ref().and_then(|d| d.capacity_wait_ms));
+                let text = if message.text.trim().is_empty() { notice } else { format!("{}\n\n{notice}", message.text.trim()) };
+                (text, false)
+            } else if message.error_code.as_deref() == Some("assistant_start_unavailable") && (!org_guest || event.relay_message_id.is_some()) {
+                (super::channel_notices::Notice::DependencyUnavailable.text(language).into(), false)
             } else if event.relay_message_id.is_some() {
-                (relay_failure_reply(&message, org_guest), false)
+                (relay_failure_reply(&message, org_guest, language), false)
             } else if org_guest {
-                (super::org_channel_service::UNAVAILABLE.into(), false)
-            } else if message.error_code.as_deref() == Some("assistant_start_unavailable") {
-                (super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message, false)
+                (super::channel_notices::Notice::org_guest_failure(message.error_code.as_deref()).text(language).into(), false)
             } else {
                 (message.text, true)
             };
             let images=super::assistant_nyxagent::turn_tool_attachments(db,super::org_channel_service::event_actor(&event),conversation,turn).await?;
             if event.relay_message_id.is_none() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
-                text.push_str("\n\nImages are unavailable on this native gateway connection. View them in NyxID.");
+                text.push_str("\n\n");
+                text.push_str(super::channel_notices::Notice::ImagesUnavailable.text(language));
             }
             if event.relay_message_id.is_some() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 // The HTTP/delivery layer supplies the existing relay image

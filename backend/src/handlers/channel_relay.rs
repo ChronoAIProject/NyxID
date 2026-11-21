@@ -188,6 +188,7 @@ pub struct MessageItem {
     pub content_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_status: Option<String>,
+    pub callback_failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
@@ -425,6 +426,7 @@ pub(crate) fn message_to_item(
         sender_platform_id: msg.sender_platform_id.clone(),
         sender_display_name: msg.sender_display_name.clone(),
         content_type: msg.content_type.clone(),
+        callback_failure_reason: msg.callback_failure_reason.clone(),
         callback_status: msg.callback_status.clone(),
         reply_to_message_id: msg.reply_to_message_id.clone(),
         created_at: msg.created_at.to_rfc3339(),
@@ -4485,6 +4487,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: Some("delivered".to_string()),
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: None,
@@ -4520,6 +4523,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: None,
+            callback_failure_reason: None,
             callback_http_status: None,
             callback_disposition: None,
             reply_to_message_id: Some(message.id.clone()),

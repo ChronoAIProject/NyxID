@@ -516,7 +516,7 @@ async fn inbound_impl_inner(
         on,
     )
     .await;
-    let (child, binding, stopped) = match selection {
+    let (mut child, binding, stopped) = match selection {
         Ok(follow::Selection::Legacy) => return Ok(None),
         Ok(follow::Selection::Quiet(reason)) => {
             if !private {
@@ -534,9 +534,7 @@ async fn inbound_impl_inner(
         }
         Err(AppError::Conflict(_)) => {
             let reply = OutboundReply {
-                text: Some(
-                    "I can't follow another thread right now. Please try again later.".into(),
-                ),
+                text: Some(Notice::ThreadLimit.text(settings.notice_language).into()),
                 attachments: Vec::new(),
                 reply_to_platform_message_id: None,
                 metadata: None,
@@ -559,6 +557,7 @@ async fn inbound_impl_inner(
         }
         Err(e) => return Err(e),
     };
+    child.notice_language = settings.notice_language;
     if !private {
         crate::services::nyxbot_admission_service::selection(
             &state.db,
@@ -622,7 +621,7 @@ async fn inbound_impl_inner(
     }
     let result = if stopped {
         Ok(Inbound::Reply(
-            "Stopped following this thread. Its history is still available in NyxID.".into(),
+            Notice::Stopped.text(settings.notice_language).into(),
         ))
     } else {
         Box::pin(start_chat_turn(
@@ -653,12 +652,12 @@ async fn inbound_impl_inner(
         let mut result = match result {
             Ok(Inbound::Busy) => Inbound::Reply(InboundReply::fixed(
                 NoticeKind::FollowBusy,
-                "I'm busy right now. Please try again in a moment.",
+                Notice::FollowBusy.text(settings.notice_language),
             )),
             Ok(value) => value,
             Err(_) => Inbound::Reply(InboundReply::fixed(
                 NoticeKind::StartFailure,
-                "I could not start that. Please try again.",
+                Notice::StartFailure.text(settings.notice_language),
             )),
         };
         if let Inbound::Reply(reply) = &mut result
@@ -684,13 +683,13 @@ async fn inbound_impl_inner(
             None
         }
         Ok(Inbound::Silent(_)) => None,
-        Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
+        Ok(Inbound::Busy) => Some(Notice::FollowBusy.text(settings.notice_language).into()),
         Ok(Inbound::Turn(receiver)) => {
             let _ = final_reply(receiver).await;
             late_delivery::process(state, event_key).await;
             None
         }
-        Err(_) => Some("I could not start that. Please try again.".into()),
+        Err(_) => Some(Notice::StartFailure.text(settings.notice_language).into()),
     };
     if let Some(reply) = reply {
         send(state, &row.user_id, &origin, conversation, &reply, None).await?;

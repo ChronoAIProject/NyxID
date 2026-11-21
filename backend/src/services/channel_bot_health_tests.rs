@@ -15,6 +15,7 @@ fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
         subscription_registered: None,
         backoff_active: false,
         gateway: false,
+        gateway_not_received: None,
         discord_intake: None,
     }
 }
@@ -177,6 +178,7 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
             subscription_registered: None,
             backoff_active: *backoff,
             gateway: false,
+            gateway_not_received: None,
             discord_intake: None,
         };
         assert_eq!(recommend(&facts).action, *expected, "{facts:?}");

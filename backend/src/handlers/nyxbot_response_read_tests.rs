@@ -99,10 +99,10 @@ async fn terminal(f: &Fixture, id: &str) -> Value {
 
 #[tokio::test]
 async fn response_read_2588_live_consumer_preserves_text_marker_and_completion() {
-    let f = Box::pin(Fixture::with_reply(
+    let f = Box::pin(Fixture::with_output(
         "response_read_live",
         false,
-        GATEWAY_LINK_REPLY,
+        pretool_output(GATEWAY_LINK_REPLY),
     ))
     .await;
     advertised(&f).await;
@@ -147,10 +147,10 @@ async fn response_read_2588_live_consumer_preserves_text_marker_and_completion()
 #[tokio::test]
 async fn response_read_2588_replica_acceptance_lifecycle_and_fifo_receipt() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let f = Box::pin(Fixture::with_reply(
+    let f = Box::pin(Fixture::with_output(
         "response_read_replica",
         false,
-        GATEWAY_LINK_REPLY,
+        pretool_output(GATEWAY_LINK_REPLY),
     ))
     .await;
     advertised(&f).await;

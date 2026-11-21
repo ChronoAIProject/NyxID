@@ -260,9 +260,14 @@ async fn accept(
             // native equivalent into the mandatory bot fence instead of adding
             // another write or throttling the authoritative bot timestamp.
             let mut bot_update = doc! {"$inc":{"native_admission_revision":1_i64}};
-            if discord {
+            let inbound_source = match &row.gateway_source {
+                Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. }) => Some("native_discord_gateway"),
+                Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. }) if tx_claim.is_some() => Some("native_whatsapp_gateway"),
+                _ => None,
+            };
+            if let Some(source) = inbound_source {
                 bot_update.insert("$set", doc! {"diagnostics.last_inbound_at":bson::DateTime::now(),
-                    "diagnostics.last_inbound_source":"native_discord_gateway"});
+                    "diagnostics.last_inbound_source":source});
             }
             let bot=db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                 bot_filter.clone(), bot_update).session(&mut *session).await?;
@@ -457,7 +462,14 @@ async fn execute(
                 &state.db,
                 &state.encryption_keys,
                 stored,
-                Some("NyxBot is busy. Please try again shortly."),
+                Some(
+                    Notice::NativeBusy.text(
+                        crate::services::channel_notices::chat_language(
+                            &state.db, &row.id, partition,
+                        )
+                        .await?,
+                    ),
+                ),
                 false,
             )
             .await?

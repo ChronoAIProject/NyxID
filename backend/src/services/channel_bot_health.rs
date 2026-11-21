@@ -116,6 +116,12 @@ fn http_status(message: &str) -> Option<u16> {
         .ok()
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct MissingGatewayEvent {
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub message_at: Option<DateTime<Utc>>,
+}
+
 /// Facts the recommendation depends on. Build with [`HealthFacts::for_bot`].
 #[derive(Clone, Debug)]
 pub struct HealthFacts<'a> {
@@ -131,6 +137,7 @@ pub struct HealthFacts<'a> {
     pub backoff_active: bool,
     /// The bot is delivered through the Agent Event Gateway.
     pub gateway: bool,
+    pub gateway_not_received: Option<MissingGatewayEvent>,
     pub discord_intake: Option<discord::Intake>,
 }
 
@@ -140,7 +147,7 @@ impl<'a> HealthFacts<'a> {
             org_guest_billing: None,
             platform: &bot.platform,
             inbound_outcome: bot.diagnostics.last_inbound_outcome.as_ref().filter(|o| {
-                !o.code.starts_with("telegram_group_")
+                !(o.code.starts_with("telegram_group_") || o.code.starts_with("whatsapp_"))
                     || bot.diagnostics.last_inbound_at.is_none_or(|at| o.at >= at)
             }),
             status: &bot.status,
@@ -163,6 +170,7 @@ impl<'a> HealthFacts<'a> {
                 .map(|state| state.registered),
             backoff_active: bot.poll_backoff_until.is_some_and(|until| until > now),
             gateway,
+            gateway_not_received: None,
             // Intake advice requires loaded flag, readiness and transport evidence.
             discord_intake: None,
         }
@@ -404,6 +412,8 @@ fn telegram_group_advice(outcome: &ChannelInboundOutcome) -> Option<Recommendati
     Some(advice(action, text))
 }
 
+pub(crate) const GATEWAY_NOT_RECEIVED_REASON: &str = "NyxID recorded a successful gateway callback and found no matching provider event when it checked after two minutes";
+
 /// The single recovery recommendation used by health, audit and notices.
 pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     if let Some(code) = facts.failure_reason
@@ -474,8 +484,33 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     {
         return recommendation;
     }
+    if facts.gateway
+        && facts.platform == "whatsapp"
+        && facts.org_guest_billing.is_none()
+        && let Some(outcome) = facts.inbound_outcome
+        && let Some(advice) = super::channel_inbound_diagnostics::recommendation(&outcome.code)
+    {
+        return advice;
+    }
     // Preserve existing gateway advice when no org-guest billing fact was added.
     if facts.gateway && facts.org_guest_billing.is_none() {
+        if let Some(missing) = facts.gateway_not_received {
+            let message_time = missing
+                .message_at
+                .map(|at| {
+                    format!(
+                        " The affected message arrived at {} UTC.",
+                        at.format("%Y-%m-%d %H:%M:%S%.3f")
+                    )
+                })
+                .unwrap_or_default();
+            return advice(
+                "contact_admin",
+                format!(
+                    "{GATEWAY_NOT_RECEIVED_REASON}.{message_time} Ask your administrator to trace the delivery in gateway Activity using the bot ID and message time."
+                ),
+            );
+        }
         return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
     }
     if facts.failure_reason == Some(codes::BILLING_SUSPENDED) && is_x(facts.platform) {
@@ -578,6 +613,40 @@ pub(crate) static TEST_NOTICES: std::sync::LazyLock<
         std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<RecordedNotice>>,
     >,
 > = std::sync::LazyLock::new(Default::default);
+
+/// Record the signed callback even though native ownership precludes relay admission.
+pub(crate) async fn record_native_relay_conflict(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    let code = codes::NATIVE_RELAY_CONFLICT;
+    let now = bson::DateTime::now();
+    let previous = db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":&bot.id,"user_id":&bot.user_id,"is_active":true,"platform":"whatsapp",
+            "platform_bot_id": &bot.platform_bot_id,
+            "$expr":{"$eq":[{"$ifNull":["$ownership_version",0_i64]},bot.ownership_version]}},
+            bson::doc! {"$set": {
+                "diagnostics.last_webhook_at":now, "diagnostics.failure_reason":code,
+                "diagnostics.last_webhook_error":{"code":code,"reason":code,"at":now},
+            }},
+        )
+        .projection(bson::doc! {"diagnostics.failure_reason":1})
+        .await?;
+    if let Some(previous) = previous
+        && previous
+            .get_document("diagnostics")
+            .ok()
+            .and_then(|d| d.get_str("failure_reason").ok())
+            != Some(code)
+    {
+        let mut facts = HealthFacts::for_bot(bot, Utc::now(), true);
+        facts.failure_reason = Some(code);
+        notify_failure(db, bot, &recommend(&facts));
+    }
+    Ok(())
+}
 
 /// Best-effort failure notice to the bot owner, or to every admin of an
 /// org-owned bot. Called once per failure transition; never fails the caller.

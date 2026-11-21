@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    models::assistant_conversation::{EngineWorkerInstance, RestartSource},
+    models::assistant_conversation::{EngineWorkerInstance, RestartSource, TeamRestartSource},
     services::assistant_turn_restart,
 };
 
@@ -278,11 +278,17 @@ pub(in crate::handlers) async fn take_one(
     }
     let limiter = &state.direct_chat_limiter;
     let owner = &admission.actor_id;
-    let team_limit = match admission.source {
-        RestartSource::FirstPartyOwner => None,
+    let team_limit = match (&admission.source, &admission.team_source) {
+        (RestartSource::FirstPartyOwner, None) => None,
         _ => Some(
             crate::handlers::assistant_team::team_pool_limit(state, owner).await
-                + u32::from(!offered.is_subagent()),
+                + u32::from(
+                    !offered.is_subagent()
+                        || matches!(
+                            admission.team_source,
+                            Some(TeamRestartSource::GroupMember { .. })
+                        ),
+                ),
         ),
     };
     let (row, permit) = if let Some(token) = &admission.capacity {

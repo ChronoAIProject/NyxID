@@ -57,7 +57,7 @@ pub fn failure_reason(code: &str, transport: &str) -> String {
         return reason.into();
     }
     if code == "not_received" {
-        return format!("{receiver} accepted it but never passed it on");
+        return crate::services::channel_bot_health::GATEWAY_NOT_RECEIVED_REASON.into();
     }
     if code == "routed_elsewhere" {
         return "another route on this bot, from an earlier setup, sent it to a different agent"

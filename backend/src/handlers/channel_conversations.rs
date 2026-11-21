@@ -613,6 +613,7 @@ pub struct ConversationMessageItem {
     pub content_type: String,
     pub agent_api_key_id: Option<String>,
     pub callback_status: Option<String>,
+    pub callback_failure_reason: Option<String>,
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
 }
@@ -673,6 +674,7 @@ pub async fn list_conversation_messages(
             sender_display_name: m.sender_display_name,
             content_type: m.content_type,
             agent_api_key_id: m.agent_api_key_id,
+            callback_failure_reason: m.callback_failure_reason,
             callback_status: m.callback_status,
             reply_to_message_id: m.reply_to_message_id,
             created_at: m.created_at.to_rfc3339(),

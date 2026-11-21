@@ -11,14 +11,14 @@ const counts = db.assistant_conversations.aggregate([
     { stopped_window: { $ne: null } },
   ] } },
   { $group: {
-    _id: { $switch: {
+    _id: { lane: { $ifNull: ["$active_turn.restart_admission.team_source.kind", "other"] }, state: { $switch: {
       branches: [
         { case: present("$stopped_window"), then: "cancel_unconfirmed" },
         { case: present("$active_turn.restart_offer.claimed_by"), then: "claimed" },
         { case: present("$active_turn.restart_offer"), then: "offered" },
       ],
       default: "subscribed",
-    } },
+    } } },
     count: { $sum: 1 },
   } },
   { $sort: { _id: 1 } },

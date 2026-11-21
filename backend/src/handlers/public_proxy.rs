@@ -179,7 +179,7 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         credential: Default::default(),
-        catalog_default_headers: Vec::new(),
+        catalog_default_headers: Default::default(),
         user_service_default_headers: Vec::new(),
         ws_frame_injections: Vec::new(),
         connection_id: None,
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(target.auth_method, "none");
         assert_eq!(target.auth_key_name, "");
         assert_eq!(target.credential.as_str(), "");
-        assert!(target.catalog_default_headers.is_empty());
+        assert!(target.catalog_headers().is_empty());
         assert_eq!(target.service.identity_propagation_mode, "none");
         assert!(!target.service.forward_access_token);
         assert!(!target.service.inject_delegation_token);

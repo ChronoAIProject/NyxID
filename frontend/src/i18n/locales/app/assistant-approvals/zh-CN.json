@@ -33,6 +33,7 @@
   "Approve": "批准",
   "Approve Request": "批准请求",
   "Approve and send": "批准并发送",
+  "Approve within {{seconds}} seconds": "请在 {{seconds}} 秒内批准",
   "Approved": "已批准",
   "Approving also allows repeat {{service}} writes for the next {{duration}} without asking again.": "批准后，接下来的 {{duration}} 内可重复向 {{service}} 写入，无需再次询问。",
   "Are you sure you want to approve access to \"{{value1}}\"? A reusable approval grant will be created using your configured expiry.": "你确定要批准访问“{{value1}}”吗？系统将按你配置的到期时间创建可重复使用的审批授权。",

@@ -600,7 +600,7 @@ async fn apply_user_security_state_with_audit(
                 session,
                 &user_id,
                 active,
-                deleting,
+                deleting.then_some(user_id.as_str()),
                 owner_deletion_policy.as_deref(),
                 expected_active,
             )
@@ -629,10 +629,11 @@ pub(crate) async fn apply_user_security_state_in_session(
     session: &mut mongodb::ClientSession,
     user_id: &str,
     active: bool,
-    deleting: bool,
+    departure_actor: Option<&str>,
     owner_deletion_policy: Option<&str>,
     expected_active: Option<bool>,
 ) -> AppResult<()> {
+    let deleting = departure_actor.is_some();
     if let Some(policy) = owner_deletion_policy {
         validate_account_deletion_policy(policy)?;
         if active || !deleting {
@@ -659,7 +660,10 @@ pub(crate) async fn apply_user_security_state_in_session(
     }
     if !active {
         super::org_membership_authority::fence_person_authority_loss(
-            db, user_id, session, deleting,
+            db,
+            user_id,
+            session,
+            departure_actor,
         )
         .await?;
     }

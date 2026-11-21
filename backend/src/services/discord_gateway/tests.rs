@@ -344,6 +344,7 @@ async fn shared_pipeline_sends_one_signed_callback_with_versioned_facts_and_no_p
         .await
         .unwrap();
     let server = MockServer::start().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let agent = uuid::Uuid::new_v4().to_string();
     state.db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
         "_id":&agent,"user_id":&fence.bot.user_id,"name":"agent","key_prefix":"nyxid_ag","key_hash":"deadbeef".repeat(8),

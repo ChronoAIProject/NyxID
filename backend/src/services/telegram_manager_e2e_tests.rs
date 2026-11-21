@@ -404,6 +404,7 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
     )
     .await;
     let (state, actor, server) = fixture_with_database(db).await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let target_org_id = if org_owned {
         use crate::models::org_membership::{MemberScopeSource, OrgRole};
         let org =

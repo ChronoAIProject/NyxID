@@ -313,6 +313,14 @@ async fn update_membership_in_session(
             &mut *transaction,
         )
         .await?;
+        crate::services::org_invite_service::retire_issuer_in_session(
+            db,
+            &current.org_user_id,
+            &current.member_user_id,
+            actor,
+            transaction,
+        )
+        .await?;
     }
     if role.is_some_and(|r| !r.can_proxy()) {
         org_channel_service::lifecycle::revoke_member_in_session(
@@ -402,6 +410,14 @@ async fn revoke_membership_in_session(
             org_user_id,
             member_user_id,
             &mut *transaction,
+        )
+        .await?;
+        crate::services::org_invite_service::retire_issuer_in_session(
+            db,
+            org_user_id,
+            member_user_id,
+            actor,
+            transaction,
         )
         .await?;
     }

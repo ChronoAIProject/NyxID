@@ -574,6 +574,14 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
             ))
         };
     }
+    if api_key.purpose == ApiKeyPurpose::General
+        && !api_key.allow_all_services
+        && path_matches_prefix(path, "/api/v1/providers")
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Provider management requires provider-wide access. Use a human session or an unrestricted service allowlist.".into(),
+        ));
+    }
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
     }
@@ -2205,6 +2213,7 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
+                Err(error @ AppError::ApiKeyScopeForbidden(_)) => Err(error),
                 Err(error) if consent => Err(error),
                 Err(AppError::Forbidden(error))
                 | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
@@ -3191,6 +3200,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_events_authorizes_method_before_polling_body() {
+        let db = crate::test_utils::connect_test_database("events_auth_order")
+            .await
+            .unwrap();
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let session = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "proxy:*",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let app = private.with_state(state);
+        for credential in [None, Some(session)] {
+            let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = polled.clone();
+            let body = Body::from_stream(futures::stream::once(async move {
+                observed.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"invalid"))
+            }));
+            let mut request = Request::post("/api/v1/channel-events/device")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(token) = credential {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!polled.load(std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_events_bounds_authenticated_stream() {
+        use futures::StreamExt;
+        let db = crate::test_utils::connect_test_database("events_body_cap")
+            .await
+            .unwrap();
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw = "nyxid_ag_event_cap_fixture";
+        let key = delegated_fixture_api_key(
+            &Uuid::new_v4().to_string(),
+            &actor.to_string(),
+            &hash_token(raw),
+        );
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let mut state = crate::test_utils::test_app_state(db);
+        state.config.proxy_max_body_size = 8;
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = polls.clone();
+        let chunks = futures::stream::iter([b"12345", b"67890", b"abcde"]).map(move |chunk| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(chunk))
+        });
+        let request = Request::post("/api/v1/channel-events/device")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {raw}"))
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let response = private.with_state(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
     async fn channel_platform_catalog_accepts_all_management_auth_and_denies_media_delegation() {
         use crate::{crypto::jwt, models::user::UserType};
         let Some(db) = crate::test_utils::connect_test_database("channel_catalog_auth").await
@@ -3325,6 +3427,43 @@ mod tests {
             assert!(delegated_read_denied_path(path));
         }
         db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn provider_management_requires_provider_wide_authority() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        for path in [
+            "/api/v1/providers",
+            "/api/v1/providers/my-tokens",
+            "/api/v1/providers/provider",
+            "/api/v1/providers/provider/icon",
+            "/api/v1/providers/provider/services",
+            "/api/v1/providers/provider/services/service",
+            "/api/v1/providers/provider/connect/api-key",
+            "/api/v1/providers/provider/connect/oauth",
+            "/api/v1/providers/provider/connect/device-code/initiate",
+            "/api/v1/providers/provider/connect/device-code/poll",
+            "/api/v1/providers/provider/connect/telegram",
+            "/api/v1/providers/provider/connect/telegram/callback",
+            "/api/v1/providers/provider/disconnect",
+            "/api/v1/providers/provider/authorization",
+            "/api/v1/providers/provider/refresh",
+            "/api/v1/providers/provider/credentials",
+            "/api/v1/providers/provider/credentials/authorization",
+            "/api/v1/providers/callback",
+        ] {
+            key.allow_all_services = true;
+            assert!(ensure_api_key_purpose_route(&key, path).is_ok(), "{path}");
+            key.allow_all_services = false;
+            key.allowed_service_ids = vec!["service".into()];
+            assert!(
+                matches!(
+                    ensure_api_key_purpose_route(&key, path),
+                    Err(AppError::ApiKeyScopeForbidden(_))
+                ),
+                "{path}"
+            );
+        }
     }
 
     pub(super) fn delegated_fixture_api_key(

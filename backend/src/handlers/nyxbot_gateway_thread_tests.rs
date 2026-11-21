@@ -194,10 +194,15 @@ impl Fixture {
         Box::pin(Self::with_org(name, false)).await
     }
     async fn with_org(name: &str, org: bool) -> Self {
-        Box::pin(Self::with_reply(name, org, "Here is your answer")).await
+        Box::pin(Self::with_output(
+            name,
+            org,
+            message_output("Here is your answer"),
+        ))
+        .await
     }
-    async fn with_reply(name: &str, org: bool, reply: &'static str) -> Self {
-        let (state, calls, model) = setup_with_reply(name, reply).await;
+    async fn with_output(name: &str, org: bool, output: Value) -> Self {
+        let (state, calls, model) = Box::pin(setup_with_output(name, output)).await;
         let (mut row, key) = if org {
             let (row, key, _, _) = org_channel_tests::org_channel(&state, false).await;
             (row, key)

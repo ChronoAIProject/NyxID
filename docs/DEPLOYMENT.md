@@ -166,6 +166,62 @@ For a failed or partial rollout, use **Re-run failed jobs** on that run.
 An app already serving the candidate is checked for readiness and skipped
 for update.
 
+### NyxBot deployment check
+
+The staging and production deploy jobs hold their existing deployment slot
+through a private NyxBot check. After both apps serve the candidate, the job
+signs in on the backend health URL's HTTPS origin, submits one owner invocation
+to a fixed private thread, requires a completed root turn with reply text,
+then sends one fixed message to a private test channel. The channel must
+return a platform message ID. The check has a 90-second deadline. An uncertain
+admission or unfinished turn gets one bounded cancellation request by its
+original idempotency key. The check never retries a paid turn or a send.
+
+Configure each GitHub environment separately. Use a dedicated, unprivileged
+owner with a hard-capped model budget, a private model-only specialist thread,
+and one opted-in channel route whose only recipient is a test account. Enable
+owner invocations for this owner after the fleet supports them. See
+[owner invocation rollout](chat/09-owner-cli-api.md#rollout-and-rollback).
+
+| Environment setting | Value |
+| --- | --- |
+| Secret `NYXID_CHECK_ACCOUNT` | JSON object with string fields `email`, `password`, `owner_id` (UUID returned by first-party CLI login), `conversation_id` (private specialist thread) and `channel_id` (channel conversation UUID). |
+| Secret `NYXID_CHECK_ALERT_URL` | HTTPS incoming webhook accepting a Slack-style JSON `text` field. Use an independent release on-call destination. |
+| Variable `NYXID_ROLLBACK_PAIR` | Optional compatibility approval in the form `<previous full SHA>..<candidate full SHA>`. An empty or stale value permits checks and blocks automatic restoration. |
+
+When check credentials are configured and both apps need updating, the job
+resolves both published manifests and pins each PATCH to its digest. The
+passing artifact name and JSON record the two digests actually applied. If
+registry lookup is unavailable, the usual SHA-tag rollout and check can
+proceed. Only a passing pair deployed by digest establishes a rollback target.
+
+Missing check secrets produce a visible skip. A passing check produces a JSON
+artifact retained for 90 days. Each record contains UTC time, environment,
+candidate commit, outcome, stage and rollback disposition. Failures keep the
+deploy job red, including after successful recovery. The alert includes the
+run link. Use the failed run's artifact and summary for incident history.
+
+Before arming a pair, review **every** intervening release and the environment's
+actual migrations, feature activations, workers and external writers against
+the rollback rules in `CLAUDE.md`. Examples include exact billing cutover, new
+billing allocation writers and the first owner invocation. Verify the previous
+binary supports all state the candidate or check can write. Coordinate manual
+deploys and hold incompatible activations through the deploy/check/restore
+window. Leave the variable empty for a forward-fix release or uncertain fleet
+state. Configure the pair before the deploy job starts.
+
+On failure the job requires the same predecessor SHA observed at **both** live
+version endpoints before rollout and immediately before their respective updates.
+It verifies commit ancestry, the exact compatibility approval and an unexpired passing
+check artifact from the latest run and attempt of that SHA's branch
+publish workflow. That run must have succeeded. Both live apps must still serve the failed candidate.
+Restoration uses the same deployer and the two recorded digests, updating the backend first
+and verifying both apps together when the frontend is ready. A changed live
+pair, missing proof, expired receipt, partial start or already-current start
+blocks automatic restoration. An ambiguous PATCH stops the sequence. Inspect
+the reported disposition before rerunning a failed deployment since a rerun
+can redeploy the failed candidate.
+
 ### Rolling back a production release
 
 Coordinate the rollback with any active or queued Publish Images deploys.
@@ -676,6 +732,15 @@ or globally in Feature Flags after every NyxID replica advertises
 `reattach.credential_watch`. Enrollment requires live fleet readiness, the
 watch capability and a selected profile with `inference_credential: thread`.
 
+Standalone NyxBot specialist assignments and member turns in personal web groups
+also require `assistant:turn-handoff-v3` across the serving NyxID fleet. They
+use the same feature flag. The survivor takes over the original team slot,
+publishes an assignment to its saved report thread, or settles the member reply
+and mention budget together in the group transcript. A pending group follower
+receives its ordinary `group_settled` event when the group becomes quiet.
+Chat-app, guest, voice, shared-agent, organization-group and collaboration-group
+turns remain outside these two lanes.
+
 The admitting replica discovers missing metadata with the owner's existing
 private assistant credential. It allows two seconds in total before admission
 for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
@@ -706,7 +771,10 @@ flight finish. Keep compatible subscribers and cancellation handlers serving.
 Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
 with a URI selecting the NyxID database. Exit 0 means the majority read on the
 primary found zero outstanding conversation records. Exit 2 prints counts for
-subscribed, offered, claimed or stopped windows. A read error requires another
+subscribed, offered, claimed or stopped windows, grouped by the active team lane
+when present. Run this check before removing v3 subscribers even when rolling
+back to a v2-capable build. V2 readers decode the compatible source and skip
+version 3 in both offer discovery and the claim update. A read error requires another
 check. A stopped window clears after confirmed cancellation or after the next
 authorized admission replaces the internal credential. Deleting its marker by
 hand could let an earlier execution use the next turn's authority.

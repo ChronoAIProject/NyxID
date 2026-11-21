@@ -357,17 +357,7 @@ fn snapshot(response: &Value, id: &str) -> Result<TurnResult, TurnError> {
     if !matches!(status, "completed" | "failed" | "cancelled" | "in_progress") {
         return Err(unknown());
     }
-    let mut saved = response.clone();
-    let kind = if status == "in_progress" {
-        "completed"
-    } else {
-        status
-    };
-    saved["status"] = json!(kind);
-    let mut decoder = ResponseStream::default();
-    decoder
-        .event(json!({"type":format!("response.{kind}"),"sequence_number":0,"response":saved}))?;
-    decoder.terminal.ok_or_else(unknown)
+    engine::parse_response(response, status)
 }
 
 fn terminal_snapshot(value: &Value, binding: &RunningResponse) -> Result<TurnResult, TurnError> {
@@ -753,6 +743,7 @@ pub(super) async fn recover(
             &key,
             deadline,
             Some(sealed),
+            None,
         )
         .await
         .map_err(|_| unknown())?;

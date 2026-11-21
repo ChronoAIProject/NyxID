@@ -33,6 +33,7 @@
   "Approve": "核准",
   "Approve Request": "核准請求",
   "Approve and send": "核准並傳送",
+  "Approve within {{seconds}} seconds": "請在 {{seconds}} 秒內核准",
   "Approved": "已核准",
   "Approving also allows repeat {{service}} writes for the next {{duration}} without asking again.": "核准後，接下來的 {{duration}} 內可重複向 {{service}} 寫入，無須再次詢問。",
   "Are you sure you want to approve access to \"{{value1}}\"? A reusable approval grant will be created using your configured expiry.": "你確定要核准存取「{{value1}}」嗎？系統將依你設定的到期時間建立可重複使用的核准授權。",

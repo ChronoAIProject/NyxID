@@ -7,9 +7,9 @@ use crate::services::{
 
 // WhatsApp's production adapter is a unit struct. Only substitute the Graph
 // origin; use its production metadata lookup/download and credential handling.
-struct WhatsAppFetch(String);
+struct WhatsAppGraph(String);
 #[async_trait::async_trait]
-impl PlatformAdapter for WhatsAppFetch {
+impl PlatformAdapter for WhatsAppGraph {
     fn outbound_capabilities(&self) -> OutboundCapabilities {
         adapters::whatsapp::WhatsAppAdapter.outbound_capabilities()
     }
@@ -42,12 +42,23 @@ impl PlatformAdapter for WhatsAppFetch {
     }
     async fn send_reply(
         &self,
-        _: &reqwest::Client,
-        _: &BotCredentials<'_>,
-        _: &str,
-        _: &OutboundReply,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        chat: &str,
+        reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
-        unreachable!()
+        self.send_reply_outcome(http, credentials, chat, reply)
+            .await?
+            .into_result()
+    }
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        chat: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<SendOutcome> {
+        adapters::whatsapp::send_outcome_at(http, credentials, chat, reply, &self.0).await
     }
     async fn register_webhook(
         &self,
@@ -169,7 +180,7 @@ async fn provider(state: &AppState, row: &NyxbotChannel) -> MockServer {
         "slack" => Arc::new(adapters::slack::SlackAdapter::media_test_adapter(
             &server.uri(),
         )),
-        "whatsapp" => Arc::new(WhatsAppFetch(server.uri())),
+        "whatsapp" => Arc::new(WhatsAppGraph(server.uri())),
         "telegram" => Arc::new(adapters::telegram::TelegramAdapter::media_test_adapter(
             &server.uri(),
         )),
@@ -413,6 +424,8 @@ async fn pending_relay_redelivery_completes_once_on_the_current_route() {
     platform(&state, &mut row, "aurinko").await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let app = axum::Router::new()
         .route("/relay/{id}", axum::routing::post(relay_callback))
         .with_state(state.clone());
@@ -450,7 +463,6 @@ async fn pending_relay_redelivery_completes_once_on_the_current_route() {
         config: &state.config,
         jwt_keys: &state.jwt_keys,
         encryption_keys: &state.encryption_keys,
-        http: &state.http_client,
         rate_limiter: &state.per_channel_event_limiter,
     };
     let id = Uuid::new_v4().to_string();
@@ -1080,4 +1092,150 @@ async fn channel_guest_media_relay_adapters_and_gateway_relay_retain_only_curren
             server.abort();
         }
     }
+}
+
+#[tokio::test]
+async fn whatsapp_relay_delivered_reply_releases_chat_for_next_text() {
+    Box::pin(whatsapp_relay_turns()).await;
+}
+
+async fn whatsapp_relay_turns() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let (mut state, calls, upstream) = setup("wa_relay_turns").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (mut row, _) = channel(&state, "direct").await;
+    row.owner_sender_ids = vec!["789".into()];
+    platform(&state, &mut row, "whatsapp").await;
+    let router = Router::new()
+        .route("/api/v1/nyxbot/relay/{id}", post(relay_callback))
+        .with_state(state.clone());
+    let callback = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    state.db.collection::<bson::Document>("api_keys")
+        .update_one(doc!{"_id":&row.route_api_key_id},doc!{"$set":{"callback_url":format!("{}/api/v1/nyxbot/relay/{}",state.config.base_url,row.id)}}).await.unwrap();
+    let secret = state
+        .encryption_keys
+        .encrypt(b"test-app-secret")
+        .await
+        .unwrap();
+    let token = state
+        .encryption_keys
+        .encrypt(b"test-bot-token")
+        .await
+        .unwrap();
+    state.db.collection::<bson::Document>("channel_bots").update_one(doc! {"_id":&row.channel_bot_id},doc! {"$set":{
+        "app_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:secret},
+        "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}
+    }}).await.unwrap();
+    let graph = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/123/messages"))
+        .respond_with(|_: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"messages":[{"id":format!("wamid.{}",Uuid::new_v4())}]}))
+        })
+        .mount(&graph)
+        .await;
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(
+            row.channel_bot_id.clone(),
+            Arc::new(WhatsAppGraph(graph.uri())),
+        );
+
+    let send = async |value: Value| {
+        let body = serde_json::to_vec(
+            &json!({"object":"whatsapp_business_account","entry":[{"id":"456","changes":[
+            {"field":"messages","value":value}]}]}),
+        )
+        .unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-app-secret").unwrap();
+        mac.update(&body);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+                .parse()
+                .unwrap(),
+        );
+        Box::pin(
+            crate::handlers::channel_webhooks::handle_webhook_inner_with_producers(
+                &state,
+                &row.channel_bot_id,
+                "whatsapp",
+                &headers,
+                &body,
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+    };
+    let mut chat_id = None;
+    let mut turns = std::collections::HashSet::new();
+    for (index, text) in ["First question", "Second question"]
+        .into_iter()
+        .enumerate()
+    {
+        let source_id = format!("wamid.source{index}");
+        send(
+            json!({"messaging_product":"whatsapp","metadata":{"phone_number_id":"123"},
+            "messages":[{"id":source_id,"from":"789","type":"text","text":{"body":text}}]}),
+        )
+        .await;
+        let event = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(e) = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(doc! {"channel_id":&row.id, "delivery.state":"sent"})
+                    .sort(doc! {"created_at":-1})
+                    .await
+                    .unwrap()
+                    && !turns.contains(e.turn_id.as_ref().unwrap())
+                {
+                    break e;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("relay did not finish the WhatsApp send");
+        let out = state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .find_one(doc! {
+                "channel_bot_id":&row.channel_bot_id, "direction":"outbound"
+            })
+            .sort(doc! {"created_at":-1})
+            .await
+            .unwrap()
+            .unwrap();
+        let wamid = out.platform_message_id.unwrap();
+        send(json!({"messaging_product":"whatsapp","metadata":{"phone_number_id":"123"},
+            "statuses":[{"id":wamid,"recipient_id":"789","status":"delivered","timestamp":Utc::now().timestamp().to_string()}]})).await;
+        assert!(state.db.collection::<bson::Document>(crate::models::channel_delivery::COLLECTION_NAME)
+            .find_one(doc!{"bot_id":&row.channel_bot_id,"platform_message_id":&wamid,"times.delivered_at":{"$type":"date"}})
+            .await.unwrap().is_some());
+        let conversation = engine::get(&state.db, OWNER, event.conversation_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            chat_id.get_or_insert(conversation.id.clone()),
+            &conversation.id
+        );
+        assert!(conversation.active_turn.is_none());
+        assert!(turns.insert(event.turn_id.unwrap()));
+    }
+    assert_eq!(calls.lock().await.len(), 2);
+    assert_eq!(graph.received_requests().await.unwrap().len(), 2);
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&row.channel_bot_id);
+    callback.abort();
+    upstream.abort();
+    state.db.drop().await.unwrap();
 }

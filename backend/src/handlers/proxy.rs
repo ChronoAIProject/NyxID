@@ -668,10 +668,10 @@ fn effective_header_map(
     Ok(result)
 }
 
-fn strip_durable_idempotency_defaults(
-    headers: &mut Vec<crate::models::default_request_header::ResolvedDefaultRequestHeader>,
-) {
-    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+fn retain_durable_default(
+    header: &crate::models::default_request_header::ResolvedDefaultRequestHeader,
+) -> bool {
+    !header.name.eq_ignore_ascii_case("idempotency-key")
 }
 
 fn single_system_header(
@@ -4188,7 +4188,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 .is_some_and(|c| c.prepared_chat.is_some())
             && target.service.custom_user_agent.is_none()
             && !target
-                .catalog_default_headers
+                .catalog_headers()
                 .iter()
                 .chain(target.user_service_default_headers.iter())
                 .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
@@ -4622,8 +4622,12 @@ async fn execute_resolved_proxy_inner<'a>(
         // Idempotency forwarding is owned exclusively by the durable endpoint
         // contract. Service defaults cannot create replay semantics that the
         // selected operation did not authorize.
-        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
-        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+        target
+            .catalog_default_headers
+            .retain(retain_durable_default);
+        target
+            .user_service_default_headers
+            .retain(retain_durable_default);
     }
     if scheduled_api_key_id.is_none()
         && (durable_grant_id.is_some() || durable_operation_id.is_some())
@@ -4651,7 +4655,7 @@ async fn execute_resolved_proxy_inner<'a>(
     let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
         &all_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -5177,6 +5181,15 @@ async fn execute_resolved_proxy_inner<'a>(
                     auth_user.api_key_id.as_deref(),
                 )
                 .await?;
+            let waiter = approval_service::ConnectedWait::for_service(
+                &state.db,
+                &pending.resolution.mode,
+                &mut request_operation,
+                &operation,
+                auth_user.assistant_chat.as_deref(),
+                timeout_secs,
+            )
+            .await?;
             let approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(
                     &state.db,
@@ -5211,7 +5224,8 @@ async fn execute_resolved_proxy_inner<'a>(
             }
             // Block until the user approves/rejects or timeout expires
             let req_id = approval_request.id.clone();
-            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+            waiter
+                .wait(&approval_request, &downstream_cancellation, timeout_secs)
                 .await
                 .map_err(|error| {
                     approval_service::map_wait_for_decision_error(
@@ -8283,7 +8297,7 @@ pub(crate) fn build_downstream_ws_request(
     // set by layers 1–2; overridable defaults only fill in when the
     // handshake doesn't already carry that header.
     for h in target
-        .catalog_default_headers
+        .catalog_headers()
         .iter()
         .chain(target.user_service_default_headers.iter())
     {
@@ -9173,7 +9187,7 @@ async fn handle_ws_passthrough_via_node(
     enriched_headers = crate::models::default_request_header::merge_into_header_list(
         enriched_headers,
         &[
-            target.catalog_default_headers.as_slice(),
+            target.catalog_headers(),
             target.user_service_default_headers.as_slice(),
         ],
     );
@@ -9675,9 +9689,9 @@ mod tests {
         compose_pre_resolved_node_ids, enforce_node_route_scope, ensure_proxy_request_id,
         final_credential_class, forwarded_response_header_value, is_chat_completions_proxy_path,
         is_codex_transport_path, is_ws_upgrade_request, read_proxy_request_body,
-        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        retain_durable_default, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -9856,7 +9870,7 @@ mod tests {
                 sensitive: false,
             },
         ];
-        strip_durable_idempotency_defaults(&mut headers);
+        headers.retain(retain_durable_default);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].name, "X-Amz-Target");
     }
@@ -10805,7 +10819,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,
@@ -13596,6 +13610,288 @@ mod proxy_resolution_integration_tests {
             .expect("approval request should exist")
     }
 
+    #[derive(Clone, Copy)]
+    enum ApprovalWaitCase {
+        Disconnect,
+        Deadline,
+        Approve,
+        NyxbotAt70,
+        NyxbotAt85,
+    }
+
+    async fn exercise_connected_approval(case: ApprovalWaitCase) {
+        use crate::downstream_disconnect::{DisconnectAwareListener, DisconnectAwareMakeService};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let nyxbot = matches!(
+            case,
+            ApprovalWaitCase::NyxbotAt70 | ApprovalWaitCase::NyxbotAt85
+        );
+        let (state, owner, auth) = if nyxbot {
+            let fixture = crate::services::assistant_authority_tests::orchestrator_fixture(
+                "nyxbot_connected_write",
+            )
+            .await;
+            let mut auth = fixture.auth;
+            auth.assistant_chat = Some(Arc::new(fixture.chat));
+            auth.allow_all_services = true;
+            (fixture.state, fixture.owner, auth)
+        } else {
+            let db = connect_test_database("proxy_connected_approval")
+                .await
+                .expect("MongoDB required");
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let auth = access_token_auth(&owner);
+            (test_app_state(db), owner, auth)
+        };
+        let db = &state.db;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Router::new().route(
+            "/items",
+            post({
+                let calls = calls.clone();
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "created"
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider_url = format!("http://{}", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move { axum::serve(listener, provider).await.unwrap() });
+        let service = insert_user_service(db, &owner, "wait", &provider_url, None).await;
+        let timeout = if matches!(case, ApprovalWaitCase::Deadline) {
+            2
+        } else {
+            300
+        };
+        if nyxbot {
+            db.collection::<mongodb::bson::Document>(NOTIFICATION_CHANNELS)
+                .update_one(
+                    doc! {"user_id": &owner},
+                    doc! {"$set": {"approval_timeout_secs": timeout}},
+                )
+                .await
+                .unwrap();
+        } else {
+            let mut channel = notification_channel(&owner, timeout);
+            channel.approval_required = None;
+            db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+                .insert_one(channel)
+                .await
+                .unwrap();
+        }
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(approval_config(&owner, &service.id))
+            .await
+            .unwrap();
+        // Model 68 seconds of callback preparation without sleeping through it.
+        // The real card is then created and the real decision/wait timers run.
+        let ingress = Utc::now() - chrono::Duration::seconds(68);
+        let proxy = Router::new()
+            .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
+            .route_layer(axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Proxy,
+                ),
+            ))
+            .layer(axum::middleware::from_fn(super::ingress::callback))
+            .layer(axum::Extension(super::ingress::RequestReceivedAt(ingress)))
+            .with_state((state.clone(), auth.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = tokio::spawn(async move {
+            axum::serve(
+                DisconnectAwareListener::new(listener),
+                DisconnectAwareMakeService::new(proxy),
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
+        let card = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("proxy created a service approval");
+        if nyxbot {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
+            let decision_second = if matches!(case, ApprovalWaitCase::NyxbotAt70) {
+                70
+            } else {
+                85
+            };
+            tokio::time::sleep(
+                (ingress + chrono::Duration::seconds(decision_second) - Utc::now())
+                    .to_std()
+                    .unwrap_or_default(),
+            )
+            .await;
+        } else {
+            assert_eq!(
+                (card.expires_at - card.created_at).num_seconds(),
+                i64::from(timeout)
+            );
+        }
+        let decide = || {
+            crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(card.id.clone()),
+                Default::default(),
+                Default::default(),
+                Json(crate::handlers::approvals::DecideRequest {
+                    approved: true,
+                    duration_sec: None,
+                }),
+            )
+        };
+        match case {
+            ApprovalWaitCase::Disconnect => {
+                drop(client);
+                // Allow the origin to observe EOF, then decide within the original TTL.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                let late = decide().await;
+                tokio::time::sleep(Duration::from_millis(1100)).await;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "late decision dispatched a write"
+                );
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert!(late.is_err());
+            }
+            ApprovalWaitCase::Deadline | ApprovalWaitCase::NyxbotAt85 => {
+                if nyxbot {
+                    assert!(decide().await.is_err(), "85-second approval succeeded");
+                }
+                let mut response = String::new();
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    client.read_to_string(&mut response),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                if !nyxbot {
+                    assert!(decide().await.is_err(), "late approval succeeded");
+                }
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id": &card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                if nyxbot {
+                    let listed = crate::handlers::approvals::list_requests(
+                        State(state.clone()),
+                        crate::test_utils::test_auth_user(&owner),
+                        axum::extract::Query(crate::handlers::approvals::ApprovalRequestsQuery {
+                            status: Some("expired".into()),
+                            page: None,
+                            per_page: None,
+                            org_id: None,
+                            include_admin_orgs: None,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .0;
+                    assert!(
+                        listed
+                            .requests
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    let cards = crate::services::assistant_nyxagent::approval_history(
+                        db,
+                        &owner,
+                        auth.api_key_id.as_deref().unwrap(),
+                        &[&card.id],
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        cards
+                            .iter()
+                            .any(|item| item.id == card.id && item.status == "expired")
+                    );
+                    assert!(
+                        response.contains("approval_expired") && response.contains("Ask the owner")
+                    );
+                }
+                assert!(
+                    response.contains("Nothing was sent by this call"),
+                    "{response}"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+            ApprovalWaitCase::Approve | ApprovalWaitCase::NyxbotAt70 => {
+                assert_eq!(decide().await.unwrap().0.status, "approved");
+                let mut response = String::new();
+                tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(response.contains("created"), "{response}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+        origin.abort();
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_disconnected_proxy_expires_without_dispatch() {
+        exercise_connected_approval(ApprovalWaitCase::Disconnect).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_deadline_returns_expiry_and_refuses_late_approval() {
+        exercise_connected_approval(ApprovalWaitCase::Deadline).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_connected_approval_returns_one_provider_result() {
+        exercise_connected_approval(ApprovalWaitCase::Approve).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_70_seconds_sends_once() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt70).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_nyxbot_approval_at_85_seconds_expires_in_chat_and_approvals() {
+        exercise_connected_approval(ApprovalWaitCase::NyxbotAt85).await;
+    }
+
     #[tokio::test]
     async fn org_service_account_resolves_org_owned_slug_service() {
         let Some(db) = connect_test_database("proxy_org_sa_slug").await else {
@@ -13682,6 +13978,13 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             assert!(default.overridable);
             assert_eq!(default.value.as_str(), default_version);
+            db.collection::<DownstreamService>(SERVICES)
+                .update_one(
+                    doc! {"_id": &catalog.id},
+                    doc! {"$set": {"base_url": &base_url}},
+                )
+                .await
+                .unwrap();
             for via_node in [false, true] {
                 for explicit_version in [None, Some("2025-09-03")] {
                     let node = if via_node {

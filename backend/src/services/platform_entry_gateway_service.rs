@@ -405,10 +405,9 @@ pub(crate) async fn forward_native(
     // The audience-bound relay token names only this dedicated route/receipt;
     // no owner access token or ordinary routing record is created.
     let delivery = forward_to_agent(
-        &state.http_client,
+        Ok(super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT.post(&row.callback_url)),
         &state.config,
         &state.jwt_keys,
-        &row.callback_url,
         payload,
         &key.id,
         &key.key_hash,

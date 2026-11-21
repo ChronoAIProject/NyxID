@@ -2,17 +2,26 @@
 use super::*;
 use crate::services::org_channel_service as org;
 
-const MEMBER_REFUSAL: &str =
-    "Verify your organization membership in NyxID to chat with this assistant.";
-
+#[cfg(test)]
 pub(crate) async fn member_refusal(
     state: &AppState,
     row: &NyxbotChannel,
     sender_id: &str,
     eligible: bool,
 ) -> &'static str {
+    member_notice(state, row, sender_id, eligible)
+        .await
+        .text(None)
+}
+
+async fn member_notice(
+    state: &AppState,
+    row: &NyxbotChannel,
+    sender_id: &str,
+    eligible: bool,
+) -> Notice {
     if row.org_restored_at.is_none() || !eligible {
-        return MEMBER_REFUSAL;
+        return Notice::VerifyMember;
     }
     let previously_linked = {
         let mut prior = vec![doc! {
@@ -49,9 +58,9 @@ pub(crate) async fn member_refusal(
             .is_some()
     };
     if previously_linked {
-        "This organization connection was restored. Members must verify their chat account again in NyxID before chatting with this assistant."
+        Notice::RestoredMember
     } else {
-        MEMBER_REFUSAL
+        Notice::VerifyMember
     }
 }
 
@@ -98,8 +107,9 @@ pub(super) async fn inbound(
         Err(AppError::Forbidden(_)) => {
             return Ok(if private || addressed == Some(true) {
                 Inbound::Reply(
-                    member_refusal(state, row, sender.id, sender.owner_eligible)
+                    member_notice(state, row, sender.id, sender.owner_eligible)
                         .await
+                        .text(chat.notice_language)
                         .into(),
                 )
             } else {
@@ -126,8 +136,9 @@ pub(super) async fn inbound(
         chats::Admission::Owner | chats::Admission::Guest => {}
         chats::Admission::Refuse => {
             return Ok(Inbound::Reply(
-                member_refusal(state, row, sender.id, sender.owner_eligible)
+                member_notice(state, row, sender.id, sender.owner_eligible)
                     .await
+                    .text(chat.notice_language)
                     .into(),
             ));
         }
@@ -173,7 +184,7 @@ pub(super) async fn inbound(
             | AppError::WalletSuspended,
         ) => Ok(Inbound::Reply(InboundReply::fixed(
             NoticeKind::GuestUnavailable,
-            org::UNAVAILABLE,
+            Notice::Unavailable.text(chat.notice_language),
         ))),
         other => other,
     }

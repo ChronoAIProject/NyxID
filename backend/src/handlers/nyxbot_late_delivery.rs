@@ -40,6 +40,7 @@ pub(super) async fn prepare(
     sender: &Sender<'_>,
     guest: bool,
     addressed: bool,
+    notice_language: Option<NoticeLanguage>,
 ) -> AppResult<()> {
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
     let row = events
@@ -48,6 +49,7 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let mut metadata = ChannelTurnDelivery {
+        notice_language,
         execution_source_bound: false,
         execution_owner_verified: crate::services::execution_permission_channel::verified_owner(
             channel,
@@ -211,14 +213,27 @@ fn provider_stream_inner(
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
             Ok(outcome) => {
-                let (allowed,org_guest)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false));
+                let (allowed,org_guest,language)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false,None));
                 if !allowed {
                     let _=refuse(&state,&event_key).await;
                     guard.disarm();
                     for frame in message_frames(&response_id,None) {yield frame;}
                     return;
                 }
-                let outcome=if org_guest {outcome.map_err(|_|Box::new(engine::TurnError::new("org_channel_guest_unavailable")))} else {outcome};
+                let outcome=outcome.map_err(|mut error| {
+                    if org_guest {
+                        let notice = Notice::org_guest_failure(Some(error.code));
+                        *error = engine::TurnError::new("org_channel_guest_unavailable");
+                        error.message = notice.text(language).into();
+                    } else if error.code == "channel_retry_attachment_unavailable" {
+                        error.message = Notice::RetryAttachmentUnavailable.text(language).into();
+                    } else if error.code == "assistant_start_unavailable" {
+                        error.message = Notice::DependencyUnavailable.text(language).into();
+                    } else if error.code == "capacity_exceeded" {
+                        error.message = crate::services::channel_notices::capacity(language,error.capacity_wait_ms());
+                    }
+                    error
+                });
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 // A completed empty result still owns a terminal delivery
                 // decision. Never acquire the stream/send barrier for silence.
@@ -243,7 +258,7 @@ fn provider_stream_inner(
                             crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
                             crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
@@ -273,7 +288,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
@@ -665,6 +680,59 @@ pub(super) async fn stream_images(
     }
 }
 
+pub(crate) async fn retry_expiry(
+    state: &AppState,
+    conversation: &AssistantConversation,
+    source: &str,
+) -> AppResult<chrono::DateTime<Utc>> {
+    let turn = conversation
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let event = state.db.collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":source,"conversation_id":&conversation.id,"turn_id":&turn.turn_id,"delivery.version":1})
+        .await?.ok_or(AppError::AssistantTurnRequired)?;
+    let d = event
+        .delivery
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if crate::services::org_channel_service::event_actor(&event) != conversation.user_id {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let mut expiry = event.expires_at;
+    if let Some(target) = d.target_expires_at {
+        expiry = expiry.min(target);
+    } else if d.transport == "gateway" {
+        expiry = expiry.min(event.created_at + ChronoDuration::minutes(29));
+    }
+    if expiry > Utc::now() {
+        let (channel, _) = eligible(state, &event, d, conversation)
+            .await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if !crate::services::nyxbot_gateway_source::ready(&channel)
+            && channel.gateway_source.is_some()
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        if channel.route_id != d.source_route_id
+            || d.source_route_api_key_id.as_deref() != Some(&channel.route_api_key_id)
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let route = channel
+            .route_id
+            .as_deref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if state.db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id":route,"user_id":bot_owner(&channel),"channel_bot_id":&channel.channel_bot_id,
+                "agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}})
+            .projection(doc! {"_id":1}).await?.is_none() {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
+    Ok(expiry)
+}
+
 pub(super) async fn eligible(
     state: &AppState,
     event: &NyxbotEvent,
@@ -1039,9 +1107,18 @@ pub(super) async fn dispatch_occurrence(
 fn settled_answer(message: &AssistantMessage, d: &ChannelTurnDelivery) -> String {
     if let Some(code) = message.error_code.as_deref() {
         let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
-            crate::services::org_channel_service::UNAVAILABLE.into()
+            Notice::org_guest_failure(Some(code))
+                .text(d.notice_language)
+                .into()
+        } else if code == "channel_retry_attachment_unavailable" {
+            Notice::RetryAttachmentUnavailable
+                .text(d.notice_language)
+                .into()
+        } else if code == "assistant_start_unavailable" {
+            Notice::DependencyUnavailable.text(d.notice_language).into()
         } else if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(
+            crate::services::channel_notices::capacity(
+                d.notice_language,
                 message
                     .error_detail
                     .as_ref()
@@ -1107,24 +1184,26 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
 
 // Ordinary channels retain their existing response path. Org channel answers
 // must recheck the original actor and source immediately before streaming.
-async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bool)> {
+async fn org_stream_authority(
+    state: &AppState,
+    id: &str,
+) -> AppResult<(bool, bool, Option<NoticeLanguage>)> {
     let Some(event) = state
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":id})
         .await?
     else {
-        return Ok((true, false));
+        return Ok((true, false, None));
     };
-    let Some(d) = event
-        .delivery
-        .as_ref()
-        .filter(|d| d.origin.org_execution.is_some())
-    else {
-        return Ok((true, false));
+    let Some(d) = &event.delivery else {
+        return Ok((true, false, None));
     };
+    if d.origin.org_execution.is_none() {
+        return Ok((true, false, d.notice_language));
+    }
     let Some(conversation) = event.conversation_id.as_deref() else {
-        return Ok((false, d.guest));
+        return Ok((false, d.guest, d.notice_language));
     };
     let row = engine::get(
         &state.db,
@@ -1132,5 +1211,9 @@ async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bo
         conversation,
     )
     .await?;
-    Ok((eligible(state, &event, d, &row).await?.is_some(), d.guest))
+    Ok((
+        eligible(state, &event, d, &row).await?.is_some(),
+        d.guest,
+        d.notice_language,
+    ))
 }

@@ -109,6 +109,20 @@ const GATEWAY_LINK_REPLY: &str = concat!(
     r"Literal _ * [ ] and C:\notes\a_b",
 );
 
+fn message_output(reply: &str) -> Value {
+    json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":reply}]}])
+}
+
+fn pretool_output(answer: &str) -> Value {
+    json!([
+        {"type":"message","role":"assistant","phase":"commentary",
+         "content":[{"type":"output_text","text":"Checking the booking record."}]},
+        {"type":"mcp_call","status":"completed","name":"read_booking"},
+        {"type":"message","role":"assistant","phase":"final_answer",
+         "content":[{"type":"output_text","text":answer}]}
+    ])
+}
+
 fn assert_gateway_link_frames(frames: &[Value]) {
     let done = frames
         .iter()
@@ -134,15 +148,15 @@ fn setup_with_reply<'a>(
     name: &'a str,
     reply: &'static str,
 ) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
-    Box::pin(setup_with_reply_impl(name, reply))
+    Box::pin(setup_with_output(name, message_output(reply)))
 }
 
-async fn setup_with_reply_impl(
+async fn setup_with_output(
     name: &str,
-    reply: &'static str,
+    output: Value,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = Box::pin(connect_transaction_test_database(name)).await;
-    setup_with_database(db, reply).await
+    setup_with_database(db, output).await
 }
 
 pub(super) async fn setup_with_command_monitor(
@@ -165,14 +179,14 @@ pub(super) async fn setup_with_command_monitor(
     });
     let db = connect_transaction_test_database_with_command_handler(name, handler).await;
     (
-        (setup_with_database(db, "Here is your answer").await),
+        (setup_with_database(db, message_output("Here is your answer")).await),
         commands,
     )
 }
 
 async fn setup_with_database(
     db: mongodb::Database,
-    reply: &'static str,
+    output: Value,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     Box::pin(engine::ensure_indexes(&db)).await.unwrap();
     db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
@@ -214,6 +228,7 @@ async fn setup_with_database(
             let sink = sink.clone();
             let callbacks = callbacks.clone();
             let db = setup_db.clone();
+            let output = output.clone();
             async move {
                 // General channel tests mock the conversation engine. Visitor
                 // initialization now needs a real, authenticated model admission;
@@ -252,9 +267,7 @@ async fn setup_with_database(
                     let completed = json!({
                         "type": "response.completed", "sequence_number": 1,
                         "response": {"id": response, "conversation": {"id": session},
-                            "status": "completed", "output": [{"type": "message",
-                            "role": "assistant", "content": [{"type": "output_text",
-                            "text": reply}]}]},
+                            "status": "completed", "output": output},
                     });
                     yield Ok::<_, Infallible>(Event::default().data(completed.to_string()));
                 };
@@ -7319,7 +7332,11 @@ async fn lost_booking_reply_recovers_one_committed_receipt_on_dispatch_retry() {
 async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
     use crate::services::nyxbot_response_recovery as recovery;
     for recover in [true, false] {
-        let (state, calls, server) = setup("relay_response_recovery").await;
+        let (state, calls, server) = Box::pin(setup_with_output(
+            "relay_response_recovery",
+            pretool_output("Here is your answer"),
+        ))
+        .await;
         let (row, key, gateway, mut request) = recovery_channel(&state, !recover).await;
         let blocked = calls.lock().await;
         let response = respond(&state, &key, &request, "relay-recovery-command").await;
@@ -7379,7 +7396,12 @@ async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
         .await
         .unwrap();
         assert_eq!(body.to_string().contains("Here is your answer"), recover);
-        if !recover {
+        if recover {
+            assert_eq!(
+                body["output"][0]["content"][0]["text"],
+                "Here is your answer"
+            );
+        } else {
             assert_eq!(body["output"], json!([]));
         }
         let stored = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
@@ -7397,6 +7419,7 @@ async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
         late_delivery::process(&state, &stored.event_key).await;
         let wire = body_text(respond(&state, &key, &request, "relay-recovery-command").await).await;
         assert_eq!(wire.matches("event: response.completed").count(), 1);
+        assert!(!wire.contains("Checking the booking record."));
         assert!(wire.contains("response.completed"));
         assert_eq!(calls.lock().await.len(), 1);
         let payload = recovery::payload(&state.encryption_keys, &stored)

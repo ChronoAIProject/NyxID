@@ -2371,11 +2371,9 @@ async fn native_discord_notification_health_ignores_legacy_and_concurrent_messag
     state.db.drop().await.unwrap();
 }
 
-#[tokio::test]
-async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_turn() {
+async fn native_whatsapp_channel(state: &AppState) -> (NyxbotChannel, String) {
     use crate::models::channel_whatsapp_native as wa;
-    let (state, calls, server) = setup("whatsapp_notifications").await;
-    let (mut row, key) = native_channel(&state).await;
+    let (mut row, key) = native_channel(state).await;
     row.platform = "whatsapp".into();
     row.gateway_source = Some(GatewaySource::WhatsApp {
         app_id: "111".into(),
@@ -2399,6 +2397,22 @@ async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_
     configs.insert_one(doc!{"_id":&bot.id,"owner_id":&bot.user_id,"ownership_version":bot.ownership_version,
         "meta_app_id":"111","waba_id":"222","phone_number_id":"333","dedicated_app":true,"updated_at":bson::DateTime::now(),
         "callback":{"phase":"gateway","gateway_channel_id":&row.gateway_channel_id,"gateway_verified_at":bson::DateTime::now()}}).await.unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.route_id},
+            doc! {"$set": {"platform": "whatsapp"}},
+        )
+        .await
+        .unwrap();
+    (row, key)
+}
+
+#[tokio::test]
+async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_turn() {
+    let (state, calls, server) = setup("whatsapp_notifications").await;
+    let (row, key) = native_whatsapp_channel(&state).await;
     for kind in [
         "cma.message.updated.v1",
         "cma.message.deleted.v1",
@@ -2406,21 +2420,14 @@ async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_
         "interaction",
         "flow",
     ] {
-        let mut request = native_event(&row, "501", "");
         let prefix = if kind == "flow" {
             "native-whatsapp-flow"
         } else {
             "whatsapp"
         };
         let id = format!("{prefix}:{}", sha256_hex(kind));
-        request["metadata"]["cmaeg.event"] = json!(id);
-        request["metadata"]["cmaeg.actor"] = json!("155501");
+        let mut request = whatsapp_request(&row, &id, "155501", "");
         let a = &mut request["event_context"]["activity"];
-        a["event_id"] = json!(id);
-        a["source"] =
-            json!({"type":"whatsapp","app_id":"111","waba_id":"222","phone_number_id":"333"});
-        a["actor"] = json!({"kind":"unknown","id":"155501"});
-        a["conversation"] = json!({"kind":"private","id":"155501"});
         a["kind"] = if matches!(kind, "interaction" | "flow") {
             json!({"type":"interaction","block_id":"card","action_id":"button","values":{}})
         } else {
@@ -2434,9 +2441,13 @@ async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_
         assert_eq!(all[2]["type"], "response.completed");
         assert_eq!(all[2]["response"]["output"], json!([]));
         if kind == "flow" {
-            configs
+            state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::channel_whatsapp_native::COLLECTION_NAME,
+                )
                 .update_one(
-                    doc! {"_id":&bot.id},
+                    doc! {"_id":&row.channel_bot_id},
                     doc! {"$set":{"callback.phase":"relay"}},
                 )
                 .await
@@ -2450,6 +2461,221 @@ async fn native_whatsapp_notifications_keep_live_custody_and_complete_without_a_
         }
     }
     assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+fn whatsapp_request(row: &NyxbotChannel, id: &str, sender: &str, text: &str) -> Value {
+    let mut request = native_event(row, id, text);
+    request["metadata"]["cmaeg.event"] = json!(id);
+    request["metadata"]["cmaeg.actor"] = json!(sender);
+    let activity = &mut request["event_context"]["activity"];
+    activity["event_id"] = json!(id);
+    activity["source"] =
+        json!({"type":"whatsapp","app_id":"111","waba_id":"222","phone_number_id":"333"});
+    activity["actor"] = json!({"kind":"unknown","id":sender});
+    activity["conversation"] = json!({"kind":"private","id":sender});
+    request
+}
+
+#[tokio::test]
+async fn whatsapp_private_turn_reuse_and_queued_wake_after_restart() {
+    Box::pin(whatsapp_private_turns()).await;
+}
+
+async fn whatsapp_private_turns() {
+    let (state, calls, server) = setup("whatsapp_private_turns").await;
+    let (row, key) = native_whatsapp_channel(&state).await;
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    let mut conversation = None;
+    let mut turns = std::collections::HashSet::new();
+    for (id, text) in [
+        ("wamid.first", "First question"),
+        ("wamid.second", "Next question"),
+    ] {
+        let response = respond(&state, &key, &whatsapp_request(&row, id, "7", text), id).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let wire = body_text(response).await;
+        assert_eq!(
+            frames(&wire).last().unwrap()["response"]["output"][0]["content"][0]["text"],
+            "Here is your answer"
+        );
+        let event = events
+            .find_one(doc! {"channel_id":&row.id,"event_id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        let chat = engine::get(&state.db, OWNER, event.conversation_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert!(chat.active_turn.is_none());
+        assert!(turns.insert(event.turn_id.unwrap()));
+        assert_eq!(conversation.get_or_insert(chat.id.clone()), &chat.id);
+    }
+    let id = conversation.unwrap();
+    let prior = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            conversation_id: Some(id.clone()),
+            text: "An existing turn".into(),
+            agent_id: None,
+            model: None,
+            access_mode: None,
+            retry_of: None,
+            acknowledgement_id: None,
+            attachment_ids: Vec::new(),
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let full: Vec<_> = (0..engine::MAX_PENDING_EVENTS)
+        .map(|_| {
+            crate::services::assistant_team_service::event("system", "Pending update".into(), None)
+        })
+        .collect();
+    engine::push_events(&state.db, OWNER, &id, full)
+        .await
+        .unwrap();
+    let chat = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&row.id, "platform_chat_id":"7"})
+        .await
+        .unwrap()
+        .unwrap();
+    for (event_id, language, expected) in [
+        (
+            "wamid.refused",
+            None,
+            "NyxBot is busy. Please try again shortly.",
+        ),
+        (
+            "wamid.refused.zh",
+            Some("zh-CN"),
+            "NyxBot 正忙，请稍后再试。",
+        ),
+    ] {
+        if let Some(language) = language {
+            chats::update_chat(
+                &state,
+                OWNER,
+                &chat.id,
+                &chats::ChatSettings {
+                    notice_language: Some(language.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let refused = whatsapp_request(&row, event_id, "7", "When will there be capacity?");
+        let refusal = respond(&state, &key, &refused, event_id).await;
+        assert_eq!(refusal.status(), StatusCode::OK);
+        let refused_frames = frames(&body_text(refusal).await);
+        assert_eq!(
+            refused_frames.last().unwrap()["response"]["output"][0]["content"][0]["text"],
+            expected
+        );
+    }
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let health = crate::handlers::channel_bots::health_for(&bot, true, true);
+    assert_eq!(
+        health.diagnostics.last_inbound_source.as_deref(),
+        Some("native_whatsapp_gateway")
+    );
+    assert_eq!(
+        health.diagnostics.last_inbound_outcome.unwrap().code,
+        "whatsapp_turn_busy"
+    );
+    assert_eq!(
+        engine::get(&state.db, OWNER, &id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        engine::MAX_PENDING_EVENTS
+    );
+    crate::services::assistant_team_service::drop_events(&state.db, OWNER, &id)
+        .await
+        .unwrap();
+    let input = whatsapp_request(&row, "wamid.queued", "7", "A distinct queued question");
+    let response = respond(&state, &key, &input, "wa-queued").await;
+    let response_id = response.headers()["x-cma-response-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    drop(response);
+    let stored = wait_native_bound(&state, &row, &response_id, true).await;
+    let pending = engine::get(&state.db, OWNER, &id).await.unwrap();
+    assert!(
+        pending
+            .pending_events
+            .iter()
+            .any(|e| e.source_event_ids.contains(&stored.event_key))
+    );
+
+    // The predecessor stopped after committing settlement but before its wake.
+    // Resume with fresh in-memory workers over the same durable queue.
+    engine::finish_turn(
+        &state.db,
+        &prior,
+        &prior.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Existing turn finished".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let restarted = test_app_state(state.db.clone());
+    let work = crate::services::assistant_team_service::queued(&restarted.db, None)
+        .await
+        .unwrap();
+    let queued = work
+        .iter()
+        .find(|chat| chat.id == id)
+        .expect("restart sweep must discover the chat");
+    Box::pin(crate::handlers::assistant_team::wake(
+        &restarted,
+        &queued.user_id,
+        &queued.id,
+    ))
+    .await;
+    let response = native_responses::events(
+        State(restarted),
+        Path(response_id),
+        axum::extract::Query(native_responses::Cursor {
+            starting_after: None,
+        }),
+        bearer(&key),
+    )
+    .await;
+    let wire = body_text(response).await;
+    assert_eq!(
+        frames(&wire).last().unwrap()["response"]["output"][0]["content"][0]["text"],
+        "Here is your answer"
+    );
+    let finished = engine::get(&state.db, OWNER, &id).await.unwrap();
+    assert!(finished.pending_events.is_empty() && finished.active_turn.is_none());
+    assert!(
+        turns.insert(
+            events
+                .find_one(doc! {"_id":&stored.event_key})
+                .await
+                .unwrap()
+                .unwrap()
+                .turn_id
+                .unwrap()
+        )
+    );
+    assert_eq!(calls.lock().await.len(), 3);
     server.abort();
     state.db.drop().await.unwrap();
 }

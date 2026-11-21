@@ -234,6 +234,8 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     // NyxID itself, so the relay callback is a real HTTP request.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let (_, router) = crate::routes::build_router_with_state(state.clone());
     let app = router.with_state(state.clone());
     let nyxid = tokio::spawn(async move {

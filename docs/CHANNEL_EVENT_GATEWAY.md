@@ -229,7 +229,7 @@ New file. Single endpoint: `POST /api/v1/channel-events/{conversation_id}`.
 Responsibilities:
 
 - Auth gate: reject `auth_user.auth_method != AuthMethod::ApiKey` with 401. Relay tokens, session cookies, and service-account tokens are all turned away at the handler boundary.
-- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. **No payload size limit** per ADR-013 — the router disables `DefaultBodyLimit` for this path.
+- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. The API-key check precedes JSON extraction. The streaming body limit is `PROXY_MAX_BODY_SIZE` (100 MiB by default).
 - Delegation: hands the validated envelope to `channel_event_service::forward_event()`.
 - Response shape: `{ "status": "accepted" | "duplicate", "event_id": "..." }`.
 
@@ -306,10 +306,10 @@ let channel_event_routes = Router::new()
         "/{conversation_id}",
         post(handlers::channel_events::post_event),
     )
-    .layer(DefaultBodyLimit::disable());
+    .layer(DefaultBodyLimit::max(config.proxy_max_body_size));
 ```
 
-Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. `DefaultBodyLimit::disable()` opts this router out of the app-wide 1 MiB body cap — per ADR-013 the gateway does not enforce an application-level payload size limit on device events.
+Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. A body exceeding the configured limit returns HTTP 413.
 
 ## AppState Integration
 

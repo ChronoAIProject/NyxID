@@ -747,6 +747,7 @@ fn untracked_discovery_allowed(name: Option<&str>) -> bool {
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    connection_cancellation: tokio_util::sync::CancellationToken,
     execution_permission:
         Option<std::sync::Arc<crate::services::execution_permission_dispatch::RequestContext>>,
     oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
@@ -827,6 +828,7 @@ impl McpAuthContext {
 
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            connection_cancellation: Default::default(),
             execution_permission: None,
             oauth_lineage: None,
             machine_source: None,
@@ -1151,6 +1153,7 @@ async fn authenticate_mcp_or_public(
                     chat.execution_permission = execution_permission.clone();
                 }
                 return Ok(McpAuthentication::Ordinary(Box::new(McpAuthContext {
+                    connection_cancellation: Default::default(),
                     execution_permission,
                     oauth_lineage: None,
                     machine_source: if chat.is_none()
@@ -1800,7 +1803,7 @@ pub async fn mcp_post(
     if watch_initialize {
         state.db = crate::services::transaction_service::durable_database(&state.db);
     }
-    let auth = match authenticate_mcp_or_public(
+    let mut auth = match authenticate_mcp_or_public(
         &state,
         &headers,
         !is_initialize,
@@ -1820,6 +1823,7 @@ pub async fn mcp_post(
         Err(resp) => return resp,
     };
 
+    auth.connection_cancellation = cancellation.clone();
     if let Some(context) = &auth.execution_permission {
         context.capture_idempotency(&headers);
         context.bind_cancellation(cancellation);
@@ -4416,6 +4420,22 @@ async fn authorize_mcp_operation(
     )
     .await
     .map_err(|_| tool_result(request_id.clone(), "Group approval is unavailable", true))?;
+    let waiter = approval_service::ConnectedWait::for_service(
+        &state.db,
+        &pending.resolution.mode,
+        &mut request_operation,
+        operation,
+        auth.chat.as_ref(),
+        timeout_secs,
+    )
+    .await
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -4455,7 +4475,12 @@ async fn authorize_mcp_operation(
         .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
     }
     let req_id = approval_request.id.clone();
-    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+    waiter
+        .wait(
+            &approval_request,
+            &auth.connection_cancellation,
+            timeout_secs,
+        )
         .await
         .map_err(|error| {
             let outcome =
@@ -8120,6 +8145,7 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            connection_cancellation: Default::default(),
             execution_permission: None,
             oauth_lineage: None,
             machine_source: None,
@@ -8732,6 +8758,72 @@ mod tests {
         let auth = McpAuthContext::user("user-1".into(), AuthMethod::Session);
         let svc = platform("svc-x");
         assert!(ensure_service_in_scope(&auth, &svc, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2705_mcp_shorter_owner_deadline_returns_model_guidance() {
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "mcp_nyxbot_write_deadline",
+        )
+        .await;
+        let db = &f.state.db;
+        db.collection::<mongodb::bson::Document>(
+            crate::models::notification_channel::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"user_id": &f.owner},
+            doc! {"$set": {"approval_required": true, "approval_timeout_secs": 30}},
+        )
+        .await
+        .unwrap();
+        let target = crate::services::mcp_approval::McpApprovalTarget {
+            service_id: uuid::Uuid::new_v4().to_string(),
+            service_owner_user_id: f.owner.clone(),
+            service_name: "Drive".into(),
+            service_slug: "drive".into(),
+            is_auto_connected: false,
+        };
+        let mut auth = McpAuthContext::user(f.owner.clone(), AuthMethod::ApiKey);
+        auth.is_api_key = true;
+        auth.api_key_id = Some(f.chat.api_key_id.clone());
+        auth.chat = Some(f.chat);
+        let ingress = chrono::Utc::now() - chrono::Duration::seconds(31);
+        let operation = operation_descriptor::build_mcp_descriptor("POST", "/folders", None);
+        let result = approval_service::CALLBACK_INGRESS
+            .scope(
+                ingress,
+                authorize_mcp_operation(
+                    &f.state,
+                    &auth,
+                    target,
+                    &operation,
+                    Some(serde_json::json!(42)),
+                ),
+            )
+            .await;
+        let response = result.expect_err("expired tool call");
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["result"]["isError"], true, "{rpc}");
+        let outcome: serde_json::Value =
+            serde_json::from_str(rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(outcome["code"], "approval_expired");
+        assert!(
+            outcome["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Nothing was sent")
+        );
+        let card = approval_service::get_request(db, outcome["request_id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(card.status, "expired");
+        assert_eq!(
+            card.expires_at.timestamp_millis(),
+            (ingress + chrono::Duration::seconds(30)).timestamp_millis()
+        );
     }
 
     #[tokio::test]

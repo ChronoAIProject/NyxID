@@ -2317,7 +2317,6 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );
@@ -2331,6 +2330,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
+        jobs: Arc::new(crate::services::job_health::Jobs::new(&config)),
         app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(crate::mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: crate::services::shutdown::Runtime::default(),

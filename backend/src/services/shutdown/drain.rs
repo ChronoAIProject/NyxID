@@ -267,42 +267,30 @@ impl Drain {
             "end": end,
         });
         tracing::info!(target: "nyxid::shutdown", event = "backend_shutdown_drain", metadata = %metadata, "Backend shutdown drain finished");
-        if !matches!(
-            tokio::time::timeout_at(
-                audit_deadline,
-                crate::services::audit_service::log_system_event(
-                    state.db.clone(),
-                    "backend_shutdown_drain",
-                    Some(metadata)
-                )
-            )
-            .await,
-            Ok(Ok(()))
-        ) {
-            tracing::warn!(target: "nyxid::shutdown", "Shutdown audit unavailable");
-        }
+        snapshot_audit(
+            state.db.clone(),
+            "backend_shutdown_drain",
+            metadata,
+            audit_deadline,
+        )
+        .await;
     }
 }
 
-/// Shared bounded chained append for start and progress. The start is joined
-/// through spawn_cleanup; progress is owned directly by the shutdown coordinator
-/// and cancelled at finish, so its IO never adds an idle/cleanup dependency.
 async fn snapshot_audit(
     db: mongodb::Database,
     event: &'static str,
     metadata: serde_json::Value,
     deadline: Instant,
 ) {
-    if !matches!(
-        tokio::time::timeout_at(
-            deadline,
-            crate::services::audit_service::log_system_event(db, event, Some(metadata)),
-        )
-        .await,
-        Ok(Ok(()))
-    ) {
-        tracing::warn!(target: "nyxid::shutdown", event, "Shutdown snapshot audit unavailable or timed out");
-    }
+    let append =
+        crate::services::audit_service::log_system_event(db, event, Some(metadata.clone()));
+    let audit_outcome = match tokio::time::timeout_at(deadline, append).await {
+        Ok(Ok(())) => return,
+        Ok(Err(_)) => "failed",
+        Err(_) => "timed_out",
+    };
+    tracing::warn!(target: "nyxid::shutdown", event, audit_outcome, metadata = %metadata, "Shutdown audit unavailable");
 }
 
 pub(super) fn shutdown_candidates_filter() -> mongodb::bson::Document {

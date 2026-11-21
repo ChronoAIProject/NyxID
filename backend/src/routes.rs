@@ -2376,20 +2376,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::channel_relay::resolve_sender),
         );
 
-    // HTTP Event Gateway — device event ingress (NyxID#221, ADR-013).
-    // Authenticated via API key; rate-limited per conversation.
-    //
-    // `DefaultBodyLimit::disable()` opts this router out of the app-wide
-    // 1 MiB body cap set in `main.rs`. Per the plan §8.1 and the gateway
-    // design doc §NOT in Scope, NyxID deliberately does not enforce an
-    // application-level payload size limit on device events — analyzers
-    // that ship larger JSON blobs or embedded metadata must be accepted.
     let channel_event_routes = Router::new()
         .route(
             "/{conversation_id}",
             post(handlers::channel_events::post_event),
         )
-        .layer(DefaultBodyLimit::disable());
+        .layer(DefaultBodyLimit::max(
+            router_state
+                .as_ref()
+                .map_or(100 * 1024 * 1024, |state| state.config.proxy_max_body_size),
+        ));
 
     let developer_routes = Router::new()
         .route(
@@ -2425,6 +2421,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
         .layer(axum::Extension(handlers::proxy::ingress::HttpIngress))
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
@@ -4012,6 +4011,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // MCP payloads may contain proxied tool inputs. The handlers retain explicit
     // PROXY_MAX_BODY_SIZE / PUBLIC_PROXY_MAX_BODY_SIZE bounds.
     let mcp_transport_routes = mcp_billing_routes!(register_billing_routes, Router::new())
+        .layer(axum::middleware::from_fn(
+            handlers::proxy::ingress::callback,
+        ))
         .layer(DefaultBodyLimit::disable());
     let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
         .layer(DefaultBodyLimit::disable());

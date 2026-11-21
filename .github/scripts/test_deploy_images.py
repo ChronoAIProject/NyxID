@@ -8,11 +8,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 from urllib.parse import parse_qs, quote_plus, urlsplit
 
-from deploy_images import DeployError, Rollout, load_target, main
+from deploy_images import DeployError, Rollout, load_target, main, published_digests
+import post_deploy_check
 
 
 SECRET = "fake +&secret"
 TOKEN = "fake.bearer"
+DIGESTS = {"backend": "sha256:" + "a" * 64, "frontend": "sha256:" + "b" * 64}
 
 
 def fake_config(suffix):
@@ -47,6 +49,15 @@ class TargetConfigTests(unittest.TestCase):
         self.assertEqual(output.getvalue() + errors.getvalue(), "")
         for value in private_values(fake_config("a")) | set(invalid_values):
             self.assertNotIn(value, message)
+
+    def test_manifest_lookup_requires_two_top_level_digests(self):
+        outputs = [subprocess.CompletedProcess([], 0, f"Name: image\nDigest: {digest}\n")
+                   for digest in DIGESTS.values()]
+        with patch("deploy_images.subprocess.run", side_effect=outputs) as inspect:
+            self.assertEqual(published_digests("dev", "1" * 40), DIGESTS)
+        self.assertTrue(inspect.call_args_list[0].args[0][-1].endswith("/backend:dev-1111111"))
+        with patch("deploy_images.subprocess.run", side_effect=[outputs[0], subprocess.CompletedProcess([], 0, "bad")]):
+            self.assertEqual(published_digests("dev", "1" * 40), {})
 
     def test_requires_single_line_json_object(self):
         for raw in (None, "", "bad-private-json", "null", "[]", json.dumps(fake_config("a"), indent=2)):
@@ -113,6 +124,8 @@ class FakeDeployment:
         self.health_sequence = []
         self.frontend_versions = []
         self.pod_reason = "FixturePod"
+        self.image_sha = case.sha
+        self.digests = {}
         self.patch_failure = None
         self.status_failure = None
 
@@ -147,12 +160,13 @@ class FakeDeployment:
                 self.events.append(("patch", app))
                 case.assertEqual(parsed.path, prefix + app)
                 case.assertEqual(headers["Content-Type"], "application/json")
-                case.assertEqual(json.loads(body), {"services": {service: {
-                    "image": f"ghcr.io/chronoaiproject/nyxid/{component}:{case.branch}-{case.sha[:7]}",
-                }}})
+                expected = f"ghcr.io/chronoaiproject/nyxid/{component}:{case.branch}-{self.image_sha[:7]}"
+                if self.digests:
+                    expected += "@" + self.digests[component]
+                case.assertEqual(json.loads(body), {"services": {service: {"image": expected}}})
                 if self.patch_failure:
                     return self.patch_failure
-                self.commits[app] = case.sha[:12]
+                self.commits[app] = self.image_sha[:12]
                 return 200, b"{}"
             case.assertEqual(method, "GET")
             case.assertEqual(parsed.path, prefix + app + "/status")
@@ -203,6 +217,7 @@ class StagingDeployTests(unittest.TestCase):
 
         tree = git("mktree")
         base = git("commit-tree", tree, "-m", "base")
+        cls.previous = base
         cls.old = base[:12]
         cls.sha = git("commit-tree", tree, "-p", base, "-m", "candidate")
         cls.newer = git("commit-tree", tree, "-p", cls.sha, "-m", "newer")[:12]
@@ -248,7 +263,7 @@ class StagingDeployTests(unittest.TestCase):
         s = self.server
         rollout = Rollout(self.target, send=s.send, sleep=s.sleep, clock=lambda: s.now, timeout=timeout)
         try:
-            rollout.run(self.sha, self.client_id, SECRET)
+            return rollout.run(self.sha, self.client_id, SECRET)
         except DeployError as error:
             self.assert_private_values_absent(str(error))
             raise
@@ -269,9 +284,86 @@ class StagingDeployTests(unittest.TestCase):
         self.assertNotIn(SECRET, self.output.getvalue())
         self.assertNotIn(TOKEN, self.output.getvalue())
 
+    def restore(self):
+        server = self.server
+        server.image_sha = self.previous
+        server.digests = DIGESTS
+        rollout = Rollout(self.target, send=server.send, sleep=server.sleep, clock=lambda: server.now)
+        rollout.restore(self.sha, self.previous, DIGESTS, self.client_id, SECRET)
+
+    def test_pinned_forward_patches_record_both_applied_digests(self):
+        self.server.digests = DIGESTS
+        s = self.server
+        rollout = Rollout(self.target, send=s.send, sleep=s.sleep, clock=lambda: s.now)
+        with patch.dict(os.environ, {"NYXID_PIN_CHECK_IMAGES": "true"}), \
+                patch("deploy_images.published_digests", return_value=DIGESTS):
+            self.assertEqual(rollout.run(self.sha, self.client_id, SECRET), self.old)
+        self.assertEqual(rollout.applied_digests, DIGESTS)
+
+    def test_restore_previous_passing_pair_backend_then_frontend(self):
+        self.assertEqual(self.deploy(), self.old)
+        self.server.events.clear()
+        self.restore()
+        self.assertEqual(self.writes(), [self.backend, self.frontend])
+        self.assertEqual(set(self.server.commits.values()), {self.old})
+        last = self.server.events[self.server.events.index(("patch", self.frontend)):]
+        self.assertEqual(last.count(("status", self.backend, "ready")), 3)
+
+    def test_failed_model_restores_observed_pair_before_sending_alert(self):
+        observed = self.deploy()
+        account = {"email": "runner@example.test", "password": "fixture", "owner_id": "ad3df9fa-eb5f-4190-a329-f5cb683b36ac",
+                   "conversation_id": "nyxa-" + "c" * 32, "channel_id": "e082a538-c99d-458d-8bc0-81d3505788e6"}
+        server = self.server
+        server.image_sha = self.previous
+        server.digests = DIGESTS
+
+        def failed_probe(_origin, _account, record):
+            record["stage"] = "model_reply"
+            raise post_deploy_check.CheckError
+
+        def alert(method, url, body, **kwargs):
+            self.assertEqual(set(server.commits.values()), {self.old})
+            self.assertIn("restored", body["text"])
+
+        env = {"GITHUB_SHA": self.sha, "GITHUB_REPOSITORY": "example/repo", "GITHUB_RUN_ID": "1",
+               self.credential_prefix + "_ID": self.client_id, self.credential_prefix + "_SECRET": SECRET,
+               "NYXID_CHECK_ACCOUNT": json.dumps(account), "NYXID_CHECK_ALERT_URL": "https://test.invalid/hook",
+               "NYXID_DEPLOY_TARGET": json.dumps(self.config), "PREVIOUS_COMMIT": observed,
+               "NYXID_ROLLBACK_PAIR": f"{self.previous}..{self.sha}"}
+        with patch.dict(os.environ, env), patch.object(post_deploy_check, "probe", side_effect=failed_probe), \
+                patch.object(post_deploy_check, "prior_images", return_value=DIGESTS), \
+                patch.object(post_deploy_check, "http_request", side_effect=alert), \
+                patch.object(post_deploy_check, "Rollout", return_value=Rollout(
+                    self.target, send=server.send, sleep=server.sleep, clock=lambda: server.now)):
+            result = post_deploy_check.run(self.name)
+        self.assertEqual(self.writes(), [self.backend, self.frontend] * 2)
+        self.assertEqual((result["outcome"], result["rollback"], result["notification"]), ("failed", "restored", "sent"))
+
+    def test_restore_backend_patch_failure_stops_before_frontend(self):
+        self.deploy()
+        self.server.patch_failure = 500, b"{}"
+        with self.assertRaisesRegex(DeployError, "^backend$"):
+            self.restore()
+        self.assertEqual(self.writes(), [self.backend, self.frontend, self.backend])
+
+    def test_restore_checks_peer_before_first_patch(self):
+        self.deploy()
+        self.server.frontend_versions = [(200, json.dumps({"commit": value}).encode())
+                                         for value in (self.sha[:12], self.newer)]
+        with self.assertRaises(DeployError):
+            self.restore()
+        self.assertEqual(self.writes(), [self.backend, self.frontend])
+
+    def test_restore_refuses_changed_pair(self):
+        self.deploy()
+        self.server.commits[self.backend] = self.other
+        with self.assertRaises(DeployError):
+            self.restore()
+        self.assertEqual(self.writes(), [self.backend, self.frontend])
+
     def test_both_apps_already_deployed(self):
         self.server.commits = dict.fromkeys([self.backend, self.frontend], self.sha[:12])
-        self.deploy()
+        self.assertEqual(self.deploy(), "")
         self.assertEqual(self.writes(), [])
         self.assertEqual(self.output.getvalue(), f"Skipping deployment, {self.target.name} already ready "
                          f"at {self.sha[:12]} (backend already current, frontend already current).\n")
@@ -281,7 +373,7 @@ class StagingDeployTests(unittest.TestCase):
             with self.subTest(role=role):
                 self.server.commits = dict.fromkeys((self.backend, self.frontend), self.old)
                 self.server.commits[app] = self.newer
-                self.deploy()
+                self.assertIsNone(self.deploy())
                 self.assertEqual(self.writes(), [])
                 self.assertIn(f"{role} already runs newer commit {self.newer}", self.output.getvalue())
 
@@ -325,7 +417,7 @@ class StagingDeployTests(unittest.TestCase):
 
     def test_partial_rollout_resumes_only_frontend(self):
         self.server.commits[self.backend] = self.sha[:12]
-        self.deploy()
+        self.assertEqual(self.deploy(), "")
         self.assertEqual(self.writes(), [self.frontend])
 
     def test_old_frontend_missing_version_document_can_be_upgraded(self):

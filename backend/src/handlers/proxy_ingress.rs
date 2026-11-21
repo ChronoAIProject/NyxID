@@ -23,6 +23,28 @@ mod body;
 #[derive(Clone, Copy)]
 pub(crate) struct HttpIngress;
 
+/// Set before routing, authentication or body reads. Only callback routes open
+/// the approval scope, including their nested service dispatches.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReceivedAt(pub(super) chrono::DateTime<chrono::Utc>);
+
+pub(crate) async fn stamp(mut request: Request<Body>) -> Request<Body> {
+    request
+        .extensions_mut()
+        .insert(RequestReceivedAt(chrono::Utc::now()));
+    request
+}
+
+pub(crate) async fn callback(request: Request<Body>, next: axum::middleware::Next) -> Response {
+    let received = request
+        .extensions()
+        .get::<RequestReceivedAt>()
+        .map_or_else(chrono::Utc::now, |at| at.0);
+    crate::services::approval_service::CALLBACK_INGRESS
+        .scope(received, next.run(request))
+        .await
+}
+
 pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
     limiter: &RefusalThrottle,
     auth: &AuthUser,

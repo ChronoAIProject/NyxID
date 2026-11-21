@@ -154,6 +154,7 @@ pub struct AppState {
         Arc<mw::app_management_observations::AppManagementObservations>,
     pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
     pub shutdown: services::shutdown::Runtime,
+    pub(crate) jobs: Arc<services::job_health::Jobs>,
     pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
@@ -736,6 +737,7 @@ async fn server_run(cli: Cli) {
         return;
     }
 
+    let jobs = Arc::new(services::job_health::Jobs::new(&config));
     services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
     services::billing::account_reconciliation::spawn(
         db.clone(),
@@ -747,6 +749,7 @@ async fn server_run(cli: Cli) {
         audit_chain_hmac_key.clone(),
         billing_ledger_hmac_key.clone(),
         config.chain_verify_interval_secs,
+        jobs.chain_verify.clone(),
     );
 
     #[cfg(all(test, unix))]
@@ -1172,7 +1175,6 @@ async fn server_run(cli: Cli) {
         .expect("Failed to load platform broker policy");
     let developer_webhook_dispatcher = Arc::new(
         services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );
@@ -1208,6 +1210,7 @@ async fn server_run(cli: Cli) {
             .expect("Invalid crash reporting configuration"),
     );
     let state = AppState {
+        jobs,
         app_management_observations: Arc::default(),
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
@@ -1430,6 +1433,7 @@ async fn server_run(cli: Cli) {
     let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
+        state.jobs.billing_reconcile.clone(),
     );
     state.billing.spawn_refresh_worker();
     services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
@@ -1793,11 +1797,12 @@ async fn server_run(cli: Cli) {
             60
         };
         services::shutdown::process().spawn_worker(async move {
+            let job = &poll_state.jobs.channel_polls;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
-                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                let Some(_work) = job.tick(&poll_state.shutdown, &mut interval).await else {
                     break;
                 };
                 if services::channel_billing_service::sweep(&poll_state)
@@ -1809,7 +1814,8 @@ async fn server_run(cli: Cli) {
                     );
                 }
                 if poll_state.config.channel_poll_interval_secs > 0
-                    && services::channel_poll_service::sweep(&poll_state)
+                    && job
+                        .observe(services::channel_poll_service::sweep(&poll_state))
                         .await
                         .is_err()
                 {
@@ -2014,7 +2020,8 @@ async fn server_run(cli: Cli) {
         .layer(axum_mw::from_fn_with_state(
             shutdown_state.shutdown.clone(),
             mw::shutdown::track,
-        ));
+        ))
+        .layer(axum_mw::map_request(handlers::proxy::ingress::stamp));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
@@ -2077,6 +2084,10 @@ async fn server_run(cli: Cli) {
         internal_body_limit,
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
     )
+    .merge(handlers::health::worker_health_router(
+        shutdown_state.jobs.clone(),
+        shutdown_state.shutdown.clone(),
+    ))
     .layer(axum_mw::from_fn_with_state(
         shutdown_state.shutdown.clone(),
         mw::shutdown::track,

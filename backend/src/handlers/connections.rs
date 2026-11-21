@@ -111,10 +111,15 @@ pub async fn list_connections(
 ) -> AppResult<Json<ConnectionListResponse>> {
     let user_id = auth_user.user_id.to_string();
 
+    let mut filter = doc! { "user_id": &user_id, "is_active": true };
+    if let Some(ids) = auth_user.api_key_service_scope() {
+        filter.insert("service_id", doc! { "$in": ids });
+    }
+
     let conns: Vec<UserServiceConnection> = state
         .db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": &user_id, "is_active": true })
+        .find(filter)
         .await?
         .try_collect()
         .await?;
@@ -167,6 +172,10 @@ pub async fn connect_service(
     Path(service_id): Path<String>,
     Json(body): Json<ConnectRequest>,
 ) -> AppResult<Json<ConnectResponse>> {
+    crate::services::key_service::ensure_api_key_service_scope(
+        auth_user.api_key_service_scope(),
+        std::slice::from_ref(&service_id),
+    )?;
     let user_id = auth_user.user_id.to_string();
 
     let result = connection_service::connect_user(
@@ -212,6 +221,10 @@ pub async fn update_connection_credential(
     Path(service_id): Path<String>,
     Json(body): Json<UpdateCredentialRequest>,
 ) -> AppResult<Json<UpdateCredentialResponse>> {
+    crate::services::key_service::ensure_api_key_service_scope(
+        auth_user.api_key_service_scope(),
+        std::slice::from_ref(&service_id),
+    )?;
     let user_id = auth_user.user_id.to_string();
 
     connection_service::update_credential(
@@ -251,6 +264,10 @@ pub async fn disconnect_service(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<DisconnectResponse>> {
+    crate::services::key_service::ensure_api_key_service_scope(
+        auth_user.api_key_service_scope(),
+        std::slice::from_ref(&service_id),
+    )?;
     let user_id = auth_user.user_id.to_string();
 
     connection_service::disconnect_user(&state.db, &user_id, &service_id).await?;
@@ -281,6 +298,10 @@ pub async fn get_connection_authorization(
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<ConnectionAuthorizationEvidenceResponse>> {
+    crate::services::key_service::ensure_api_key_service_scope(
+        auth_user.api_key_service_scope(),
+        std::slice::from_ref(&service_id),
+    )?;
     let user_id = auth_user.user_id.to_string();
     let connection = state
         .db
@@ -328,6 +349,85 @@ mod tests {
             .insert_one(&svc)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_connections_follow_effective_service_scope() {
+        use crate::{errors::AppError, mw::auth::AuthMethod};
+        let db = connect_test_database("legacy_connection_scope")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut key = test_auth_user(&owner);
+        key.auth_method = AuthMethod::ApiKey;
+        key.allow_all_services = false;
+        key.allowed_service_ids = vec!["included".into()];
+        let state = test_app_state(db.clone());
+        for id in ["included", "other"] {
+            insert_connection_service(&db, id).await;
+            let _ = connect_service(
+                State(state.clone()),
+                test_auth_user(&owner),
+                Path(id.into()),
+                Json(ConnectRequest {
+                    credential: Some("fixture".into()),
+                    credential_label: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let Json(list) = list_connections(State(state.clone()), key.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            list.connections
+                .iter()
+                .map(|row| row.service_id.as_str())
+                .collect::<Vec<_>>(),
+            ["included"]
+        );
+        for id in ["other", "included"] {
+            let allowed = id == "included";
+            let evidence =
+                get_connection_authorization(State(state.clone()), key.clone(), Path(id.into()))
+                    .await;
+            let update = update_connection_credential(
+                State(state.clone()),
+                key.clone(),
+                Path(id.into()),
+                Json(UpdateCredentialRequest {
+                    credential: "fixture".into(),
+                    credential_label: None,
+                }),
+            )
+            .await;
+            let disconnect =
+                disconnect_service(State(state.clone()), key.clone(), Path(id.into())).await;
+            let connect = connect_service(
+                State(state.clone()),
+                key.clone(),
+                Path(id.into()),
+                Json(ConnectRequest {
+                    credential: Some("fixture".into()),
+                    credential_label: None,
+                }),
+            )
+            .await;
+            for result in [
+                evidence.map(|_| ()),
+                update.map(|_| ()),
+                disconnect.map(|_| ()),
+                connect.map(|_| ()),
+            ] {
+                if allowed {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(result, Err(AppError::ApiKeyScopeForbidden(_))));
+                }
+            }
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

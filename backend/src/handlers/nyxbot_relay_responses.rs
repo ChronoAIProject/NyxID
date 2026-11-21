@@ -277,7 +277,17 @@ pub(super) async fn settle_admission(
         Ok(Inbound::Reply(text)) => (Some(text.text.as_str()), false),
         Ok(Inbound::Silent(_)) => (None, false),
         Ok(Inbound::Busy) => (
-            Some("NyxBot is busy. This message was not started. Please try again shortly."),
+            Some(
+                Notice::RelayBusy.text(
+                    crate::services::channel_notices::chat_language(
+                        &state.db,
+                        &stored.channel_id,
+                        &stored.partition,
+                    )
+                    .await
+                    .unwrap_or_default(),
+                ),
+            ),
             false,
         ),
         Err(_) => {

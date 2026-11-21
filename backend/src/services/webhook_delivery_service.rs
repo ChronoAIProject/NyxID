@@ -1,6 +1,7 @@
 //! Shared outbound webhook signing and bounded delivery.
 
 use hmac::{Hmac, Mac};
+#[cfg(test)]
 use reqwest::Client;
 use sha2::Sha256;
 use std::time::Duration;
@@ -8,6 +9,8 @@ use tokio::time::sleep;
 
 use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
+
+pub(super) const DESTINATION_REFUSED: &str = "destination_refused";
 
 const MAX_ATTEMPTS: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 1_000;
@@ -66,7 +69,6 @@ pub struct DeliveryFailure {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_signed_body(
-    http_client: &Client,
     url: &str,
     secret: &[u8],
     event_type: &str,
@@ -80,7 +82,6 @@ pub async fn deliver_signed_body(
         policy.timeout = LEGACY_REVOCATION_HTTP_TIMEOUT;
     }
     deliver_with_policy(
-        http_client,
         url,
         secret,
         event_type,
@@ -95,7 +96,6 @@ pub async fn deliver_signed_body(
 
 #[allow(clippy::too_many_arguments)]
 async fn deliver_with_policy(
-    http_client: &Client,
     url: &str,
     secret: &[u8],
     event_type: &str,
@@ -105,6 +105,16 @@ async fn deliver_with_policy(
     key_id: Option<&str>,
     policy: DeliveryPolicy,
 ) -> Result<(), DeliveryFailure> {
+    let (target, http_client) =
+        super::proxy_destination::http::signed_webhook(url).map_err(|error| DeliveryFailure {
+            attempts: 0,
+            reason: if matches!(error, AppError::ValidationError(_)) {
+                DESTINATION_REFUSED
+            } else {
+                "transport_unavailable"
+            },
+            last_status: None,
+        })?;
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let signature = match signature_contract {
         SignatureContract::Timestamped => compute_timestamped_signature(secret, &timestamp, body),
@@ -115,7 +125,7 @@ async fn deliver_with_policy(
 
     for attempt in 1..=policy.max_attempts {
         let mut request = http_client
-            .post(url)
+            .post(target.clone())
             .timeout(policy.timeout)
             .header("Content-Type", "application/json")
             .header("X-NyxID-Event", event_type)
@@ -131,6 +141,20 @@ async fn deliver_with_policy(
 
         match request.send().await {
             Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status().is_redirection() => {
+                return Err(DeliveryFailure {
+                    attempts: attempt,
+                    reason: DESTINATION_REFUSED,
+                    last_status: Some(response.status().as_u16()),
+                });
+            }
+            Err(error) if super::proxy_destination::http::denied_address(&error) => {
+                return Err(DeliveryFailure {
+                    attempts: attempt,
+                    reason: DESTINATION_REFUSED,
+                    last_status: None,
+                });
+            }
             Ok(response) => {
                 last_status = Some(response.status().as_u16());
                 reason = "non_success_status";
@@ -243,10 +267,11 @@ mod tests {
             .await
             .expect("bind test server");
         let address = listener.local_addr().expect("test address");
+        let _origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve test app") });
 
         let result = deliver_with_policy(
-            &Client::new(),
             &format!("http://{address}/hook"),
             b"secret",
             "test.event",
@@ -264,6 +289,103 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn delivery_reports_destination_refusal_once() {
+        struct PrivateAnswer;
+        impl reqwest::dns::Resolve for PrivateAnswer {
+            fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                let answers = vec![std::net::SocketAddr::from(([10, 0, 0, 1], 0))];
+                Box::pin(async { Ok(Box::new(answers.into_iter()) as reqwest::dns::Addrs) })
+            }
+        }
+        let failure = crate::services::proxy_destination::http::with_test_pools(
+            Arc::new(PrivateAnswer),
+            Arc::new(|| Client::builder().no_proxy()),
+            deliver_with_policy(
+                "http://delivery.invalid:1/hook",
+                b"fixture",
+                "event",
+                "id",
+                b"{}",
+                SignatureContract::Timestamped,
+                None,
+                DeliveryPolicy {
+                    max_attempts: 3,
+                    base_backoff: Duration::ZERO,
+                    timeout: Duration::from_secs(1),
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.reason, "destination_refused");
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(failure.last_status, None);
+    }
+
+    #[tokio::test]
+    async fn delivery_accepts_public_target_and_stops_at_redirect() {
+        use axum::response::Redirect;
+        use reqwest::dns::{Name, Resolve, Resolving};
+        struct UnusedResolver;
+        impl Resolve for UnusedResolver {
+            fn resolve(&self, _: Name) -> Resolving {
+                panic!("the local proxy fixture uses an IP literal")
+            }
+        }
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let calls = accepted.clone();
+        let app = Router::new()
+            .route("/next", post(|| async { Redirect::temporary("/accepted") }))
+            .route(
+                "/accepted",
+                post(move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::ACCEPTED
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy =
+            reqwest::Proxy::all(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let builder = Arc::new(move || Client::builder().proxy(proxy.clone()));
+        crate::services::proxy_destination::http::with_test_pools(
+            Arc::new(UnusedResolver),
+            builder,
+            async {
+                for path in ["accepted", "next"] {
+                    let result = deliver_with_policy(
+                        &format!("http://93.184.216.34/{path}"),
+                        b"fixture",
+                        "event",
+                        "id",
+                        b"{}",
+                        SignatureContract::Timestamped,
+                        None,
+                        DeliveryPolicy {
+                            max_attempts: 3,
+                            base_backoff: Duration::ZERO,
+                            timeout: Duration::from_secs(1),
+                        },
+                    )
+                    .await;
+                    if path == "accepted" {
+                        result.unwrap();
+                    } else {
+                        let failure = result.unwrap_err();
+                        assert_eq!(
+                            (failure.reason, failure.last_status, failure.attempts),
+                            ("destination_refused", Some(307), 1)
+                        );
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        task.abort();
     }
 
     #[tokio::test]

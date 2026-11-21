@@ -470,6 +470,7 @@ pub fn schema(name: &str) -> Value {
         "stop_following_thread" => (json!({"thread_id":string(64)}), vec!["thread_id"]),
         "update_channel_chat" => (
             json!({"chat_id": string(64),
+                "notice_language":{"type":"string","enum":["en","zh-CN","zh-TW","default"],"description":"Language for fixed notices in this chat and its followed threads. Default is English."},
                 "threads":{"type":"string","enum":["follow","off"]},
                 "reply_mode": {"type": "string", "enum": ["mention", "all"],
                     "description": "Groups and channels: answer only when mentioned or \

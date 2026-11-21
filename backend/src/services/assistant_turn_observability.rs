@@ -69,10 +69,22 @@ pub async fn attempt(
     request_key: &str,
     capacity_deadline: DateTime<Utc>,
     input: Option<bson::Binary>,
+    channel_retry_session: Option<&Option<String>>,
 ) -> AppResult<u32> {
     let mut update = doc! {"$inc": {"active_turn.engine_attempts": 1}};
     let mut filter =
         WorkerFence::matching(row, doc! {"active_turn.stop_requested": {"$ne": true}})?;
+    if let Some(session) = channel_retry_session {
+        filter.extend(doc! {
+            "active_turn.worker_instance.id": &super::assistant_engine_worker::instance().id,
+            "active_turn.capacity_accepted_at": bson::Bson::Null,
+            "active_turn.model_attempt_id": bson::Bson::Null,
+            "active_turn.activity_total": {"$in":[0,bson::Bson::Null]},
+            "active_turn.reply.text": {"$in":["",bson::Bson::Null]},
+            "nyxagent_session_id": session,
+            "credential_api_key_id": &row.credential_api_key_id,
+        });
+    }
     let mut enrolled = false;
     if let Some(turn) = &row.active_turn
         && let Some(admission) = &turn.restart_admission

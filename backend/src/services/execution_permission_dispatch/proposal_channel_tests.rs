@@ -71,6 +71,7 @@ async fn channel_turn_transport(
         platform: if native { "discord" } else { "telegram" }.into(),
     };
     let delivery = ChannelTurnDelivery {
+        notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: true,
         sender_kind: Some(crate::models::channel_thread::ThreadSenderKind::Human),

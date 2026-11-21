@@ -4639,8 +4639,9 @@ pub(crate) fn enroll_restart(
     draining: bool,
 ) {
     use crate::models::assistant_conversation::{
-        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource,
+        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource, TeamRestartSource,
     };
+    let specialist = row.is_subagent();
     let Some(turn) = row.active_turn.as_mut() else {
         return;
     };
@@ -4674,6 +4675,7 @@ pub(crate) fn enroll_restart(
     {
         return;
     }
+    let mut team_source = None;
     let source = match (&turn.automation_work, turn.origin) {
         (Some(work), _)
             if matches!(work.role.as_str(), "coordinator" | "direct" | "group")
@@ -4698,6 +4700,54 @@ pub(crate) fn enroll_restart(
         {
             RestartSource::FirstPartyOwner
         }
+        (None, TurnOrigin::Orchestrator)
+            if specialist
+                && row.group_id.is_none()
+                && row.group_request_id.is_none()
+                && turn.trigger_run_id.is_none()
+                && super::security_readiness_service::team_restart_enrollment_ready() =>
+        {
+            let Some(target) = turn
+                .report_to
+                .as_ref()
+                .filter(|target| Some(*target) == start.report_to.as_ref())
+            else {
+                return;
+            };
+            team_source = Some(TeamRestartSource::Assignment {
+                report_to: target.clone(),
+            });
+            RestartSource::FirstPartyOwner
+        }
+        (None, TurnOrigin::Group)
+            if turn.group_reply_in_settlement
+                && row.group_seen_seq > 0
+                && row.group_request_id.is_none()
+                && turn.trigger_run_id.is_none()
+                && super::security_readiness_service::team_restart_enrollment_ready() =>
+        {
+            let Some(group) = row
+                .group_id
+                .as_ref()
+                .filter(|group| Some(*group) == start.group_id.as_ref())
+            else {
+                return;
+            };
+            if !row.agent_id.as_ref().is_some_and(|agent| {
+                super::assistant_wake_service::group::admitted_member(
+                    group,
+                    agent,
+                    row.group_seen_seq,
+                )
+            }) {
+                return;
+            }
+            team_source = Some(TeamRestartSource::GroupMember {
+                group_id: group.clone(),
+                upper_seq: row.group_seen_seq,
+            });
+            RestartSource::FirstPartyOwner
+        }
         _ => return,
     };
     let (Some(initiating_seq), Some(agent_id), Some(worker)) = (
@@ -4710,11 +4760,12 @@ pub(crate) fn enroll_restart(
     turn.restart_admission = Some(Box::new(RestartAdmission {
         continued_after_restart: false,
         generation: super::security_readiness_service::local_generation().map(str::to_owned),
-        version: 2,
+        version: if team_source.is_some() { 3 } else { 2 },
         capacity: start.capacity.clone(),
         reattach: Some(deployment),
         window: None,
         source,
+        team_source,
         initiating_message_id: message_id.into(),
         initiating_seq,
         reply_id: Uuid::new_v4().to_string(),
@@ -4879,6 +4930,7 @@ pub(crate) async fn finish_turn_inner(
         .turn_id
         .clone();
     let mut session = db.client().start_session().await?;
+    let health_db = db;
     let db = db.clone();
     let row = row.clone();
     let result = result.clone();
@@ -5114,17 +5166,8 @@ artifact_recovery_target: None,
                 if let Some(turn) = settled_turn.as_ref() && let Some(offer) = &turn.restart_offer {
                     super::assistant_turn_restart::audit(&db, session, &row.user_id, &turn.turn_id, offer, "settled", error.as_ref().map_or("completed",|error|error.code)).await?;
                 }
-                if let Some(turn) = settled_turn.as_ref()
-                    && let Some(source) = turn.restart_admission.as_deref().filter(|source| !source.credential_ended)
-                    && let Some(window) = &source.window
-                    && !window.terminal
-                {
-                    current.stopped_window = Some(crate::models::assistant_conversation::StoppedWindow {
-                        turn_id: turn.turn_id.clone(),
-                        credential_id: source.credential_id.clone(),
-                        window_key: window.key.clone(),
-                        destination_hash: source.reattach.as_ref().map(|deployment| deployment.destination_hash.clone()),
-                    });
+                if let Some(window) = settled_turn.as_ref().and_then(unconfirmed_window) {
+                    current.stopped_window = Some(window);
                 }
                 // A disposable upstream session may retain fetched pixels or
                 // injected document text. Never carry it into another guest's
@@ -5160,6 +5203,7 @@ artifact_recovery_target: None,
                     automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
+                        text_report_in_settlement: settled_turn.as_ref().and_then(|turn|turn.restart_admission.as_ref()).is_some_and(|source|matches!(source.team_source,Some(crate::models::assistant_conversation::TeamRestartSource::Assignment { .. }))),
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
                         references: if error.is_none() { settled_turn.as_ref().map(|t| t.delegated_images.references.clone()).unwrap_or_default() } else { Vec::new() },
@@ -5279,9 +5323,38 @@ artifact_recovery_target: None,
         .await
         .map_err(transactions::map_transaction_error)?;
     if let Some(turn) = settled.as_ref() {
+        if let Some(error) = &error {
+            let code = if error.upstream_code.as_deref() == Some("idempotency_conflict") {
+                "idempotency_conflict"
+            } else {
+                error.code
+            };
+            Box::pin(super::channel_inbound_diagnostics::org_guest_turn(
+                health_db, turn, code,
+            ))
+            .await;
+        }
         super::assistant_turn_observability::settled(&log_row, turn, error.as_ref(), Utc::now());
     }
     Ok(error)
+}
+
+pub(crate) fn unconfirmed_window(
+    turn: &ActiveTurn,
+) -> Option<crate::models::assistant_conversation::StoppedWindow> {
+    let source = turn.restart_admission.as_ref()?;
+    let window = source.window.as_ref()?;
+    (!source.credential_ended && !window.terminal).then(|| {
+        crate::models::assistant_conversation::StoppedWindow {
+            turn_id: turn.turn_id.clone(),
+            credential_id: source.credential_id.clone(),
+            window_key: window.key.clone(),
+            destination_hash: source
+                .reattach
+                .as_ref()
+                .map(|deployment| deployment.destination_hash.clone()),
+        }
+    })
 }
 
 /// Force a stopped turn through the same fenced settlement used by its worker.
@@ -5398,6 +5471,7 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
         .await?;
     let mut settled = Vec::new();
     while let Some(row) = cursor.try_next().await? {
+        super::job_health::checkpoint(true);
         if row.active_turn.is_none() {
             continue;
         }
@@ -5464,7 +5538,7 @@ pub async fn pending_approvals(
     user_id: &str,
     credential_api_key_id: &str,
 ) -> AppResult<Vec<ChatApproval>> {
-    chat_approvals(db, user_id, credential_api_key_id, false).await
+    chat_approvals(db, user_id, credential_api_key_id, false, &[]).await
 }
 
 /// Keep terminal requests visible after expiry/decision and after a reload.
@@ -5473,8 +5547,9 @@ pub async fn approval_history(
     db: &Database,
     user_id: &str,
     credential_api_key_id: &str,
+    linked_ids: &[&str],
 ) -> AppResult<Vec<ChatApproval>> {
-    chat_approvals(db, user_id, credential_api_key_id, true).await
+    chat_approvals(db, user_id, credential_api_key_id, true, linked_ids).await
 }
 
 async fn chat_approvals(
@@ -5482,6 +5557,7 @@ async fn chat_approvals(
     user_id: &str,
     credential_api_key_id: &str,
     include_decided: bool,
+    linked_ids: &[&str],
 ) -> AppResult<Vec<ChatApproval>> {
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
     if credential_api_key_id.is_empty() {
@@ -5520,6 +5596,27 @@ async fn chat_approvals(
             .try_collect()
             .await?;
         rows.extend(recent);
+        // Activity IDs come from the authenticated conversation page. They
+        // also identify legacy HTTP cards that have no requester label.
+        let present: std::collections::HashSet<_> =
+            rows.iter().map(|row| row.id.as_str()).collect();
+        let missing: Vec<_> = linked_ids
+            .iter()
+            .copied()
+            .filter(|id| !present.contains(id))
+            .collect();
+        if !missing.is_empty() {
+            let linked: Vec<ApprovalRequest> = collection
+                .find(doc! {
+                    "_id":{"$in":missing}, "execution_proposal":null,
+                    "requester_type":"api_key", "requester_id":user_id,
+                    "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+                })
+                .await?
+                .try_collect()
+                .await?;
+            rows.extend(linked);
+        }
         rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
     }
     Ok(rows
@@ -7016,6 +7113,16 @@ pub async fn delete(
     user_id: &str,
     id: &str,
 ) -> AppResult<Vec<AssistantConversation>> {
+    delete_with_retirement(db, user_id, id, None).await
+}
+
+pub(crate) async fn delete_with_retirement(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    retirement: Option<&super::assistant_group_service::RetirementWindows>,
+) -> AppResult<Vec<AssistantConversation>> {
+    let retirement = retirement.cloned();
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let user_id = user_id.to_owned();
@@ -7026,7 +7133,9 @@ pub async fn delete(
             let db = &db;
             let user_id = user_id.as_str();
             let id = id.as_str();
-            let operation = delete_in_session(db, user_id, id, session).await;
+            let operation =
+                delete_with_retirement_in_session(db, user_id, id, retirement.as_ref(), session)
+                    .await;
             transactions::transaction_result(operation)
         })
         .await
@@ -7040,6 +7149,19 @@ pub(crate) async fn delete_in_session(
     db: &Database,
     user_id: &str,
     id: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<(
+    Vec<AssistantConversation>,
+    Vec<crate::models::api_key_credential::ApiKeyCredential>,
+)> {
+    delete_with_retirement_in_session(db, user_id, id, None, session).await
+}
+
+pub(crate) async fn delete_with_retirement_in_session(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    retirement: Option<&super::assistant_group_service::RetirementWindows>,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<(
     Vec<AssistantConversation>,
@@ -7077,6 +7199,19 @@ pub(crate) async fn delete_in_session(
     let mut children = Vec::new();
     for row in &rows {
         let id = row.id.as_str();
+        if let Some(attempts) = retirement
+            && (row
+                .stopped_window
+                .as_ref()
+                .is_some_and(|window| Some(window) != attempts.get(id))
+                || row
+                    .active_turn
+                    .as_ref()
+                    .and_then(|turn| turn.restart_admission.as_ref())
+                    .is_some())
+        {
+            return Err(AppError::AssistantTurnActive);
+        }
         if row.shared_agent_thread {
             db.collection::<bson::Document>(
                 crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,
@@ -8018,6 +8153,10 @@ impl TurnError {
                 "credential_revoked",
                 "NyxID rejected the assistant credential during this turn. Review completed actions before retrying.",
             ),
+            "channel_retry_attachment_unavailable" => (
+                "channel_retry_attachment_unavailable",
+                super::channel_notices::Notice::RetryAttachmentUnavailable.text(None),
+            ),
             "model_authority_changed" => (
                 "model_authority_changed",
                 "Your access settings or model connection changed during this task. Review the completed actions and try again.",
@@ -8385,62 +8524,93 @@ impl ResponseStream {
             self.text.push_str(delta);
         } else {
             let response = &event["response"];
-            let text = response["output"]
-                .as_array()
-                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?
-                .iter()
-                .filter(|item| item["type"] == "message" && item["role"] == "assistant")
-                .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                .filter(|part| part["type"] == "output_text")
-                .map(|part| {
-                    part["text"]
-                        .as_str()
-                        .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .join("\n\n");
-            let session = response["conversation"]["id"]
-                .as_str()
-                .filter(|id| prefixed_hex(id, "conv_"));
-            let response_id = response["id"].as_str().filter(|id| {
-                let parts: Vec<_> = id.split('_').collect();
-                parts.len() == 3
-                    && parts[0] == "resp"
-                    && prefixed_hex(parts[1], "")
-                    && prefixed_hex(parts[2], "")
-                    && session.is_some_and(|sid| sid[5..] == *parts[1])
-            });
-            if session.is_none()
-                || response_id.is_none()
-                || response["status"].as_str() != kind.strip_prefix("response.")
-            {
-                return Err(TurnError::internal("invalid_stream", "stream"));
-            }
-            if text.len() > MAX_OUTPUT_BYTES {
-                return Err(TurnError::internal("output_too_large", "stream"));
-            }
+            let result =
+                parse_response(response, kind.strip_prefix("response.").unwrap_or_default())?;
             self.image_input_unsupported = unsupported_images(response);
-            self.text = text;
-            self.terminal = Some(TurnResult {
-                text: self.text.clone(),
-                session_id: session.map(str::to_owned),
-                response_id: response_id.map(str::to_owned),
-                error: (kind != "response.completed").then(|| {
-                    let mut error = TurnError::new(if kind == "response.cancelled" {
-                        "cancelled"
-                    } else {
-                        response["error"]["code"].as_str().unwrap_or_default()
-                    });
-                    error.response_id = response_id.map(Into::into);
-                    error
-                }),
-            });
+            self.text.clone_from(&result.text);
+            self.terminal = Some(result);
         }
         if self.text.len() > MAX_OUTPUT_BYTES {
             return Err(TurnError::internal("output_too_large", "stream"));
         }
         Ok(())
     }
+}
+
+/// Read the same Responses object from a terminal SSE event or a reattachment snapshot.
+pub(super) fn parse_response(response: &Value, status: &str) -> Result<TurnResult, TurnError> {
+    let invalid = || TurnError::internal("invalid_stream", "stream");
+    if response["status"] != status {
+        return Err(invalid());
+    }
+    let session = response["conversation"]["id"]
+        .as_str()
+        .filter(|id| prefixed_hex(id, "conv_"))
+        .ok_or_else(invalid)?;
+    let response_id = response["id"]
+        .as_str()
+        .filter(|id| prefixed_hex(id, &format!("resp_{}_", &session[5..])))
+        .ok_or_else(invalid)?;
+    let messages = response["output"]
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .filter(|item| item["type"] == "message" && item["role"] == "assistant");
+    let final_only =
+        status == "completed" && messages.clone().any(|item| item["phase"] == "final_answer");
+    let unphased_only = status == "completed"
+        && !final_only
+        && messages.clone().any(|item| item["phase"].is_null());
+    let mut has_reply = status != "completed" || final_only || unphased_only;
+    let mut parts = Vec::new();
+    let mut bytes_with_separators = 0;
+    const SEPARATOR: &str = "\n\n";
+    for item in messages {
+        let phase = &item["phase"];
+        let selected = if final_only {
+            phase == "final_answer"
+        } else {
+            !unphased_only || phase.is_null()
+        };
+        for part in item["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|part| part["type"] == "output_text")
+        {
+            let text = part["text"].as_str().ok_or_else(invalid)?;
+            // Count even discarded commentary against the original joined-output limit.
+            bytes_with_separators += SEPARATOR.len() + text.len();
+            if bytes_with_separators > MAX_OUTPUT_BYTES + SEPARATOR.len() {
+                return Err(TurnError::internal("output_too_large", "stream"));
+            }
+            if selected {
+                // A commentary-only completion is a reply, even without a final-answer marker.
+                has_reply |= phase == "commentary" && !text.is_empty();
+                parts.push(text);
+            }
+        }
+    }
+    let error = match status {
+        "failed" => Some(TurnError::new(
+            response["error"]["code"].as_str().unwrap_or_default(),
+        )),
+        "cancelled" => Some(TurnError::new("cancelled")),
+        _ => None,
+    };
+    Ok(TurnResult {
+        text: if has_reply {
+            parts.join(SEPARATOR)
+        } else {
+            String::new()
+        },
+        session_id: Some(session.to_owned()),
+        response_id: Some(response_id.to_owned()),
+        error: error.map(|mut err| {
+            err.response_id = Some(response_id.into());
+            err
+        }),
+    })
 }
 
 pub(crate) fn unsupported_images(response: &Value) -> bool {

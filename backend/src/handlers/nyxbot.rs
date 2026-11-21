@@ -45,7 +45,7 @@ use crate::{
         channel_bot::ChannelBot,
         nyxbot_channel::{
             COLLECTION_NAME as CHANNELS, EVENTS_COLLECTION_NAME as EVENTS, LINK_CODE_TTL_HOURS,
-            NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch,
+            NoticeLanguage, NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch,
             THREADS_COLLECTION_NAME as THREADS, WATCHES_COLLECTION_NAME as WATCHES,
         },
         nyxbot_event_binding::{COLLECTION_NAME as EVENT_BINDINGS, NyxbotEventBinding},
@@ -58,6 +58,7 @@ use crate::{
 };
 
 use super::assistant_team::{Pool, Started, start_server_turn};
+use crate::services::channel_notices::Notice;
 
 #[path = "nyxbot_provider_refusal.rs"]
 mod provider_refusal;
@@ -4087,7 +4088,7 @@ async fn start_chat_turn(
     let native = row.transport == "gateway" && row.gateway_source.is_some();
     if native && text.trim().is_empty() && had_media {
         return Ok(Inbound::Reply(
-            crate::services::nyxbot_response_recovery::MEDIA_UNAVAILABLE.into(),
+            Notice::MediaUnavailable.text(chat.notice_language).into(),
         ));
     }
     let private = chat.kind.as_deref() == Some("private");
@@ -4117,7 +4118,7 @@ async fn start_chat_turn(
         if !crate::services::org_channel_service::guest_rate(&state.db, &execution, &row.id).await?
         {
             return Ok(Inbound::Reply(
-                "Please wait a moment before sending another message.".into(),
+                Notice::SlowDown.text(chat.notice_language).into(),
             ));
         }
         Some(execution)
@@ -4317,7 +4318,17 @@ async fn start_chat_turn(
             )
         }))
     };
-    late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
+    late_delivery::prepare(
+        state,
+        event_key,
+        row,
+        &origin,
+        sender,
+        guest,
+        addressed,
+        chat.notice_language,
+    )
+    .await?;
     let telegram_input = if !guest
         && canonical_platform(&row.platform) == "telegram"
         && !sender.media.is_empty()
@@ -4427,8 +4438,15 @@ async fn start_chat_turn(
                 && exists
                 && origin.thread.is_none()
                 && let Some(key) = question_key.as_deref()
-                && let Some(reply) =
-                    repeated_question(state, row, &conversation_id, key, &origin).await?
+                && let Some(reply) = repeated_question(
+                    state,
+                    row,
+                    &conversation_id,
+                    key,
+                    &origin,
+                    chat.notice_language,
+                )
+                .await?
             {
                 return Ok(Inbound::Reply(reply.into()));
             }
@@ -4439,7 +4457,7 @@ async fn start_chat_turn(
                 return Ok(if addressed {
                     Inbound::Reply(InboundReply::fixed(
                         NoticeKind::GuestBusy,
-                        "I'm answering another message right now. Please try again in a moment.",
+                        Notice::GuestBusy.text(chat.notice_language),
                     ))
                 } else {
                     Inbound::Silent("refused_busy")
@@ -4514,6 +4532,7 @@ async fn repeated_question(
     conversation_id: &str,
     key: &str,
     origin: &ChannelOrigin,
+    language: Option<NoticeLanguage>,
 ) -> AppResult<Option<String>> {
     let actor = origin
         .org_execution
@@ -4531,9 +4550,9 @@ async fn repeated_question(
         .map(|queued| {
             queued.map(|queued| {
                 if queued {
-                    "That question is already queued; I'll answer it in this thread.".into()
+                    Notice::QueuedThread.text(language).into()
                 } else {
-                    "I'm already working on that question and will answer in this thread.".into()
+                    Notice::WorkingThread.text(language).into()
                 }
             })
         });
@@ -4545,16 +4564,14 @@ async fn repeated_question(
         .filter(|turn| turn.invocation_id.is_none() && turn.question_key.as_deref() == Some(key))
     {
         if turn.asked_from.as_ref() == Some(origin) {
-            return Ok(Some(
-                "I'm still working on that question and will answer it shortly.".into(),
-            ));
+            return Ok(Some(Notice::Working.text(language).into()));
         }
         let waiting =
             engine::also_deliver(&state.db, actor, conversation_id, &turn.turn_id, origin).await?;
         return Ok(Some(if waiting {
-            "I'm already working on that question; I'll send the answer here too.".into()
+            Notice::WorkingHereToo.text(language).into()
         } else {
-            "I'm already working on that question; you'll find the answer in NyxID.".into()
+            Notice::WorkingNyxid.text(language).into()
         }));
     }
     if current
@@ -4594,14 +4611,12 @@ async fn repeated_question(
                 None => false,
             };
             return Ok(Some(if waiting {
-                "I'm already working on that question; I'll send the answer here.".into()
+                Notice::WorkingHere.text(language).into()
             } else {
-                "I've just answered that question; you'll find it in NyxID.".into()
+                Notice::Answered.text(language).into()
             }));
         }
-        return Ok(Some(
-            "That question is already queued; I'll answer it next.".into(),
-        ));
+        return Ok(Some(Notice::QueuedNext.text(language).into()));
     }
     Ok(None)
 }
@@ -4650,6 +4665,15 @@ async fn final_reply(
                             ) && let Some(message) = event["error"]["message"].as_str()
                             {
                                 error.message = message.to_owned();
+                            }
+                            if error.code == "capacity_exceeded" {
+                                error.metadata = Some(Box::new(
+                                    crate::models::assistant_message::TurnMetadata {
+                                        capacity_wait_ms: event["error"]["capacity_wait_ms"]
+                                            .as_u64(),
+                                        ..Default::default()
+                                    },
+                                ));
                             }
                             Err(Box::new(error))
                         };
@@ -6772,6 +6796,22 @@ async fn gateway_inbound(
             admission_diagnostics::telegram_group_outcome(state, row, source, activity, code).await;
         }
     }
+    if row.platform == "whatsapp" && activity["conversation"]["kind"] == "private" {
+        if row.gateway_source.is_some() {
+            admission_diagnostics::native_whatsapp_outcome(
+                state,
+                row,
+                result.as_ref().map_err(|_| ()),
+            )
+            .await;
+        }
+        if matches!(result, Ok(Inbound::Busy)) {
+            let language =
+                crate::services::channel_notices::chat_language(&state.db, &row.id, partition)
+                    .await?;
+            return Ok(Inbound::Reply(Notice::NativeBusy.text(language).into()));
+        }
+    }
     result
 }
 
@@ -7175,6 +7215,23 @@ pub async fn deliver_to_for(
         // Boxed: the image and platform sends make this future large, and it is
         // awaited deep inside turn settlement.
         let result: AppResult<()> = Box::pin(async {
+            let fixed = match purpose {
+                supplemental::Purpose::CheckingNotice => Some(Notice::Checking),
+                supplemental::Purpose::CapacityNotice => Some(Notice::Pending),
+                _ => None,
+            };
+            let text = if let Some(notice) = fixed {
+                notice.text(
+                    crate::services::channel_notices::chat_language(
+                        &state.db,
+                        &origin.nyxbot_channel_id,
+                        &origin.partition,
+                    )
+                    .await?,
+                )
+            } else {
+                text
+            };
             if origin.thread.is_some() {
                 let image_turn = images.and_then(|plan| {
                     row.active_turn.as_ref().map(|turn| images::ImageTurn {
@@ -7631,7 +7688,7 @@ pub async fn relay_callback(
         .map(str::to_owned);
     let message_id = claims.message_id.clone();
     // Private chats are tracked only where inbound diagnostics exist.
-    let track_admission = kind != "private" || row.platform == "x";
+    let track_admission = kind != "private" || matches!(row.platform.as_str(), "x" | "whatsapp");
     let admission_facts = if track_admission {
         match crate::services::nyxbot_admission_service::begin(
             &state.db,
@@ -7863,10 +7920,7 @@ pub async fn relay_callback(
                     None
                 }
                 Inbound::Silent(_) => None,
-                Inbound::Busy => Some(
-                    "I couldn't accept this message right now. Please try again in a moment."
-                        .into(),
-                ),
+                Inbound::Busy => Some(Notice::Capacity.text(chat.notice_language).into()),
                 Inbound::Turn(receiver) => {
                     let _ = final_reply(receiver).await;
                     late_delivery::process(&state, &admitted.id).await;

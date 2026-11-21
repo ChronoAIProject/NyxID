@@ -1236,7 +1236,7 @@ fn spawn_terminal_webhook_delivery(
                     tracing::warn!(connect_link_id = %link.id, %error, "failed to mark terminal webhook delivered");
                 }
             }
-            Err(failure) if link.webhook_event_attempts >= WEBHOOK_MAX_DISPATCH_CYCLES => {
+            Err(failure) if failure.reason == super::webhook_delivery_service::DESTINATION_REFUSED || link.webhook_event_attempts >= WEBHOOK_MAX_DISPATCH_CYCLES => {
                 abandon_terminal_webhook(&db, &link, failure).await;
             }
             Err(failure) => {
@@ -1268,7 +1268,7 @@ async fn abandon_terminal_webhook(
                 "webhook_event_id": event_id,
                 "webhook_event_status": "pending",
             },
-            doc! { "$set": { "webhook_event_status": "abandoned" } },
+            doc! { "$set": { "webhook_event_status": "abandoned", "webhook_failure_reason": failure.reason } },
         )
         .await;
     if !matches!(updated, Ok(result) if result.modified_count == 1) {
@@ -2411,6 +2411,8 @@ mod tests {
             .await
             .expect("bind terminal webhook receiver");
         let address = listener.local_addr().expect("terminal receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, receiver)
                 .await
@@ -2447,10 +2449,7 @@ mod tests {
             .await
             .expect("make link terminal");
         let dispatcher =
-            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
-                keys,
-            );
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(keys);
 
         dispatch_terminal_webhook_if_needed(&db, &dispatcher, &created.link.id).await;
         let body = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
@@ -2513,6 +2512,8 @@ mod tests {
             .await
             .expect("bind redispatch receiver");
         let address = listener.local_addr().unwrap();
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
         let client = insert_oauth_client(&db, "Outbox App", Vec::new()).await;
         let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
@@ -2550,10 +2551,7 @@ mod tests {
             .await
             .unwrap();
         let dispatcher =
-            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
-                keys,
-            );
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(keys);
 
         assert_eq!(
             redispatch_terminal_webhooks(&db, &dispatcher)
@@ -2607,7 +2605,6 @@ mod tests {
             .unwrap();
         let dispatcher =
             crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
                 std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
             );
 
@@ -2677,6 +2674,8 @@ mod tests {
             .await
             .expect("bind expiry webhook receiver");
         let address = listener.local_addr().expect("expiry receiver address");
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, receiver)
                 .await
@@ -2714,10 +2713,7 @@ mod tests {
             .await
             .expect("make app link overdue");
         let dispatcher =
-            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
-                keys,
-            );
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(keys);
 
         assert_eq!(expire_pending_app_links(&db, &dispatcher).await.unwrap(), 1);
         let body = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
@@ -2761,7 +2757,6 @@ mod tests {
             .expect("make first-party link overdue");
         let dispatcher =
             crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
                 std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
             );
 
@@ -2796,7 +2791,6 @@ mod tests {
             .expect("pin app link within grace");
         let dispatcher =
             crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-                reqwest::Client::new(),
                 std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
             );
 

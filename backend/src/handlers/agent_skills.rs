@@ -1834,18 +1834,19 @@ mod tests {
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                let count = f
+                let live_request = f
                     .state
                     .db
                     .collection::<mongodb::bson::Document>(
                         crate::models::approval_request::COLLECTION_NAME,
                     )
-                    .count_documents(
-                        doc! {"user_id": &f.owner, "service_id": &service.id, "status": "pending"},
-                    )
+                    .find_one(doc! {
+                        "_id": {"$ne": pending.get_str("_id").unwrap()},
+                        "user_id": &f.owner, "service_id": &service.id, "status": "pending",
+                    })
                     .await
                     .unwrap();
-                if count >= 2 {
+                if live_request.is_some() {
                     break;
                 }
                 assert!(
