@@ -13,96 +13,10 @@ use std::time::Duration as Wait;
 enum Lane {
     Assignment,
     Member,
+    Wake,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Cut {
-    None,
-    BeforeCreated,
-    MidAnswer,
-    Stop,
-    Lost,
-    Remove,
-    Delete,
-    DeletePending,
-    TextReport,
-}
-
-const SESSION: &str = "conv_11111111111111111111111111111111";
-const RESPONSE: &str = "resp_11111111111111111111111111111111_22222222222222222222222222222222";
-
-fn snapshot(status: &str) -> Value {
-    json!({"status":status,"conversation_id":SESSION,"response_id":RESPONSE,"last_sequence_number":2,
-        "response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":if status=="lost" {"failed"}else{status},
-        "error":(status=="lost").then(||json!({"code":"executor_lost","tool_dispatch":"none"})),
-        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer @NyxBot"}]}]}})
-}
-
-#[derive(Default, Clone)]
-struct Upstream {
-    discovery: Requests,
-    posts: Arc<AtomicUsize>,
-    lookups: Arc<AtomicUsize>,
-    cancels: Arc<AtomicUsize>,
-    cancel_started: Arc<tokio::sync::Notify>,
-    release_cancel: Arc<tokio::sync::Notify>,
-    expected: Arc<Mutex<Option<(axum::http::HeaderValue, axum::http::HeaderValue)>>>,
-}
-
-impl Upstream {
-    fn router(&self, cut: Cut, background: bool) -> Router {
-        let posts = self.posts.clone();
-        let captured = self.expected.clone();
-        let expected = self.expected.clone();
-        let lookups = self.lookups.clone();
-        let cancels = self.cancels.clone();
-        let cancel_started = self.cancel_started.clone();
-        let release_cancel = self.release_cancel.clone();
-        let cancel = post(move || {
-            cancels.fetch_add(1, Ordering::SeqCst);
-            let release_cancel = release_cancel.clone();
-            cancel_started.notify_one();
-            async move {
-                if cut == Cut::DeletePending {
-                    release_cancel.notified().await;
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
-                } else {
-                    Json(snapshot("cancelled")).into_response()
-                }
-            }
-        });
-        self.discovery.router(false).route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
-            let posts = posts.clone(); let captured = captured.clone(); async move {
-                assert_eq!(body["background"] == true, background);
-                posts.fetch_add(1, Ordering::SeqCst);
-                if background { *captured.lock().await = Some((headers["authorization"].clone(),headers["idempotency-key"].clone())); }
-                let stream = async_stream::stream! {
-                    if cut != Cut::BeforeCreated {
-                        let created = json!({"type":"response.created","sequence_number":0,"response":{"id":RESPONSE,"conversation":{"id":SESSION}}});
-                        yield Ok::<_, Infallible>(Event::default().data(created.to_string()));
-                        let delta = json!({"type":"response.output_text.delta","sequence_number":1,"delta":"ans"});
-                        yield Ok(Event::default().data(delta.to_string()));
-                    }
-                    if cut != Cut::None { std::future::pending::<()>().await; }
-                    let terminal = json!({"type":"response.completed","sequence_number":2,"response":snapshot("completed")["response"]});
-                    yield Ok(Event::default().data(terminal.to_string()));
-                };
-                Sse::new(stream)
-            }
-        })).route("/v1/responses/lookup", axum::routing::get(move |headers: HeaderMap| {
-            let expected = expected.clone(); let lookups = lookups.clone(); async move {
-                let held = expected.lock().await;
-                let (credential,key) = held.as_ref().expect("execution POST");
-                assert!(headers["authorization"] == credential && headers["idempotency-key"] == key);
-                lookups.fetch_add(1,Ordering::SeqCst);
-                Json(snapshot(match cut { Cut::Lost => "lost", Cut::Stop => "running", _ => "completed" }))
-            }
-        })).route(&format!("/v1/responses/{RESPONSE}/events"), axum::routing::get(|| async {
-            ([("content-type","text/event-stream")],axum::body::Body::from_stream(futures::stream::pending::<Result<axum::body::Bytes, Infallible>>()))
-        })).route("/v1/responses/cancel", cancel.clone())
-            .route(&format!("/v1/responses/{RESPONSE}/cancel"), cancel)
-    }
-}
+use crate::handlers::assistant_handoff_test_upstream::{Cut, Upstream};
 
 async fn exercise(
     lane: Lane,
@@ -126,6 +40,27 @@ async fn exercise(
     .await
     .unwrap();
     let agent = specialist(&fixture).await;
+    let wake_event = crate::services::assistant_team_service::event(
+        "subagent_settled",
+        "Finished assignment".into(),
+        Some(&agent.id),
+    );
+    if lane == Lane::Wake {
+        assert!(
+            engine::force_stop(
+                &fixture.db,
+                OWNER,
+                &parent.id,
+                &parent.active_turn.as_ref().unwrap().turn_id
+            )
+            .await
+            .unwrap()
+        );
+        engine::push_events(&fixture.db, OWNER, &parent.id, vec![wake_event.clone()])
+            .await
+            .unwrap()
+            .unwrap();
+    }
     let group = if lane == Lane::Member {
         use crate::services::{
             assistant_settings_service as settings, coordination_service::RateWindowStore,
@@ -172,7 +107,11 @@ async fn exercise(
     }
     crate::services::assistant_notification_service::reset_flag_cache(&fixture.db);
     if !compatible {
-        readiness::observe_v2_only_test_fleet(&fixture.db).await;
+        if lane == Lane::Wake {
+            readiness::observe_v3_only_test_fleet(&fixture.db).await;
+        } else {
+            readiness::observe_v2_only_test_fleet(&fixture.db).await;
+        }
     }
     if warm {
         engine::require_enabled(&fixture.db, OWNER).await.unwrap();
@@ -203,7 +142,10 @@ async fn exercise(
     counts.lock().unwrap().clear();
     let id = workers::TEST_WORKER
         .scope(previous, async {
-            if let Some(group) = &group {
+            if lane == Lane::Wake {
+                assistant_team::wake(&first, OWNER, &parent.id).await;
+                parent.id.clone()
+            } else if let Some(group) = &group {
                 assistant_group::post_and_follow(
                     &first,
                     OWNER,
@@ -376,40 +318,57 @@ async fn exercise(
             report_source = Some(row.clone());
         }
         let source = active.restart_admission.as_ref().unwrap();
-        assert_eq!(source.version, 3);
-        match source.team_source.as_ref().unwrap() {
-            TeamRestartSource::Assignment { report_to } => {
-                assert_eq!(report_to, &parent.id);
-                if cut == Cut::TextReport {
-                    assert!(active.delegated_images.assignment.is_none());
-                } else {
-                    assert_eq!(
-                        active
-                            .delegated_images
-                            .assignment
-                            .as_ref()
-                            .unwrap()
-                            .recipient_conversation,
-                        *report_to
-                    );
+        if lane == Lane::Wake {
+            assert_eq!(source.version, 4);
+            assert!(matches!(
+                source.chat_source.as_deref(),
+                Some(crate::models::assistant_conversation::ChatRestartSource::Wake { .. })
+            ));
+            assert_eq!(
+                source.event_ids.as_slice(),
+                std::slice::from_ref(&wake_event.id)
+            );
+            assert_eq!(active.events.len(), 1);
+            assert_eq!(active.events[0].id, wake_event.id);
+            assert!(row.pending_events.is_empty());
+        } else {
+            assert_eq!(source.version, 3);
+        }
+        if let Some(team) = &source.team_source {
+            match team {
+                TeamRestartSource::Assignment { report_to } => {
+                    assert_eq!(report_to, &parent.id);
+                    if cut == Cut::TextReport {
+                        assert!(active.delegated_images.assignment.is_none());
+                    } else {
+                        assert_eq!(
+                            active
+                                .delegated_images
+                                .assignment
+                                .as_ref()
+                                .unwrap()
+                                .recipient_conversation,
+                            *report_to
+                        );
+                    }
+                    assert!(!active.with_nyxbot);
                 }
-                assert!(!active.with_nyxbot);
-            }
-            TeamRestartSource::GroupMember {
-                group_id,
-                upper_seq,
-            } => {
-                assert_eq!(group_id, &group.as_ref().unwrap().id);
-                assert_eq!(*upper_seq, row.group_seen_seq);
-                assert!(active.with_nyxbot);
+                TeamRestartSource::GroupMember {
+                    group_id,
+                    upper_seq,
+                } => {
+                    assert_eq!(group_id, &group.as_ref().unwrap().id);
+                    assert_eq!(*upper_seq, row.group_seen_seq);
+                    assert!(active.with_nyxbot);
+                }
             }
         }
         let legacy: LegacyAdmission =
             bson::from_document(bson::to_document(source.as_ref()).unwrap()).unwrap();
         assert_eq!(legacy.source, RestartSource::FirstPartyOwner);
         assert!(!matches!(legacy.version, 1 | 2));
-        let team_limit =
-            assistant_team::team_pool_limit(&first, OWNER).await + u32::from(lane == Lane::Member);
+        let team_limit = assistant_team::team_pool_limit(&first, OWNER).await
+            + u32::from(lane != Lane::Assignment);
         let mut occupied = Vec::new();
         for _ in 1..team_limit {
             occupied.push(
@@ -457,7 +416,12 @@ async fn exercise(
             .unwrap()
             .pop()
             .unwrap();
-        assert!(collection.find_one(doc!{"_id":&id,"active_turn.restart_admission.version":{"$in":[1,2]},"active_turn.restart_offer.claimed_by":null}).await.unwrap().is_none());
+        let old_versions = if lane == Lane::Wake {
+            vec![1, 2, 3]
+        } else {
+            vec![1, 2]
+        };
+        assert!(collection.find_one(doc!{"_id":&id,"active_turn.restart_admission.version":{"$in":old_versions},"active_turn.restart_offer.claimed_by":null}).await.unwrap().is_none());
         assert!(
             assistant_nyxagent::survivor::take_one(&fixture, &offered, workers::instance())
                 .await
@@ -513,7 +477,11 @@ async fn exercise(
     let replies = engine::messages(&fixture.db, OWNER, &id, 10, None)
         .await
         .unwrap();
-    let mut replies = replies.iter().filter(|message| message.role == "assistant");
+    let mut replies = replies.iter().filter(|message| {
+        message.role == "assistant"
+            && (lane != Lane::Wake
+                || message.turn_id != parent.active_turn.as_ref().unwrap().turn_id)
+    });
     let reply = replies.next().expect("saved reply");
     assert!(replies.next().is_none());
     match cut {
@@ -542,7 +510,7 @@ async fn exercise(
                 .unwrap(),
             1
         );
-    } else {
+    } else if lane == Lane::Assignment {
         assert_eq!(reply.report_to.as_deref(), Some(parent.id.as_str()));
         if cut == Cut::TextReport {
             assert!(reply.delegated_images.assignment.is_none());
@@ -570,8 +538,13 @@ async fn exercise(
                     "subagent_settled"
                 })
             .count(),
-        1
+        usize::from(lane != Lane::Wake)
     );
+    if lane == Lane::Wake {
+        assert_eq!(target.event_streak, 1);
+        assert!(target.pending_events.is_empty());
+        assert!(target.active_turn.is_none());
+    }
     if let Some(source) = report_source {
         let enrolled = &target.pending_events[0];
         assert_eq!(enrolled.id, reply.turn_id);
@@ -629,6 +602,20 @@ async fn exercise(
 struct LegacyAdmission {
     version: i32,
     source: RestartSource,
+}
+
+#[tokio::test]
+async fn nyxbot_wake_takeover_consumes_event_once() {
+    for cut in [Cut::BeforeCreated, Cut::MidAnswer, Cut::Stop, Cut::Lost] {
+        exercise(Lane::Wake, cut, true, true, false).await;
+    }
+}
+
+#[tokio::test]
+async fn nyxbot_wake_costs_and_rollout() {
+    for (enabled, compatible) in [(false, true), (true, false), (true, true)] {
+        exercise(Lane::Wake, Cut::None, enabled, compatible, true).await;
+    }
 }
 
 #[tokio::test]

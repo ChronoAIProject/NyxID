@@ -34,6 +34,8 @@ pub mod assistant_action_effects_services;
 pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
+#[cfg(test)]
+mod assistant_handoff_test_upstream;
 pub mod assistant_readiness;
 pub mod assistant_sharing;
 pub mod auth;

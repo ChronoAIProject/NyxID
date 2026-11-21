@@ -4683,7 +4683,9 @@ async fn final_reply(
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => {
-                return Err(Box::new(engine::TurnError::new("turn_lost")));
+                return Err(Box::new(
+                    engine::TurnError::new("turn_lost").at_stage("subscriber_closed"),
+                ));
             }
         }
     }
@@ -7199,18 +7201,33 @@ pub async fn deliver_to_for(
     images: Option<&images::ImageSendPlan>,
     purpose: supplemental::Purpose,
 ) {
-    let mut decision = supplemental::Decision::new(purpose);
-    decision.turn = row.active_turn.as_ref().map(|turn| turn.turn_id.clone());
-    decision.event = origin.native_event_id.clone().or_else(|| {
-        row.active_turn
-            .as_ref()
-            .filter(|turn| turn.asked_from.as_ref() == Some(origin))
-            .and_then(|turn| turn.channel_event_id.clone())
+    let source = row.active_turn.as_ref().map(|turn| {
+        crate::services::channel_supplemental_delivery::ResultSource::capture(turn, origin)
     });
-    let trace = row
-        .active_turn
+    let _ = deliver_from_source(state, row, origin, text, images, purpose, source).await;
+}
+
+async fn deliver_from_source(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+    images: Option<&images::ImageSendPlan>,
+    purpose: supplemental::Purpose,
+    source: Option<crate::services::channel_supplemental_delivery::ResultSource>,
+) -> AppResult<()> {
+    let mut decision = supplemental::Decision::new(purpose);
+    let turn_id = source.as_ref().map(|source| source.turn_id.clone());
+    decision.turn.clone_from(&turn_id);
+    decision.event = source
         .as_ref()
-        .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+        .and_then(|binding| binding.event_id.clone())
+        .or_else(|| origin.native_event_id.clone());
+    decision.source = source;
+    decision.saved_result = row.active_turn.is_none() && turn_id.is_some();
+    let trace = turn_id
+        .as_deref()
+        .and_then(crate::turn_trace::TurnContext::for_turn);
     crate::turn_trace::scope(trace, async {
         // Boxed: the image and platform sends make this future large, and it is
         // awaited deep inside turn settlement.
@@ -7234,9 +7251,9 @@ pub async fn deliver_to_for(
             };
             if origin.thread.is_some() {
                 let image_turn = images.and_then(|plan| {
-                    row.active_turn.as_ref().map(|turn| images::ImageTurn {
+                    turn_id.as_deref().map(|turn_id| images::ImageTurn {
                         plan,
-                        turn_id: &turn.turn_id,
+                        turn_id,
                         app_visible: !row.guest_turn && row.channel.is_none(),
                     })
                 });
@@ -7258,9 +7275,60 @@ pub async fn deliver_to_for(
             if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
                 return Err(AppError::NotFound("Native reply source unavailable".into()));
             }
+            let mut bound_anchor = None;
+            if decision.saved_result && channel.gateway_source.is_none() {
+                use crate::services::channel_supplemental_delivery::{Source, source_for};
+                match source_for(&state.db, &row.id, origin, decision.source.as_ref()).await? {
+                    Source::Event(event) => {
+                        bound_anchor = supplemental::event_anchor(
+                            state,
+                            &event,
+                            &channel,
+                            &thread,
+                            &mut decision,
+                        )
+                        .await?;
+                        if bound_anchor.is_none() {
+                            return Ok(());
+                        }
+                    }
+                    Source::Missing => {
+                        decision.skip(supplemental::Reason::MissingAnchor);
+                        return Ok(());
+                    }
+                    Source::Unbound if channel.transport != "gateway" => {
+                        let Some(id) = thread.last_message_id.as_deref() else {
+                            decision.skip(supplemental::Reason::MissingAnchor);
+                            return Ok(());
+                        };
+                        use crate::services::channel_supplemental_delivery::{
+                            result_window, validate_anchor,
+                        };
+                        match validate_anchor(&state.db, &channel, &thread, id, None).await? {
+                            Ok(Some(message)) => {
+                                if let Err(reason) = result_window(purpose, message.created_at) {
+                                    decision.skip(reason);
+                                    return Ok(());
+                                }
+                                bound_anchor = Some(id.to_owned());
+                                decision.anchor = supplemental::Anchor::ChatPointer;
+                            }
+                            Err(reason) => {
+                                decision.skip(reason);
+                                return Ok(());
+                            }
+                            Ok(None) => {
+                                decision.skip(supplemental::Reason::MissingAnchor);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Source::Unbound => {}
+                }
+            }
             let mut reply = bounded_reply(text);
             if let Some(plan) = images
-                && let Some(turn) = row.active_turn.as_ref()
+                && let Some(turn_id) = turn_id.as_deref()
             {
                 let report = images::report_or_failure(
                     state,
@@ -7270,10 +7338,15 @@ pub async fn deliver_to_for(
                         },
                         owner: &row.user_id,
                         conversation_id: &row.id,
-                        turn_id: &turn.turn_id,
+                        turn_id,
                         channel: &channel,
                         thread: &thread,
-                        anchor: images::thread_anchor(&channel, &thread),
+                        anchor: bound_anchor.as_ref().map_or_else(
+                            || images::thread_anchor(&channel, &thread),
+                            |id| images::ImageAnchor::Inbound {
+                                message_id: id.clone(),
+                            },
+                        ),
                         audience: images::ImageAudience {
                             owner_private: !row.guest_turn
                                 && (row.channel.is_none()
@@ -7308,15 +7381,25 @@ pub async fn deliver_to_for(
             // reference yet: it is answered through NyxID's relay, as before.
             let relay_era =
                 thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
-            if (channel.transport != "gateway" || relay_era) && thread.last_message_id.is_some() {
-                decision.anchor = supplemental::Anchor::ChatPointer;
-                decision.dispatch(crate::handlers::nyxbot::supplemental::Egress::LocalRelay);
-            }
             if channel.transport == "gateway" && !relay_era {
                 supplemental::relay(state, row, origin, &channel, &thread, &reply, &mut decision)
                     .await?;
-            } else if let Some(message_id) = thread.last_message_id.as_deref() {
-                direct_reply(state, &channel, message_id, &reply, None).await?;
+            } else if let Some(message_id) = bound_anchor
+                .as_deref()
+                .or(thread.last_message_id.as_deref())
+            {
+                if bound_anchor.is_none() {
+                    decision.anchor = supplemental::Anchor::ChatPointer;
+                }
+                if decision.saved_result {
+                    supplemental::prepare_local_result(
+                        state, &channel, &thread, message_id, &reply,
+                    )
+                    .await?;
+                }
+                decision.dispatch(supplemental::Egress::LocalRelay);
+                supplemental::send_local(state, &channel, message_id, origin, &reply, &decision)
+                    .await?;
                 decision.outcome("confirmed");
             }
             Ok(())
@@ -7324,9 +7407,15 @@ pub async fn deliver_to_for(
         .await;
         decision.result(&result);
         if let Err(error) = &result {
-            tracing::debug!(%error, "NyxBot channel update not delivered");
+            tracing::debug!(
+                error_code = error.error_code(),
+                "NyxBot channel update not delivered"
+            );
         }
-        decision.record(state, row).await;
+        decision
+            .record_ids(state, &row.user_id, &row.id, turn_id.as_deref())
+            .await;
+        result
     })
     .await
 }
@@ -8330,6 +8419,9 @@ pub(crate) mod thread_controls;
 
 #[path = "nyxbot_late_delivery.rs"]
 pub(crate) mod late_delivery;
+
+#[path = "nyxbot_handoff_delivery.rs"]
+pub(crate) mod handoff_delivery;
 
 #[cfg(test)]
 mod future_size_tests {

@@ -71,6 +71,7 @@ async fn channel_turn_transport(
         platform: if native { "discord" } else { "telegram" }.into(),
     };
     let delivery = ChannelTurnDelivery {
+        restart_owner_verified: false,
         notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: true,
@@ -1790,6 +1791,41 @@ async fn execution_result_native_preparation_crash_survivor_delivers_once() {
 #[tokio::test]
 async fn execution_result_sealed_preparation_crash_survivor_delivers_once() {
     preparation_crash_survivor_delivers_once("sealed").await;
+}
+
+#[tokio::test]
+async fn permission_result_claim_binds_the_completed_continuation() {
+    let (fixture, original, _) = channel_turn_transport("permission_result_claim", "direct").await;
+    let platform = local_result_platform(&fixture, "confirmed").await;
+    let expected = result_ready(&fixture, &original).await;
+    assert_ne!(
+        expected.turn_id,
+        original.active_turn.as_ref().unwrap().turn_id
+    );
+    let process =
+        || crate::handlers::nyxbot::execution_delivery::process(&fixture.state, &expected.id);
+    crate::services::durable_wake_tests::resume_after(
+        "execution_result_dispatch_committed",
+        async { process().await.unwrap() },
+        async {
+            let claimed = delivery(&fixture).await;
+            assert_eq!(claimed.id, expected.id);
+            assert_eq!(claimed.turn_id, expected.turn_id);
+            assert_eq!(claimed.message_id, expected.message_id);
+            assert_eq!(claimed.occurrence_key, expected.occurrence_key);
+            assert!(claimed.claim_id.is_some());
+            assert_eq!(claimed.state, "dispatching");
+            process().await.unwrap();
+            assert!(platform.received_requests().await.unwrap().is_empty());
+        },
+    )
+    .await;
+    process().await.unwrap();
+    let completed = delivery(&fixture).await;
+    assert_eq!(completed.state, "confirmed");
+    assert_eq!(completed.preparation.unwrap().receipts.len(), 1);
+    assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+    fixture.cleanup().await;
 }
 
 #[tokio::test]

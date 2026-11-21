@@ -596,6 +596,8 @@ pub struct ActiveTurn {
 pub struct ExecutionAttempt {
     pub epoch: i64,
     pub claim_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_delivery: Option<Box<ChatRestartSource>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +616,8 @@ pub struct RestartAdmission {
     pub source: RestartSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_source: Option<TeamRestartSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_source: Option<Box<ChatRestartSource>>,
     pub initiating_message_id: String,
     pub initiating_seq: i64,
     pub reply_id: String,
@@ -635,6 +639,8 @@ pub struct ReattachDeployment {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoppedWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_origin: Option<Box<PlatformTurnOrigin>>,
     pub turn_id: String,
     pub credential_id: String,
     pub window_key: String,
@@ -650,6 +656,8 @@ pub struct ThreadSecretFence {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReattachWindow {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub channel_capacity_retry: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<WindowRefusal>,
     #[serde(default)]
@@ -728,6 +736,22 @@ pub struct CredentialWatchLimits {
 pub enum TeamRestartSource {
     Assignment { report_to: String },
     GroupMember { group_id: String, upper_seq: i64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChatRestartSource {
+    PersonalManager {
+        origin: Box<PlatformTurnOrigin>,
+    },
+    PrivateChannel {
+        event_id: String,
+        origin: ChannelOrigin,
+    },
+    Wake {
+        report_to: Option<String>,
+        reply_channel: Option<ChannelOrigin>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

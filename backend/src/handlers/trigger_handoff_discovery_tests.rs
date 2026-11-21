@@ -1,41 +1,12 @@
 use super::*;
 use crate::handlers::assistant_nyxagent::{SERVER_TURN_POLICY, start_turn};
 use crate::services::{feature_flag_service as flags, security_readiness_service as readiness};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 #[path = "assistant_team_handoff_tests.rs"]
 mod team_handoff;
 
-#[derive(Default, Clone)]
-struct Requests {
-    capabilities: Arc<AtomicUsize>,
-    models: Arc<AtomicUsize>,
-}
-
-impl Requests {
-    fn counts(&self) -> (usize, usize) {
-        (
-            self.capabilities.load(Ordering::SeqCst),
-            self.models.load(Ordering::SeqCst),
-        )
-    }
-
-    fn router(&self, fail_models: bool) -> Router {
-        let capabilities = self.capabilities.clone();
-        let models = self.models.clone();
-        Router::new().route("/v1/capabilities", axum::routing::get(move |headers: HeaderMap| async move {
-            assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer nyx"));
-            capabilities.fetch_add(1, Ordering::SeqCst);
-            Json(json!({"reattach":{"protocol":"nyxagent-reattach-v1","credential_watch":{"interval_seconds":30,"model_request_max_age_seconds":15},"recent_events":32,"max_events":64,"max_event_bytes":65536,"retention_seconds":3600,"max_subscribers_per_response":8,"max_subscribers_per_owner":32}}))
-        })).route("/v1/models", axum::routing::get(move |headers: HeaderMap, uri: axum::http::Uri| async move {
-            assert_eq!(uri.query(), Some("include_capabilities=true"));
-            assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer nyx"));
-            models.fetch_add(1, Ordering::SeqCst);
-            if fail_models { return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(); }
-            Json(json!({"data":[{"id":engine::DEFAULT_MODEL,"inference_credential":"thread"}]})).into_response()
-        }))
-    }
-}
+use crate::handlers::assistant_handoff_test_upstream::Requests;
 
 async fn set_flag(state: &AppState) {
     flags::set_platform_override(

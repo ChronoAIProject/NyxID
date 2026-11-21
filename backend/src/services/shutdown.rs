@@ -530,6 +530,9 @@ impl Runtime {
         F::Output: Send + 'static,
     {
         let (work, id) = self.insert(&mut self.state(), kind);
+        #[cfg(test)]
+        let future = super::assistant_engine_worker::TEST_WORKER
+            .scope(super::assistant_engine_worker::instance(), future);
         let future = Box::pin(future);
         let task = tokio::spawn(async move {
             let _work = work;

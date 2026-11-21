@@ -10,14 +10,19 @@ use crate::{
     models::nyxbot_channel::EVENTS_COLLECTION_NAME as EVENTS,
 };
 
-pub async fn bind_in_session(
+pub(crate) struct BoundEvent {
+    pub trace_request: Option<String>,
+    pub owner_origin: Option<crate::models::assistant_conversation::ChannelOrigin>,
+}
+
+pub(crate) async fn bind_in_session(
     db: &Database,
     session: &mut ClientSession,
     event: &str,
     owner: &str,
     conversation: &str,
     turn: &str,
-) -> AppResult<Option<String>> {
+) -> AppResult<BoundEvent> {
     let bound = db
         .collection::<bson::Document>(EVENTS)
         .find_one_and_update(
@@ -60,7 +65,22 @@ pub async fn bind_in_session(
         .await?;
     }
     bind_response(db, session, event, transport_owner, conversation, replay).await?;
-    Ok(bound.get_str("trace_request_id").ok().map(str::to_owned))
+    let owner_origin = bound
+        .get_document("delivery")
+        .ok()
+        .filter(|delivery| {
+            transport_owner == owner
+                && bound.get_str("custom_binding_id").is_err()
+                && (delivery.get_bool("execution_owner_verified") == Ok(true)
+                    || delivery.get_bool("restart_owner_verified") == Ok(true))
+                && delivery.get_bool("guest") == Ok(false)
+        })
+        .and_then(|delivery| delivery.get_document("origin").ok())
+        .and_then(|origin| bson::from_document(origin.clone()).ok());
+    Ok(BoundEvent {
+        trace_request: bound.get_str("trace_request_id").ok().map(str::to_owned),
+        owner_origin,
+    })
 }
 
 /// A guest waiting for model setup is still subject to the live source's
@@ -518,7 +538,9 @@ pub(crate) async fn enqueue_in_session(
         .await?
         .ok_or_else(|| AppError::Forbidden("Channel source authority changed".into()))?;
     let trace_request = if let Some(turn) = &bound_turn {
-        bind_in_session(db, session, &source, owner, conversation, turn).await?
+        bind_in_session(db, session, &source, owner, conversation, turn)
+            .await?
+            .trace_request
     } else {
         rows.update_one(
             doc! {"_id": &conversation, "user_id": &owner},
