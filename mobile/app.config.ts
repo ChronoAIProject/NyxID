@@ -105,6 +105,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withFontScaleChanges",
       "./plugins/withVoiceAudio",
       "./plugins/withSceneLifecycle",
       "./plugins/withWatchCompanion",

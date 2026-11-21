@@ -1,7 +1,7 @@
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
-import { assistantDraftStore } from "./assistantDraftStore";
+import { assistantDraftStore, discardUploadDraft } from "./assistantDraftStore";
 import { useEffect, useRef, useState } from "react";
 import {
   ActionSheetIOS,
@@ -15,6 +15,9 @@ import * as DocumentPicker from "expo-document-picker";
 import { requireOptionalNativeModule } from "expo";
 import type { ImagePickerAsset } from "expo-image-picker";
 import { File, Paths } from "expo-file-system";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { relativeCachePath } from "./uploadDraftRecovery";
+import { uploadDraftStorage } from "./uploadDraftStorage";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import {
@@ -92,12 +95,20 @@ export function useAssistantUploads({
     online,
     reservedMentionHandles,
   };
+  const targetAgent = useRef(agentId);
+  targetAgent.current = agentId;
   const current = useRef<AssistantUploadSession | undefined>(undefined);
   const epoch = getAuthEpoch();
+  const owner = getAuthAccountId();
+  const [otherDraft, setOtherDraft] =
+    useState<Awaited<ReturnType<typeof uploadDraftStorage.other>>>();
+  // An existing chat/group has a durable scope independent of when its agent loads.
+  // A new draft is also bound to the explicit route's agent in retainKey.
   const key = JSON.stringify([
     epoch,
+    owner,
     generation,
-    agentId ?? null,
+    retainKey ? null : (agentId ?? null),
     conversationId ?? null,
     groupId ?? null,
     retainKey ?? null,
@@ -109,7 +120,21 @@ export function useAssistantUploads({
   function createSession() {
     let ctx: AssistantUploadSession;
     const dependencies = {
-      current: () => current.current === ctx && epoch === getAuthEpoch(),
+      current: () =>
+        current.current === ctx &&
+        epoch === getAuthEpoch() &&
+        owner === getAuthAccountId(),
+      saveDraft:
+        owner && retainKey
+          ? (session) =>
+              uploadDraftStorage.save(
+                owner,
+                retainKey,
+                session.snapshot((uri) =>
+                  relativeCachePath(uri, cachePrefix()),
+                ),
+              )
+          : undefined,
       reservedMentionHandles: () => live.current.reservedMentionHandles ?? [],
       available: () =>
         live.current.enabled &&
@@ -143,7 +168,7 @@ export function useAssistantUploads({
       },
       createDraft: (signal) => {
         if (groupId) throw localizedError("Open a saved crew to attach files.");
-        return assistantUploadsApi.createDraft(agentId, signal);
+        return assistantUploadsApi.createDraft(targetAgent.current, signal);
       },
       upload: (id, file, bytes, signal, onProgress) =>
         assistantUploadsApi.upload(
@@ -154,7 +179,7 @@ export function useAssistantUploads({
           onProgress,
         ),
       remove: (id, attachmentId) =>
-        epoch === getAuthEpoch()
+        epoch === getAuthEpoch() && owner === getAuthAccountId()
           ? assistantUploadsApi.remove(
               { kind: groupId ? "groups" : "conversations", id },
               attachmentId,
@@ -175,6 +200,7 @@ export function useAssistantUploads({
       retained && !retained.disposed
         ? retained
         : new AssistantUploadSession(dependencies, groupId ?? conversationId);
+    ctx.restoring = !!owner && !!retainKey && !ctx.restored;
     ctx.rebind(dependencies);
     if (retainKey)
       assistantDraftStore.set(`uploads:${retainKey}`, ctx, () => ctx.dispose());
@@ -184,6 +210,59 @@ export function useAssistantUploads({
     context.current = { key, retainKey, session: createSession() };
   const session = context.current.session;
   current.current = session;
+  useEffect(() => {
+    if (!owner || !retainKey || !session.restoring) return;
+    let active = true;
+    const owns = () =>
+      active &&
+      !session.disposed &&
+      current.current === session &&
+      owner === getAuthAccountId() &&
+      epoch === getAuthEpoch();
+    void uploadDraftStorage
+      .load(owner, retainKey)
+      .then((draft) => {
+        if (!owns() || !draft) return;
+        const prefix = cachePrefix();
+        session.restore(draft, (path) => {
+          if (!path || relativeCachePath(prefix + path, prefix) !== path)
+            return;
+          try {
+            const file = new File(prefix + path);
+            if (file.exists) return file.uri;
+          } catch {
+            /* The OS can evict a cached picker result. */
+          }
+        });
+      })
+      .catch(() => {
+        if (owns()) session.reselect = true;
+      })
+      .finally(() => {
+        if (!owns()) return;
+        session.restoring = false;
+        session.restored = true;
+        setVersion((n) => n + 1);
+      });
+    return () => {
+      active = false;
+    };
+  }, [owner, retainKey, epoch, session]);
+  useEffect(() => {
+    setOtherDraft(undefined);
+    if (!owner || !focused || retainKey !== "nyxbot-home") return;
+    let active = true;
+    void uploadDraftStorage
+      .other(owner)
+      .then((target) => {
+        if (active && owner === getAuthAccountId() && epoch === getAuthEpoch())
+          setOtherDraft(target);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [owner, retainKey, focused, epoch]);
   const pendingPicker = useRef<
     | {
         session: AssistantUploadSession;
@@ -255,11 +334,18 @@ export function useAssistantUploads({
     ) {
       pendingPicker.current = undefined;
       pending.files.forEach(disposeFile);
+      pending.session.picking = false;
+      if (pending.session === session && epoch === getAuthEpoch()) {
+        session.reselect = true;
+        void session.saveDraft().catch(() => {});
+      }
     } else if (foreground && AppState.currentState === "active") {
       // Android can deliver the picker result before its resume callback.
       // Wait for the active render/effects before starting any upload, so an
       // earlier background effect cannot interrupt the newly accepted files.
       pendingPicker.current = undefined;
+      session.picking = false;
+      session.reselect = false;
       session.add(pending.files);
     }
   });
@@ -278,17 +364,39 @@ export function useAssistantUploads({
       session.entries.size >= MAX_ASSISTANT_ATTACHMENTS
     )
       return;
+    if (session.restoring) return;
     pickerLock.current = true;
     setPicking(true);
     setError(undefined);
     let pickedCopies: PickedAssistantFile[] = [];
     let transferred = false;
     try {
+      // The document picker's JS promise cannot survive process death.
+      // Commit the destination before yielding to the system picker.
+      session.picking = true;
+      if (owner && retainKey) {
+        await session.saveDraft();
+        if (
+          current.current !== session ||
+          owner !== getAuthAccountId() ||
+          epoch !== getAuthEpoch() ||
+          !live.current.enabled ||
+          !live.current.focused ||
+          AppState.currentState !== "active"
+        )
+          return;
+      }
       let files: PickedAssistantFile[];
       if (source === "photos" || source === "camera") {
         if (!requireOptionalNativeModule("ExponentImagePicker"))
           throw new Error(
-            (source === "camera" ? translateApp("Camera needs the updated NyxID app. You can still attach images using Files.") : translateApp("Photos needs the updated NyxID app. You can still attach images using Files.")),
+            source === "camera"
+              ? translateApp(
+                  "Camera needs the updated NyxID app. You can still attach images using Files.",
+                )
+              : translateApp(
+                  "Photos needs the updated NyxID app. You can still attach images using Files.",
+                ),
           );
         const ImagePicker = await import("expo-image-picker");
         if (
@@ -323,10 +431,10 @@ export function useAssistantUploads({
           )
             return;
           if (!permission.granted) {
-            setError(
-              () => (translateApp(
+            setError(() =>
+              translateApp(
                 "Camera access is off. Allow NyxID to use the camera in Settings, or choose Photos or Files.",
-              )),
+              ),
             );
             Alert.alert(
               translateApp("Allow camera access"),
@@ -345,10 +453,10 @@ export function useAssistantUploads({
                         current.current === session &&
                         epoch === getAuthEpoch()
                       )
-                        setError(
-                          () => (translateApp(
+                        setError(() =>
+                          translateApp(
                             "Couldn't open Settings. Open your device's Settings and allow camera access for NyxID.",
-                          )),
+                          ),
                         );
                     });
                   },
@@ -396,7 +504,9 @@ export function useAssistantUploads({
           )
             continue;
           if (!requireOptionalNativeModule("ExpoImageManipulator"))
-            throw localizedError("This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.");
+            throw localizedError(
+              "This photo format needs the updated NyxID app. Choose a JPEG or PNG using Files.",
+            );
           const { ImageManipulator, SaveFormat } =
             await import("expo-image-manipulator");
           const context = ImageManipulator.manipulate(file.uri);
@@ -450,17 +560,27 @@ export function useAssistantUploads({
       }
     } catch (cause) {
       if (current.current === session && epoch === getAuthEpoch())
-        setError(
-          () => (source === "camera"
+        setError(() =>
+          source === "camera"
             ? translateApp(
                 "The camera couldn't open. It may be unavailable on this device. Try again, or choose Photos or Files.",
               )
             : cause instanceof Error
               ? cause.message
-              : translateApp("The file picker could not open.")),
+              : translateApp("The file picker could not open."),
         );
     } finally {
-      if (!transferred) pickedCopies.forEach(disposeFile);
+      if (!transferred) {
+        session.picking = false;
+        pickedCopies.forEach(disposeFile);
+        if (
+          current.current === session &&
+          owner === getAuthAccountId() &&
+          epoch === getAuthEpoch()
+        ) {
+          void session.saveDraft().catch(() => {});
+        }
+      }
       pickerLock.current = false;
       if (current.current) setPicking(false);
     }
@@ -544,7 +664,33 @@ export function useAssistantUploads({
     session,
     files: [...session.entries.values()],
     blocked: session.blocked,
-    picking,
+    otherDraft,
+    discardOtherDraft: async () => {
+      if (
+        !owner ||
+        !otherDraft ||
+        current.current !== session ||
+        epoch !== getAuthEpoch() ||
+        !live.current.focused
+      )
+        return;
+      try {
+        await discardUploadDraft(owner, otherDraft.key);
+        const next = await uploadDraftStorage.other(owner);
+        if (
+          current.current === session &&
+          getAuthAccountId() === owner &&
+          epoch === getAuthEpoch()
+        )
+          setOtherDraft(next);
+      } catch {
+        if (current.current === session && epoch === getAuthEpoch())
+          setError(() =>
+            translateApp("The attachment draft could not be discarded. Try again."),
+          );
+      }
+    },
+    picking: picking || session.restoring,
     error,
     notice: session.notice,
     pick,
