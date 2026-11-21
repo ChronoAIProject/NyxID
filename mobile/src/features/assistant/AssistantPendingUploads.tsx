@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Image, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { X } from "lucide-react-native";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
-import { Label } from "../../components/workspace/WorkspaceUI";
+import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
@@ -40,11 +40,21 @@ export function AssistantPendingUploads({
   remove,
   disabled,
   showMentionHandles = true,
+  reselect,
+  choose,
+  dismiss,
+  resume,
+  canResume,
 }: {
   files: PendingAssistantUpload[];
   remove: (key: string) => void;
   disabled: boolean;
   showMentionHandles?: boolean;
+  reselect: boolean;
+  choose: () => void;
+  dismiss: () => void;
+  resume: () => void;
+  canResume: boolean;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
@@ -97,6 +107,34 @@ export function AssistantPendingUploads({
 
   return (
     <>
+      {reselect && (
+        <View style={styles.recovery}>
+          <Label>
+            {t(
+              "An attachment selection was interrupted. Choose the file again.",
+            )}
+          </Label>
+          <ActionButton
+            label={t("Choose files")}
+            onPress={choose}
+            disabled={!canResume}
+            variant="secondary"
+          />
+          <ActionButton
+            label={t("Dismiss")}
+            onPress={dismiss}
+            variant="secondary"
+          />
+        </View>
+      )}
+      {files.some((row) => row.resumable) && (
+        <ActionButton
+          label={t("Resume attachment uploads")}
+          onPress={resume}
+          disabled={!canResume}
+          variant="secondary"
+        />
+      )}
       {files.length ? (
         <View style={styles.listFrame}>
           <View style={styles.viewport}>
@@ -381,6 +419,7 @@ const styles = StyleSheet.create({
     gap: GAP,
     padding: INSET,
   },
+  recovery: { gap: GAP, padding: INSET },
   card: {
     minWidth: 0,
     aspectRatio: 1,

@@ -1,3 +1,5 @@
+import { discardUploadDraft } from "../assistant/assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
@@ -319,8 +321,10 @@ function GroupEditor({
           style: "destructive",
           onPress: () =>
             void perform(async () => {
+              const owner = getAuthAccountId();
               if (kind === "delete") await groupsApi.remove(baseline.id);
               else await groupsApi.leave(baseline.id);
+              void discardUploadDraft(owner, `crew:${baseline.id}`).catch(() => {});
               if (
                 scope.current.mounted &&
                 scope.current.epoch === getAuthEpoch()
