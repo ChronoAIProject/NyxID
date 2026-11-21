@@ -1975,12 +1975,6 @@ async fn execute_turn_inner(
     } else {
         String::new()
     };
-    let current_input = if media_context.is_empty() {
-        text.to_owned()
-    } else {
-        format!("{text}\n\n{media_context}")
-    };
-    let text = current_input.as_str();
     let turn = row.active_turn.as_ref().expect("claimed turn");
     let run_deadline = if let Some(run_id) = turn
         .trigger_run_id
@@ -2329,6 +2323,10 @@ async fn execute_turn_inner(
             json!(omitted)
         ));
     }
+    if !media_context.is_empty() {
+        decisions.push('\n');
+        decisions.push_str(&media_context);
+    }
     let media_decision_offset = decisions.len();
     decisions.push_str(&listing);
     // Persist the delivery outcome on metadata, so a reload does not hide the fallback.
@@ -2373,11 +2371,7 @@ async fn execute_turn_inner(
     let mut completed = String::new();
     let mut emitted = String::new();
     let mut first_output_recorded = false;
-    let mut input = if text.trim().is_empty() {
-        "Please discuss the attachments in this message."
-    } else {
-        text
-    };
+    let mut input = text;
     let mut recovery = engine::Recovery::default();
     let start_retry_deadline = tokio::time::Instant::now() + super::assistant_start_retry::BUDGET;
     let mut start_retries = 0;

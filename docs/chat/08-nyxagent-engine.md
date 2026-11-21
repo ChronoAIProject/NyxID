@@ -1656,7 +1656,10 @@ returned by DTOs, Debug, logs, audit or tools. Each fresh binding gets a new mar
 The preamble exists only in the upstream request, never in NyxID's stored user
 message. Image requests retain the input array: the combined text goes in its
 `input_text` part and image parts remain unchanged.
-Attachment-only messages still carry this preamble. The current attachment
+Attachment-only messages still carry this preamble. An empty caption stays
+empty after the context block. Telegram ingress paths that require nonempty
+text use a single paperclip (📎) for a captionless file. The specialist's
+instructions and the conversation determine how to respond. The current attachment
 listing and expiry/image-omission notices occur exactly once in every request,
 including automatic continuations and session/credential recovery retries.
 Other turn notes are sent on the first upstream request, and again when recovery

@@ -6515,7 +6515,7 @@ async fn dispatch_relay_response(
         .filter(|text| !text.is_empty())
         .unwrap_or(text);
     if text.is_empty() && !media.is_empty() {
-        text = "Please review the attached Telegram media.".into();
+        text = crate::services::telegram_input::ATTACHMENT_ONLY.into();
     }
     let human = sender_kind == crate::models::channel_thread::ThreadSenderKind::Human;
     // Admission includes chat reconciliation and turn preparation. Keep that
@@ -7760,7 +7760,7 @@ pub async fn relay_callback(
         && chats::native_message(&raw)
             .is_some_and(|m| !crate::services::telegram_input::attachments(m).is_empty())
     {
-        text = "Please review the attached Telegram media.".into();
+        text = crate::services::telegram_input::ATTACHMENT_ONLY.into();
     }
     let raw_title = ["message", "edited_message", "channel_post"]
         .iter()

@@ -210,7 +210,7 @@ pub(crate) async fn dispatch_update(
         super::telegram_input::scrub(&super::telegram_input::content(&update["message"]))
     };
     if text.is_empty() && !super::telegram_input::attachments(&update["message"]).is_empty() {
-        text = "Please review the attached Telegram media.".into();
+        text = super::telegram_input::ATTACHMENT_ONLY.into();
     }
     dispatch_verified(
         state,
