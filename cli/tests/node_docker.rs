@@ -232,50 +232,31 @@ fn machine_docker_restart_validates_ca_before_touching_existing_container() {
 }
 
 #[test]
-fn machine_docker_creation_preserves_ca_mounts_and_sandbox_profile() {
+fn new_machine_requires_a_release_digest_before_probe_or_creation() {
     let harness = DockerHarness::new();
     let docker = harness.root.path().join("bin/docker");
     std::fs::write(&docker,
         "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"$DOCKER_CALL_LOG\"\nprintf '\\n' >> \"$DOCKER_CALL_LOG\"\n[ \"$1\" != inspect ]\n",
     ).unwrap();
-    let path = harness.certificate("company.pem");
-    let output = harness
-        .command("start")
-        .arg("--machine")
-        .args(["--separation", "shared-legacy"])
-        .env("NYXID_CA_CERT", &path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let calls = harness.calls();
-    let run = calls.last().unwrap();
-    assert_eq!(
-        run.last().unwrap(),
-        "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest"
-    );
-    assert!(
-        run.windows(2)
-            .any(|args| args == ["-e", "NYXID_CA_CERT=/etc/nyxid/tls/ca.pem"])
-    );
-    let mount = format!(
-        "type=bind,source={},target=/etc/nyxid/tls/ca.pem,readonly",
-        path.display()
-    );
-    assert!(run.windows(2).any(|args| args == ["--mount", &mount]));
-    assert!(
-        run.windows(2)
-            .any(|args| args == ["-e", "NYXID_MACHINE_SEPARATION=shared-legacy"])
-    );
-    assert!(
-        run.windows(2)
-            .any(|args| args[0] == "--security-opt" && args[1].starts_with("seccomp="))
-    );
-    assert!(
-        run.iter()
-            .any(|arg| arg == "nyxid-node-machine-state:/var/lib/nyxid-machine")
-    );
+    for args in [
+        vec!["--machine"],
+        vec!["--machine", "--separation", "shared-legacy"],
+    ] {
+        let output = harness.command("start").args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("valid machine release digest"));
+        let calls = harness.calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[2],
+            [
+                "pull",
+                concat!(
+                    "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:",
+                    env!("CARGO_PKG_VERSION")
+                )
+            ]
+        );
+        std::fs::remove_file(harness.root.path().join("docker.log")).unwrap();
+    }
 }

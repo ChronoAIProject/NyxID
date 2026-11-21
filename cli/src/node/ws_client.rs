@@ -5616,9 +5616,9 @@ mod tests {
                 run_http_proxy_until_cancel(
                     &mut cancellation.receiver,
                     proxy_executor::execute_proxy_request(
-                        &request,
+                        &proxy_executor::signed_test_request(&request),
                         &credentials,
-                        None,
+                        Some(proxy_executor::TEST_SIGNING_SECRET),
                         &tokio::sync::Mutex::new(ReplayGuard::new()),
                         &NodeMetrics::new(),
                         &tx,
@@ -5839,9 +5839,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5925,9 +5925,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,

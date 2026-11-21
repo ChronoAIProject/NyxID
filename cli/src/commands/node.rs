@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
@@ -588,7 +588,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
-        NodeCommands::Docker { command } => run_docker_command(command),
+        NodeCommands::Docker { command } => run_docker_command(command).await,
 
         NodeCommands::Daemon { command } => match command {
             NodeDaemonCommands::Install {
@@ -771,7 +771,7 @@ fn admin_label(admin: &Value) -> String {
 // ---- Docker subcommands ----
 
 const DOCKER_IMAGE: &str = "nyxid-node:latest";
-const MACHINE_DOCKER_IMAGE: &str = "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest";
+const LOCAL_MACHINE_BUILD_IMAGE: &str = "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest";
 const DOCKER_CONFIG_DIR: &str = "/app/config";
 
 fn docker_container_name(profile: Option<&str>, machine: bool) -> String {
@@ -799,7 +799,7 @@ fn docker_config_dir(profile: Option<&str>) -> Result<std::path::PathBuf> {
     }
 }
 
-fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
+async fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
     // Verify docker is available
     let docker_check = std::process::Command::new("docker")
         .arg("--version")
@@ -814,11 +814,11 @@ fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
     match command {
         NodeDockerCommands::Build { machine } => docker_build(machine),
         NodeDockerCommands::Start { args, separation } => {
-            docker_start(args.profile.as_deref(), args.machine, false, separation)
+            docker_start(args.profile.as_deref(), args.machine, false, separation).await
         }
         NodeDockerCommands::Stop { args } => docker_stop(args.profile.as_deref(), args.machine),
         NodeDockerCommands::Restart { args, separation } => {
-            docker_start(args.profile.as_deref(), args.machine, true, separation)
+            docker_start(args.profile.as_deref(), args.machine, true, separation).await
         }
         NodeDockerCommands::Status { args } => docker_status(args.profile.as_deref(), args.machine),
         NodeDockerCommands::Logs { args, follow } => {
@@ -829,7 +829,7 @@ fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
 
 fn docker_build(machine: bool) -> Result<()> {
     let image = if machine {
-        MACHINE_DOCKER_IMAGE
+        LOCAL_MACHINE_BUILD_IMAGE
     } else {
         DOCKER_IMAGE
     };
@@ -918,7 +918,7 @@ fn docker_ca_args(ca_environment: &[(&str, String)]) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn docker_start(
+async fn docker_start(
     profile: Option<&str>,
     machine: bool,
     restart: bool,
@@ -931,7 +931,7 @@ fn docker_start(
     }
     if machine {
         let ca_args = docker_ca_args(&ca_environment)?;
-        return docker_machine_start(profile, restart, &ca_args, separation);
+        return docker_machine_start(profile, restart, &ca_args, separation).await;
     }
     let config_dir = docker_config_dir(profile)?;
     let container = docker_container_name(profile, false);
@@ -1015,14 +1015,54 @@ fn machine_container_security_args(security: &str) -> Vec<String> {
     .collect()
 }
 
-fn machine_container_probe_args(security: &str) -> Vec<String> {
+fn machine_release_digest(pull_output: &str) -> Result<&str> {
+    let mut digests = pull_output
+        .lines()
+        .filter_map(|line| line.strip_prefix("Digest: "));
+    let digest = digests
+        .next()
+        .filter(|value| nyxid_machine::update::valid_digest(value))
+        .context("Docker did not report a valid machine release digest")?;
+    anyhow::ensure!(
+        digests.next().is_none(),
+        "Docker reported multiple machine release digests"
+    );
+    Ok(digest)
+}
+
+async fn verified_machine_image() -> Result<String> {
+    let version = env!("CARGO_PKG_VERSION");
+    let tag = format!("{}:{version}", nyxid_machine::update::MACHINE_IMAGE);
+    eprintln!("Pulling machine release {tag} for verification...");
+    let output = tokio::process::Command::new("docker")
+        .args(["pull", &tag])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Could not pull the machine release {tag}. A new container requires registry access."
+    );
+    let stdout = std::str::from_utf8(&output.stdout).context("Invalid Docker pull output")?;
+    let digest = machine_release_digest(stdout)?;
+    super::update_attestation::verify_image_attestation(
+        &crate::machine_updater::docker::github_client()?,
+        &digest["sha256:".len()..],
+        version,
+        None,
+    )
+    .await
+    .context("Machine release verification failed")?;
+    Ok(format!("{tag}@{digest}"))
+}
+
+fn machine_container_probe_args(security: &str, image: &str) -> Vec<String> {
     let mut args = machine_container_security_args(security);
     args.extend(
         [
             "--rm",
             "--entrypoint",
             "/usr/local/bin/nyxid",
-            MACHINE_DOCKER_IMAGE,
+            image,
             "node",
             "setup",
             "--container",
@@ -1045,7 +1085,41 @@ fn machine_container_selection_args(selection: Separation) -> [String; 4] {
     ]
 }
 
-fn docker_machine_start(
+fn machine_container_command(
+    container: &str,
+    security: &str,
+    selection: Separation,
+    ca_args: &[String],
+    image: &str,
+) -> std::process::Command {
+    let state = format!("{container}-state:/var/lib/nyxid-machine");
+    let workspace = format!("{container}-workspace:/workspace");
+    let mut command = std::process::Command::new("docker");
+    command.args(["--log-level", "error"]);
+    command.args(machine_container_security_args(security));
+    command.args([
+        "-d",
+        "--name",
+        container,
+        "--restart",
+        "unless-stopped",
+        "-v",
+        &state,
+        "-v",
+        &workspace,
+    ]);
+    command.args(machine_container_selection_args(selection));
+    for key in ["NYXID_NODE_URL", "NYXID_NODE_TOKEN"] {
+        if std::env::var_os(key).is_some() {
+            command.args(["-e", key]);
+        }
+    }
+    command.args(ca_args);
+    command.arg(image);
+    command
+}
+
+async fn docker_machine_start(
     profile: Option<&str>,
     restart: bool,
     ca_args: &[String],
@@ -1074,8 +1148,7 @@ fn docker_machine_start(
         }
         return Ok(());
     }
-    let state = format!("{container}-state:/var/lib/nyxid-machine");
-    let workspace = format!("{container}-workspace:/workspace");
+    let image = verified_machine_image().await?;
     let mut sandbox = tempfile::NamedTempFile::new()?;
     std::io::Write::write_all(
         &mut sandbox,
@@ -1089,7 +1162,7 @@ fn docker_machine_start(
         None
     } else {
         let output = std::process::Command::new("docker")
-            .args(machine_container_probe_args(&security))
+            .args(machine_container_probe_args(&security, &image))
             .output()?;
         output
             .status
@@ -1103,28 +1176,7 @@ fn docker_machine_start(
     if selection == Separation::SharedLegacy {
         eprintln!("{}", nyxid_machine::context::SHARED_LEGACY_WARNING);
     }
-    let mut command = std::process::Command::new("docker");
-    command.args(["--log-level", "error"]);
-    command.args(machine_container_security_args(&security));
-    command.args([
-        "-d",
-        "--name",
-        &container,
-        "--restart",
-        "unless-stopped",
-        "-v",
-        &state,
-        "-v",
-        &workspace,
-    ]);
-    command.args(machine_container_selection_args(selection));
-    for key in ["NYXID_NODE_URL", "NYXID_NODE_TOKEN"] {
-        if std::env::var_os(key).is_some() {
-            command.args(["-e", key]);
-        }
-    }
-    command.args(ca_args);
-    command.arg(MACHINE_DOCKER_IMAGE);
+    let mut command = machine_container_command(&container, &security, selection, ca_args, &image);
     if !command.status()?.success() {
         anyhow::bail!("Could not start machine container");
     }
@@ -1494,8 +1546,62 @@ mod tests {
     }
 
     #[test]
+    fn release_contract_machine_probe_uses_official_digest() {
+        let digest = format!("sha256:{}", "7b".repeat(32));
+        let output = format!("Layers downloaded\nDigest: {digest}\nStatus: Download complete\n");
+        let digest = machine_release_digest(&output).unwrap();
+        let tag = format!(
+            "{}:{}",
+            nyxid_machine::update::MACHINE_IMAGE,
+            env!("CARGO_PKG_VERSION")
+        );
+        let image = format!("{tag}@{digest}");
+        let args = machine_container_probe_args("seccomp=profile", &image);
+        assert!(args.contains(&image));
+        assert!(machine_release_digest(&format!("{output}{output}")).is_err());
+        for invalid in ["", "Digest: latest", "Digest: sha256:0000"] {
+            assert!(machine_release_digest(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_creation_preserves_ca_mounts_and_sandbox_profile() {
+        let image = format!(
+            "{}:{}@sha256:{}",
+            nyxid_machine::update::MACHINE_IMAGE,
+            env!("CARGO_PKG_VERSION"),
+            "7b".repeat(32)
+        );
+        let ca_args = docker_ca_args(&[("NYXID_CA_CERT", "/test/company.pem".into())]).unwrap();
+        let command = machine_container_command(
+            "nyxid-node-machine",
+            "seccomp=/policy.json",
+            Separation::SharedLegacy,
+            &ca_args,
+            &image,
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(args.last(), Some(&image.as_str()));
+        for pair in [
+            [
+                "--mount",
+                "type=bind,source=/test/company.pem,target=/etc/nyxid/tls/ca.pem,readonly",
+            ],
+            ["-e", "NYXID_CA_CERT=/etc/nyxid/tls/ca.pem"],
+            ["-e", "NYXID_MACHINE_SEPARATION=shared-legacy"],
+            ["--security-opt", "seccomp=/policy.json"],
+            ["-v", "nyxid-node-machine-state:/var/lib/nyxid-machine"],
+        ] {
+            assert!(args.windows(2).any(|args| args == pair));
+        }
+    }
+
+    #[test]
     fn docker_machine_probe_uses_runtime_security_without_secrets_or_persistent_volumes() {
-        let probe = machine_container_probe_args("seccomp=/tmp/test policy.json");
+        let probe = machine_container_probe_args("seccomp=/tmp/test policy.json", "image");
         assert!(probe.starts_with(&machine_container_security_args(
             "seccomp=/tmp/test policy.json"
         )));

@@ -57,6 +57,30 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
 /// Threshold above which responses are streamed rather than buffered (256 KB).
 const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
 
+async fn verify_proxy_request(
+    request: &serde_json::Value,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+) -> std::result::Result<(), &'static str> {
+    let secret = signing_secret
+        .filter(|key| key.len() == 64)
+        .ok_or("Node HTTP proxy requires a configured signing secret")?;
+    let (Some(timestamp), Some(nonce), Some(signature)) = (
+        request["timestamp"].as_str(),
+        request["nonce"].as_str().filter(|nonce| !nonce.is_empty()),
+        request["signature"].as_str(),
+    ) else {
+        return Err("Node HTTP proxy requires a signed request");
+    };
+    if !signing::verify_request_signature(request, secret, signature) {
+        return Err("HMAC signature verification failed");
+    }
+    if !replay_guard.lock().await.check(timestamp, nonce) {
+        return Err("Request rejected: replay or expired timestamp");
+    }
+    Ok(())
+}
+
 /// Execute a proxy request and return the WS response message(s).
 ///
 /// For non-streaming responses, returns a single `proxy_response` JSON string.
@@ -216,57 +240,13 @@ async fn execute_proxy_request_inner(
         .await;
         return;
     }
-    // 1. Verify HMAC signature if signing is enabled
-    if let Some(secret) = signing_secret {
-        let timestamp = request["timestamp"].as_str();
-        let nonce = request["nonce"].as_str();
-        let signature = request["signature"].as_str();
-
-        if timestamp.is_some() || nonce.is_some() || signature.is_some() {
-            let Some(signature) = signature else {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(request_id, "Missing HMAC signature", 403, false),
-                )
-                .await;
-                return;
-            };
-
-            if !signing::verify_request_signature(request, secret, signature) {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        "HMAC signature verification failed",
-                        403,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-
-            // Replay protection
-            let timestamp = timestamp.unwrap_or("");
-            let nonce = nonce.unwrap_or("");
-            let mut guard = replay_guard.lock().await;
-            if !guard.check(timestamp, nonce) {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        "Request rejected: replay or expired timestamp",
-                        403,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-        }
+    // Streaming uploads arrive with a separately verified opening and body.
+    if upload.is_none()
+        && let Err(message) = verify_proxy_request(request, signing_secret, replay_guard).await
+    {
+        metrics.record_error();
+        let _ = send_ws_message(tx, proxy_error_response(request_id, message, 403, false)).await;
+        return;
     }
 
     // 2. Look up credentials for this service
@@ -888,6 +868,26 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 }
 
 #[cfg(test)]
+pub(super) const TEST_SIGNING_SECRET: &str =
+    "3737373737373737373737373737373737373737373737373737373737373737";
+
+#[cfg(test)]
+pub(super) fn signed_test_request(request: &serde_json::Value) -> serde_json::Value {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut request = request.clone();
+    request["timestamp"] = chrono::Utc::now().to_rfc3339().into();
+    request["nonce"] = uuid::Uuid::new_v4().to_string().into();
+    let message = ["timestamp", "nonce", "method", "path", "query", "body"]
+        .map(|name| request[name].as_str().unwrap_or_default())
+        .join("\n");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&[0x37; 32]).unwrap();
+    mac.update(message.as_bytes());
+    request["signature"] = hex::encode(mac.finalize().into_bytes()).into();
+    request
+}
+
+#[cfg(test)]
 mod tests {
     use super::append_query_param;
 
@@ -940,6 +940,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_contract_proxy_requires_authentication_before_credential_lookup() {
+        use super::super::{config::NodeConfig, secret_backend::SecretBackend};
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"}, "node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let request = serde_json::json!({"request_id":"test","service_slug":"unconfigured"});
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut tampered = signed_test_request(&request);
+        tampered["path"] = "/different".into();
+        for (frame, local_secret) in [
+            (&request, Some(TEST_SIGNING_SECRET)),
+            (&request, None),
+            (&tampered, Some(TEST_SIGNING_SECRET)),
+            (&signed_test_request(&request), None),
+        ] {
+            execute_proxy_request(
+                frame,
+                &credentials,
+                local_secret,
+                &tokio::sync::Mutex::new(ReplayGuard::new()),
+                &NodeMetrics::new(),
+                &tx,
+                false,
+                &build_http_client().unwrap(),
+            )
+            .await;
+            let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+                panic!("expected response");
+            };
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(frame["status"], 403);
+            assert_eq!(frame["retryable"], false);
+        }
+    }
+
+    #[tokio::test]
     async fn node_endpoint_2126_server_target_wins_over_stale_local_target() {
         use super::super::{config::NodeConfig, secret_backend::SecretBackend};
         use super::*;
@@ -982,9 +1023,9 @@ mod tests {
         let request = serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "base_url":new.uri(), "method":"GET", "path":"/health", "headers":{}});
         let (tx, mut rx) = mpsc::channel(8);
         execute_proxy_request(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &tokio::sync::Mutex::new(ReplayGuard::new()),
             &NodeMetrics::new(),
             &tx,
@@ -1143,9 +1184,9 @@ mod tests {
         let metrics = NodeMetrics::new();
         let http_client = build_http_client().unwrap();
         execute_proxy_request_with_ifttt_client(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &guard,
             &metrics,
             &tx,
@@ -1169,9 +1210,9 @@ mod tests {
         request["path"] = "trigger/event_only".into();
         request["body"] = "".into();
         execute_proxy_request_with_ifttt_client(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &guard,
             &metrics,
             &tx,
@@ -1197,9 +1238,9 @@ mod tests {
             request["method"] = method.into();
             request["path"] = path.into();
             execute_proxy_request_with_ifttt_client(
-                &request,
+                &signed_test_request(&request),
                 &credentials,
-                None,
+                Some(TEST_SIGNING_SECRET),
                 &guard,
                 &metrics,
                 &tx,

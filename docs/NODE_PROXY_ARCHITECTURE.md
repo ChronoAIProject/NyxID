@@ -872,7 +872,7 @@ or audit data.
 - **Delivered** to the node agent in the `register_ok` WebSocket message (raw, shown once)
 - **Stored** on the node agent as AES-256-GCM encrypted ciphertext in the config file (or in OS keychain)
 - **Rotated** alongside auth token rotation (`rotate-token` endpoint returns both new auth token and new signing secret)
-- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls whether signing is active
+- **Configurable**: `NODE_HMAC_SIGNING_ENABLED` (default: `true`) controls server signing for ordinary proxy requests. Upgraded agents require signed HTTP proxy requests and return a non-retryable 403 for unsigned frames. Enable signing on all server replicas before upgrading HTTP proxy agents
 
 ### Signature Computation
 
