@@ -1,3 +1,4 @@
+import { AttachmentSourcePicker } from "./AttachmentSourcePicker";
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -2169,6 +2170,7 @@ export function AssistantScreen({
           <RightPanelSlot />
         </View>
       </RightPanelProvider>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

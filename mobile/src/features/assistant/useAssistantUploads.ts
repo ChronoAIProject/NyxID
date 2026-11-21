@@ -8,6 +8,7 @@ import {
   Alert,
   AppState,
   Linking,
+  Keyboard,
   Platform,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -27,6 +28,7 @@ import {
   MAX_ASSISTANT_ATTACHMENTS,
   isSupportedAttachment,
 } from "./assistantUploads";
+import type { AttachmentSourceChoice } from "./AttachmentSourcePicker";
 
 const cachePrefix = () => `${Paths.cache.uri.replace(/\/+$/, "")}/`;
 
@@ -77,6 +79,7 @@ export function useAssistantUploads({
   );
   const [, setVersion] = useState(0);
   const [picking, setPicking] = useState(false);
+  const [sourceChoices, setSourceChoices] = useState<AttachmentSourceChoice[]>();
   const [error, setError] = useLocalizedState<string>();
   const live = useRef({
     enabled,
@@ -240,6 +243,7 @@ export function useAssistantUploads({
   }, [session]);
   useEffect(() => {
     setError(undefined);
+    setSourceChoices(undefined);
     if (!enabled || !focused || !foreground || !online) session.interrupt();
   }, [session, enabled, focused, foreground, online]);
   useEffect(() => {
@@ -472,6 +476,7 @@ export function useAssistantUploads({
   ) {
     if (
       pickerLock.current ||
+      sourceChoices ||
       current.current !== session ||
       pendingPicker.current ||
       !live.current.enabled ||
@@ -518,26 +523,23 @@ export function useAssistantUploads({
         },
       );
     } else {
-      // Android Alert supports at most three buttons. Back/outside dismisses
-      // this first menu; the second menu keeps Files and connection reachable.
-      Alert.alert(
-        translateApp("Add attachments"),
-        undefined,
-        [
-          { text: translateApp("Camera"), onPress: () => void pick("camera") },
-          { text: translateApp("Photos"), onPress: () => void pick("photos") },
-          {
-            text: translateApp("More options…"),
-            onPress: () =>
-              Alert.alert(translateApp("More attachment options"), undefined, [
-                { text: translateApp("Files"), onPress: () => void pick("files") },
-                ...extra,
-                { text: translateApp("Cancel"), style: "cancel" },
-              ]),
+      Keyboard.dismiss();
+      setSourceChoices([
+        ...(["camera", "photos", "files"] as const).map((source, index) => ({
+          label: translateApp(["Camera", "Photos", "Files"][index]!),
+          onPress: () => {
+            setSourceChoices(undefined);
+            void pick(source);
           },
-        ],
-        { cancelable: true },
-      );
+        })),
+        ...extra.map((action) => ({
+          label: action.text,
+          onPress: () => {
+            setSourceChoices(undefined);
+            action.onPress();
+          },
+        })),
+      ]);
     }
   }
   return {
@@ -549,6 +551,9 @@ export function useAssistantUploads({
     notice: session.notice,
     pick,
     choose,
+    sourcePicker: sourceChoices
+      ? { choices: sourceChoices, onClose: () => setSourceChoices(undefined) }
+      : undefined,
     remove: (key: string) => session.remove(key),
   };
 }
