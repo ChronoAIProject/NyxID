@@ -399,6 +399,19 @@ pub struct SubscriberCheckpoint {
     pub response_id: String,
     pub sequence: u64,
     pub window_text: String,
+    /// UTF-8 byte boundaries in window_text order.
+    /// Absent on legacy checkpoints and when redaction changed the boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_lengths: Option<Vec<OutputPartLength>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputPartLength {
+    pub output_index: u64,
+    pub content_index: u64,
+    pub bytes: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_snapshot: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

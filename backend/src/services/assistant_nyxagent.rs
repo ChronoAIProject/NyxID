@@ -8452,6 +8452,162 @@ pub async fn waiting_for_capacity(
     Ok(())
 }
 
+/// Live deltas concatenate directly. Parts restored from an upstream response
+/// snapshot retain the two-newline joining used by parse_response.
+#[derive(Clone, Default)]
+pub(super) struct OutputText {
+    parts: std::collections::BTreeMap<(u64, u64), TextPart>,
+    bytes: usize,
+}
+
+#[derive(Clone, Default)]
+struct TextPart {
+    text: String,
+    from_snapshot: bool,
+}
+
+impl OutputText {
+    fn update(&mut self, key: (u64, u64), value: &str, append: bool) -> Result<(), TurnError> {
+        let previous = self.parts.get(&key);
+        let removed = if append {
+            0
+        } else {
+            previous.map_or(0, |part| part.text.len())
+        };
+        let bytes = self.bytes - removed + value.len();
+        if bytes > MAX_OUTPUT_BYTES {
+            return Err(TurnError::internal("output_too_large", "stream"));
+        }
+        self.bytes = bytes;
+        if value.is_empty() && previous.is_none() {
+            return Ok(());
+        }
+        let part = self.parts.entry(key).or_default();
+        if !append {
+            part.text.clear();
+        }
+        part.text.push_str(value);
+        Ok(())
+    }
+
+    fn discard(&mut self, matches: impl Fn((u64, u64)) -> bool) {
+        self.parts.retain(|key, _| !matches(*key));
+        let snapshot_count = self
+            .parts
+            .values()
+            .filter(|part| part.from_snapshot)
+            .count();
+        self.bytes = self
+            .parts
+            .values()
+            .map(|part| part.text.len())
+            .sum::<usize>()
+            + snapshot_count.saturating_sub(1) * 2;
+    }
+
+    pub(super) fn text(&self) -> String {
+        let mut text = String::with_capacity(self.bytes);
+        let mut seen_snapshot = false;
+        for part in self.parts.values() {
+            if part.from_snapshot {
+                if seen_snapshot {
+                    text.push_str("\n\n");
+                }
+                seen_snapshot = true;
+            }
+            text.push_str(&part.text);
+        }
+        text
+    }
+
+    pub(super) fn layout(&self) -> Vec<crate::models::assistant_conversation::OutputPartLength> {
+        self.parts
+            .iter()
+            .map(|(&(output_index, content_index), part)| {
+                crate::models::assistant_conversation::OutputPartLength {
+                    output_index,
+                    content_index,
+                    bytes: part.text.len(),
+                    from_snapshot: part.from_snapshot,
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn restore(
+        cursor: &crate::models::assistant_conversation::SubscriberCheckpoint,
+    ) -> Option<Self> {
+        let mut remaining = cursor.window_text.as_str();
+        let mut output = Self::default();
+        let mut seen_snapshot = false;
+        for part in cursor.part_lengths.as_ref()? {
+            if part.from_snapshot {
+                if seen_snapshot {
+                    remaining = remaining.strip_prefix("\n\n")?;
+                }
+                seen_snapshot = true;
+            }
+            let (text, rest) = remaining.split_at_checked(part.bytes)?;
+            remaining = rest;
+            output.parts.insert(
+                (part.output_index, part.content_index),
+                TextPart {
+                    text: text.into(),
+                    from_snapshot: part.from_snapshot,
+                },
+            );
+        }
+        output.bytes = cursor.window_text.len();
+        (remaining.is_empty() && output.text() == cursor.window_text).then_some(output)
+    }
+
+    // The caller has already validated and size-checked the response with parse_response.
+    pub(super) fn from_snapshot(response: &Value) -> Result<Self, TurnError> {
+        let mut output = Self::default();
+        for (item_index, item) in response["output"]
+            .as_array()
+            .ok_or_else(invalid_stream)?
+            .iter()
+            .enumerate()
+        {
+            if item["type"] != "message"
+                || item["role"] != "assistant"
+                || empty_incomplete_message(item)
+            {
+                continue;
+            }
+            for (part_index, part) in item["content"].as_array().into_iter().flatten().enumerate() {
+                if part["type"] == "output_text" {
+                    let text = part["text"].as_str().ok_or_else(invalid_stream)?;
+                    output.bytes += text.len() + if output.parts.is_empty() { 0 } else { 2 };
+                    output.parts.insert(
+                        (item_index as u64, part_index as u64),
+                        TextPart {
+                            text: text.into(),
+                            from_snapshot: true,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+fn invalid_stream() -> TurnError {
+    TurnError::internal("invalid_stream", "stream")
+}
+
+pub(super) fn empty_incomplete_message(item: &Value) -> bool {
+    item["type"] == "message"
+        && item["status"] == "incomplete"
+        && item["content"].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .all(|part| part["type"] == "output_text" && part["text"].as_str() == Some(""))
+        })
+}
+
 /// Strict incremental Responses SSE decoder. Unknown event types are additive;
 /// malformed frames and non-monotonic sequences fail closed.
 #[derive(Default)]
@@ -8461,7 +8617,7 @@ pub struct ResponseStream {
     buffer: Vec<u8>,
     total: usize,
     pub(super) sequence: Option<u64>,
-    pub text: String,
+    pub(super) output: OutputText,
     pub terminal: Option<TurnResult>,
     pub created: Option<crate::models::assistant_conversation::RunningResponse>,
     /// Every parsed data event, including tool-progress kinds this decoder
@@ -8472,6 +8628,18 @@ pub struct ResponseStream {
     pub image_input_unsupported: bool,
 }
 impl ResponseStream {
+    pub(super) fn text_len(&self) -> usize {
+        self.terminal
+            .as_ref()
+            .map_or(self.output.bytes, |result| result.text.len())
+    }
+
+    pub(super) fn text(&self) -> String {
+        self.terminal
+            .as_ref()
+            .map_or_else(|| self.output.text(), |result| result.text.clone())
+    }
+
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
         self.total += chunk.len();
         if self.total > MAX_STREAM_BYTES {
@@ -8555,6 +8723,8 @@ impl ResponseStream {
             kind,
             "response.created"
                 | "response.output_text.delta"
+                | "response.output_text.done"
+                | "response.output_item.done"
                 | "response.completed"
                 | "response.failed"
                 | "response.cancelled"
@@ -8586,24 +8756,46 @@ impl ResponseStream {
                 response_id: id.to_owned(),
                 session_id: session.to_owned(),
             });
-        } else if kind == "response.output_text.delta" {
-            let delta = event["delta"]
+        } else if matches!(
+            kind,
+            "response.output_text.delta" | "response.output_text.done"
+        ) {
+            // Older Responses streams omitted both indices on single-message deltas.
+            let index = |field: &str| {
+                event
+                    .get(field)
+                    .map_or(Ok(0), |v| v.as_u64().ok_or_else(invalid_stream))
+            };
+            let key = (index("output_index")?, index("content_index")?);
+            let append = kind == "response.output_text.delta";
+            let value = event[if append { "delta" } else { "text" }]
                 .as_str()
-                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
-            if self.text.len().saturating_add(delta.len()) > MAX_OUTPUT_BYTES {
-                return Err(TurnError::internal("output_too_large", "stream"));
+                .ok_or_else(invalid_stream)?;
+            if !append {
+                if let Some(indices) = event.get("discarded_output_indices") {
+                    let discarded = indices
+                        .as_array()
+                        .ok_or_else(invalid_stream)?
+                        .iter()
+                        .map(|v| v.as_u64().ok_or_else(invalid_stream))
+                        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                    self.output.discard(|(item, _)| discarded.contains(&item));
+                } else if value.is_empty() && event["status"] == "incomplete" {
+                    self.output.discard(|part| part == key);
+                }
             }
-            self.text.push_str(delta);
+            self.output.update(key, value, append)?;
+        } else if kind == "response.output_item.done" {
+            if empty_incomplete_message(&event["item"]) {
+                let index = event["output_index"].as_u64().ok_or_else(invalid_stream)?;
+                self.output.discard(|(item, _)| item == index);
+            }
         } else {
             let response = &event["response"];
             let result =
                 parse_response(response, kind.strip_prefix("response.").unwrap_or_default())?;
             self.image_input_unsupported = unsupported_images(response);
-            self.text.clone_from(&result.text);
             self.terminal = Some(result);
-        }
-        if self.text.len() > MAX_OUTPUT_BYTES {
-            return Err(TurnError::internal("output_too_large", "stream"));
         }
         Ok(())
     }
@@ -8627,7 +8819,11 @@ pub(super) fn parse_response(response: &Value, status: &str) -> Result<TurnResul
         .as_array()
         .ok_or_else(invalid)?
         .iter()
-        .filter(|item| item["type"] == "message" && item["role"] == "assistant");
+        .filter(|item| {
+            item["type"] == "message"
+                && item["role"] == "assistant"
+                && !empty_incomplete_message(item)
+        });
     let final_only =
         status == "completed" && messages.clone().any(|item| item["phase"] == "final_answer");
     let unphased_only = status == "completed"

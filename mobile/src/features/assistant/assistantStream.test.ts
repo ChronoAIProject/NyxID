@@ -88,11 +88,19 @@ test("stream reducer adopts server identity and authoritative completed text", (
     event: "block.completed",
     cursor: 5,
     block_id: "b1",
-    block: { type: "text", block_id: "b1", text: "完整结果" },
+    block: { type: "text", block_id: "b1", text: "" },
   });
+  assert.equal(liveReplyText(state), "");
+  state = applyAssistantEvent(state, {
+    event: "block.delta",
+    cursor: 6,
+    block_id: "b1",
+    text: "完整结果",
+  });
+  assert.equal(liveReplyText(state), "完整结果");
   state = applyAssistantEvent(state, {
     event: "turn.completed",
-    cursor: 6,
+    cursor: 7,
     turn_id: "turn-1",
     status: "completed",
     error: null,

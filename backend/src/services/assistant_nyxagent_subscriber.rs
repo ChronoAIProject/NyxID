@@ -264,7 +264,7 @@ pub(super) async fn reconnect(
     block: &str,
     partial: &mut String,
 ) -> Result<TurnResult, TurnError> {
-    let saved = state
+    let mut saved = state
         .db
         .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
         .find_one(
@@ -274,6 +274,17 @@ pub(super) async fn reconnect(
         .await
         .map_err(|_| unknown())?
         .ok_or_else(unknown)?;
+    if let (Some(turn), Some(watch)) = (saved.active_turn.as_mut(), &events.checkpoint) {
+        let latest = watch.borrow();
+        if latest.upstream.is_some()
+            && turn
+                .reply
+                .as_ref()
+                .is_none_or(|reply| latest.cursor > reply.cursor)
+        {
+            turn.reply = Some(latest.clone());
+        }
+    }
     let admission = saved
         .active_turn
         .as_ref()
@@ -332,13 +343,54 @@ pub(super) fn checkpoint(
     id: &str,
     sequence: u64,
     window_text: &str,
+    output: &engine::OutputText,
+    unredacted: &str,
 ) -> SubscriberCheckpoint {
     SubscriberCheckpoint {
         window_key: key.into(),
         response_id: id.into(),
         sequence,
         window_text: window_text.into(),
+        part_lengths: (window_text == unredacted).then(|| output.layout()),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_snapshot(
+    events: &mut Events,
+    block: &str,
+    partial: &mut String,
+    input: &Input,
+    credential: &AssistantCredential,
+    output: &engine::OutputText,
+    key: &str,
+    id: &str,
+    sequence: u64,
+    force: bool,
+) -> Result<(), TurnError> {
+    let raw = output.text();
+    let safe = input.redact(&raw, credential);
+    let held = engine::secret_prefix_suffix(
+        &safe,
+        &[
+            &credential.raw_key,
+            input.binding.marker.as_deref().unwrap_or(""),
+        ],
+    );
+    let visible = &safe[..safe.len() - held.len()];
+    let full = input.full_text(visible)?;
+    // Withhold a possible secret prefix. A correction can still retract text
+    // already shown while the replacement's trailing bytes are withheld.
+    if (!force && full == *partial) || (!held.is_empty() && full.starts_with(partial.as_str())) {
+        return Ok(());
+    }
+    events.emit_with_checkpoint(
+        "block.completed",
+        json!({"block_id":block,"block":{"type":"text","block_id":block,"text":full}}),
+        Some(checkpoint(key, id, sequence, visible, output, &raw)),
+    );
+    *partial = full;
+    Ok(())
 }
 
 fn identity(value: &Value, credential: &AssistantCredential) -> Option<RunningResponse> {
@@ -814,10 +866,14 @@ async fn recover_window(
     let cursor = prior
         .and_then(|reply| reply.upstream.as_ref())
         .filter(|cursor| cursor.window_key == key);
-    let mut sequence = cursor.map(|cursor| cursor.sequence);
-    let mut text = cursor
-        .map(|cursor| cursor.window_text.clone())
-        .unwrap_or_default();
+    // Replay through a legacy or redacted cursor to recover its item boundaries
+    // before publishing any more text to the existing block.
+    let restored = cursor.and_then(engine::OutputText::restore);
+    let publish_from = cursor.map_or(0, |cursor| cursor.sequence);
+    let mut sequence = cursor
+        .filter(|_| restored.is_some())
+        .map(|cursor| cursor.sequence);
+    let mut output = restored.unwrap_or_default();
     let mut expected = cursor.map(|cursor| cursor.response_id.clone()).or_else(|| {
         active
             .running_response
@@ -1057,6 +1113,7 @@ async fn recover_window(
                 && before_admission(&value, window, active, admission.version);
             let not_started = status == "failed"
                 && sequence.is_none()
+                && cursor.is_none()
                 && binding.as_ref().is_some_and(|binding| {
                     value["response"]["id"] == binding.response_id
                         && value["response"]["status"] == "failed"
@@ -1104,7 +1161,7 @@ async fn recover_window(
                 accepted = false;
                 expected = None;
                 sequence = None;
-                text.clear();
+                output = engine::OutputText::default();
                 bound = None;
                 fresh_post = true;
                 continue;
@@ -1129,7 +1186,11 @@ async fn recover_window(
                     result.text = input.full_text(&redact(&result.text))?;
                     if status == "lost" {
                         result.error = Some(TurnError::new("executor_lost"));
-                        if partial.starts_with(&result.text) {
+                        if partial.starts_with(&result.text)
+                            && !value["response"]["output"].as_array().is_some_and(|items| {
+                                items.iter().any(engine::empty_incomplete_message)
+                            })
+                        {
                             result.text = partial.clone();
                         }
                     }
@@ -1184,7 +1245,7 @@ async fn recover_window(
             let mut decoder = ResponseStream::default();
             decoder.replay = true;
             decoder.sequence = sequence;
-            decoder.text.clone_from(&text);
+            decoder.output.clone_from(&output);
             let bounds = stream_bounds();
             let mut last_progress = tokio::time::Instant::now();
             let mut received = false;
@@ -1225,24 +1286,15 @@ async fn recover_window(
                     }
                     return Ok(result);
                 }
-                let safe = redact(&decoder.text);
-                let held = engine::secret_prefix_suffix(
-                    &safe,
-                    &[
-                        &credential.raw_key,
-                        input.binding.marker.as_deref().unwrap_or(""),
-                    ],
-                );
-                if held.is_empty()
-                    && let (Some(id), Some(seq)) = (&expected, decoder.sequence)
-                {
-                    let full = input.full_text(&safe)?;
-                    if full != *partial {
-                        events.emit_with_checkpoint("block.completed",json!({"block_id":block,"block":{"type":"text","block_id":block,"text":full}}), Some(checkpoint(&key, id, seq, &safe)));
-                    }
-                    *partial = full;
+                if let (Some(id), Some(seq)) = (&expected, decoder.sequence) {
                     sequence = Some(seq);
-                    text = safe;
+                    output.clone_from(&decoder.output);
+                    if seq >= publish_from {
+                        publish_snapshot(
+                            events, block, partial, input, credential, &output, &key, id, seq,
+                            false,
+                        )?;
+                    }
                 }
                 if let Some(error) = decoder.reader_error.take() {
                     gap = Some(error);
@@ -1255,8 +1307,8 @@ async fn recover_window(
         {
             let response = &gap["response"];
             let mut result = snapshot(response, id)?;
-            let safe = redact(&result.text);
             if response["status"] != "in_progress" {
+                let safe = redact(&result.text);
                 *image_unsupported = engine::unsupported_images(response);
                 result.text = input.full_text(&safe)?;
                 if !executor_lost(&result) {
@@ -1270,22 +1322,12 @@ async fn recover_window(
             if sequence.is_some_and(|before| before > next) {
                 return Err(unknown());
             }
-            text = result.text;
+            output = engine::OutputText::from_snapshot(response)?;
             sequence = Some(next);
-            let held = engine::secret_prefix_suffix(
-                &safe,
-                &[
-                    &credential.raw_key,
-                    input.binding.marker.as_deref().unwrap_or(""),
-                ],
-            );
-            if held.is_empty() {
-                *partial = input.full_text(&safe)?;
-                events.emit_with_checkpoint(
-                    "block.completed",
-                    json!({"block_id":block,"block":{"type":"text","block_id":block,"text":partial}}),
-                    Some(checkpoint(&key, id, next, &safe)),
-                );
+            if next >= publish_from {
+                publish_snapshot(
+                    events, block, partial, input, credential, &output, &key, id, next, true,
+                )?;
             }
         }
     }

@@ -608,6 +608,7 @@ enum Frame {
     Keepalive,
     Created,
     Delta(&'static str),
+    Data(Value),
     /// A data event this decoder ignores, such as MCP tool progress.
     ToolProgress,
     Completed,
@@ -653,6 +654,7 @@ async fn setup_stream(
                                 "response": {"id": RESPONSE, "conversation": {"id": SESSION}}}),
                             Frame::Delta(text) => json!({"type": "response.output_text.delta",
                                 "sequence_number": sequence, "delta": text}),
+                            Frame::Data(data) => data,
                             Frame::ToolProgress => json!({"type": "response.mcp_call.in_progress",
                                 "sequence_number": sequence}),
                             Frame::Completed => json!({"type": "response.completed", "sequence_number": sequence,
@@ -675,6 +677,95 @@ async fn setup_stream(
     let state = test_app_state(db);
     let server = register_upstream(&state, upstream).await;
     (state, calls, server)
+}
+
+const BEFORE_DISCARD: usize = 5;
+const AFTER_DISCARD: usize = 6;
+const RETRY_DELTA: usize = 11;
+// End on a byte the credential and hex context-marker prefix guards always release.
+const RETRIED_ANSWER: &str = "hello world!";
+
+// NyxAgent .17 correction: the first done clears the abandoned message, then
+// the retry gets a new item. Sequence numbers double as exclusive replay cursors.
+fn discarded_attempt_frames() -> Vec<Value> {
+    let message = |id: &str, status: &str, text: &str| {
+        json!({
+            "type":"message","id":id,"role":"assistant","status":status,
+            "content":[{"type":"output_text","text":text,"annotations":[]}]
+        })
+    };
+    let discarded = message("msg_first", "incomplete", "");
+    let retry = message("msg_retry", "completed", RETRIED_ANSWER);
+    let mut frames = vec![
+        json!({"type":"response.created","response":{"id":RESPONSE,"conversation":{"id":SESSION}}}),
+        json!({"type":"response.in_progress","response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"in_progress","output":[]}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_first","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg_first","part":discarded["content"][0]}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_first","delta":"abandoned "}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_first","delta":"attempt."}),
+        json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_first","text":"","status":"incomplete","logprobs":[],"discarded_output_indices":[0]}),
+        json!({"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"msg_first","part":discarded["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":0,"item":discarded}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_retry","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":1,"content_index":0,"item_id":"msg_retry","part":discarded["content"][0]}),
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_retry","delta":RETRIED_ANSWER}),
+        json!({"type":"response.output_text.done","output_index":1,"content_index":0,"item_id":"msg_retry","text":RETRIED_ANSWER,"logprobs":[]}),
+        json!({"type":"response.content_part.done","output_index":1,"content_index":0,"item_id":"msg_retry","part":retry["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":1,"item":retry}),
+        json!({"type":"response.completed","response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"completed","output":[discarded,retry]}}),
+    ];
+    for (seq, frame) in frames.iter_mut().enumerate() {
+        frame["sequence_number"] = json!(seq);
+    }
+    frames
+}
+
+#[tokio::test]
+async fn discarded_attempt_replaces_browser_block_before_retry_and_settlement() {
+    let frames = discarded_attempt_frames()
+        .into_iter()
+        .flat_map(|frame| [Frame::Data(frame), Frame::Sleep(Duration::from_millis(20))])
+        .collect();
+    let (state, _, server) = setup_stream("nyxa_discard", Duration::ZERO, frames).await;
+    let response = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    let updates: Vec<_> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .filter_map(|event| match event["event"].as_str()? {
+            "block.delta" => Some(("delta", event["text"].as_str()?.to_owned())),
+            "block.completed" => Some(("snapshot", event["block"]["text"].as_str()?.to_owned())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        updates,
+        [
+            ("delta", "abandoned ".into()),
+            ("delta", "attempt.".into()),
+            ("snapshot", "".into()),
+            ("delta", RETRIED_ANSWER.into()),
+            ("snapshot", RETRIED_ANSWER.into())
+        ]
+    );
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.last().unwrap().text, RETRIED_ANSWER);
+    server.abort();
+    let _ = server.await;
+    state.db.drop().await.unwrap();
 }
 
 /// Short execution bounds for this test's thread (current-thread runtime).
