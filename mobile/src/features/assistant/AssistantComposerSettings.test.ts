@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
-import { COMPOSER_ACCESS_DESCRIPTION } from "./composerSettings";
+import { QueryClient, QueryObserver, environmentManager, onlineManager } from "@tanstack/query-core";
+import { buildApiError } from "../../lib/api/responseError";
+import { COMPOSER_ACCESS_DESCRIPTION, composerSettingsRecoveryInterval } from "./composerSettings";
 
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): Element[] =>
@@ -200,6 +202,55 @@ test("the Duo pill keeps every current mode and the base explicit-retry policy",
   assert.equal(query.retry, false);
   assert.equal(query.refetchOnReconnect, undefined);
   x.h.unmount();
+});
+
+test("offline cold start recovers permissions after the first connected GET still fails", { timeout: 10_000 }, async (t) => {
+  const x = setup();
+  const options = x.queries.at(-1);
+  const wasServer = environmentManager.isServer();
+  environmentManager.setIsServer(() => false);
+  const client = new QueryClient();
+  const originalOnline = onlineManager.isOnline();
+  onlineManager.setOnline(false);
+  client.mount();
+  let attempts = 0;
+  const observer = new QueryObserver(client, {
+    ...options,
+    queryFn: async () => {
+      if (++attempts === 1) throw buildApiError(null, 0);
+      return { access_mode: "nyxmode" };
+    },
+  });
+  const done = deferred<void>();
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.isSuccess) done.resolve();
+  });
+  t.after(() => {
+    unsubscribe();
+    client.unmount();
+    client.clear();
+    onlineManager.setOnline(originalOnline);
+    environmentManager.setIsServer(() => wasServer);
+    x.h.unmount();
+  });
+  assert.equal(observer.getCurrentResult().fetchStatus, "paused");
+  assert.equal(attempts, 0);
+  onlineManager.setOnline(true);
+  await done.promise;
+  assert.deepEqual(observer.getCurrentResult().data, { access_mode: "nyxmode" });
+  assert.equal(attempts, 2);
+  assert.equal(options.refetchInterval(client.getQueryCache().find({ queryKey: options.queryKey })), false);
+});
+
+test("permission recovery backs off on network or gateway failures and leaves other errors for manual retry", () => {
+  for (const [code, expected] of [[0, 5000], [503, 5000], [403, false], [429, false]] as const) {
+    assert.equal(composerSettingsRecoveryInterval({
+      state: { status: "error", error: buildApiError(null, code), errorUpdateCount: 1 },
+    }), expected);
+  }
+  assert.equal(composerSettingsRecoveryInterval({
+    state: { status: "error", error: buildApiError(null, 0), errorUpdateCount: 10 },
+  }), 30_000);
 });
 
 test("native settings expose only permissions and the three descriptions, with no discovery or model transport", () => {
