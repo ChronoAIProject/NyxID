@@ -74,6 +74,7 @@ fn snapshot(status: &str) -> Value {
 pub(crate) struct Upstream {
     pub(crate) discovery: Requests,
     pub(crate) posts: Arc<AtomicUsize>,
+    pub(crate) posted: Arc<tokio::sync::Notify>,
     pub(crate) lookups: Arc<AtomicUsize>,
     pub(crate) cancels: Arc<AtomicUsize>,
     pub(crate) cancel_started: Arc<tokio::sync::Notify>,
@@ -84,6 +85,7 @@ pub(crate) struct Upstream {
 impl Upstream {
     pub(crate) fn router(&self, cut: Cut, background: bool) -> Router {
         let posts = self.posts.clone();
+        let posted = self.posted.clone();
         let captured = self.expected.clone();
         let expected = self.expected.clone();
         let lookups = self.lookups.clone();
@@ -104,9 +106,10 @@ impl Upstream {
             }
         });
         self.discovery.router(false).route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
-            let posts = posts.clone(); let captured = captured.clone(); async move {
+            let posts = posts.clone(); let posted = posted.clone(); let captured = captured.clone(); async move {
                 assert_eq!(body["background"] == true, background);
                 posts.fetch_add(1, Ordering::SeqCst);
+                posted.notify_one();
                 if background { *captured.lock().await = Some((headers["authorization"].clone(),headers["idempotency-key"].clone())); }
                 let stream = async_stream::stream! {
                     if cut != Cut::BeforeCreated {

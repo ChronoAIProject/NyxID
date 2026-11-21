@@ -31,6 +31,18 @@ use crate::services::ssh_service::SshSessionManager;
 
 mod mongo_readiness;
 
+/// Keep Tokio time fixed during real I/O until the test explicitly advances it.
+pub(crate) async fn with_manual_clock<T>(future: impl std::future::Future<Output = T>) -> T {
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let guard = tokio::task::spawn_blocking(move || hold.blocking_recv());
+    tokio::time::pause();
+    let result = future.await;
+    tokio::time::resume();
+    release.send(()).unwrap();
+    guard.await.unwrap().unwrap();
+    result
+}
+
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
 const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;

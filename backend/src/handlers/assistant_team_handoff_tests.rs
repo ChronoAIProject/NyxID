@@ -140,50 +140,69 @@ async fn exercise(
         hostname: None,
     }));
     counts.lock().unwrap().clear();
-    let id = workers::TEST_WORKER
-        .scope(previous, async {
-            if lane == Lane::Wake {
-                assistant_team::wake(&first, OWNER, &parent.id).await;
-                parent.id.clone()
-            } else if let Some(group) = &group {
-                assistant_group::post_and_follow(
-                    &first,
-                    OWNER,
-                    &group.id,
-                    &format!("@{} answer please", agent.name),
-                    None,
-                    &parent.id,
-                )
+    let admission = workers::TEST_WORKER.scope(previous, async {
+        if lane == Lane::Wake {
+            assistant_team::wake(&first, OWNER, &parent.id).await;
+            parent.id.clone()
+        } else if let Some(group) = &group {
+            assistant_group::post_and_follow(
+                &first,
+                OWNER,
+                &group.id,
+                &format!("@{} answer please", agent.name),
+                None,
+                &parent.id,
+            )
+            .await
+            .unwrap();
+            groups::member_thread(&fixture.db, OWNER, &group.id, &agent.id)
                 .await
-                .unwrap();
-                groups::member_thread(&fixture.db, OWNER, &group.id, &agent.id)
-                    .await
-                    .unwrap()
-                    .expect("member admitted")
-                    .id
-            } else {
-                let assistant_team::Started::Turn { conversation, .. } = assistant_team::assign(
-                    &first,
-                    OWNER,
-                    &agent,
-                    "answer please",
-                    Some(&parent.id),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap() else {
-                    panic!("assignment admission")
-                };
-                conversation.id
-            }
+                .unwrap()
+                .expect("member admitted")
+                .id
+        } else {
+            let assistant_team::Started::Turn { conversation, .. } = assistant_team::assign(
+                &first,
+                OWNER,
+                &agent,
+                "answer please",
+                Some(&parent.id),
+                None,
+                None,
+            )
+            .await
+            .unwrap() else {
+                panic!("assignment admission")
+            };
+            conversation.id
+        }
+    });
+    let (id, measured) = if cut == Cut::None {
+        // Measure a turn shorter than one stop-poll interval. The initial stop
+        // read, settlement, and after-turn work all use the monitored client.
+        crate::test_utils::with_manual_clock(async {
+            let (id, ()) = tokio::join!(
+                async {
+                    let id = admission.await;
+                    first.shutdown.idle().await;
+                    id
+                },
+                async {
+                    upstream.posted.notified().await;
+                    // Tokio rounds the heartbeat's initial interval tick up to a millisecond.
+                    tokio::time::advance(Wait::from_millis(1)).await;
+                }
+            );
+            (id, crate::services::durable_wake_tests::take(&counts))
         })
-        .await;
+        .await
+    } else {
+        (admission.await, Default::default())
+    };
     let collection = fixture
         .db
         .collection::<AssistantConversation>(CONVERSATIONS);
     let limit = Wait::from_secs(35);
-    let mut measured = Default::default();
     let mut report_source = None;
     if cut != Cut::None {
         let row = tokio::time::timeout(limit, async {
@@ -455,10 +474,6 @@ async fn exercise(
             .expect("survivor finished");
         drop(occupied);
     } else {
-        tokio::time::timeout(limit, first.shutdown.idle())
-            .await
-            .expect("first replica finished");
-        measured = crate::services::durable_wake_tests::take(&counts);
         let total: usize = measured.values().sum();
         eprintln!(
             "team_handoff_commands lane={lane:?} flag={flag} compatible={compatible} warm={warm} total={total} by_command={}",
@@ -634,14 +649,15 @@ async fn personal_group_member_takeover_and_publication() {
 
 #[tokio::test]
 async fn team_lane_command_costs_and_rollout() {
-    for lane in [Lane::Assignment, Lane::Member] {
+    for (lane, warm_commands) in [(Lane::Assignment, 107), (Lane::Member, 157)] {
         for warm in [false, true] {
             let off = exercise(lane, Cut::None, false, true, warm).await;
             let on = exercise(lane, Cut::None, true, true, warm).await;
             let mixed = exercise(lane, Cut::None, true, false, warm).await;
             assert_eq!(off, mixed);
             if warm {
-                assert_eq!(off.values().sum::<usize>(), on.values().sum::<usize>());
+                assert_eq!(off.values().sum::<usize>(), warm_commands);
+                assert_eq!(on.values().sum::<usize>(), warm_commands);
             }
         }
     }
