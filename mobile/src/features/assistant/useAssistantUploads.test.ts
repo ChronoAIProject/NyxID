@@ -94,6 +94,7 @@ function harness(
     expo: { requireOptionalNativeModule: () => (installed ? {} : null) },
     "react-native": {
       Platform: { OS: platform },
+      Keyboard: { dismiss() {} },
       Alert: {
         alert: (title: unknown, _: unknown, buttons: typeof choices) => {
           alertTitle = title;
@@ -209,31 +210,22 @@ function harness(
       if (platform === "ios")
         iosChoice?.((iosOptions as any).options.indexOf(label));
       else {
-        choices.find((b) => b.text === "More options…")?.onPress?.();
-        choices.find((b) => b.text === label)?.onPress?.();
+        h.flush();
+        h.value().sourcePicker?.choices.find(b => b.label === label)?.onPress();
       }
     },
     cancelChooser: () => {
       if (platform === "ios") iosChoice?.(3);
-      else choices.find((b) => b.text === "Cancel")?.onPress?.();
+      else { h.flush(); h.value().sourcePicker?.onClose(); }
     },
     choose: (source: "files" | "photos" | "camera") => {
-      if (platform !== "ios" && source === "files")
-        choices.find((b) => b.text === "More options…")?.onPress?.();
       if (platform === "ios")
         iosChoice?.(source === "camera" ? 0 : source === "photos" ? 1 : 2);
-      else
-        choices
-          .find(
-            (button) =>
-              button.text ===
-              (source === "camera"
-                ? "Camera"
-                : source === "photos"
-                  ? "Photos"
-                  : "Files"),
-          )
-          ?.onPress?.();
+      else {
+        h.flush();
+        h.value().sourcePicker?.choices.find(b => b.label ===
+          (source === "camera" ? "Camera" : source === "photos" ? "Photos" : "Files"))?.onPress();
+      }
     },
     conversionError: () => {
       conversionError = true;
@@ -293,15 +285,16 @@ test("plus chooser routes Camera, Photos and Files to their respective native pi
       const x = harness(platform);
       x.h.value().choose();
       assert.equal(x.calls.length, 0);
+      x.h.flush();
       assert.deepEqual(
         Array.from(
           platform === "ios"
             ? x.iosOptions().options
-            : x.choices().map((b) => b.text),
+            : x.h.value().sourcePicker?.choices.map((b) => b.label),
         ),
         platform === "ios"
           ? ["Camera", "Photos", "Files", "Cancel"]
-          : ["Camera", "Photos", "More options…"],
+          : ["Camera", "Photos", "Files"],
       );
       x.choose(source);
       x.cameraPermission.resolve({ granted: true });
@@ -322,6 +315,40 @@ test("plus chooser routes Camera, Photos and Files to their respective native pi
       x.h.unmount();
     }
   }
+});
+
+test("Android source rows reject captured stale authority and close after context changes", async () => {
+  for (const boundary of ["account", "chat", "permission", "offline", "blur"]) {
+    const x = harness();
+    x.h.value().choose();
+    x.h.flush();
+    const camera = x.h.value().sourcePicker!.choices[0]!;
+    if (boundary === "account") x.changeOwner();
+    if (boundary === "chat") x.props.generation++;
+    if (boundary === "permission") x.props.enabled = false;
+    if (boundary === "offline") x.props.online = false;
+    if (boundary === "blur") x.blur();
+    x.h.render();
+    assert.equal(x.h.value().sourcePicker, undefined);
+    camera.onPress();
+    x.cameraPermission.resolve({ granted: true });
+    await x.h.settle();
+    assert.equal(x.calls.length, 0);
+    assert.equal(x.requests.length, 0);
+    x.h.unmount();
+  }
+});
+
+test("Android attachment choices use a vertical list and retain Files without nested native dialog buttons", () => {
+  const x = harness("android");
+  x.h.value().choose();
+  x.h.flush();
+  assert.deepEqual(Array.from(x.h.value().sourcePicker?.choices.map((choice: { label: string }) => choice.label) ?? []), ["Camera", "Photos", "Files"]);
+  assert.equal(x.choices().length, 0, "large labels never enter Android Alert's button row");
+  x.h.value().sourcePicker!.onClose();
+  x.h.flush();
+  assert.equal(x.h.value().sourcePicker, undefined);
+  x.h.unmount();
 });
 
 test("late chooser actions cannot open a picker for an obsolete account, chat or disabled composer", async () => {
@@ -697,7 +724,7 @@ test("connection chooser action retains Camera/Photos/Files and rejects stale ac
         "Cancel",
       ]);
       assert.equal(x.iosOptions().cancelButtonIndex, 4);
-    } else assert.equal(x.choices().length, 3);
+    } else { x.h.flush(); assert.equal(x.h.value().sourcePicker?.choices.length, 4); }
     x.chooseExtra("Use a connection");
     assert.equal(connections, 1);
     assert.equal(x.calls.length, 0);
