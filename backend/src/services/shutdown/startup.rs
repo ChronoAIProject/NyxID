@@ -53,9 +53,6 @@ pub(crate) fn listeners_bound(
             "previous_generation": previous.map(|row| serde_json::json!({"generation":row.generation_id,"last_heartbeat_at":row.observed_at})),
         });
         tracing::info!(target:"nyxid::shutdown", event="backend_process_started", metadata=%metadata, "Backend process listeners bound");
-        if !matches!(tokio::time::timeout_at(started + TOTAL_TIMEOUT,
-            super::super::audit_service::log_system_event(db, "backend_process_started", Some(metadata))).await, Ok(Ok(()))) {
-            tracing::warn!(target:"nyxid::shutdown", "Process start audit unavailable or timed out");
-        }
+        super::drain::snapshot_audit(db, "backend_process_started", metadata, started + TOTAL_TIMEOUT).await;
     })
 }

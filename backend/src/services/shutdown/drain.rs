@@ -277,7 +277,7 @@ impl Drain {
     }
 }
 
-async fn snapshot_audit(
+pub(super) async fn snapshot_audit(
     db: mongodb::Database,
     event: &'static str,
     metadata: serde_json::Value,

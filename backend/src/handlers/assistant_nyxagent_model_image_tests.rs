@@ -111,11 +111,28 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             ))
             .unwrap();
         text_request.extensions_mut().insert(SERVER_TURN_POLICY);
-        drop(
-            turns(State(state.clone()), test_auth_user(OWNER), text_request)
-                .await
-                .unwrap(),
-        );
+        let ordinary = turns(State(state.clone()), test_auth_user(OWNER), text_request)
+            .await
+            .unwrap_or_else(|error| {
+                let AppError::DatabaseError(source) = &error else {
+                    panic!("ordinary turn admission: error={}", error.error_key());
+                };
+                use mongodb::error::{ErrorKind, WriteFailure};
+                let (kind, code) = match source.kind.as_ref() {
+                    ErrorKind::Command(command) => ("command", Some(command.code)),
+                    ErrorKind::Write(WriteFailure::WriteError(write)) => ("write", Some(write.code)),
+                    ErrorKind::Write(WriteFailure::WriteConcernError(write)) => ("write_concern", Some(write.code)),
+                    ErrorKind::ServerSelection { .. } => ("selection", None),
+                    ErrorKind::Io(_) => ("io", None),
+                    _ => ("other", None),
+                };
+                panic!(
+                    "ordinary turn admission: mongo_kind={kind}, mongo_code={code:?}, transient_transaction={}, unknown_commit={}",
+                    source.contains_label("TransientTransactionError"),
+                    source.contains_label("UnknownTransactionCommitResult")
+                );
+            });
+        drop(ordinary);
         settled(&state).await;
         assert!(
             !upstream

@@ -1101,9 +1101,8 @@ async fn drive_owner_turn(
     // AbortOnDropHandle ties the child to this worker: a panic or task abort
     // cannot leave a fresh heartbeat behind to hide an orphaned turn.
     let heartbeat_task = AbortOnDropHandle::new(crate::services::shutdown::process().spawn_worker(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS));
-        interval.tick().await;
+        let period = Duration::from_secs(engine::ACTIVE_TURN_HEARTBEAT_SECS);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             tokio::select! {
                 _ = &mut heartbeat_stop_rx => break,
@@ -1532,7 +1531,10 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
                     .await
             }
         } else {
-            match engine::get(&state.db, &row.user_id, &row.id).await {
+            let read = engine::get(&state.db, &row.user_id, &row.id);
+            #[cfg(test)]
+            let read = engine::STOP_POLL.scope((), read);
+            match read.await {
                 Ok(current) => {
                     if let Some(original) = row
                         .active_turn

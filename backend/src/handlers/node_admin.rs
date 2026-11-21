@@ -3770,19 +3770,25 @@ mod tests {
         state.config.release_integrity_manifest_url = None;
         let app = api_app_preserving_config(state);
 
-        let (status, body) = route_json(
-            app,
-            Method::POST,
-            format!(
-                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
-                node.id, pending.id
-            ),
-            &token,
-            Some(ciphertext_request(vec![1, 2, 3])),
-        )
-        .await;
+        let (status, body) =
+            crate::services::oauth_token_authority_service::with_fixture_read_budget(route_json(
+                app,
+                Method::POST,
+                format!(
+                    "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                    node.id, pending.id
+                ),
+                &token,
+                Some(ciphertext_request(vec![1, 2, 3])),
+            ))
+            .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "route error {}",
+            body["error"]
+        );
         assert_eq!(body["error_code"], 1008);
         assert_eq!(body["error"], "validation_error");
         assert!(

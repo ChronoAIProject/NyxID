@@ -1994,8 +1994,13 @@ async fn legacy_turn_stop_and_group_paths_do_not_read_or_persist_v2_state() {
 
 #[tokio::test]
 async fn v2_slow_committed_admission_keeps_its_driver_and_expired_fence_aborts() {
-    let (mut state, _, server) = setup("v2_slow_admission").await;
-    state.config.automation_continuation_v2_enabled = true;
+    let (fixture, _, server) = setup("v2_slow_admission").await;
+    let mut config = fixture.config.clone();
+    config.automation_continuation_v2_enabled = true;
+    // The 31-second clock jump tests admission. A real chat capacity permit
+    // must remain valid while its independent renewal timer catches up.
+    config.cluster_slot_ttl_secs = schedules::continuation::ADMISSION_LEASE_SECONDS as u64;
+    let state = crate::test_utils::test_app_state_with_config(fixture.db, config);
     crate::services::security_readiness_service::ready_automation_test_replica(&state.db).await;
     let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
     let trigger = automation(&state, &agent.id, None).await;
@@ -2007,20 +2012,28 @@ async fn v2_slow_committed_admission_keeps_its_driver_and_expired_fence_aborts()
     let pause = crate::test_utils::install_admission_pause(&state.db);
     let worker_state = state.clone();
     let worker = tokio::spawn(async move { run_job_once(&worker_state, &job).await });
-    tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
-        .await
-        .unwrap();
+    pause.entered.notified().await;
     // The old 30-second timeout dropped this future after begin_turn committed.
-    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
     assert!(
         !worker.is_finished(),
         "Committed admission must retain its future until it spawns the driver"
     );
     pause.resume.notify_one();
     worker.await.unwrap().unwrap();
+    state.shutdown.idle().await;
+    let finished = completed(&state, &trigger).await;
     assert_eq!(
-        completed(&state, &trigger).await.outcome,
-        RunOutcome::Completed
+        finished.outcome,
+        RunOutcome::Completed,
+        "reason={:?}, stage={:?}",
+        finished.reason,
+        finished
+            .failure_reason
+            .as_ref()
+            .map(|reason| reason.stage.as_str())
     );
 
     let next = schedules::enqueue_now(&state.db, &trigger).await.unwrap();

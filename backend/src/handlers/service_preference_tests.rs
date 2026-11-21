@@ -928,6 +928,13 @@ async fn service_preference_command_monitoring_bounds_detail_and_single_listing_
 
 #[tokio::test]
 async fn service_preference_group_merge_capacity_and_explicit_hidden_release() {
+    crate::services::oauth_token_authority_service::with_fixture_read_budget(
+        group_merge_and_release(),
+    )
+    .await;
+}
+
+async fn group_merge_and_release() {
     let (state, router, owner, token, ids) = fixture("preference_group_merge_release").await;
     let db = &state.db;
     let second_person = Uuid::new_v4().to_string();
