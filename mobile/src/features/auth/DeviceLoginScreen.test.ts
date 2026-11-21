@@ -14,16 +14,18 @@ function elements(root: Element): Element[] {
   )];
 }
 
-function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true }:
+function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true, platform = "ios" }:
   { inSheet?: boolean; scanner?: boolean; reduced?: boolean; authenticated?: boolean; userCode?: string; canGoBack?: boolean;
     previewRequest?: (code: string) => Promise<unknown>;
-    decisionRequest?: () => Promise<void> } = {}) {
+    decisionRequest?: () => Promise<void>; platform?: "ios" | "android" } = {}) {
   let reducedMotion = reduced;
   let linkedCode = userCode;
   let language: Language = "en";
   const navigationCalls: unknown[] = [];
   const previews: { code: string }[] = [];
   const decisions: string[] = [];
+  let keyboardVisible = false;
+  let keyboardDismissals = 0;
   // Render the local ManualCodeModal with the actual screen; native boundaries
   // remain inert elements, so its hook and visible/animation props are exercised.
   const jsx = (type: any, props: Record<string, unknown>): Element =>
@@ -37,7 +39,11 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
         "View", "Text", "TextInput", "Pressable", "ScrollView", "Modal",
         "KeyboardAvoidingView", "ActivityIndicator",
       ].map((name) => [name, name])),
-      Platform: { OS: "ios" },
+      Platform: { OS: platform },
+      Keyboard: {
+        isVisible: () => keyboardVisible,
+        dismiss: () => { keyboardDismissals++; keyboardVisible = false; },
+      },
     },
     "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) },
     "lucide-react-native": Object.fromEntries([
@@ -51,6 +57,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
     "./AuthSubmitButton": { AuthSubmitButton: "PrimaryButton" },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "../../components/icons/empty-state/MagicKeyIllustration": { MagicKeyIllustration: "MagicKeyIllustration" },
     "../../components/icons/empty-state/RoadBarrierIllustration": { RoadBarrierIllustration: "RoadBarrierIllustration" },
     "../../lib/accessibility/useReducedMotion": { useReducedMotion: () => reducedMotion },
@@ -105,6 +112,8 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
   }
   return {
     harness, find, previews, decisions, navigationCalls,
+    keyboard: (visible: boolean) => { keyboardVisible = visible; },
+    keyboardDismissals: () => keyboardDismissals,
     setLanguage(value: Language) { language = value; harness.render(); },
     setCode(value: string) { linkedCode = value; harness.render(); },
     setReducedMotion(value: boolean) { reducedMotion = value; harness.render(); },
@@ -130,6 +139,29 @@ test("manual code modal follows reduced motion on entry and while open", () => {
     assert.equal(env.find("Modal").props.visible, false);
     env.harness.unmount();
   }
+});
+
+test("Android manual-code Back hides the keyboard before closing and keeps the code", () => {
+  const env = setup({ platform: "android" });
+  env.find("DeviceCodeScanner").props.onManualEntry();
+  env.harness.flush();
+  const input = () => elements(env.harness.value()).find((item) => item.type === "TextInput" && item.props.accessibilityLabel === "Login code")!;
+  input().props.onChangeText("ABCD-EFGH");
+  env.harness.flush();
+  env.keyboard(true);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.keyboardDismissals(), 1);
+  assert.equal(env.find("Modal").props.visible, true);
+  assert.equal(input().props.value, "ABCD-EFGH");
+  assert.deepEqual(env.navigationCalls, []);
+  const scroller = elements(env.find("KeyboardViewport")).find((item) => item.type === "ScrollView")!;
+  assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+  assert.equal(scroller.props.automaticallyAdjustKeyboardInsets, false);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.find("Modal").props.visible, false);
+  env.harness.unmount();
 });
 
 const pendingPreview = (label: string) => ({

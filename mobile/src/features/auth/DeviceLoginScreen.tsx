@@ -33,6 +33,7 @@ import {
 import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -43,6 +44,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import {
   ChevronDown,
   ChevronLeft,
@@ -273,12 +275,19 @@ function ManualCodeModal({
       transparent
       animationType={reducedMotion ? "none" : "slide"}
       statusBarTranslucent
-      onRequestClose={onDismiss}
+      onRequestClose={() => {
+        // Native Modal owns Android Back separately from BackHandler.
+        if (Platform.OS === "android" && Keyboard.isVisible()) {
+          Keyboard.dismiss();
+          return;
+        }
+        onDismiss();
+      }}
     >
-      <KeyboardAvoidingView
+      <KeyboardViewport>
+      <View
         accessibilityViewIsModal
-        style={styles.modalRoot}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={[styles.modalRoot, { paddingTop: insets.top }]}
       >
         <Pressable
           accessibilityRole="button"
@@ -286,11 +295,15 @@ function ManualCodeModal({
           style={styles.modalBackdrop}
           onPress={onDismiss}
         />
-        <View
-          style={[
+        <ScrollView
+          style={styles.modalScroll}
+          contentContainerStyle={[
             styles.modalCard,
             { paddingBottom: Math.max(insets.bottom, 16) },
           ]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+          automaticallyAdjustKeyboardInsets={false}
         >
           <View style={styles.modalHeader}>
             <View style={styles.modalHeaderCopy}>
@@ -360,8 +373,9 @@ function ManualCodeModal({
             disabled={isPending || coolingDown || !normalizedCode}
             onPress={onSubmit}
           />
-        </View>
-      </KeyboardAvoidingView>
+        </ScrollView>
+      </View>
+      </KeyboardViewport>
     </Modal>
   );
 }

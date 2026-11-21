@@ -7,9 +7,7 @@ import { useRef, useState } from "react";
 import {
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,6 +15,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import {
   Check,
@@ -26,6 +25,7 @@ import {
   X,
 } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
@@ -189,6 +189,8 @@ export function AgentPermissionsSheet({
     guest_access: { ...value.guest_access },
   }));
   const [query, setQuery] = useState("");
+  const { fontScale } = useWindowDimensions();
+  const [compactSearch, setCompactSearch] = useState(false);
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [guestService, setGuestService] = useState<ServiceOption>();
   const [saving, setSaving] = useState(false);
@@ -324,9 +326,12 @@ export function AgentPermissionsSheet({
     >
       <SafeAreaProvider>
         <SafeAreaView style={[styles.fill, { backgroundColor: colors.bg }]}>
-          <KeyboardAvoidingView
-            style={styles.fill}
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          <KeyboardViewport
+            onViewportChange={(frame) =>
+              // Preserve two usable result rows after the fixed controls.
+              // Tall windows keep their ordinary filters and save footer.
+              setCompactSearch(Boolean(frame && frame.height < 420 * Math.max(1, fontScale)))
+            }
           >
             <View style={[styles.header, { borderColor: colors.border }]}>
               {guestService ? (
@@ -468,7 +473,7 @@ export function AgentPermissionsSheet({
                       </Pressable>
                     )}
                   </View>
-                  <View accessibilityRole="tablist" style={styles.tabs}>
+                  {!compactSearch && <View accessibilityRole="tablist" style={styles.tabs}>
                     {[false, true].map((only) => (
                       <Pressable
                         key={String(only)}
@@ -504,16 +509,16 @@ export function AgentPermissionsSheet({
                         </Label>
                       </Pressable>
                     ))}
-                  </View>
+                  </View>}
                 </View>
                 <FlatList
                   style={styles.fill}
                   data={filtered}
                   keyExtractor={(item) => item.value}
                   keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode="on-drag"
+                  keyboardDismissMode={compactSearch ? "none" : "on-drag"}
                   contentContainerStyle={styles.list}
-                  ListHeaderComponent={header}
+                  ListHeaderComponent={compactSearch ? null : header}
                   ListEmptyComponent={
                     // While connections load, the header's skeleton rows
                     // stand in for the list.
@@ -650,7 +655,7 @@ export function AgentPermissionsSheet({
                 />
               </>
             )}
-            <View
+            {(!compactSearch || guestService) && <View
               style={[
                 styles.footer,
                 { backgroundColor: colors.bg, borderColor: colors.border },
@@ -685,8 +690,8 @@ export function AgentPermissionsSheet({
                   onPress={() => void save()}
                 />
               )}
-            </View>
-          </KeyboardAvoidingView>
+            </View>}
+          </KeyboardViewport>
         </SafeAreaView>
       </SafeAreaProvider>
     </Modal>
@@ -694,7 +699,7 @@ export function AgentPermissionsSheet({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, minHeight: 0 },
   flex: { flex: 1, minWidth: 0 },
   header: {
     flexDirection: "row",

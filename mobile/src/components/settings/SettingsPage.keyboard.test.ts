@@ -97,7 +97,7 @@ function setup({
         },
         Dimensions: {
           get: (name: string) => {
-            assert.equal(name, "window");
+            assert.ok(name === "window" || name === "screen");
             return { height: windowHeight };
           },
           addEventListener: () => ({ remove() {} }),
