@@ -4764,6 +4764,7 @@ async fn execute_resolved_proxy_inner<'a>(
             method.as_str(),
             operation_path.as_ref(),
             crate::services::agent_operation_scope_service::GuestHttpContext {
+                catalog_slug: catalog_service_slug.as_deref(),
                 query: query.as_deref(),
                 websocket: is_ws_candidate,
                 // The webhook floor runs before assistant selection/consent.
@@ -4817,10 +4818,23 @@ async fn execute_resolved_proxy_inner<'a>(
         query.as_deref(),
         &body_bytes,
     );
-    // Only POST needs catalog authority to become a read. Preserve method
-    // classification and the existing endpoint-query budget for other raw
-    // requests; guest/operation-scope authorization has already run above.
-    let effects = if method == reqwest::Method::POST {
+    // Apply destructive overlay routes even without endpoint rows (including PUT
+    // cell edits). Only POST needs the additional stored-endpoint lookup.
+    let compiled = catalog_service_slug
+        .as_deref()
+        .and_then(crate::services::catalog_spec_registry::spec_key_for_slug)
+        .and_then(|key| {
+            crate::services::catalog_spec_registry::compiled_effects(
+                key,
+                &method,
+                operation_path.as_ref()?,
+                query.as_deref(),
+                method_override,
+            )
+        });
+    let effects = if let Some(destructive) = compiled.filter(|effects| effects.destructive) {
+        destructive
+    } else if method == reqwest::Method::POST {
         crate::services::agent_operation_scope_service::unscoped_effects(
             &state.db,
             operation_scope_id,
@@ -4833,6 +4847,7 @@ async fn execute_resolved_proxy_inner<'a>(
     } else {
         crate::services::mcp_service::operation_effects(&method, Default::default())
     };
+    assistant_projection.destructive = effects.destructive;
     operation_descriptor::apply_operation_effects(&mut operation, effects, method_override);
     operation_descriptor::apply_inference_contract(
         &mut operation,

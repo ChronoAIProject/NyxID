@@ -4676,14 +4676,7 @@ async fn guest_service_refusal(
         };
         if let Some(connection) = shared.connections().get(service_id) {
             if connection.user_id == shared.owner() {
-                let effects = mcp_service::operation_effects(
-                    prepared.method(),
-                    service
-                        .durable_endpoint_metadata
-                        .get(&endpoint.endpoint_id)
-                        .copied()
-                        .unwrap_or_default(),
-                );
+                let effects = prepared.effects();
                 if prepared.carries_method_override()
                     || !crate::services::shared_agent_service::permits(
                         shared.level(service_id),
@@ -4724,11 +4717,6 @@ async fn guest_service_refusal(
         &service.service_id,
         crate::services::agent_operation_scope_service::mcp_catalog_id(service),
     );
-    let metadata = service
-        .durable_endpoint_metadata
-        .get(&endpoint.endpoint_id)
-        .copied()
-        .unwrap_or_default();
     // A method override may be honoured in place of the method the call is
     // sent with, and approvals see only the latter: guests never send one.
     if prepared.carries_method_override() {
@@ -4741,7 +4729,7 @@ async fn guest_service_refusal(
             true,
         ));
     }
-    let mut effects = prepared.guest_effects(metadata);
+    let mut effects = prepared.effects();
     if service.is_generic_proxy
         && (crate::services::agent_operation_scope_service::mcp_catalog_id(service).is_some()
             || matches!(&service.source, mcp_service::McpToolSource::Platform { .. }))
@@ -4865,12 +4853,7 @@ async fn webhook_service_gate(
     if service.source.is_user_service() {
         return Ok(None);
     }
-    let metadata = service
-        .durable_endpoint_metadata
-        .get(&endpoint.endpoint_id)
-        .copied()
-        .unwrap_or_default();
-    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let effects = prepared.effects();
     // Method overrides have unknown effects; they must never bypass a card.
     let read_only = effects.reads && !prepared.carries_method_override();
     let destructive = effects.destructive || prepared.carries_method_override();

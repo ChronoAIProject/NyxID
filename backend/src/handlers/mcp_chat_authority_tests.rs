@@ -6154,6 +6154,187 @@ async fn guest_operations_do_not_follow_redirects_or_mint_delegation_tokens() {
     f.state.db.drop().await.unwrap();
 }
 
+async fn sheets_connection(f: &Fixture, url: &str) -> String {
+    use crate::services::assistant_team_service as team;
+    let db = &f.state.db;
+    let id = connected(db, &f.owner, "sheets", url).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "api-google-sheets".into();
+    catalog.base_url = url.into();
+    db.collection::<crate::models::downstream_service::DownstreamService>(
+        crate::models::downstream_service::COLLECTION_NAME,
+    )
+    .insert_one(&catalog)
+    .await
+    .unwrap();
+    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    let spec = crate::services::catalog_spec_registry::spec_for_slug(&catalog.slug).unwrap();
+    for (method, path) in [
+        (
+            "post",
+            "/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+        ),
+        ("put", "/v4/spreadsheets/{spreadsheetId}/values/{range}"),
+    ] {
+        let op = &spec["paths"][path][method];
+        let mut row = crate::test_utils::test_service_endpoint(
+            &catalog.id,
+            op["operationId"].as_str().unwrap(),
+            &method.to_ascii_uppercase(),
+            path,
+        );
+        row.parameters = Some(op["parameters"].clone());
+        row.request_body_schema =
+            Some(op["requestBody"]["content"]["application/json"]["schema"].clone());
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(row)
+        .await
+        .unwrap();
+    }
+    team::set_grants(
+        db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    catalog.id
+}
+
+async fn sheets_stub() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let app = Router::new().fallback(any(|uri: axum::http::Uri| async move {
+            Json(json!({"query": uri.query()}))
+        }));
+        axum::serve(listener, app).await.unwrap();
+    });
+    (url, server)
+}
+
+#[tokio::test]
+async fn sheets_insert_rows_auto_specialist_executes_append_and_confirms_edits() {
+    let f = boxed_chat_fixture("sheets_auto").await;
+    let (url, server) = sheets_stub().await;
+    sheets_connection(&f, &url).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Nyxmode).await;
+    let auth = authenticate(&f).await;
+    let args = json!({"spreadsheetId":"sheet","range":"A1","valueInputOption":"RAW","body":{"values":[["value"]]}});
+    let mut append = args.clone();
+    append["insertDataOption"] = json!("INSERT_ROWS");
+    let sent = result(
+        call(&f, &auth, "sheets__sheets_append_values", append).await,
+        false,
+    )
+    .await;
+    assert!(
+        sent["query"]
+            .as_str()
+            .unwrap()
+            .contains("insertDataOption=INSERT_ROWS")
+    );
+    assert!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for tool in [
+        "sheets__sheets_update_values",
+        "sheets__sheets_append_values",
+    ] {
+        let card = result(call(&f, &auth, tool, args.clone()).await, true).await;
+        assert_eq!(card["error"], "acknowledgement_required", "{tool}");
+    }
+    let cards = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(cards.len(), 2);
+    assert!(
+        cards
+            .iter()
+            .all(|card| card.confirmation.as_ref().unwrap().risk == "destructive")
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sheets_insert_rows_deny_destructive_policy_on_raw_proxy() {
+    use tower::ServiceExt;
+    let f = boxed_chat_fixture("sheets_deny_destructive").await;
+    let (url, server) = sheets_stub().await;
+    let catalog_id = sheets_connection(&f, &url).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Autopilot).await;
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::service_approval_config::COLLECTION_NAME)
+        .insert_one(doc! {"_id":"sheets-policy", "user_id":&f.owner, "service_id":catalog_id,
+            "service_name":"Sheets", "approval_required":false, "default_effect":"auto_allow",
+            "rules":[{"verbs":["destructive"],"effect":"deny"}], "created_at":now, "updated_at":now})
+        .await.unwrap();
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+    let router = router.with_state(f.state.clone());
+    for (method, suffix, status) in [
+        (
+            "POST",
+            ":append?insertDataOption=INSERT_ROWS",
+            StatusCode::OK,
+        ),
+        ("POST", ":append", StatusCode::FORBIDDEN),
+        ("PUT", "", StatusCode::FORBIDDEN),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!(
+                        "/api/v1/proxy/s/sheets/v4/spreadsheets/sheet/values/A1{suffix}"
+                    ))
+                    .header("x-api-key", key.raw_key.as_str())
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"values":[["value"]]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let actual = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            actual,
+            status,
+            "{method} {suffix}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn guest_append_mcp_checks_actual_query_and_intersects_guest_level() {
     use crate::services::assistant_team_service as team;
@@ -6246,9 +6427,10 @@ async fn guest_append_mcp_checks_actual_query_and_intersects_guest_level() {
                 .is_none(),
             allowed
         );
-        assert!(
-            prepared.guest_effects(metadata).destructive,
-            "owner approval classification stays destructive"
+        assert_eq!(prepared.effects().destructive, !allowed);
+        assert_eq!(
+            prepared.operation_descriptor().verb.as_str(),
+            if allowed { "write" } else { "destructive" }
         );
     }
     // A generic fallback must still classify the actual compiled route even
