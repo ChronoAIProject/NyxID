@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{os::unix::fs::PermissionsExt, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 struct DockerHarness {
     root: tempfile::TempDir,
@@ -35,6 +35,10 @@ impl DockerHarness {
             .env("NYXID_NO_UPDATE_CHECK", "1")
             .env("NYXID_SKIP_SKILL_SELF_HEAL", "1")
             .current_dir(self.root.path());
+        // The child runs in a temporary directory that is removed after the test.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
         command
     }
 
@@ -218,17 +222,55 @@ fn machine_docker_restart_validates_ca_before_touching_existing_container() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("NYXID_CA_CERT"));
         assert_eq!(harness.calls(), vec![vec!["--version"]]);
     }
-    let harness = DockerHarness::new();
-    let output = harness
-        .command("restart")
-        .arg("--machine")
-        .output()
+}
+
+#[test]
+fn existing_machine_starts_and_restarts_offline_without_pulling_or_probing() {
+    for (action, running, expected) in [
+        ("start", "false", Some("start")),
+        ("start", "true", None),
+        ("restart", "true", Some("restart")),
+    ] {
+        let harness = DockerHarness::new();
+        let docker = harness.root.path().join("bin/docker");
+        fs::write(
+            &docker,
+            r#"#!/bin/sh
+printf '%s\0' "$@" >> "$DOCKER_CALL_LOG"
+printf '\n' >> "$DOCKER_CALL_LOG"
+case "$1" in
+    --version|start|restart) exit 0 ;;
+    inspect) echo "$MACHINE_RUNNING" ;;
+    *) exit 1 ;;
+esac
+"#,
+        )
         .unwrap();
-    assert!(output.status.success());
-    assert_eq!(
-        harness.calls().last().unwrap(),
-        &["restart", "nyxid-node-machine"]
-    );
+        let output = harness
+            .command(action)
+            .arg("--machine")
+            .env("MACHINE_RUNNING", running)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut calls = vec![
+            vec!["--version"],
+            vec![
+                "inspect",
+                "--format",
+                "{{.State.Running}}",
+                "nyxid-node-machine",
+            ],
+        ];
+        if let Some(expected) = expected {
+            calls.push(vec![expected, "nyxid-node-machine"]);
+        }
+        assert_eq!(harness.calls(), calls);
+    }
 }
 
 #[test]
