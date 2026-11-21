@@ -46,8 +46,12 @@ pub enum TurnOrigin {
 
 /// A server-authored wake-up item waiting for the agent's next event turn.
 /// `text` is NyxID-authored and bounded; it never carries secrets.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Extended, JSON-quoted channel notice. Older readers receive an explicitly
+    /// marked excerpt in `text` within their existing event-rendering budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_message: Option<String>,
     /// Metadata-only continuation; rendered inside the consuming admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake: Option<super::assistant_wake::WakeReference>,
@@ -105,6 +109,8 @@ pub struct AgentEvent {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelTurnContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<super::channel_message::TextCompleteness>,
     /// Exact server-validated organization source, retained independently of
     /// mutable reply preferences and revalidated before rendering model input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +128,12 @@ pub struct ChannelTurnContext {
     pub sender_kind: super::channel_thread::ThreadSenderKind,
     pub guest: bool,
     pub original_message: bool,
+}
+
+impl std::fmt::Debug for AgentEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AgentEvent([REDACTED])")
+    }
 }
 
 impl AgentEvent {

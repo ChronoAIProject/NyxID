@@ -709,6 +709,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 doc!{"$pull":{"pending_events":{"kind":super::cma_operation::APPROVAL_EVENT_KIND,"question_key":approval_key}}})
                 .session(&mut *session).await?;
             let event = AgentEvent {
+                channel_message: None,
                 wake: None,
                 automation_work: w.delivery.automation_work.clone(),
                 execution_task: w.execution_task.clone(),

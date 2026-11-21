@@ -225,6 +225,10 @@ fn oversized_posts_are_truncated_on_a_char_boundary() {
     let flattened = parse_post(&post, &[], None).unwrap();
     assert!(flattened.text.len() <= MAX_TEXT_BYTES);
     assert!(flattened.text.ends_with(MARKER));
+    assert_eq!(
+        flattened.truncated_original_bytes,
+        Some("title\n".len() + text.len() + "\nlost".len())
+    );
     assert!(flattened.text.starts_with("title\n文文"));
     assert!(!flattened.text.contains("lost"));
     // Exactly at the budget, nothing is cut.

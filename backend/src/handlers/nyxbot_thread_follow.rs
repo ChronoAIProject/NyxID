@@ -47,13 +47,21 @@ pub(super) async fn inbound(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
 ) -> AppResult<bool> {
     if row.transport != "direct" {
         return Ok(false);
     }
     Ok(Box::pin(inbound_impl(
-        state, row, payload, message, text, event_key, false,
+        state,
+        row,
+        payload,
+        message,
+        text,
+        truncated_original_bytes,
+        event_key,
+        false,
     ))
     .await?
     .is_some())
@@ -79,6 +87,7 @@ pub(super) async fn gateway_inbound(
         &payload,
         activity["event_id"].as_str().unwrap_or_default(),
         text,
+        None,
         event_key,
         true,
     ))
@@ -92,11 +101,19 @@ pub(super) async fn inbound_impl(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
     gateway: bool,
 ) -> AppResult<Option<Inbound>> {
     let result = Box::pin(inbound_impl_inner(
-        state, row, payload, message, text, event_key, gateway,
+        state,
+        row,
+        payload,
+        message,
+        text,
+        truncated_original_bytes,
+        event_key,
+        gateway,
     ))
     .await;
     if payload["conversation"]["type"] != "private" {
@@ -125,6 +142,7 @@ async fn inbound_impl_inner(
     payload: &Value,
     message: &str,
     text: &str,
+    truncated_original_bytes: Option<usize>,
     event_key: &str,
     gateway: bool,
 ) -> AppResult<Option<Inbound>> {
@@ -194,6 +212,7 @@ async fn inbound_impl_inner(
         return Ok(Some(Inbound::Silent("refused_empty_content")));
     }
     let sender = Sender {
+        truncated_original_bytes,
         original_kind: None,
         media: crate::services::telegram_input::stored_attachments(&source.attachments),
         original_message: canonical_platform(&row.platform) != "telegram"
@@ -1187,9 +1206,16 @@ pub(crate) async fn prelude(
     );
     // JSON quoting makes sender/body boundaries explicit without interpreting
     // provider display names as owner identity or instruction delimiters.
+    let mut truncations = Vec::new();
     for m in context.history.messages {
-        prelude
-            .push_str(&json!({"sender":m.sender_id,"time":m.created_at,"text":m.text}).to_string());
+        let mut item = json!({"message_id":m.message_id,"sender":m.sender_id,"time":m.created_at,"text":m.text});
+        if let Some(bytes) = m.truncated_original_bytes {
+            item["truncated"] = json!(true);
+            item["original_bytes"] = json!(bytes);
+            item["notice"] = json!("[message truncated]");
+            truncations.push(doc! {"message_id": m.message_id, "truncated": true, "original_bytes": bytes as i64});
+        }
+        prelude.push_str(&item.to_string());
         prelude.push('\n');
     }
     for m in context.metadata {
@@ -1208,7 +1234,7 @@ pub(crate) async fn prelude(
             .collection::<NyxbotThread>(THREADS)
             .update_one(
                 context_filter,
-                doc! {"$set":{"context_status":status,"context_message_count":count as i64}},
+                doc! {"$set":{"context_status":status,"context_message_count":count as i64, "context_text_truncations":truncations}},
             )
             .await
     })

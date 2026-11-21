@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_message::{
-    COLLECTION_NAME, CallbackDisposition, CallbackRefusal, ChannelMessage,
+    COLLECTION_NAME, CallbackDisposition, CallbackRefusal, ChannelMessage, TextCompleteness,
 };
 use crate::services::channel_platform::InboundMessage;
 
@@ -227,6 +227,10 @@ pub(crate) fn inbound_metadata(
         .then(|| super::channel_adapters::lark::effective_file_name(&inbound.raw_data))
         .flatten();
     ChannelMessage {
+        text_completeness: inbound.text.as_ref().map(|text| TextCompleteness {
+            original_bytes: text.len(),
+            truncated: false,
+        }),
         effective_attachment_filenames: if is_lark_file {
             attachments
                 .iter()
@@ -310,6 +314,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
@@ -387,6 +392,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        text_completeness: None,
         effective_attachment_filenames: Vec::new(),
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
@@ -635,6 +641,14 @@ pub(super) async fn forward_to_agent(
         .header("X-NyxID-Timestamp", &timestamp)
         .header("X-NyxID-Platform", &payload.platform)
         .timeout(timeout);
+
+    // Strict callback decoders depend on the signed JSON schema. The relay
+    // forwards the full text; receivers can verify its UTF-8 size from the body.
+    if let Some(text) = &payload.content.text {
+        request = request
+            .header("X-NyxID-Text-Original-Bytes", text.len().to_string())
+            .header("X-NyxID-Text-Truncated", "false");
+    }
 
     // Include the bot owner's access token so the receiving agent can make
     // NyxID API calls (proxy, approvals, etc.) on behalf of the user.
@@ -1638,6 +1652,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -1715,6 +1730,65 @@ mod tests {
         };
 
         (message, conversation, inbound)
+    }
+
+    #[tokio::test]
+    async fn long_inbound_text_survives_lark_callback_and_history_reports_length() {
+        use crate::services::channel_adapters::lark::LarkFamilyAdapter;
+        use crate::services::channel_platform::PlatformAdapter;
+        use crate::services::provider_token_exchange_service::TokenExchangeCache;
+        use serde_json::json;
+        let cache = std::sync::Arc::new(TokenExchangeCache::new());
+        let (_, conversation, _) = attachment_callback_fixture();
+        for adapter in [
+            LarkFamilyAdapter::lark(cache.clone()),
+            LarkFamilyAdapter::feishu(cache),
+        ] {
+            for chars in [12, 1000, 2000, 5000, 6000, 10_000] {
+                let pattern = "正文🦉e\u{301}\nhttps://example.org/\n```rs\n\"\\\n```\n";
+                let text: String = pattern.chars().cycle().take(chars).collect();
+                let body = json!({"schema":"2.0","header":{"event_type":"im.message.receive_v1"},
+                    "event":{"sender":{"sender_id":{"open_id":"ou_sender"}},
+                    "message":{"message_id":"om_long","chat_id":"oc_group","chat_type":"group",
+                    "message_type":"text","content":json!({"text":text}).to_string()}}});
+                let parsed = adapter
+                    .parse_inbound(&serde_json::to_vec(&body).unwrap())
+                    .await
+                    .unwrap();
+                let inbound = &parsed[0];
+                let message = inbound_metadata(
+                    "bot",
+                    &conversation.id,
+                    "owner",
+                    adapter.platform_id(),
+                    inbound,
+                    "key",
+                    "source",
+                );
+                let callback = build_callback_payload(
+                    &message,
+                    &conversation,
+                    "key",
+                    "agent",
+                    inbound,
+                    None,
+                    "https://nyxid.example",
+                );
+                let callback = serde_json::to_value(callback).unwrap();
+                assert!(callback["content"]["text"].as_str() == Some(&text));
+                let stored = bson::to_document(&message).unwrap();
+                assert!(!stored.contains_key("text"));
+                let history = crate::handlers::channel_relay::message_to_item(
+                    &bson::from_document(stored).unwrap(),
+                    "https://nyxid.example",
+                );
+                let history = serde_json::to_value(history).unwrap();
+                assert!(history.get("text").is_none());
+                let expected = json!({"original_bytes":text.len(), "truncated":false});
+                assert_eq!(history["text_completeness"], expected);
+                assert!(callback["content"].get("text_completeness").is_none());
+            }
+        }
     }
 
     #[test]
@@ -2387,11 +2461,14 @@ mod tests {
         let config = test_app_config();
         let keys = test_jwt_keys();
 
+        let mut payload = test_payload();
+        let long_message = "文🦉".repeat(3000);
+        payload.content.text = Some(long_message.clone());
         let delivery = forward_to_agent(
             Ok(client.post(&url)),
             &config,
             &keys,
-            test_payload(),
+            payload,
             "key-1",
             "test_api_key_hash",
             None,
@@ -2402,6 +2479,16 @@ mod tests {
         let request = captured_request(&captured).await;
         assert!(!header_value(&request.headers, "X-NyxID-Signature").is_empty());
         assert!(!header_value(&request.headers, "X-NyxID-Callback-Token").is_empty());
+        assert_eq!(
+            header_value(&request.headers, "X-NyxID-Text-Original-Bytes"),
+            long_message.len().to_string()
+        );
+        assert_eq!(
+            header_value(&request.headers, "X-NyxID-Text-Truncated"),
+            "false"
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(wire["content"]["text"].as_str() == Some(long_message.as_str()));
         server.abort();
     }
 

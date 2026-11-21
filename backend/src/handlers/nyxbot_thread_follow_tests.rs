@@ -391,6 +391,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
                 &json!({"conversation": {"type": "private"}}),
                 "message-that-does-not-exist",
                 "legacy DM",
+                None,
                 "unused-event-key",
             ))
             .await
@@ -411,6 +412,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
             &json!({"conversation": {"type": "private"}}),
             "message-that-does-not-exist",
             "legacy DM",
+            None,
             "unused-event-key",
         ))
         .await

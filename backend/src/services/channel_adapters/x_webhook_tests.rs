@@ -564,6 +564,10 @@ fn public_events_preserve_post_identity_and_thread_without_becoming_dms() {
         assert_eq!(message.sender_display_name.as_deref(), Some("Reader"));
         assert_eq!(message.thread_id.as_deref(), Some("550"));
         assert_eq!(message.reply_to_platform_message_id.as_deref(), Some("550"));
+        let full_text = "文🦉".repeat(3000);
+        event["data"]["payload"]["note_tweet"] = json!({"text": full_text});
+        let parsed = webhooks::parse(&serde_json::to_vec(&event).unwrap()).unwrap();
+        assert!(parsed[0].text.as_deref() == Some(full_text.as_str()));
         event["data"]["payload"]["author_id"] = json!("10");
         assert!(
             webhooks::parse(&serde_json::to_vec(&event).unwrap())

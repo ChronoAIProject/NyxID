@@ -5573,6 +5573,17 @@ fn production_recap_reports_tail_truncation_without_sniffing_message_text() {
         "0 earlier owner messages / 1 truncated; read them with nyx__conversation_history"
     ));
 
+    let mut channel = recap_owner_message(2, "文🦉".repeat(3000));
+    channel.origin = Some(TurnOrigin::Channel);
+    let expected = format!("[truncated=true, original_bytes={}]", channel.text.len());
+    assert!(
+        recap_line(&channel, true, 1000)
+            .unwrap()
+            .text
+            .contains(&expected)
+    );
+    assert!(owner_recap_line(&channel, 1000).text.contains(&expected));
+
     let short = recap_owner_message(
         1,
         "A literal [truncated] marker is part of the instruction".into(),

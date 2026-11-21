@@ -3002,12 +3002,14 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .unwrap();
     assert!(queued.pending_events.is_empty());
     // The owner's own message while busy is queued for the group...
+    let long_message = format!("@helper_bot {}验收完成", "文🦉e\u{301}".repeat(1496));
+    assert_eq!(long_message.chars().count(), 6000);
     let owner_queued = body_text(
         respond(
             &state,
             &agent_key,
             &group_event(
-                "@helper_bot and the budget?",
+                &long_message,
                 "7",
                 "Alice",
                 "evt-g2c",
@@ -3080,6 +3082,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     assert_eq!(conversation.pending_events.len(), 1);
     // Let the app turn and the woken group turn finish.
     wait_for_calls(&calls, 4).await;
+    assert!(calls.lock().await.iter().any(|call| {
+        call["input"]
+            .as_str()
+            .is_some_and(|input| input.contains(&long_message))
+    }));
     settle(&state, &thread.id).await;
     // The chat is listed with its settings; only the owner may talk there
     // once they say so.
@@ -5840,6 +5847,7 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
             .is_empty()
     );
     let sender = |id: &'static str| Sender {
+        truncated_original_bytes: None,
         original_kind: None,
         media: Vec::new(),
         original_message: true,

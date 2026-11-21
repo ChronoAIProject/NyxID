@@ -1394,6 +1394,26 @@ The standalone browser suite covers every supported credential form, a synthetic
 
 NyxID sends a normalized message to the agent's callback URL.
 
+Callbacks with `content.text` send its UTF-8 byte length in the
+`X-NyxID-Text-Original-Bytes` HTTP header and `false` in
+`X-NyxID-Text-Truncated`. Receivers can verify the count against the text in
+the signed body. Both relay history APIs return a `text_completeness` record
+for adapter text alongside routing metadata.
+For example, `{"original_bytes":18000,"truncated":false}` means the complete
+18,000-byte adapter text was available for the callback. A missing record
+means the length is unknown. These measurements start at the text supplied
+by the platform. The receiver can retain the signed callback for later reads.
+For Lark/Feishu structured posts the original document is in
+`raw_platform_data.event.message.content`.
+
+NyxBot uses a 32,768-character input budget for immediate and queued channel
+messages. A bounded projection includes a visible marker and the original
+byte count. Older readers can consume a labelled preview of a long queued
+message during rollout. Followed-thread history has a separate 4 KiB budget
+per message and 32 KiB total. A partial entry identifies the provider message
+and includes `truncated: true` and `original_bytes`. A permitted provider
+message read can use that ID to retrieve the source.
+
 ```json
 {
   "message_id": "550e8400-e29b-41d4-a716-446655440000",

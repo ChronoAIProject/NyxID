@@ -309,7 +309,7 @@ pub async fn select(
             let mut child = child.ok_or_else(not_found)?;
             if child.conversation_id.is_none() && (addressed || settings.reply_mode.as_deref()==Some("all")) {
                 child=rows.find_one_and_update(doc! {"_id":&child.id,"conversation_id":bson::Bson::Null},
-                    doc! {"$set":{"conversation_id":format!("nyxa-{}",uuid::Uuid::new_v4().simple()),"context_status":"pending","context_message_count":0}})
+                    doc! {"$set":{"conversation_id":format!("nyxa-{}",uuid::Uuid::new_v4().simple()),"context_status":"pending","context_message_count":0,"context_text_truncations":[]}})
                     .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(not_found)?;
             }
 
