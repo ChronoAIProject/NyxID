@@ -15,7 +15,8 @@ impl Drop for TelegramOrigin {
 
 #[tokio::test]
 async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
-    for enabled in [false, true] {
+    let caption = "Keep the forwarded text despite the file failure";
+    for (enabled, text) in [(false, caption), (true, caption), (true, "")] {
         let (state, calls, model) = setup("telegram_file_degrade").await;
         let (row, agent_key) = channel(&state, "gateway").await;
         state
@@ -68,7 +69,7 @@ async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
             .insert_one(doc!{"_id":&id,"channel_bot_id":&row.channel_bot_id,"agent_api_key_id":&row.route_api_key_id,
                 "direction":"inbound","sender_platform_id":"7","original_message":false,
                 "attachments":[{"content_type":"file","provider_ref":"too-large","filename":"large.txt","size_bytes":64_i64*1024*1024}]}).await.unwrap();
-        let mut body = event("Keep the forwarded text despite the file failure", "7", &id);
+        let mut body = event(text, "7", &id);
         body["event_context"]["activity"]
             .as_object_mut()
             .unwrap()
@@ -80,8 +81,9 @@ async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
         assert!(body_text(response).await.contains("Here is your answer"));
         let captured = calls.lock().await;
         assert_eq!(captured.len(), 1);
-        let input = captured[0].to_string();
-        assert!(input.contains("Keep the forwarded text despite the file failure"));
+        let input = captured[0]["input"].as_str().unwrap();
+        let (_, user_text) = input.rsplit_once("]\n\n").unwrap();
+        assert_eq!(user_text, if text.is_empty() { "📎" } else { text });
         let expected_notes: &[&str] = if enabled {
             &["too large: 1"]
         } else {
