@@ -1104,6 +1104,7 @@ async fn pending_recovery(
         request_hash: "test".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),

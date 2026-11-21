@@ -4,6 +4,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 
 fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     HealthFacts {
+        answer_delivery: None,
         org_guest_billing: None,
         inbound_outcome: None,
         platform,
@@ -167,6 +168,7 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
     ];
     for (platform, status, registered, reason, backoff, expected) in rows {
         let facts = HealthFacts {
+            answer_delivery: None,
             org_guest_billing: None,
             inbound_outcome: None,
             platform,
@@ -757,4 +759,15 @@ async fn discord_2323_health_identifies_actionable_review_reasons_through_transi
         }
     }
     db.drop().await.unwrap();
+}
+
+#[test]
+fn gateway_answer_failure_recommendations_do_not_render_as_healthy() {
+    let mut facts = facts("lark", "active");
+    facts.gateway = true;
+    facts.thread_reason = Some("thread_target_rejected");
+    assert_ne!(recommend(&facts).action, "none");
+    facts.thread_reason = None;
+    facts.outbound_reason = Some("gateway_reply_unconfirmed");
+    assert_ne!(recommend(&facts).action, "none");
 }

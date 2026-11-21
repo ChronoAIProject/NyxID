@@ -6,6 +6,7 @@
 //! Diagnostics are metadata only: codes, timestamps and counts. Never store
 //! message bodies, provider error prose with user content, or credentials.
 
+pub mod answer;
 pub mod discord;
 
 use super::channel_platform::platform_name;
@@ -125,6 +126,7 @@ pub struct MissingGatewayEvent {
 /// Facts the recommendation depends on. Build with [`HealthFacts::for_bot`].
 #[derive(Clone, Debug)]
 pub struct HealthFacts<'a> {
+    pub answer_delivery: Option<answer::Delivery>,
     pub org_guest_billing: Option<&'a str>,
     pub platform: &'a str,
     pub status: &'a str,
@@ -144,6 +146,7 @@ pub struct HealthFacts<'a> {
 impl<'a> HealthFacts<'a> {
     pub fn for_bot(bot: &'a ChannelBot, now: DateTime<Utc>, gateway: bool) -> Self {
         Self {
+            answer_delivery: None,
             org_guest_billing: None,
             platform: &bot.platform,
             inbound_outcome: bot.diagnostics.last_inbound_outcome.as_ref().filter(|o| {
@@ -443,12 +446,12 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
         return for_code(codes::NATIVE_RELAY_CONFLICT, facts, false).expect("mapped code");
     }
     match facts.thread_reason {
-        Some("thread_target_rejected") => return advice("none",
-            "NyxID could not validate the thread or permission to reply, so this reply was not sent. There is no reply to retry here. If the next message has the same problem, report it to NyxID support.".into()),
-        Some("thread_reply_failed") => return advice("none",
-            "The last thread reply failed or its delivery could not be confirmed. Part of it may have arrived. No action is needed here; if a later reply has the same problem, report it to NyxID support.".into()),
+        Some("thread_target_rejected") => return advice("reconnect",
+            "The bot could not access the original thread. Check the chat and reconnect the channel if the bot has lost access.".into()),
+        Some("thread_reply_failed") => return advice("verify",
+            "The thread reply may be incomplete. Check the chat before asking again.".into()),
         Some("thread_delayed_reply_failed") => return advice("none",
-            "A delayed thread update failed or its delivery could not be confirmed. No action is needed here; if a later update has the same problem, report it to NyxID support.".into()),
+            "A delayed thread update may be missing. Check the chat for the update.".into()),
         Some("thread_reply_reference_expired") => return advice("none",
             "A delayed thread update could not be sent because its gateway reply reference expired after 29 minutes. No owner action is needed; a new message starts a new reply window.".into()),
         _ => {},
@@ -469,12 +472,12 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
                 | "gateway_reply_unreadable_response_pending" | "gateway_reply_interrupted_pending" => "NyxBot is still trying with the same reply.",
                 _ => "Delivery could not be confirmed before checking stopped.",
             };
-            return advice("none", format!("{observed} {progress} No action is needed unless a later reply has the same problem; if it does, report it to NyxID support."));
+            return advice("gateway", format!("{observed} {progress} Check the chat before asking again."));
         }
-        Some("gateway_reply_unconfirmed") => return advice("none", "The gateway accepted this reply, but delivery was not confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
-        Some("gateway_reply_unavailable") => return advice("none", "The gateway was temporarily unavailable. This reply has no confirmed delivery. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
-        Some("gateway_reply_rejected") => return advice("none", "The gateway refused this reply. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
-        Some("gateway_reply_unknown") => return advice("none", "Delivery of this reply could not be confirmed. No action is needed unless a later reply has the same problem; if it does, report it to NyxID support.".into()),
+        Some("gateway_reply_unconfirmed") => return advice("gateway", "The gateway accepted this reply, but delivery was not confirmed. Check the chat before asking again.".into()),
+        Some("gateway_reply_unavailable") => return advice("gateway", "The gateway was temporarily unavailable. This reply has no confirmed delivery. Check the chat before asking again.".into()),
+        Some("gateway_reply_rejected") => return advice("gateway", "The gateway refused this reply. Check the chat before asking again.".into()),
+        Some("gateway_reply_unknown") => return advice("gateway", "Delivery of this reply could not be confirmed. Check the chat before asking again.".into()),
         _ => {}
     }
     if facts.gateway
@@ -511,7 +514,9 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
                 ),
             );
         }
-        return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
+        if facts.answer_delivery.is_none() {
+            return advice("gateway", "This bot is delivered through the Agent Event Gateway; check the NyxBot channel's status there.".into());
+        }
     }
     if facts.failure_reason == Some(codes::BILLING_SUSPENDED) && is_x(facts.platform) {
         return super::channel_inbound_diagnostics::recommendation("x_billing_refused")
@@ -554,6 +559,9 @@ pub fn recommend(facts: &HealthFacts<'_>) -> Recommendation {
     }
     if let Some(reason) = facts.org_guest_billing {
         return guest_billing_advice(reason);
+    }
+    if let Some(answer) = facts.answer_delivery {
+        return answer.recommendation();
     }
     if facts.gateway {
         return advice(
