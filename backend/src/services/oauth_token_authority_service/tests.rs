@@ -607,13 +607,17 @@ async fn revocation_and_client_soft_deletion_fail_tokens_on_another_app_state() 
         StatusCode::UNAUTHORIZED
     );
     assert!(
-        super::super::token_service::refresh_tokens(
+        super::super::token_service::refresh_tokens_for_client(
             &replica.state.db,
             &replica.state.config,
             &replica.state.jwt_keys,
             &refresh.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(
+                &fixture.client,
+                Some("fixture-client-secret")
+            )
         )
         .await
         .is_err()

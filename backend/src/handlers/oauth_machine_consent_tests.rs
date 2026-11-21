@@ -232,13 +232,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
         .unwrap()
         .unwrap();
     assert_eq!(row.protected_consent, Some(reference.clone()));
-    let refreshed = crate::services::token_service::refresh_tokens(
+    let refreshed = crate::services::token_service::refresh_tokens_for_client(
         &f.state.db,
         &f.state.config,
         &f.state.jwt_keys,
         &issued.refresh_token,
         None,
         None,
+        crate::services::token_service::RefreshClient::Identified(&f.client, None),
     )
     .await
     .unwrap();
@@ -259,13 +260,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
     let again = f.prepare().await;
     f.code(&again).await;
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &refreshed.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -343,13 +345,14 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
         .await
         .unwrap();
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &legacy_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -574,13 +577,14 @@ async fn machine_oauth_consent_revoke_reconsent_never_adopts_old_tokens() {
         .is_err()
     );
     assert!(
-        crate::services::token_service::refresh_tokens(
+        crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &original.refresh_token,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .is_err()
@@ -1106,13 +1110,14 @@ async fn machine_oauth_optional_without_selection_narrows_tokens_and_keeps_mcp()
             }
         }
         let refresh = issued.refresh_token.unwrap();
-        let refreshed = crate::services::token_service::refresh_tokens(
+        let refreshed = crate::services::token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &refresh,
             None,
             None,
+            crate::services::token_service::RefreshClient::Identified(&f.client, None),
         )
         .await
         .unwrap();
