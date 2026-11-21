@@ -3906,6 +3906,7 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
         request_hash: "images".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),

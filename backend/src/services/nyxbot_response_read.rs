@@ -515,6 +515,9 @@ async fn view_mode(
     let mut payload = Payload::new(id, &mapping.conversation_id, command.metadata.clone());
     if mapping.thread_reply == Some(true) {
         payload.frames[0]["response"]["thread_reply"] = serde_json::json!(true);
+        if event.turn_id.is_some() || event.status == "queued" {
+            payload.snapshot["thread_reply"] = serde_json::json!(true);
+        }
     }
     payload.progress();
     if terminal {

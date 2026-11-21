@@ -982,3 +982,59 @@ async fn response_read_2588_failed_followed_turn_stays_empty_and_sends_failure_i
 
 #[path = "nyxbot_org_thread_notice_tests.rs"]
 mod org_thread_notice_tests;
+
+#[tokio::test]
+async fn followed_turn_snapshot_keeps_accepted_thread_choice() {
+    let f = Box::pin(Fixture::new("thread_snapshot_2460")).await;
+    advertised(&f).await;
+    let (mut request, event) = f.input("answer", ThreadAddress::Mention, false, true).await;
+    metadata(&mut request, &event);
+    let blocked = f.calls.lock().await;
+    let response = Box::pin(respond(&f.state, &f.key, &request, &event)).await;
+    let mut body = response.into_body();
+    let created = frames(&first(&mut body).await).remove(0);
+    let id = created["response"]["id"].as_str().unwrap();
+    assert_eq!(created["response"]["thread_reply"], true);
+    assert_eq!(snapshot(&f, id).await["thread_reply"], true);
+    drop(blocked);
+    body.collect().await.unwrap();
+    let completed = terminal(&f, id).await;
+    assert_eq!(completed["thread_reply"], true);
+    assert_eq!(completed["output"], json!([]));
+}
+
+#[tokio::test]
+async fn followed_answer_delivery_health_tracks_the_answer_receipt() {
+    let f = Box::pin(Fixture::new("answer_health_2460")).await;
+    let (request, event) = f.input("answer", ThreadAddress::Mention, false, true).await;
+    let response = Box::pin(respond(&f.state, &f.key, &request, &event)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("Here is your answer"));
+    let bot = crate::services::channel_bot_service::get_bot(&f.state.db, &f.row.channel_bot_id)
+        .await
+        .unwrap();
+    let health = Box::pin(crate::handlers::channel_bots::health_loaded(
+        &f.state, &bot, true, true,
+    ))
+    .await
+    .unwrap();
+    let health = serde_json::to_value(health).unwrap();
+    assert_eq!(health["answer_delivery"]["state"], "unconfirmed");
+    assert_eq!(
+        health["answer_delivery"]["reason"],
+        "gateway_does_not_confirm"
+    );
+    assert_eq!(health["recommended_action"], "none");
+    assert!(
+        health["recommended_action_text"]
+            .as_str()
+            .unwrap()
+            .contains("receipt")
+    );
+    assert!(!health["answer_delivery"].to_string().contains(&event));
+    assert!(
+        !health["answer_delivery"]
+            .to_string()
+            .contains("Here is your answer")
+    );
+}

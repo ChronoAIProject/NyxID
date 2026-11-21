@@ -66,6 +66,10 @@ export const RECOMMENDED_ACTIONS = [
 ] as const;
 
 export const channelBotHealthSchema = z.object({
+  answer_delivery: z.object({
+    state: z.enum(["prepared", "confirmed", "rejected", "unconfirmed"]),
+    reason: z.string(),
+  }).optional(),
   discord_intake: discordIntakeSchema.optional(),
   id: z.string(),
   platform: z.string(),

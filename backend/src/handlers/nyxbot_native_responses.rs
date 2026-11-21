@@ -211,6 +211,7 @@ async fn accept(
         request_hash,
         conversation_id: None,
         terminal: claim.is_none(),
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&state.encryption_keys).await?,
         created_at: now,
@@ -547,7 +548,10 @@ async fn snapshot_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((_, body, trace))) => {
+        Ok(Some((stored, body, trace))) => {
+            if let Err(error) = recovery::observe_answer_output(&state.db, &stored, &body).await {
+                return provider_refusal::error(error);
+            }
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
             }
@@ -753,6 +757,12 @@ pub(super) fn stream(
                     }
                     if stored.terminal && !relay_responses::stream_output(&state, &row, &stored, body.snapshot["status"].as_str().unwrap_or("failed")).await.unwrap_or(false) {
                         relay_responses::suppress_output(&mut body);
+                    }
+                    if stored.terminal && next < body.frames.len() as u64
+                        && recovery::observe_answer_output(&state.db, &stored, &body).await.is_err()
+                    {
+                        yield Ok(axum::response::sse::Event::default().event("error").data("{\"type\":\"error\",\"code\":\"provider_unavailable\"}"));
+                        break;
                     }
                     for frame in body.frames.iter().skip(next as usize) {
                         let seq=frame["sequence_number"].as_u64().unwrap_or_default();

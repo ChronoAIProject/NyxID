@@ -2863,15 +2863,14 @@ send: exact `409 routed_reply_in_progress`, any 5xx (including
 is no new delivery outbox. See the [gateway receipt and lookup contract](CHANNEL_EVENT_GATEWAY.md#reply-target-receipts-and-dispatch-lookup).
 
 Bot Health uses the existing outbound diagnostics. `gateway_reply_unconfirmed`
-means the gateway accepted the reply but delivery is unconfirmed; its action is
-`none`, advising no action unless a later reply repeats the problem.
+means the gateway accepted the reply and platform delivery is unconfirmed.
+Health uses the latest answer to distinguish an active receipt wait from a terminal outcome.
 `gateway_reply_unavailable` records a transient gateway failure without claiming
 acceptance. The closed reasons `gateway_reply_no_response`,
 `gateway_reply_server_error`, `gateway_reply_unreadable_response` and
 `gateway_reply_interrupted` describe the new failures; `_pending` adds that
 NyxBot is still trying with the same reply. Terminal wording says confirmation
-could not be obtained before checking stopped. These have action `none` and
-the same later-reply guidance. Only the first proven admission and the terminal
+could not be obtained before checking stopped. Owners can check the chat before asking again. Only the first proven admission and the terminal
 outcome produce audit rows; polls do not. The event, diagnostic and chained audit commit
 together. Audit retains the HTTP status class, closed gateway code and failure, never
 answer text, problem prose, keys or reply-target references. Terminal rows retain
@@ -2880,6 +2879,21 @@ outcomes emit the Channel trace milestone; its enum has no pending value, so
 first admission uses `unknown`. Local pre-send refusals (missing key, expired
 target or event, changed authority) remain `refused` without a gateway Health
 entry or gateway rejection audit. Only a received status proves gateway refusal.
+
+Owner and admin Health expose optional `answer_delivery` for the latest retained
+turn answer on the selected NyxBot channel. Its `state` is `prepared`,
+`confirmed`, `rejected` or `unconfirmed`, with a closed `reason`. A stream claim
+or a stored answer exposed to the gateway has reason `gateway_does_not_confirm` and
+action `none`: this gateway contract has no primary-answer delivery receipt.
+A send or pending receipt stays neutral through ten minutes from the event's
+`created_at`. An older wait is `delivery_stalled`. A terminal unknown outcome
+and a refused target need attention immediately. Owners can check the original
+chat and verify or reconnect the channel as indicated.
+The current receipt on a late answer supersedes its earlier preparation or
+uncertainty. A thread preflight refusal or a send failure also appears in the
+existing outbound diagnostics and recommendation. An acknowledgement,
+supplemental post or successful inbound callback cannot confirm a primary answer.
+Health reads use metadata only and have no delivery side effects.
 
 ### Retrying a retained Discord release (#2323)
 

@@ -347,6 +347,8 @@ pub struct ChannelBotDiagnosticsResponse {
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_delivery: Option<crate::services::channel_bot_health::answer::Delivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
     pub id: String,
@@ -548,6 +550,10 @@ pub(crate) async fn health_loaded(
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct NyxbotHealthRow {
+    #[serde(default)]
+    answer_events: Vec<crate::services::channel_bot_health::answer::Observation>,
+    #[serde(default)]
+    answer_responses: Vec<crate::services::channel_bot_health::answer::Observation>,
     #[serde(rename = "_id")]
     id: String,
     user_id: String,
@@ -590,7 +596,7 @@ async fn latest_nyxbot_rows(
         .aggregate([
             doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
             doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
                 "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
@@ -611,13 +617,15 @@ async fn latest_nyxbot_rows(
                 "gateway_not_received": {"$max": "$gateway_not_received"}}},
             doc! {"$replaceWith": {"$mergeObjects": ["$row", {"gateway_not_received": "$gateway_not_received"}]}},
             doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
                 "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
                 "org_restore_attempts": 1, "native_intake_refused": 1, "gateway_not_received": 1,
             }},
             doc! {"$limit": bot_ids.len() as i64},
+            crate::services::channel_bot_health::answer::event_lookup(),
+            crate::services::channel_bot_health::answer::response_lookup(),
         ])
         .hint(mongodb::options::Hint::Name(
             "nyxbot_health_latest".to_owned(),
@@ -672,6 +680,7 @@ fn health_with_intake(
     }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        answer_delivery: facts.answer_delivery,
         discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
@@ -713,6 +722,13 @@ fn health_with_nyxbot(
     let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
     if let Some(row) = nyxbot {
         facts.gateway_not_received = row.gateway_not_received;
+        crate::services::channel_bot_health::answer::apply_latest(
+            &mut facts,
+            row.answer_events.first(),
+            row.answer_responses.first(),
+            bot.diagnostics.last_outbound_error.as_ref(),
+        );
+        response.answer_delivery = facts.answer_delivery;
         if row.native_intake_refused && facts.failure_reason.is_none() {
             facts.failure_reason =
                 Some(crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED);

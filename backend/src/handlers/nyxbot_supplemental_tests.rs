@@ -574,6 +574,7 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         request_hash: "fixture".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: true,
+        answer_delivery: None,
         revision: 1,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
