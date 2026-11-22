@@ -460,7 +460,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(
         super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &result)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         CHILD
     );
     let response = serde_json::to_string(&crate::handlers::telegram_new::RequestResponse::from(

@@ -1598,8 +1598,7 @@ impl TelegramNewService<'_> {
     }
 
     pub(crate) async fn remove_owned_webhook(&self, bot: &ChannelBot) -> AppResult<&'static str> {
-        let token =
-            Zeroizing::new(super::channel_bot_service::decrypt_bot_token(self.keys, bot).await?);
+        let token = super::channel_bot_service::decrypt_bot_token(self.keys, bot).await?;
         let callback = format!(
             "{}/api/v1/webhooks/channel/{}/{}",
             self.config.base_url.trim_end_matches('/'),

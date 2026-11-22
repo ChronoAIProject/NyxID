@@ -172,7 +172,7 @@ pub struct GenericOAuthCallbackQuery {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct DeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -181,10 +181,12 @@ pub struct DeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct DeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(DeviceCodeInitiateResponse, DeviceCodePollRequest,);
 
 #[derive(Debug, Serialize)]
 pub struct DeviceCodePollResponse {

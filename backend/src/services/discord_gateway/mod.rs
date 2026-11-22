@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, time::Duration};
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroizing;
 
 use super::coordination_service::{
     LeaseStore, LeaseToken, active_lease_filter, cluster_lease_runtime,
@@ -459,7 +458,7 @@ async fn session(state: &AppState, fence: &Fence) {
         match super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &fence.bot)
             .await
         {
-            Ok(token) => Zeroizing::new(token),
+            Ok(token) => token,
             Err(_) => {
                 let _ = status(
                     &state.db,

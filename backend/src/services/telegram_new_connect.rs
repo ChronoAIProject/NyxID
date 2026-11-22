@@ -185,8 +185,7 @@ impl TelegramNewService<'_> {
             ));
         }
         self.check_owner(actor, &bot.user_id).await?;
-        let token =
-            Zeroizing::new(super::channel_bot_service::decrypt_bot_token(self.keys, &bot).await?);
+        let token = super::channel_bot_service::decrypt_bot_token(self.keys, &bot).await?;
         let encrypted = bot
             .webhook_secret_encrypted
             .as_deref()

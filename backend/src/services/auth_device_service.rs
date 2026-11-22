@@ -43,7 +43,7 @@ const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ"
 pub(crate) use super::login_client_context::*;
 pub use crate::models::login_client_context::LoginClientContext as InitiateInput;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InitiateOutput {
     pub device_code: String,
     pub user_code: String,
@@ -84,7 +84,7 @@ impl std::fmt::Debug for AccountDelivery {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApproveInput {
     pub user_id: String,
     pub user_code: String,
@@ -92,13 +92,15 @@ pub struct ApproveInput {
     pub approver_user_agent: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DenyInput {
     pub user_id: String,
     pub user_code: String,
     pub denier_ip: Option<String>,
     pub denier_user_agent: Option<String>,
 }
+
+crate::errors::redacted_debug!(InitiateOutput, ApproveInput, DenyInput,);
 
 #[tracing::instrument(
     name = "auth_device.initiate",

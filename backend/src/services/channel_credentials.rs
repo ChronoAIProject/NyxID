@@ -146,9 +146,7 @@ pub async fn resolve_bot_token(
         required_scopes,
     } = adapter.credential_resolution()
     else {
-        return super::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map(Zeroizing::new);
+        return super::channel_bot_service::decrypt_bot_token(keys, bot).await;
     };
     let result = if bot.credential_source != "connection" {
         Err(reconnect("Bot is missing its OAuth connection"))
