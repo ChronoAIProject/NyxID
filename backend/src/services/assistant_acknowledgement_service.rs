@@ -212,7 +212,8 @@ const ACTION_STATE_GUIDANCE: &str = " This confirmation authorizes only the exac
 /// How risky an assistant action is. The owner's access mode decides which
 /// classes need a single-use action card; policy floors (webhook automations,
 /// machine and saved-login confirmation) apply in Auto and Ask every time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OwnerActionClass {
     Read,
     Change,

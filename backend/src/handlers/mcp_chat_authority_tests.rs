@@ -8285,7 +8285,10 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
 
 // #2271: drive both direct native and nyx__call_tool discovery through the
 // real authenticated handler. Only synthetic lengths/IDs enter these fixtures.
-async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+async fn operation_discovery_fixture(
+    name: &'static str,
+    count: usize,
+) -> (Fixture, String, Vec<String>) {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
     let f = boxed_chat_fixture(name).await;
@@ -8309,7 +8312,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
     .unwrap();
     let mut ids = Vec::new();
     let now = bson::DateTime::now();
-    let rows:Vec<_>=(0..120).map(|i| {
+    let rows:Vec<_>=(0..count).map(|i| {
         let id=uuid::Uuid::new_v4().to_string(); ids.push(id.clone());
         doc!{"_id":id,"service_id":&service,"name":format!("operation_{i}"),
             "description":"中文 JSON \"value\"\n# Markdown\\path".repeat(8),
@@ -8327,7 +8330,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
 
 #[tokio::test]
 async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_filtered() {
-    let (f, service, expected) = operation_discovery_fixture("discovery_pages").await;
+    let (f, service, expected) = operation_discovery_fixture("discovery_pages", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let hidden = connected(
         &f.state.db,
@@ -8411,7 +8414,7 @@ async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_f
 async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding() {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
-    let (f, service, ids) = operation_discovery_fixture("discovery_fences").await;
+    let (f, service, ids) = operation_discovery_fixture("discovery_fences", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let initial = json!({"subagent":"worker","limit":1});
     let first = result(
@@ -9016,5 +9019,150 @@ async fn voice_rpc_error_envelopes_redact_links_in_json_and_sse_without_changing
             .unwrap(),
         1
     );
+    f.state.db.drop().await.unwrap();
+}
+
+async fn operation_effect_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+    let (f, service, ids) = operation_discovery_fixture(name, 5).await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(doc! {"_id":&ids[4]}, doc! {"$set":{"publication":"draft"}})
+        .await
+        .unwrap();
+    for (id, method, risk) in [
+        (&ids[1], "POST", None),
+        (&ids[2], "POST", Some("read")),
+        (&ids[3], "DELETE", None),
+    ] {
+        endpoints
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"method":method,"risk":risk,"name":format!("read_{id}")}},
+            )
+            .await
+            .unwrap();
+    }
+    (f, service, ids)
+}
+
+#[tokio::test]
+async fn agent_operation_effect_filter_uses_closed_classes() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_filter").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    for (class, expected) in [
+        ("read", vec![&ids[0], &ids[2]]),
+        ("change", vec![&ids[1]]),
+        ("destructive", vec![&ids[3]]),
+        ("sensitive", vec![]),
+    ] {
+        let page = result(
+            call(
+                &f,
+                &auth,
+                "nyxid__get_agent_operations",
+                json!({"subagent":"worker","service_id":service,"effect_class":class}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        let actual: Vec<_> = page["services"][0]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| op["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_operation_effect_read_only_snapshot_never_grows() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_snapshot").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let selection = json!({"subagent":"worker","service_id":service,"selection":{"expected_revision":0,"read_only":true}});
+    let saved = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(saved["revision"], 1);
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(
+            doc! {"_id":&ids[4]},
+            doc! {"$set":{"publication":"published"}},
+        )
+        .await
+        .unwrap();
+    let _ = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection).await,
+        true,
+    )
+    .await;
+    let page = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(page["services"][0]["revision"], 1);
+    assert_eq!(page["services"][0]["all_operations"], false);
+    assert_eq!(
+        page["services"][0]["endpoint_ids"],
+        json!([&ids[0], &ids[2]])
+    );
+    assert_eq!(
+        page["services"][0]["operations"].as_array().unwrap().len(),
+        5
+    );
+    // Existing selected reads keep their value limits, and a read omitted by
+    // the owner's explicit selection stays omitted on a later snapshot.
+    let limits = json!({"query":{"lang":{"required":true,"rule":{"type":"exact","value":"en"}}}});
+    let restricted = json!({"subagent":"worker","service_id":service,"selection":{
+        "expected_revision":1,"endpoint_ids":[ids[0]],"inputs":{(&ids[0]):limits}}});
+    result(
+        call(&f, &auth, "nyxid__set_agent_operations", restricted).await,
+        false,
+    )
+    .await;
+    result(
+        call(
+            &f,
+            &auth,
+            "nyxid__set_agent_operations",
+            json!({"subagent":"worker","service_id":service,
+        "selection":{"expected_revision":2,"read_only":true}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    let filtered = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service,"effect_class":"read"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(filtered["services"][0]["endpoint_ids"], json!([ids[0]]));
+    assert_eq!(filtered["services"][0]["inputs"][&ids[0]], limits);
     f.state.db.drop().await.unwrap();
 }
