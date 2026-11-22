@@ -958,6 +958,7 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// settlement delivered that receipt; retries of either original/resume turn join it.
 pub(super) async fn existing_effect(
     db: &Database,
+    context: &RequestContext,
     chat: &acks::ChatAuthority,
     connection: &str,
     digest: &str,
@@ -974,6 +975,9 @@ pub(super) async fn existing_effect(
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
     })).await? {
+        if let Ok(p) = proposal(&row) {
+            context.observation.replay(&row.status, &p.state);
+        }
         return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });

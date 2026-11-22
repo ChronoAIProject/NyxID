@@ -121,7 +121,7 @@ async fn channel_turn_transport(
         .unwrap();
     db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
     if native {
-        db.collection::<Document>("nyxbot_gateway_responses").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"response_id":"original-response","user_id":&f.owner,"channel_id":&id,"binding_id":"bound","partition":"original-chat","event_key":&event,"request_hash":"hash","conversation_id":&previous.id,"terminal":false,"revision":1_i64,"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},"created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
+        native_response(&f, &id, &event, "original-response", &previous.id).await;
     }
     if !native {
         let token = f
@@ -493,6 +493,24 @@ fn migration_channel_source_is_additive_and_redacted() {
     assert!(!debug.contains("secret-source") && !debug.contains("secret-key"));
 }
 
+async fn native_response(
+    f: &Fixture,
+    channel: &str,
+    event: &str,
+    response: &str,
+    conversation: &str,
+) {
+    f.state.db.collection::<Document>("nyxbot_gateway_responses").insert_one(doc! {
+        "_id": Uuid::new_v4().to_string(), "response_id": response, "user_id": &f.owner,
+        "channel_id": channel, "binding_id": "bound", "partition": "original-chat",
+        "event_key": event, "request_hash": "hash", "conversation_id": conversation,
+        "terminal": false, "revision": 1_i64,
+        "payload_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+        "created_at": bson::DateTime::now(),
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(24)),
+    }).await.unwrap();
+}
+
 async fn another_channel_turn(
     f: &Fixture,
     row: &AssistantConversation,
@@ -513,7 +531,28 @@ async fn another_channel_turn(
     event.status = "running".into();
     event.created_at = Utc::now();
     let id = event.id.clone();
-    let origin = event.delivery.as_ref().unwrap().origin.clone();
+    let delivery = event.delivery.as_mut().unwrap();
+    delivery.execution_source_bound = false;
+    if delivery.origin.native_event_id.is_some() {
+        delivery.origin.native_event_id = Some(id.clone());
+        native_response(f, &event.channel_id, &id, &event.event_id, &row.id).await;
+    }
+    if let Some(relay_id) = &mut event.relay_message_id {
+        let messages = f.state.db.collection::<Document>("channel_messages");
+        let mut inbound = messages
+            .find_one(doc! {"_id": &*relay_id})
+            .await
+            .unwrap()
+            .unwrap();
+        relay_id.clone_from(&event.event_id);
+        inbound.insert("_id", &event.event_id);
+        inbound.insert(
+            "platform_message_id",
+            Uuid::new_v4().as_fields().0.to_string(),
+        );
+        messages.insert_one(inbound).await.unwrap();
+    }
+    let origin = delivery.origin.clone();
     f.state
         .db
         .collection::<NyxbotEvent>("nyxbot_events")
@@ -1214,9 +1253,10 @@ async fn sheet_call(
     range: &str,
     body: Option<&serde_json::Value>,
 ) -> (StatusCode, String) {
-    let path = format!(
-        "/proxy/s/execution-fixture/v4/spreadsheets/book/values/{range}?valueInputOption=RAW"
-    );
+    let mut path = format!("/proxy/s/execution-fixture/v4/spreadsheets/book/values/{range}");
+    if method == "PUT" {
+        path.push_str("?valueInputOption=RAW");
+    }
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -1243,7 +1283,7 @@ async fn sheet_call(
 #[tokio::test]
 async fn migration_channel_sheets_range_inputs_review_readback_and_exact_original_reply() {
     for transport in ["direct", "gateway", "native"] {
-        let (f, row, _) =
+        let (f, row, event) =
             channel_turn_transport("migration_channel_sheets_inputs", transport).await;
         let native = transport == "native";
         let mut direct_bot = None;
@@ -1275,6 +1315,27 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
         } else {
             gateway
         };
+        let range_path = "/v4/spreadsheets/book/values/Sheet1!A1:B2";
+        let cells = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let written = cells.clone();
+        f.server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path(range_path))
+            .and(wiremock::matchers::query_param("valueInputOption", "RAW"))
+            .respond_with(move |request: &wiremock::Request| {
+                *written.lock().unwrap() = Some(request.body_json::<Value>().unwrap());
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({"updatedCells":4}))
+            })
+            .mount(&f.server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(range_path))
+            .respond_with(move |_: &wiremock::Request| match &*cells.lock().unwrap() {
+                Some(stored) => wiremock::ResponseTemplate::new(200).set_body_json(stored),
+                None => wiremock::ResponseTemplate::new(404),
+            })
+            .mount(&f.server)
+            .await;
         let values = json!({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["Type","Amount"],["Receipt",12]]});
         let (status, error) = sheet_call(&f, "PUT", "Sheet1!A1:B2", Some(&values)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
@@ -1323,11 +1384,11 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
             .await
             .unwrap()
             .unwrap();
-        approve(&f, &read, "operation").await;
+        approve(&f, &read, "persistent").await;
         finish(&f, &resumed, "Write complete; readback needs review").await;
         let next = event_turn(&f, &row).await;
         let result = resume(&f, &next).await;
-        assert!(result.contains("HTTP 200"), "{result}");
+        assert!(result.contains(&values.to_string()), "{result}");
         let sent = f.server.received_requests().await.unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].method.as_str(), "PUT");
@@ -1337,6 +1398,8 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
         );
         assert_eq!(sent[0].url.query(), Some("valueInputOption=RAW"));
         assert_eq!(sent[1].method.as_str(), "GET");
+        assert_eq!(sent[1].url.query(), None);
+        assert_eq!(count(&f, "approval_requests").await, 2);
         // A changed range is outside the reviewed persistent contract.
         assert_eq!(
             sheet_call(&f, "PUT", "Sheet2!A1:B2", Some(&values)).await.0,
@@ -1394,6 +1457,21 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
                 .unwrap()
                 .remove(&bot);
         }
+        let fresh = another_channel_turn(&f, &row, &event).await;
+        let prior_requests = count(&f, "approval_requests").await;
+        let (status, body) = sheet_call(&f, "PUT", "Sheet1!A1:B2", Some(&values)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = sheet_call(&f, "GET", "Sheet1!A1:B2", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), values);
+        let sent = f.server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[2].method.as_str(), "PUT");
+        assert_eq!(sent[3].method.as_str(), "GET");
+        assert_eq!(count(&f, "approval_requests").await, prior_requests);
+        assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
+        assert_eq!(count(&f, "assistant_agent_consents").await, 0);
+        finish(&f, &fresh, &body).await;
         f.cleanup().await;
     }
 }
