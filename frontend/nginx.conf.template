@@ -9,13 +9,30 @@ map $request_uri $nyxid_has_claim {
 }
 # Never write raw queries or Referer values. This also protects encoded names,
 # duplicate parameters and asset requests from a client ignoring the policy.
-map $request_uri $nyxid_access_path {
+map $uri $nyxid_route_label {
     default $uri;
-    ~^(?<nyxid_path_without_query>[^?]*) $nyxid_path_without_query;
+    ~*^/connect/return/[^/]+/?$ $uri;
+    ~*^/connect/bot/ /connect/bot/:token;
+    ~*^/connect/ /connect/:token;
+    ~*^/preview/ /preview/:id;
+    ~*^/orgs/join/ /orgs/join/:nonce;
+    ~*^/api/v1/orgs/join/ /api/v1/orgs/join/:nonce;
+    ~*^/api/v1/users/me/oauth-consent-requests/ /api/v1/users/me/oauth-consent-requests/:handle;
+    ~*^/api/v1/proxy/s/[^/]+/ /api/v1/proxy/s/:slug/:path;
+    ~*^/api/v1/proxy/nyxbot-voice/[^/]+/ /api/v1/proxy/nyxbot-voice/:service_id/:path;
+    ~*^/api/v1/proxy/[^/]+/ /api/v1/proxy/:service_id/:path;
+    ~*^/public/s/[^/]+/ /public/s/:slug/:path;
+    ~*^/api/v1/llm/[^/]+/v1/ /api/v1/llm/:provider/v1/:path;
+    ~*^/api/v1/public-nyxbot/models/[^/]+/ /api/v1/public-nyxbot/models/:service_id/:path;
+    ~*^/api/v1/permission-execution/rest/ /api/v1/permission-execution/rest/:path;
+    ~*^/credential-accept/ /credential-accept/:path;
+    ~*^/nodes/[^/]+/credentials/pending/[^/]+/accept /nodes/:node_id/credentials/pending/:pending_id/accept;
+    ~*^/nodes/credentials/pending/[^/]+/fan-out/accept /nodes/credentials/pending/:pending_id/fan-out/accept;
 }
 log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
     '"$request_method $nyxid_access_path $server_protocol" $status $body_bytes_sent '
-    '"-" "$http_user_agent"';
+    '"-" "$http_user_agent" upstream_status=$upstream_status '
+    'upstream_response_time=$upstream_response_time upstream_connect_time=$upstream_connect_time';
 
 # Proxy responses keep their own API/OAuth/credential policy. A proxy failure
 # receives a restrictive fallback, never the SPA's policy.
@@ -59,7 +76,11 @@ server {
     # nginx 1.27 stops inheriting add_header as soon as a child adds any.
     # Every location includes its complete, response-specific header policy.
     include @@STATIC_HEADERS@@;
+    # Evaluate the cached map on the normalized path before an index redirect.
+    set $nyxid_access_path $nyxid_route_label;
     access_log /var/log/nginx/access.log nyxid_frontend;
+    # Request diagnostics come from the formatted access log, which records route labels.
+    error_log /dev/null;
 
     # Gzip compression
     gzip on;

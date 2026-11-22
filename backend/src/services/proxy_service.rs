@@ -5180,7 +5180,7 @@ async fn forward_request_with_egress_guard_inner(
             if let Some(cached) = cloud_response_cache.get(&key) {
                 tracing::debug!(
                     auth_method = %target.auth_method,
-                    base_url = %target.base_url,
+                    host = %crate::services::url_validation::url_host_for_logs(&target.base_url),
                     "cloud_response_cache hit"
                 );
                 if let Some(guard) = egress_guard {

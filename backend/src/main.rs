@@ -1863,7 +1863,9 @@ async fn server_run(cli: Cli) {
         )
         .await
         {
-            Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
+            Ok(()) => {
+                tracing::info!(host = %crate::services::url_validation::url_host_for_logs(webhook_url), "Telegram webhook registered")
+            }
             Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
         }
 

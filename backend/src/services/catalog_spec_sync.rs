@@ -231,7 +231,7 @@ async fn sync_spec_attempt(db: &mongodb::Database, service: &DownstreamService) 
         Err(error) => {
             tracing::warn!(
                 slug = %service.slug,
-                spec_url = %crate::services::api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 %error,
                 "Spec endpoint sync: failed to fetch OpenAPI spec; run discover-endpoints manually"
             );
