@@ -1534,6 +1534,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
         )
         .route(
+            "/billing/cma-usage-pricing/prepare",
+            post(handlers::admin_sandbox_rates::usage::prepare),
+        )
+        .route(
+            "/billing/cma-usage-tariffs",
+            get(handlers::admin_sandbox_rates::usage::list)
+                .post(handlers::admin_sandbox_rates::usage::publish),
+        )
+        .route(
+            "/billing/cma-usage-policies",
+            get(handlers::admin_sandbox_rates::usage::policies)
+                .post(handlers::admin_sandbox_rates::usage::publish_policy),
+        )
+        .route(
             "/remote-machines/platform",
             get(handlers::admin_remote_machine_platform::get),
         )

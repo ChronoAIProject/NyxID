@@ -1,0 +1,1441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nyxid:cma-usage:v1",
+  "title": "CMA usage-only evidence v1",
+  "description": "Wire shape only. The decoder additionally enforces byte bounds, duplicate keys, canonical decimal strings, ordering, exact arithmetic, coverage, time and predecessor invariants. No intake or financial effects.",
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f](?:[^\\u0000-\\u001f\\u007f-\\u009f]*[^\\s\\u0000-\\u001f\\u007f-\\u009f])?$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "quantity": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,37})$"
+    },
+    "counter": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+    },
+    "millis": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)$"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/text"
+        },
+        "id": {
+          "$ref": "#/$defs/text"
+        },
+        "revision": {
+          "$ref": "#/$defs/counter"
+        },
+        "part": {
+          "$ref": "#/$defs/millis"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "revision",
+        "part"
+      ],
+      "additionalProperties": false
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "$ref": "#/$defs/text"
+        },
+        "subject": {
+          "$ref": "#/$defs/text"
+        },
+        "kind": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "required": [
+        "issuer",
+        "subject",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "range": {
+      "type": "object",
+      "properties": {
+        "start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/millis"
+        }
+      },
+      "required": [
+        "start_ms",
+        "end_ms"
+      ],
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "properties": {
+        "runtime_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/counter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "home_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "home_generation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "runtime_id",
+        "runtime_generation",
+        "home_id",
+        "home_generation"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "runtime_id": {
+                  "type": "null"
+                },
+                "runtime_generation": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "runtime_id": {
+                  "type": "string"
+                },
+                "runtime_generation": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "home_id": {
+                  "type": "null"
+                },
+                "home_generation": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "properties": {
+                "home_id": {
+                  "type": "string"
+                },
+                "home_generation": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "allocation": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "$ref": "#/$defs/quantity"
+        },
+        "memory_mib": {
+          "$ref": "#/$defs/quantity"
+        },
+        "disk_gib": {
+          "$ref": "#/$defs/quantity"
+        }
+      },
+      "required": [
+        "cpu_millis",
+        "memory_mib",
+        "disk_gib"
+      ],
+      "additionalProperties": false
+    },
+    "audit": {
+      "type": "object",
+      "properties": {
+        "compute_uptime_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "retained_home_ms": {
+          "$ref": "#/$defs/millis"
+        }
+      },
+      "required": [
+        "compute_uptime_ms",
+        "retained_home_ms"
+      ],
+      "additionalProperties": false
+    },
+    "quality": {
+      "type": "object",
+      "properties": {
+        "covered_binding_ms": {
+          "$ref": "#/$defs/quantity"
+        },
+        "expected_binding_ms": {
+          "$ref": "#/$defs/quantity"
+        },
+        "quality": {
+          "enum": [
+            "observed",
+            "partial",
+            "missing",
+            "estimated"
+          ]
+        },
+        "missing_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "covered_binding_ms",
+        "expected_binding_ms",
+        "quality",
+        "missing_reason"
+      ],
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "$ref": "#/$defs/quality"
+        },
+        "memory": {
+          "$ref": "#/$defs/quality"
+        },
+        "disk": {
+          "$ref": "#/$defs/quality"
+        }
+      },
+      "required": [
+        "cpu",
+        "memory",
+        "disk"
+      ],
+      "additionalProperties": false
+    },
+    "opening": {
+      "type": "object",
+      "properties": {
+        "first_source": {
+          "$ref": "#/$defs/source"
+        },
+        "capture_start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "tracking_started_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "complete_lifecycle": {
+          "type": "boolean"
+        },
+        "historical_missing_ranges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/range"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "first_source",
+        "capture_start_ms",
+        "tracking_started_at_ms",
+        "complete_lifecycle",
+        "historical_missing_ranges"
+      ],
+      "additionalProperties": false
+    },
+    "seal": {
+      "type": "object",
+      "properties": {
+        "final_source": {
+          "$ref": "#/$defs/source"
+        },
+        "sealed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "reason": {
+          "enum": [
+            "home_released",
+            "owner_changed",
+            "incarnation_ended"
+          ]
+        }
+      },
+      "required": [
+        "final_source",
+        "sealed_at_ms",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_fact": {
+      "type": "object",
+      "properties": {
+        "fact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "evidence_revision": {
+          "$ref": "#/$defs/counter"
+        },
+        "bucket_start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource"
+        },
+        "allocation": {
+          "$ref": "#/$defs/allocation"
+        },
+        "quantities": {
+          "type": "object",
+          "properties": {
+            "sandbox_cpu_millis_seconds": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sandbox_memory_mib_seconds": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sandbox_disk_gib_seconds": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "sandbox_cpu_millis_seconds",
+            "sandbox_memory_mib_seconds",
+            "sandbox_disk_gib_seconds"
+          ],
+          "additionalProperties": false
+        },
+        "audit_time": {
+          "$ref": "#/$defs/audit"
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        }
+      },
+      "required": [
+        "fact_id",
+        "evidence_revision",
+        "bucket_start_ms",
+        "start_ms",
+        "end_ms",
+        "resource",
+        "allocation",
+        "quantities",
+        "audit_time",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_correction_body": {
+      "type": "object",
+      "properties": {
+        "fact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "expected_predecessor_event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "expected_predecessor_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "expected_evidence_revision": {
+          "$ref": "#/$defs/counter"
+        },
+        "replacement": {
+          "$ref": "#/$defs/allocated_fact"
+        },
+        "reason": {
+          "enum": [
+            "late_sample",
+            "binding_repair",
+            "algorithm_correction",
+            "lifecycle_correction"
+          ]
+        }
+      },
+      "required": [
+        "fact_id",
+        "expected_predecessor_event_id",
+        "expected_predecessor_digest",
+        "expected_evidence_revision",
+        "replacement",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_stream_open": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "allocated"
+        },
+        "metric_definition_version": {
+          "const": "allocated-v1"
+        },
+        "algorithm_version": {
+          "const": "lifecycle-minute-split-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "stream_open"
+        },
+        "opening": {
+          "$ref": "#/$defs/opening"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "opening"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_usage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "allocated"
+        },
+        "metric_definition_version": {
+          "const": "allocated-v1"
+        },
+        "algorithm_version": {
+          "const": "lifecycle-minute-split-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "usage"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/allocated_fact"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "facts"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_correction": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "allocated"
+        },
+        "metric_definition_version": {
+          "const": "allocated-v1"
+        },
+        "algorithm_version": {
+          "const": "lifecycle-minute-split-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "correction"
+        },
+        "correction": {
+          "$ref": "#/$defs/allocated_correction_body"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "correction"
+      ],
+      "additionalProperties": false
+    },
+    "allocated_stream_seal": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "allocated"
+        },
+        "metric_definition_version": {
+          "const": "allocated-v1"
+        },
+        "algorithm_version": {
+          "const": "lifecycle-minute-split-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "stream_seal"
+        },
+        "seal": {
+          "$ref": "#/$defs/seal"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "seal"
+      ],
+      "additionalProperties": false
+    },
+    "measured_fact": {
+      "type": "object",
+      "properties": {
+        "fact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "evidence_revision": {
+          "$ref": "#/$defs/counter"
+        },
+        "bucket_start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "start_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "end_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource"
+        },
+        "allocation": {
+          "type": "null"
+        },
+        "quantities": {
+          "type": "object",
+          "properties": {
+            "sandbox_cpu_core_nanoseconds_v1": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sandbox_memory_working_set_byte_milliseconds_v1": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sandbox_disk_used_byte_milliseconds_v1": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "sandbox_cpu_core_nanoseconds_v1",
+            "sandbox_memory_working_set_byte_milliseconds_v1",
+            "sandbox_disk_used_byte_milliseconds_v1"
+          ],
+          "additionalProperties": false
+        },
+        "audit_time": {
+          "$ref": "#/$defs/audit"
+        },
+        "coverage": {
+          "$ref": "#/$defs/coverage"
+        }
+      },
+      "required": [
+        "fact_id",
+        "evidence_revision",
+        "bucket_start_ms",
+        "start_ms",
+        "end_ms",
+        "resource",
+        "allocation",
+        "quantities",
+        "audit_time",
+        "coverage"
+      ],
+      "additionalProperties": false
+    },
+    "measured_correction_body": {
+      "type": "object",
+      "properties": {
+        "fact_id": {
+          "$ref": "#/$defs/id"
+        },
+        "expected_predecessor_event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "expected_predecessor_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "expected_evidence_revision": {
+          "$ref": "#/$defs/counter"
+        },
+        "replacement": {
+          "$ref": "#/$defs/measured_fact"
+        },
+        "reason": {
+          "enum": [
+            "late_sample",
+            "binding_repair",
+            "algorithm_correction",
+            "lifecycle_correction"
+          ]
+        }
+      },
+      "required": [
+        "fact_id",
+        "expected_predecessor_event_id",
+        "expected_predecessor_digest",
+        "expected_evidence_revision",
+        "replacement",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "measured_stream_open": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "measured"
+        },
+        "metric_definition_version": {
+          "const": "measured-v1"
+        },
+        "algorithm_version": {
+          "const": "binding-integral-half-even-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "stream_open"
+        },
+        "opening": {
+          "$ref": "#/$defs/opening"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "opening"
+      ],
+      "additionalProperties": false
+    },
+    "measured_usage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "measured"
+        },
+        "metric_definition_version": {
+          "const": "measured-v1"
+        },
+        "algorithm_version": {
+          "const": "binding-integral-half-even-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "usage"
+        },
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/measured_fact"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "facts"
+      ],
+      "additionalProperties": false
+    },
+    "measured_correction": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "measured"
+        },
+        "metric_definition_version": {
+          "const": "measured-v1"
+        },
+        "algorithm_version": {
+          "const": "binding-integral-half-even-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "correction"
+        },
+        "correction": {
+          "$ref": "#/$defs/measured_correction_body"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "correction"
+      ],
+      "additionalProperties": false
+    },
+    "measured_stream_seal": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "producer_namespace": {
+          "$ref": "#/$defs/text"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "previous_event_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_ref": {
+          "$ref": "#/$defs/owner"
+        },
+        "sandbox_id": {
+          "$ref": "#/$defs/text"
+        },
+        "source_epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "basis": {
+          "const": "measured"
+        },
+        "metric_definition_version": {
+          "const": "measured-v1"
+        },
+        "algorithm_version": {
+          "const": "binding-integral-half-even-v1"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "source_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "observed_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "source_cutoff_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "produced_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "kind": {
+          "const": "stream_seal"
+        },
+        "seal": {
+          "$ref": "#/$defs/seal"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_namespace",
+        "stream_id",
+        "event_id",
+        "sequence",
+        "previous_event_digest",
+        "owner_ref",
+        "sandbox_id",
+        "source_epoch",
+        "basis",
+        "metric_definition_version",
+        "algorithm_version",
+        "source_refs",
+        "source_digest",
+        "observed_at_ms",
+        "source_cutoff_ms",
+        "produced_at_ms",
+        "kind",
+        "seal"
+      ],
+      "additionalProperties": false
+    },
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/allocated_stream_open"
+        },
+        {
+          "$ref": "#/$defs/allocated_usage"
+        },
+        {
+          "$ref": "#/$defs/allocated_correction"
+        },
+        {
+          "$ref": "#/$defs/allocated_stream_seal"
+        },
+        {
+          "$ref": "#/$defs/measured_stream_open"
+        },
+        {
+          "$ref": "#/$defs/measured_usage"
+        },
+        {
+          "$ref": "#/$defs/measured_correction"
+        },
+        {
+          "$ref": "#/$defs/measured_stream_seal"
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/id"
+        },
+        "event_id": {
+          "$ref": "#/$defs/id"
+        },
+        "stream_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/counter"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "accepted_at_ms": {
+          "$ref": "#/$defs/millis"
+        },
+        "custody": {
+          "const": "persisted"
+        }
+      },
+      "required": [
+        "receipt_id",
+        "event_id",
+        "stream_id",
+        "sequence",
+        "payload_digest",
+        "accepted_at_ms",
+        "custody"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/event"
+    },
+    {
+      "$ref": "#/$defs/receipt"
+    }
+  ]
+}
