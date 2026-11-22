@@ -177,7 +177,7 @@ async fn wallet(state: &AppState, owner: &str) -> BillingWallet {
         .unwrap()
 }
 
-async fn rows(state: &AppState) -> Vec<UsageMeterRow> {
+pub(crate) async fn rows(state: &AppState) -> Vec<UsageMeterRow> {
     state
         .db
         .collection(crate::models::usage_meter::COLLECTION_NAME)

@@ -558,7 +558,9 @@ async fn password_change_shared_user_throttle_counts_success_and_precedes_hash_v
     crate::services::coordination_service::TEST_RATE_WINDOW_NOW
         .scope(
             std::cell::Cell::new(mongodb::bson::DateTime::now()),
-            check_user_throttle_in_one_window(),
+            crate::services::oauth_token_authority_service::with_fixture_read_budget(
+                check_user_throttle_in_one_window(),
+            ),
         )
         .await;
 }
@@ -582,23 +584,24 @@ async fn check_user_throttle_in_one_window() {
         } else {
             &wrong_password
         };
+        let (status, body) = request(
+            replica,
+            "POST",
+            "/auth/password/change",
+            Some(&token),
+            None,
+            Some(&format!("192.0.2.{}", attempt + 1)),
+            json!({"current_password":current, "new_password":current_password}),
+        )
+        .await;
         assert_eq!(
-            request(
-                replica,
-                "POST",
-                "/auth/password/change",
-                Some(&token),
-                None,
-                Some(&format!("192.0.2.{}", attempt + 1)),
-                json!({"current_password":current, "new_password":current_password})
-            )
-            .await
-            .0,
+            status,
             if attempt == 0 {
                 StatusCode::OK
             } else {
                 StatusCode::BAD_REQUEST
-            }
+            },
+            "attempt {attempt}: {body}"
         );
     }
     // A raw random token is not an Argon2 hash; throttling must prevent verification.
@@ -612,7 +615,7 @@ async fn check_user_throttle_in_one_window() {
         .await
         .unwrap();
     let (status, body) = change(&other_replica, &token, &current_password, &new_password).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert_eq!(body["error_code"], 1005);
 }
 
