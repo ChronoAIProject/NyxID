@@ -814,6 +814,7 @@ pub(crate) fn prepare<'a>(
         {
             proposals::existing_effect(
                 db,
+                context,
                 chat,
                 effect.connection,
                 &digest,
@@ -1057,6 +1058,9 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            if let Ok(p) = proposals::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
+            }
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1108,6 +1112,9 @@ pub(crate) fn prepare<'a>(
                     .await?;
                 }
                 return prepare(state, Some(context), chat, key, effect).await;
+            }
+            if let Ok(p) = proposals::v2::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
