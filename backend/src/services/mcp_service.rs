@@ -2006,32 +2006,39 @@ fn service_endpoint_durable_metadata(
 ) -> HashMap<String, McpDurableEndpointMetadata> {
     eps.iter()
         .map(|endpoint| {
-            let marks = catalog_slug
-                .map(|slug| {
-                    super::catalog_spec_registry::operation_marks(
-                        slug,
-                        &endpoint.method,
-                        &endpoint.path,
-                        &endpoint.name,
-                    )
-                })
-                .unwrap_or_default();
             (
                 endpoint.id.clone(),
-                McpDurableEndpointMetadata {
-                    risk: endpoint.risk,
-                    catalog_contract: true,
-                    destructive: marks.destructive,
-                    changes_existing: marks.changes_existing,
-                    generic_spec_key: None,
-                    append_only: marks.append_only,
-                    append_only_query: marks.append_only_query,
-                    supports_idempotency_key: endpoint.supports_idempotency_key,
-                    operation_generation: endpoint.operation_generation,
-                },
+                stored_endpoint_metadata(endpoint, catalog_slug),
             )
         })
         .collect()
+}
+
+pub(super) fn stored_endpoint_metadata(
+    endpoint: &ServiceEndpoint,
+    catalog_slug: Option<&str>,
+) -> McpDurableEndpointMetadata {
+    let marks = catalog_slug
+        .map(|slug| {
+            super::catalog_spec_registry::operation_marks(
+                slug,
+                &endpoint.method,
+                &endpoint.path,
+                &endpoint.name,
+            )
+        })
+        .unwrap_or_default();
+    McpDurableEndpointMetadata {
+        risk: endpoint.risk,
+        catalog_contract: true,
+        destructive: marks.destructive,
+        changes_existing: marks.changes_existing,
+        append_only: marks.append_only,
+        append_only_query: marks.append_only_query,
+        supports_idempotency_key: endpoint.supports_idempotency_key,
+        operation_generation: endpoint.operation_generation,
+        generic_spec_key: None,
+    }
 }
 
 /// An instance-mounted spec of a catalog service keeps what the catalog
@@ -3126,7 +3133,9 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status"
+        "nyxid__set_agent_operations" => (false, false, false),
+        "nyxid__get_agent_operations"
+        | "nyxid__task_status"
         | "nyxid__list_notifications"
         | "nyxid__list_schedules"
         | "nyxid__read_tool_result" => (true, false, false),
@@ -3180,6 +3189,8 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__get_agent_operations" => "List specialist operations by effect",
+        "nyxid__set_agent_operations" => "Set specialist operation scope",
         "nyxid__task_status" => "Read task execution status",
         "nyxid__list_notifications" => "Read NyxBot notifications",
         "nyxid__list_schedules" => "List NyxBot schedules and automations",

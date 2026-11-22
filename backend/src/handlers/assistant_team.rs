@@ -2150,9 +2150,27 @@ async fn dispatch_operation_scopes(
         "set_agent_operations" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let service = text_arg(args, "service_id");
+            let mut payload = args["selection"].clone();
+            let read_only = payload
+                .as_object_mut()
+                .and_then(|fields| fields.remove("read_only"))
+                .is_some();
+            if read_only
+                && ["all_operations", "endpoint_ids", "rules", "inputs"]
+                    .iter()
+                    .any(|field| payload.get(*field).is_some())
+            {
+                return Err(AppError::ValidationError(
+                    "Use read_only with expected_revision and no explicit selection.".into(),
+                ));
+            }
             let selection: crate::models::agent_operation_scope::OperationSelection =
-                serde_json::from_value(args["selection"].clone())
+                serde_json::from_value(payload)
                     .map_err(|_| AppError::ValidationError("Invalid operation selection".into()))?;
+            let edit = crate::services::agent_operation_scope_service::SpecialistSelection {
+                input: &selection,
+                read_only,
+            };
             let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
                 // A widening card binds the compiled contract the owner saw.
                 if selection.contract_digest.is_none() {
@@ -2184,7 +2202,7 @@ async fn dispatch_operation_scopes(
             if webhook_gate.ask().is_some() {
                 let digest = Box::pin(
                     crate::services::agent_operation_scope_service::preview_digest(
-                        db, owner, &agent.id, service, &selection,
+                        db, owner, &agent.id, service, edit,
                     ),
                 )
                 .await?;
@@ -2195,7 +2213,7 @@ async fn dispatch_operation_scopes(
                         owner,
                         &agent.id,
                         service,
-                        &selection,
+                        edit,
                     ),
                 )
                 .await?;
@@ -2221,7 +2239,7 @@ async fn dispatch_operation_scopes(
                 owner,
                 &agent.id,
                 service,
-                &selection,
+                edit,
                 confirmed || webhook_gate.auto_allowed().is_some(),
             ))
             .await
@@ -2235,7 +2253,7 @@ async fn dispatch_operation_scopes(
                                 owner,
                                 &agent.id,
                                 service,
-                                &selection,
+                                edit,
                             ),
                         )
                         .await?;
@@ -2261,7 +2279,7 @@ async fn dispatch_operation_scopes(
                 {
                     let digest = Box::pin(
                         crate::services::agent_operation_scope_service::preview_digest(
-                            db, owner, &agent.id, service, &selection,
+                            db, owner, &agent.id, service, edit,
                         ),
                     )
                     .await?;
@@ -2272,7 +2290,7 @@ async fn dispatch_operation_scopes(
                             owner,
                             &agent.id,
                             service,
-                            &selection,
+                            edit,
                         ),
                     )
                     .await?;
@@ -2292,7 +2310,7 @@ async fn dispatch_operation_scopes(
                     if let Some(auto) = gate.auto_allowed() {
                         let updated =
                             Box::pin(crate::services::agent_operation_scope_service::set(
-                                db, owner, &agent.id, service, &selection, true,
+                                db, owner, &agent.id, service, edit, true,
                             ))
                             .await?;
                         acks::record_auto_allowed(

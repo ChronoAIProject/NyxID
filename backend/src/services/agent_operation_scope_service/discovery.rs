@@ -16,6 +16,7 @@ pub(crate) struct PageRequest {
     #[serde(default)]
     pub guests: bool,
     pub service_id: Option<String>,
+    pub effect_class: Option<super::OwnerActionClass>,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
 }
@@ -129,13 +130,19 @@ pub(super) fn page(
         .into_iter()
         .map(|row| serde_json::to_value(row).expect("typed service options"))
         .collect();
-    let versioned = json!([
+    let mut versioned = json!([
         "operation-discovery-v1",
         binding,
         request.service_id,
         request.guests,
         services
     ]);
+    if let Some(class) = request.effect_class {
+        versioned
+            .as_array_mut()
+            .expect("view binding")
+            .push(json!(class.as_str()));
+    }
     let snapshot = hex::encode(Sha256::digest(versioned.to_string().as_bytes()));
     let total: usize = services.iter().map(width).sum();
     let start = if let Some(cursor) = &request.cursor {
@@ -171,7 +178,15 @@ pub(super) fn page(
     };
     let mut count = limit.min(total - start);
     loop {
-        let result = projection(&services, &snapshot, start, count);
+        let mut result = projection(&services, &snapshot, start, count);
+        if let Some(class) = request.effect_class {
+            result["effect_class"] = json!(class.as_str());
+            if count < total - start {
+                result["continuation_hint"] = json!(
+                    "Repeat with cursor=next_cursor and the same subagent, service_id, effect_class and guests until complete. Filtered pages show matching published endpoints only."
+                );
+            }
+        }
         if wire_bytes(&result) <= MAX_WIRE_BYTES {
             // Metadata only: never log paths, summaries, input values or cursor.
             tracing::debug!(
@@ -319,6 +334,12 @@ mod tests {
             Err(AppError::Conflict(_))
         ));
         for changed in [
+            PageRequest {
+                effect_class: Some(
+                    crate::services::assistant_acknowledgement_service::OwnerActionClass::Read,
+                ),
+                ..request_for(&request)
+            },
             PageRequest {
                 guests: true,
                 ..request_for(&request)
