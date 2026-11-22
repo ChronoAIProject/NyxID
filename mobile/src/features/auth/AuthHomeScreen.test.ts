@@ -656,7 +656,12 @@ for (const validationError of [false, true]) test(`${validationError ? "invalid 
   assert.equal(textContent(alert), "Incorrect login details.");
   assert.equal(alert.props.style.borderWidth, undefined);
   assert.equal(alert.props.style.backgroundColor, undefined);
-  assert.equal(elements(alert).find((element) => element.type === "Text")!.props.numberOfLines, 1);
+  const alertText = elements(alert).find((element) => element.type === "Text")!;
+  assert.equal(
+    alertText.props.numberOfLines,
+    undefined,
+    "credential errors can wrap on narrow screens and at larger text sizes",
+  );
   assert.equal(screen.sessions.length, 0);
   assert.equal(
     elements(screen.harness.value()).some(

@@ -655,7 +655,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                 </Text>
               </>
             ) : (
-              <Text style={styles.errorText} numberOfLines={passwordInvalid ? 1 : undefined}>{loginErrorMessage}</Text>
+              <Text style={styles.errorText}>{loginErrorMessage}</Text>
             )}
           </View>
         )}
