@@ -1013,9 +1013,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - Every slab header bar, narrow or beside the persistent sidebar, floats its
   controls as these floating buttons, 8pt apart with 12pt side margins:
   Menu/Back (or Show/Hide sidebar), the agent identity (avatar, title,
-  chevron) as one glass pill, then the bell, New chat and More, and crew options.
-  Ordinary devices keep their existing action set and thread/member details;
-  More opens Details directly, or offers Voice preferences and Details during a call. The Duo's chats (folded or
+  chevron) as one glass pill, then New chat and More together in a capsule.
+  More grows that exact measured capsule into an anchored options bubble over
+  the existing chat, then shrinks back on dismissal. The floating surface keeps
+  its top-right anchor, with a rounded theme border and soft floating elevation
+  outside the clipped content; icons yield to Chat details, Notifications when enabled
+  (with its unread count), Settings and Voice preferences during a call. Crew
+  options use the same transition from their single-button capsule to Settings,
+  retaining the crew's existing settings destination. Outside tap, Android Back
+  and accessibility escape reverse the transition. Reduced motion changes size
+  immediately; focus enters the menu and returns to its trigger on dismissal.
+  A selected destination opens only after the bubble/native modal dismisses. The Duo's chats (folded or
   unfolded, either mode) have no bar: these controls sit in the status
   column (below). The chevron always follows the title.
   Every other workspace bar uses the same floating controls, on ordinary
@@ -1223,14 +1231,14 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). Only on narrow iOS corner-sensor windows an idle
-  composer is one row:
+  (user decision 2026-11-11). On narrow phones on both iOS and Android an idle
+  Home, private, contextual or crew composer is one row:
   unfocused with an empty or whitespace-only draft (the draft itself is never
   trimmed), Attach, dictation and Send overlay its text line and the permission
   pill hides. Focus, non-whitespace text, attachments, uploads or dictation
-  restore two rows without remounting the input. Ordinary devices retain the
-  full-width text row and existing toolbar, permission dropdown and input focus
-  behavior. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
+  restore two rows without remounting the input. Wide layouts retain their
+  full-width text row and existing toolbar. Input and toolbar use the same
+  compact layout on ordinary and corner-sensor phones. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
   first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages
@@ -1249,12 +1257,20 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   white canvas. Sign-in, device codes, Agent Key login and MFA share this
   treatment. Workspace tokens, dark auth styling and the existing faint brand
   halo remain unchanged.
-- Native pending attachment chips keep their width and text-scaled height through
-  waiting, upload, checking, ready and error states, with a 44pt remove target.
+- Native selected attachments share one horizontal row, with equal square tiles
+  sized to fit three within the actual composer viewport, including padding and
+  gaps. Images and first-page PDF thumbnails hide visible filenames; other files
+  and failed previews show a concise type and filename. All states retain the
+  same square frame. An inset circular remove action has a separate 44pt target.
+  Strong left/right fades appear only toward hidden content, with a localized
+  visible attachment range below the viewport only while it overflows. Range and
+  offset adapt to swipes, resizing and selection changes. Local preview validation
+  runs independently of the serialized upload queue. Full filenames and errors
+  remain accessible, including when visible text truncates.
   A thin bottom bar shows upload progress; waiting/checking gently pulse a short
   segment (static under Reduce Motion). Status text owns accessibility. Ready
-  chips show only the thumbnail/icon, filename and remove control, without a
-  tick or Ready label. Errors keep red text and remove the loader.
+  tiles omit the tick and Ready label. Errors keep red text and remove the loader,
+  preserving a usable local preview when uploading fails.
 - Chat Details, History and Working context are nested pages in the content slab.
   History shares the cursor-paged Recents browser, filtered to the current agent.
   Title edits, deletion and context reset retain dirty/critical-write guards.

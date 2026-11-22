@@ -194,6 +194,10 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [isEmailAuthPending, setIsEmailAuthPending] = useState(false);
   const socialLoginLock = useRef(false);
   const [loginError, setLoginError] = useLocalizedState<string | null>(null);
+  const passwordInvalid = loginError === "INCORRECT_LOGIN_DETAILS";
+  const loginErrorMessage = passwordInvalid
+    ? translateApp("Incorrect login details.")
+    : loginError;
   const [registrationNotice, setRegistrationNotice] = useLocalizedState<string | null>(null);
   const [registrationPending, setRegistrationPending] = useState(false);
   const registrationLock = useRef(false);
@@ -205,11 +209,11 @@ export function AuthHomeScreen({ navigation }: Props) {
   const errorBannerRef = useRef<View>(null);
 
   useEffect(() => {
-    if (loginError && Platform.OS === "ios") {
-      AccessibilityInfo.announceForAccessibility(loginError === "WAITLIST"
-        ? translateApp("Registration is invite-only.") : loginError);
+    if (loginErrorMessage && Platform.OS === "ios") {
+      AccessibilityInfo.announceForAccessibility(loginErrorMessage === "WAITLIST"
+        ? translateApp("Registration is invite-only.") : loginErrorMessage);
     }
-  }, [loginError]);
+  }, [loginErrorMessage]);
 
   const showToast = (message: () => string, kind: ToastKind) => {
     setToast(localizedToast(() => ({ message: message(), kind })));
@@ -417,6 +421,11 @@ export function AuthHomeScreen({ navigation }: Props) {
                   "Your verification expired. Please sign in again.",
                 )),
               );
+            } else if (!mfaChallenge && error instanceof ApiError && (
+              error.errorCode === 2000 || error.errorKey === "authentication_failed" ||
+              error.errorCode === 1008 || error.errorKey === "validation_error"
+            )) {
+              setLoginError(() => "INCORRECT_LOGIN_DETAILS");
             } else { setLoginError(() => (resolveErrorMessage(error))); }
           }
         },
@@ -584,7 +593,8 @@ export function AuthHomeScreen({ navigation }: Props) {
                     autoComplete="email"
                   />
                   <AuthTextInput
-                    frameStyle={styles.field}
+                    frameStyle={passwordInvalid ? [styles.field, styles.invalidField] : styles.field}
+                    invalid={passwordInvalid}
                     leading={<LockKeyhole size={18} color={colors.textMuted} />}
                     style={styles.input}
                     accessibilityLabel={translateApp("Password")}
@@ -632,7 +642,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               </View>
               )}
         {loginError && (
-          <View ref={errorBannerRef} style={styles.errorBanner}
+          <View ref={errorBannerRef} style={passwordInvalid ? styles.credentialError : styles.errorBanner}
             accessibilityRole="alert" accessibilityLiveRegion="assertive"
             onLayout={() => scrollController.current?.reveal(errorBannerRef.current)}>
             {loginError === "WAITLIST" ? (
@@ -645,7 +655,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                 </Text>
               </>
             ) : (
-              <Text style={styles.errorText}>{loginError}</Text>
+              <Text style={styles.errorText}>{loginErrorMessage}</Text>
             )}
           </View>
         )}
@@ -756,6 +766,7 @@ const createStyles = (c: ThemeColors, mode: string) =>
       backgroundColor: c.card,
     },
     fieldAction: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+    invalidField: { borderColor: c.danger, borderWidth: 1 },
     pressed: { transform: [{ scale: 0.98 }] },
     heroTagline: {
       ...typeScale.caption,
@@ -787,6 +798,9 @@ const createStyles = (c: ThemeColors, mode: string) =>
       borderRadius: radius.lg,
       paddingVertical: spacing.lg,
       paddingHorizontal: spacing.lg,
+    },
+    credentialError: {
+      paddingHorizontal: 2,
     },
     errorText: {
       color: c.danger,
