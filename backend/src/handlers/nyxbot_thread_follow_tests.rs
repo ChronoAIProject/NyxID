@@ -391,6 +391,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
                 &json!({"conversation": {"type": "private"}}),
                 "message-that-does-not-exist",
                 "legacy DM",
+                None,
                 "unused-event-key",
             ))
             .await
@@ -411,6 +412,7 @@ async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
             &json!({"conversation": {"type": "private"}}),
             "message-that-does-not-exist",
             "legacy DM",
+            None,
             "unused-event-key",
         ))
         .await
@@ -821,6 +823,7 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
             .clone(),
     );
     source_event.delivery = Some(crate::models::nyxbot_channel::ChannelTurnDelivery {
+        restart_owner_verified: false,
         notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: false,

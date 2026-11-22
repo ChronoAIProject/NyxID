@@ -333,17 +333,27 @@ pub async fn cancel(
         .find_one(doc! { "_id": link_id })
         .await?
         .ok_or(AppError::ConnectLinkNotFound)?;
+    cancel_link(db, actor_user_id, current)
+        .await
+        .map(|(view, _)| view)
+}
+
+async fn cancel_link(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    current: ConnectLink,
+) -> AppResult<(LinkView, bool)> {
     ensure_actor_can_manage(db, actor_user_id, &current).await?;
     let current = claim_expiry(db, current, Some(actor_user_id)).await?;
     match current.status {
         ConnectLinkStatus::Expired => return Err(AppError::ConnectLinkExpired),
         ConnectLinkStatus::Completed => return Err(AppError::ConnectLinkAlreadyCompleted),
-        ConnectLinkStatus::Cancelled => return view_for_link(db, current).await,
+        ConnectLinkStatus::Cancelled => return Ok((view_for_link(db, current).await?, false)),
         ConnectLinkStatus::Pending => {}
     }
 
     let mut filter = doc! {
-        "_id": link_id,
+        "_id": &current.id,
         "status": "pending",
     };
     filter.extend(claim_available_filter(Utc::now()));
@@ -364,20 +374,19 @@ pub async fn cancel(
         .return_document(ReturnDocument::After)
         .await?;
     let Some(updated) = updated else {
-        return Err(completion_conflict_error(db, link_id).await?);
+        return Err(completion_conflict_error(db, &current.id).await?);
     };
 
-    view_for_link(db, updated).await
+    Ok((view_for_link(db, updated).await?, true))
 }
 
 pub async fn cancel_by_token(
     db: &mongodb::Database,
     actor_user_id: &str,
     raw_token: &str,
-) -> AppResult<LinkView> {
+) -> AppResult<(LinkView, bool)> {
     let link = find_by_raw_token(db, raw_token).await?;
-    ensure_actor_can_manage(db, actor_user_id, &link).await?;
-    cancel(db, actor_user_id, &link.id).await
+    cancel_link(db, actor_user_id, link).await
 }
 
 #[allow(clippy::too_many_arguments)]

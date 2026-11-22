@@ -1656,7 +1656,10 @@ returned by DTOs, Debug, logs, audit or tools. Each fresh binding gets a new mar
 The preamble exists only in the upstream request, never in NyxID's stored user
 message. Image requests retain the input array: the combined text goes in its
 `input_text` part and image parts remain unchanged.
-Attachment-only messages still carry this preamble. The current attachment
+Attachment-only messages still carry this preamble. An empty caption stays
+empty after the context block. Telegram ingress paths that require nonempty
+text use a single paperclip (📎) for a captionless file. The specialist's
+instructions and the conversation determine how to respond. The current attachment
 listing and expiry/image-omission notices occur exactly once in every request,
 including automatic continuations and session/credential recovery retries.
 Other turn notes are sent on the first upstream request, and again when recovery
@@ -1731,6 +1734,16 @@ recognized events, invalid IDs, or nonmonotonic recognized sequence numbers fail
 closed. Cached upstream replay may contain only a terminal response, so terminal
 output is authoritative. Returned `conversation.id` and `response.id` are always
 stored on success. Locally guessing the first session ID is incorrect.
+
+NyxAgent can discard a partial model attempt after a successful retry. NyxID
+applies `response.output_text.done` at its output and content index and clears
+all `discarded_output_indices` on that frame. Live deltas still concatenate.
+A correction that rewrites visible text sends a full `block.completed` snapshot
+on the same block. Web and mobile continue applying later deltas to it. The
+coalesced reattach checkpoint saves the corrected text and its part lengths.
+For older checkpoints or text changed by redaction, recovery reconstructs the
+indices from upstream replay or its retained snapshot before publishing updates.
+Empty incomplete messages contribute neither text nor separators to settlement.
 
 For a completed response, NyxID settles every assistant message marked
 `phase: final_answer`, preserving the order of its output-text parts and the

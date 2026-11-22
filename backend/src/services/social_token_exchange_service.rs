@@ -160,6 +160,7 @@ async fn exchange_social_token_inner(
                 http_client,
             )
             .await?
+            .profile
         }
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
@@ -220,7 +221,7 @@ async fn complete_verified_exchange(
         &user_uuid,
         Some(&profile.email),
         Some(true),
-        profile.display_name.as_deref(),
+        user.display_name.as_deref(),
         profile.avatar_url.as_deref(),
         client_id,
         None, // no nonce for token exchange
@@ -414,6 +415,53 @@ mod tests {
     use crate::test_utils::{cached_test_jwt_keys, connect_test_database, test_app_config};
     use chrono::Utc;
     use mongodb::bson::doc;
+
+    #[tokio::test]
+    async fn mobile_id_token_uses_profile_name_when_apple_omits_name() {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{test_app_state, test_user};
+        use jsonwebtoken::{Algorithm, Validation, decode};
+
+        let db = connect_test_database("mobile_id_token_name").await.unwrap();
+        let state = test_app_state(db.clone());
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.social_provider = Some("apple".into());
+        user.social_provider_id = Some("apple-id".into());
+        user.display_name = Some("小明".into());
+        let profile = SocialProfile {
+            provider: SocialProvider::Apple,
+            provider_id: "apple-id".into(),
+            email: user.email.clone(),
+            display_name: None,
+            avatar_url: None,
+        };
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .unwrap();
+        let exchange = complete_verified_exchange(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            "public-client",
+            SocialProvider::Apple,
+            profile,
+        )
+        .await
+        .unwrap();
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&["public-client"]);
+        validation.set_issuer(&state.config.accepted_jwt_issuers());
+        let claims = decode::<jwt::IdTokenClaims>(
+            exchange.id_token.as_deref().unwrap(),
+            &state.jwt_keys.decoding,
+            &validation,
+        )
+        .unwrap()
+        .claims;
+        assert_eq!(claims.name, user.display_name);
+    }
 
     #[tokio::test]
     async fn mobile_token_exchange_defaults_to_exempt_for_all_social_providers() {

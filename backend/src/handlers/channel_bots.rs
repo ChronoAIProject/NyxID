@@ -283,10 +283,35 @@ pub struct CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct VerifyBotResponse {
+    verification_scope: VerificationScope,
     pub last_verification: Option<BotVerificationResponse>,
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VerificationScope {
+    Credentials,
+    CredentialsAndWebhook,
+    StoredCredentials,
+}
+
+impl VerifyBotResponse {
+    fn from_bot(
+        bot: crate::models::channel_bot::ChannelBot,
+        verification_scope: VerificationScope,
+        last_verification: Option<BotVerificationResponse>,
+    ) -> Self {
+        Self {
+            id: bot.id,
+            status: bot.status,
+            webhook_registered: bot.webhook_registered,
+            verification_scope,
+            last_verification,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -346,6 +371,8 @@ pub struct ChannelBotDiagnosticsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_delivery: Option<crate::services::channel_bot_health::answer::Delivery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
@@ -548,6 +575,10 @@ pub(crate) async fn health_loaded(
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct NyxbotHealthRow {
+    #[serde(default)]
+    answer_events: Vec<crate::services::channel_bot_health::answer::Observation>,
+    #[serde(default)]
+    answer_responses: Vec<crate::services::channel_bot_health::answer::Observation>,
     #[serde(rename = "_id")]
     id: String,
     user_id: String,
@@ -590,7 +621,7 @@ async fn latest_nyxbot_rows(
         .aggregate([
             doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
             doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
                 "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
@@ -611,13 +642,15 @@ async fn latest_nyxbot_rows(
                 "gateway_not_received": {"$max": "$gateway_not_received"}}},
             doc! {"$replaceWith": {"$mergeObjects": ["$row", {"gateway_not_received": "$gateway_not_received"}]}},
             doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1,
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
                 "status": 1, "last_error": 1, "org_specialist": 1,
                 "agent_id": 1, "org_restore_last_reason": 1,
                 "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
                 "org_restore_attempts": 1, "native_intake_refused": 1, "gateway_not_received": 1,
             }},
             doc! {"$limit": bot_ids.len() as i64},
+            crate::services::channel_bot_health::answer::event_lookup(),
+            crate::services::channel_bot_health::answer::response_lookup(),
         ])
         .hint(mongodb::options::Hint::Name(
             "nyxbot_health_latest".to_owned(),
@@ -672,6 +705,7 @@ fn health_with_intake(
     }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        answer_delivery: facts.answer_delivery,
         discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
@@ -713,6 +747,13 @@ fn health_with_nyxbot(
     let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
     if let Some(row) = nyxbot {
         facts.gateway_not_received = row.gateway_not_received;
+        crate::services::channel_bot_health::answer::apply_latest(
+            &mut facts,
+            row.answer_events.first(),
+            row.answer_responses.first(),
+            bot.diagnostics.last_outbound_error.as_ref(),
+        );
+        response.answer_delivery = facts.answer_delivery;
         if row.native_intake_refused && facts.failure_reason.is_none() {
             facts.failure_reason =
                 Some(crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED);
@@ -1868,12 +1909,11 @@ pub(crate) async fn verify_bot_with_adapter(
             &state.config,
         )
         .await?;
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: verified.id,
-            status: verified.status,
-            webhook_registered: verified.webhook_registered,
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            verified,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
     }
     if bot.platform == "telegram-new" {
         if !bot.is_active || bot.status == "suspended" {
@@ -1907,12 +1947,11 @@ pub(crate) async fn verify_bot_with_adapter(
                         "Bot credentials or verification changed. Run verification again.".into(),
                     )
                 })?;
-        return Ok(Json(VerifyBotResponse {
-            id: current.id,
-            status: current.status,
-            webhook_registered: current.webhook_registered,
-            last_verification: Some(observed.into()),
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            current,
+            VerificationScope::Credentials,
+            Some(observed.into()),
+        )));
     }
 
     if adapter.serializes_lifecycle() {
@@ -1930,12 +1969,11 @@ pub(crate) async fn verify_bot_with_adapter(
             &url,
         )
         .await?;
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: verified.id,
-            status: verified.status,
-            webhook_registered: verified.webhook_registered,
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            verified,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
     }
 
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
@@ -2010,24 +2048,33 @@ pub(crate) async fn verify_bot_with_adapter(
                     .await;
             }
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-            return Ok(Json(VerifyBotResponse {
-                last_verification: None,
-                id: current.id,
-                status: current.status,
-                webhook_registered: current.webhook_registered,
-            }));
+            return Ok(Json(VerifyBotResponse::from_bot(
+                current,
+                VerificationScope::CredentialsAndWebhook,
+                None,
+            )));
         }
         ensure_verify_material_present(&bot, adapter)?;
     }
 
-    // Some subscription protocols bind the dashboard to the original secret.
-    if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: bot.id,
-            status: bot.status,
-            webhook_registered: bot.webhook_registered,
-        }));
+    // A manual webhook or Gateway receives its activation evidence from ingress.
+    // Running registration here would reset that evidence even for an active bot.
+    let registration = adapter.registration();
+    if !registration.automatic_webhook
+        || registration.preserve_subscription_on_verify
+        || bot.platform == "telegram-new"
+    {
+        if !registration.automatic_webhook && !registration.preserve_subscription_on_verify {
+            channel_bot_service::resume_manual_registration(&state.db, adapter, &bot).await?;
+        }
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        let scope = if adapter.platform_id() == "openclaw" {
+            // The legacy adapter can load the stored token but has no identity API.
+            VerificationScope::StoredCredentials
+        } else {
+            VerificationScope::Credentials
+        };
+        return Ok(Json(VerifyBotResponse::from_bot(current, scope, None)));
     }
 
     // Re-register webhook with a fresh secret. The original raw secret is not
@@ -2065,7 +2112,7 @@ pub(crate) async fn verify_bot_with_adapter(
 
     // Update the stored hash to match the new secret
     if reg_result.is_ok() {
-        let _ = state
+        state
             .db
             .collection::<crate::models::channel_bot::ChannelBot>(
                 crate::models::channel_bot::COLLECTION_NAME,
@@ -2074,23 +2121,17 @@ pub(crate) async fn verify_bot_with_adapter(
                 mongodb::bson::doc! { "_id": &bot.id },
                 mongodb::bson::doc! { "$set": { "webhook_secret_hash": &new_hash } },
             )
-            .await;
+            .await?;
+    } else {
+        channel_bot_service::mark_bot_failed(&state.db, &bot.id).await?;
     }
 
-    let (status, webhook_registered) = match reg_result {
-        Ok(()) => ("active".to_string(), true),
-        Err(_) => {
-            let _ = channel_bot_service::mark_bot_failed(&state.db, &bot.id).await;
-            ("failed".to_string(), false)
-        }
-    };
-
-    Ok(Json(VerifyBotResponse {
-        last_verification: None,
-        id: bot.id,
-        status,
-        webhook_registered,
-    }))
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    Ok(Json(VerifyBotResponse::from_bot(
+        current,
+        VerificationScope::CredentialsAndWebhook,
+        None,
+    )))
 }
 
 #[cfg(test)]
@@ -2219,6 +2260,83 @@ mod tests {
             let value = serde_json::to_value(bot_to_item(&legacy)).unwrap();
             assert!(value.get("gateway_state").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn discord_verify_matches_detail_and_health_after_checking_credentials() {
+        use crate::services::channel_adapters::discord::DiscordAdapter;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let db = connect_test_database("discord_verify_status")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "123", "username": "bot"})),
+            )
+            .expect(4)
+            .mount(&server)
+            .await;
+        let adapter = DiscordAdapter::media_test_adapter(&server.uri());
+        for (status, expected) in [
+            ("pending_webhook", "pending_webhook"),
+            ("active", "active"),
+            ("pending", "pending_webhook"),
+            ("failed", "pending_webhook"),
+        ] {
+            let mut bot = make_telegram_bot();
+            bot.platform = "discord".into();
+            bot.public_key = Some("a".repeat(64));
+            bot.bot_token_encrypted = state.encryption_keys.encrypt(b"test-token").await.unwrap();
+            bot.status = status.into();
+            if status == "active" {
+                bot.diagnostics.discord_gateway =
+                    Some(crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: "connected".into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    });
+            }
+            db.collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .insert_one(&bot)
+            .await
+            .unwrap();
+
+            let auth = || test_auth_user(&bot.user_id);
+            let id = || Path(bot.id.clone());
+            let Json(verified) = verify_bot_with_adapter(
+                &state,
+                bot.clone(),
+                &adapter,
+                &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+                None,
+            )
+            .await
+            .unwrap();
+            let Json(detail) = get_bot(State(state.clone()), auth(), id()).await.unwrap();
+            let Json(health) = health(State(state.clone()), auth(), id()).await.unwrap();
+            assert_eq!(verified.status, detail.status);
+            assert_eq!(verified.webhook_registered, detail.webhook_registered);
+            assert_eq!(verified.status, health.status);
+            assert_eq!(verified.webhook_registered, health.webhook_registered);
+            assert_eq!(verified.status, expected);
+            assert!(matches!(
+                verified.verification_scope,
+                VerificationScope::Credentials
+            ));
+            assert!(!verified.webhook_registered);
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

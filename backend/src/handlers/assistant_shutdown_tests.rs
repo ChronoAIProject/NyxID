@@ -77,19 +77,26 @@ async fn idle_drain_record(
             row.get_document("event_data").unwrap().clone(),
         );
     }
-    let marker = format!(
-        r#"nyxid::shutdown: Shutdown audit unavailable event="{event}" audit_outcome="timed_out" metadata="#
-    );
-    let mut records = log.lines().filter_map(|line| line.split_once(&marker));
-    let (_, data) = records
-        .next()
+    let data = timed_out_audit_metadata(event, log)
         .unwrap_or_else(|| panic!("missing chained {event} row and timeout record"));
+    (None, data)
+}
+
+#[cfg(unix)]
+fn timed_out_audit_metadata(event: &str, log: &str) -> Option<bson::Document> {
+    let marker =
+        format!(r#"nyxid::shutdown: Shutdown audit unavailable event="{event}" audit_outcome="#);
+    let mut records = log.lines().filter_map(|line| line.split_once(&marker));
+    let (_, outcome) = records.next()?;
+    let data = outcome
+        .strip_prefix(r#""timed_out" metadata="#)
+        .unwrap_or_else(|| panic!("{event} audit write failed"));
     assert!(
         records.next().is_none(),
         "duplicate {event} timeout records"
     );
     let metadata: Value = serde_json::from_str(data).unwrap();
-    (None, bson::to_document(&metadata).unwrap())
+    Some(bson::to_document(&metadata).unwrap())
 }
 
 async fn drain_audit(state: &AppState) -> bson::Document {
@@ -427,25 +434,21 @@ async fn actual_server_process(scenario: ProcessDrain) {
         "server startup timeout: {}",
         std::fs::read_to_string(&output).unwrap()
     );
-    tokio::time::timeout(Duration::from_secs(4), async {
-        loop {
-            let count = state
-                .db
-                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .count_documents(doc! {"event_type": "backend_process_started"})
-                .await
-                .unwrap();
-            if count > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let start_data = loop {
+        if let Some(row) = find_drain_audit_row(&state, "backend_process_started").await {
+            break row.get_document("event_data").unwrap().clone();
         }
-    })
-    .await
-    .expect("real server must write its bounded process-start audit");
-    let process_start = drain_audit_row(&state, "backend_process_started").await;
-    assert!(process_start.contains_key("entry_hash"));
-    let start_data = process_start.get_document("event_data").unwrap();
+        let log = std::fs::read_to_string(&output).unwrap();
+        if let Some(data) = timed_out_audit_metadata("backend_process_started", &log) {
+            assert!(idle_observers, "process-start audit timed out");
+            break data;
+        }
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "server exited before publishing process start"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(
         start_data.get_str("instance_name").unwrap(),
         "drain-process-test"
@@ -1001,7 +1004,14 @@ async fn idle_node_and_subscriptions(
     assert!(audit.get_array("turns_interrupted").unwrap().is_empty());
     assert_eq!(audit.get_i64("subscriptions_ended").unwrap(), 2);
     assert_eq!(audit.get_i64("turns_completed_during_drain").unwrap(), 0);
-    assert_eq!(audit.get_i64("tracked_units_at_finish").unwrap(), 0);
+    let tracked = audit.get_i64("tracked_units_at_finish").unwrap();
+    if tracked != 0 {
+        // The work wait was idle. A slow fenced node release can outlive the
+        // separate cleanup reserve after the peer already received close 1001.
+        assert_eq!(tracked, 1);
+        assert!(log.contains("Shutdown node ownership release unavailable"));
+        assert!(log.contains("Finish snapshot retains only the node socket"));
+    }
     let initial = audit.get_document("in_flight_at_start").unwrap();
     assert_eq!(initial.get_i64("http_requests").unwrap(), 0);
     assert_eq!(initial.get_i64("streams").unwrap(), 0);

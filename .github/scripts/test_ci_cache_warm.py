@@ -470,7 +470,7 @@ class CacheWarmTests(unittest.TestCase):
         cache = next(i for i, step in enumerate(steps)
                      if step.get("uses") == CACHE_ACTION)
         clean = next(i for i, step in enumerate(steps)
-                     if step.get("run") == "cargo llvm-cov clean --workspace")
+                     if "cargo llvm-cov clean --workspace" in step.get("run", ""))
         build = next(i for i, step in enumerate(steps)
                      if "cargo llvm-cov --package nyxid-cli --no-report" in step.get("run", ""))
         report = next(i for i, step in enumerate(steps)
@@ -480,6 +480,12 @@ class CacheWarmTests(unittest.TestCase):
         self.assertLess(build, report)
         self.assertNotIn("if", steps[clean])
         self.assertFalse(steps[clean].get("continue-on-error", False))
+        run = steps[clean]["run"]
+        # Cargo will not clean a target directory that lacks CACHEDIR.TAG, and
+        # cargo-llvm-cov only warns, so the step restores the tag and fails loudly.
+        self.assertLess(run.index("CACHEDIR.TAG"), run.index("cargo llvm-cov clean"))
+        self.assertIn("Signature: 8a477f597d28d172789f06886806bc55", run)
+        self.assertIn("exit 1", run)
 
 
 if __name__ == "__main__":

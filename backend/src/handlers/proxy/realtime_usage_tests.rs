@@ -396,20 +396,21 @@ async fn realtime_ws_bridges_limit_closes_quiet_sessions_and_cancels_blocked_obs
                         .unwrap();
                 }
             }
-            let started = std::time::Instant::now();
-            let received =
-                tokio::time::timeout(std::time::Duration::from_secs(2), running.client.next())
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let received = running.client.next().await;
+                assert!(
+                    matches!(received, Some(Ok(Message::Close(None))) | None),
+                    "{received:?}"
+                );
+                (&mut running.closed)
                     .await
-                    .unwrap();
-            assert!(
-                matches!(received, Some(Ok(Message::Close(None))) | None),
-                "{received:?}"
-            );
-            tokio::time::timeout(std::time::Duration::from_secs(3), &mut running.finished)
+                    .expect("bridge task dropped before closing");
+            })
+            .await
+            .expect("WebSocket bridge exceeded its close deadline");
+            (&mut running.finished)
                 .await
-                .unwrap()
                 .expect("bridge task dropped before settlement completed");
-            assert!(started.elapsed() < std::time::Duration::from_secs(2));
             fixtures::settled(&f, if blocked { 3 } else { 0 }).await;
             drop(running);
             f.db.drop().await.unwrap();

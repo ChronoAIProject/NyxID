@@ -1,6 +1,9 @@
 //! Ephemeral, provider-authenticated Telegram content. Never persist raw updates.
 use serde_json::{Value, json};
 
+/// Telegram text-based admission and transcripts use this for a captionless file.
+pub(crate) const ATTACHMENT_ONLY: &str = "📎";
+
 pub fn original(update: &Value) -> bool {
     let Some(message) = update.get("message") else {
         return false;

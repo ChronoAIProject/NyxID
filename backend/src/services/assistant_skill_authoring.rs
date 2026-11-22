@@ -845,7 +845,7 @@ pub async fn publish_automatically(
     result["proposal_url"] = url.into();
     result["instructions"] = format!(
         "Publication and attachment completed. Do not publish or attach again. {}",
-        acks::DECISION_NARRATION
+        acks::decision_narration(true)
     )
     .into();
     Ok(result)

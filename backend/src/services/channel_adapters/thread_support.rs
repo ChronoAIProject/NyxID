@@ -89,15 +89,6 @@ pub(crate) fn push(
         history.partial = true;
         return;
     }
-    let mut end = message
-        .text
-        .len()
-        .min(HISTORY_MESSAGE_BYTES)
-        .min(HISTORY_BYTES - used);
-    while !message.text.is_char_boundary(end) {
-        end -= 1;
-    }
-    history.partial |= end < message.text.len();
-    message.text.truncate(end);
+    history.partial |= message.limit_text(HISTORY_BYTES - used);
     history.messages.push(message);
 }

@@ -265,6 +265,7 @@ async fn schedule_on_stopped_home_replaces_unconfirmed_execution_credential() {
             .unwrap()
             .unwrap();
     let stopped = crate::models::assistant_conversation::StoppedWindow {
+        manager_origin: None,
         turn_id: Uuid::new_v4().to_string(),
         window_key: Uuid::new_v4().to_string(),
         credential_id: old.api_key_id.clone(),

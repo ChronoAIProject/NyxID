@@ -464,7 +464,7 @@ async fn wiki_is_read_and_scopes_select_only_lookup_without_authorizing_docx() {
     let prepared =
         mcp_service::prepare_proxy_tool_call(service, endpoint, &json!({"token":"wiki-token"}))
             .unwrap();
-    let effects = prepared.guest_effects(service.durable_endpoint_metadata[&endpoint.endpoint_id]);
+    let effects = prepared.effects();
     assert!(effects.reads && !effects.destructive);
     auth.assistant_operation_scopes.insert(u.instance.clone(),serde_json::from_value(json!({"revision":1,"catalog_service_id":u.catalog.id,"operations":[{"endpoint_id":endpoint.endpoint_id,"rule":{"method":"GET","path_template":endpoint.path}}]})).unwrap());
     assert!(

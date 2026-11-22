@@ -237,11 +237,13 @@ pub fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>
 /// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
 const MCP_CLIENT_ID: &str = "nyx-mcp";
 
-/// Seed default OAuth clients at startup (idempotent).
-///
-/// Creates the `nyx-mcp` public client used by MCP desktop apps. The client
-/// has no registered redirect URIs because loopback URIs are validated
-/// dynamically per RFC 8252 section 7.3.
+const MCP_REDIRECTS: &[&str] = &[
+    "http://127.0.0.1/callback",
+    "http://localhost/callback",
+    "cursor://anysphere.cursor-mcp/oauth/callback",
+];
+
+/// Seed the native callbacks used by the shared public MCP client.
 pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
@@ -254,7 +256,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         id: MCP_CLIENT_ID.to_string(),
         client_name: "NyxID MCP Client".to_string(),
         client_secret_hash: "NONE".to_string(),
-        redirect_uris: vec![],
+        redirect_uris: MCP_REDIRECTS.iter().map(|uri| (*uri).to_owned()).collect(),
         allowed_scopes: DEFAULT_MCP_ALLOWED_SCOPES.to_string(),
         scope_provenance: crate::models::oauth_client::ScopeProvenance::Defaulted,
         grant_types: "authorization_code".to_string(),
@@ -292,6 +294,15 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
 }
 
 async fn reconcile_default_client(db: &mongodb::Database, existing: &OauthClient) -> AppResult<()> {
+    if existing.redirect_uris.is_empty()
+        && existing.client_type == "public"
+        && existing.created_by.as_deref() == Some("system")
+    {
+        db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+            doc! {"_id": MCP_CLIENT_ID, "client_type":"public", "created_by":"system", "redirect_uris":{"$size":0}},
+            doc! {"$set":{"redirect_uris": MCP_REDIRECTS.to_vec(), "updated_at": bson::DateTime::now()}},
+        ).await?;
+    }
     if let Some(updated_scopes) = merge_missing_default_mcp_scopes(&existing.allowed_scopes)? {
         apply_client_update(
             db,
@@ -3244,6 +3255,7 @@ mod tests {
                 .insert_one(&Consent {
                     revision: None,
                     write_version: None,
+                    reviewed_redirect_hash: None,
                     issuance_fence: None,
                     id: format!("consent-{client_id}"),
                     user_id: "user-with-consent".to_string(),
@@ -3501,6 +3513,7 @@ mod tests {
             seed_default_clients(&db).await.expect("seed runs");
 
             let upgraded = get_client(&db, MCP_CLIENT_ID).await.unwrap();
+            assert_eq!(upgraded.redirect_uris, MCP_REDIRECTS);
             for scope in ["roles", "groups"] {
                 assert!(
                     upgraded

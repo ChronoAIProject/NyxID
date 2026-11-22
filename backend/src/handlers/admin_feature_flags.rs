@@ -442,7 +442,7 @@ pub async fn set_feature_flag(
     Path(flag_key): Path<String>,
     Json(body): Json<SetAdminFeatureFlagRequest>,
 ) -> AppResult<Json<AdminUserFeatureFlagOverrideOrGlobal>> {
-    if flag_key == feature_flag_service::APP_TOKEN_MANAGEMENT_FLAG_KEY {
+    if feature_flag_service::requires_oauth_policy_admin(&flag_key) {
         super::login_client_context::require_first_party_human(&auth_user)?;
         super::admin_helpers::require_admin(&state, &auth_user).await?;
     }
@@ -634,7 +634,7 @@ pub async fn clear_feature_flag(
     Path(flag_key): Path<String>,
     Query(query): Query<ClearAdminFeatureFlagQuery>,
 ) -> AppResult<impl IntoResponse> {
-    if flag_key == feature_flag_service::APP_TOKEN_MANAGEMENT_FLAG_KEY {
+    if feature_flag_service::requires_oauth_policy_admin(&flag_key) {
         super::login_client_context::require_first_party_human(&auth_user)?;
         super::admin_helpers::require_admin(&state, &auth_user).await?;
     }

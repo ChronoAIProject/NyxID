@@ -98,6 +98,7 @@ import { toast } from "sonner";
 import type {
   ChannelBotDetail,
   ChannelConversationItem,
+  VerifyChannelBotResponse,
 } from "@/types/channels";
 import {
   conversationTypeLabel,
@@ -1027,6 +1028,24 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
   );
 }
 
+function verificationMessage(platform: string, result: VerifyChannelBotResponse): string {
+  const status = translateUi(statusLabel(result.status));
+  if (result.last_verification?.status === "verified" && (platform === "lark" || platform === "feishu")) {
+    return `${translateUi(LARK_VERIFY_SUCCESS)} ${translateUi("Bot status: {{status}}.", { status })}`;
+  }
+  if (result.verification_scope === "credentials_and_webhook") {
+    return translateUi("Credentials verified. Webhook setup checked. Bot status: {{status}}.", { status });
+  }
+  if (result.verification_scope === "credentials" || result.last_verification?.status === "verified") {
+    return translateUi("Credentials verified. Bot status: {{status}}.", { status });
+  }
+  if (result.verification_scope === "stored_credentials") {
+    return translateUi("Stored credentials read. Bot status: {{status}}.", { status });
+  }
+  // Older replicas may report Active for a manual webhook without checking ingress.
+  return translateUi("Check complete. See bot details for the current status.");
+}
+
 export function ChannelBotDetailPage() {
   useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
@@ -1093,11 +1112,9 @@ export function ChannelBotDetailPage() {
     setVerificationContext({ id: bot.id, updatedAt: bot.updated_at, previousCheckId: bot.last_verification?.id ?? null });
     try {
       const result = await verifyMutation.mutateAsync(botId);
-      if (result.last_verification?.status === "verified") toast.success(translateUi(bot.platform === "lark" || bot.platform === "feishu" ? LARK_VERIFY_SUCCESS : "WhatsApp credentials verified"));
-      else if (result.status === "failed" || result.status === "invalid") toast.error(translateErrorMessage("Bot verification failed"));
-      else if (bot.platform === "lark" || bot.platform === "feishu") toast.success(translateUi(LARK_VERIFY_SUCCESS));
-      else if (result.status === "active") toast.success(translateUi("Bot verified successfully"));
-      else toast.success(translateUi("Bot verification completed"));
+      const message = verificationMessage(bot.platform, result);
+      if (result.status === "failed" || result.status === "invalid") toast.error(translateErrorMessage(message));
+      else toast.success(message);
     } catch (err) {
       toast.error(
         translateErrorMessage(bot.platform === "whatsapp" ? verificationErrorMessage(err) : err instanceof ApiError ? err.message : "Failed to verify bot"),
@@ -1179,9 +1196,7 @@ export function ChannelBotDetailPage() {
         <div role="alert"><ErrorBanner message={bot.error} /></div>
       ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
         <p role="status" className="text-13 text-muted-foreground">
-          {bot.platform === "lark" || bot.platform === "feishu"
-            ? verifyMutation.data.last_verification?.status === "verified" ? LARK_VERIFY_SUCCESS : translateUi("Credential check finished. Review setup status below; callback and member verification are separate.")
-            : translateUi("Verification complete. Status: {{value1}}.", { value1: statusLabel(verifyMutation.data.status) })}
+          {verificationMessage(bot.platform, verifyMutation.data)}
         </p>
       ))}
 

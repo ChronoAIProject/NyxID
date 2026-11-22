@@ -97,6 +97,7 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        restart_owner_verified: false,
         notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: false,
@@ -1104,6 +1105,7 @@ async fn pending_recovery(
         request_hash: "test".into(),
         conversation_id: f.event.conversation_id.clone(),
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),

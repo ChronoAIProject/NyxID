@@ -946,7 +946,21 @@ fn event_turn_text(events: &[AgentEvent], shared_group_context: Option<&str>) ->
 }
 
 pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
-    let text = excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  ");
+    let mut text = match &event.channel_message {
+        Some(message) if event.kind == "message" && !event.channel_contexts.is_empty() => {
+            message.replace('\n', "\n  ")
+        }
+        _ => excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  "),
+    };
+    if event.kind == "message"
+        && !event.source_event_ids.is_empty()
+        && event
+            .channel_contexts
+            .iter()
+            .all(|source| source.text_completeness.is_none())
+    {
+        text.push_str("\n  [Legacy channel message, completeness and original length unknown]");
+    }
     if event.channel_contexts.is_empty() {
         text
     } else {
@@ -1622,6 +1636,21 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             .await?;
     }
     // One NyxBot per owner.
+    db.collection::<bson::Document>(MESSAGES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"handoff_delivery_due_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("assistant_handoff_delivery_due".to_owned())
+                        .partial_filter_expression(
+                            doc! {"handoff_delivery_due_at":{"$type":"date"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -1717,6 +1746,9 @@ pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantC
     get_authorized(db, user_id, id).await.map(|(row, _)| row)
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(super) static STOP_POLL: (); }
+
 pub(crate) async fn get_authorized(
     db: &Database,
     user_id: &str,
@@ -1725,11 +1757,15 @@ pub(crate) async fn get_authorized(
     AssistantConversation,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
-    let row = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(owner_filter(user_id, id)?)
-        .await?
-        .ok_or_else(not_found)?;
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let query = collection.find_one(owner_filter(user_id, id)?);
+    #[cfg(test)]
+    let query = if STOP_POLL.try_with(|_| ()).is_ok() {
+        query.comment("stop_poll")
+    } else {
+        query
+    };
+    let row = query.await?.ok_or_else(not_found)?;
     let access = authorize_thread_read(db, &row).await?;
     Ok((row, access))
 }
@@ -3466,6 +3502,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
     }
     let mut trace_sources = Vec::new();
+    let mut owner_channel_sources = true;
     if let Some(event_id) = start.channel_event_id.as_deref() {
         Box::pin(
             super::channel_turn_delivery::validate_guest_setup_in_session(
@@ -3482,7 +3519,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             turn_id,
         )
         .await?;
-        trace_sources.extend(trace_source);
+        owner_channel_sources = trace_source.owner_origin.is_some()
+            && trace_source.owner_origin.as_ref()
+                == start.reply_channel.as_ref().or(start.channel.as_ref());
+        trace_sources.extend(trace_source.trace_request);
     }
     if start.channel_event_id.is_some() {
         super::org_channel_service::transcript::publish(
@@ -3492,6 +3532,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             &ids.message_id,
             &start.text,
             "user",
+            start
+                .channel_context
+                .as_ref()
+                .and_then(|source| source.text_completeness),
         )
         .await?;
     }
@@ -3508,7 +3552,12 @@ pub(crate) async fn begin_owner_turn_in_session(
                 turn_id,
             )
             .await?;
-            trace_sources.extend(trace_source);
+            owner_channel_sources &= trace_source.owner_origin.as_ref().is_some_and(|origin| {
+                turn.events.iter().any(|event| {
+                    event.source_event_ids.contains(source) && event.reply_to.contains(origin)
+                })
+            });
+            trace_sources.extend(trace_source.trace_request);
         }
         if turn.channel_event_id.is_none() {
             turn.channel_event_id = turn
@@ -3655,7 +3704,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.message_count += 1;
     }
     if restart_enabled(db, user_id) {
-        if let Some(metadata) = metadata {
+        if !owner_channel_sources {
+            if let Some(active) = &mut row.active_turn {
+                active.restart_eligibility = Some("lane_ineligible".into());
+            }
+        } else if let Some(metadata) = metadata {
             let profile = metadata.profile(&row.model);
             negotiate_restart(
                 &mut row,
@@ -3861,6 +3914,14 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                channel_text_completeness: turn
+                    .channel_context
+                    .iter()
+                    .chain(turn.events.iter().flat_map(|event| &event.channel_contexts))
+                    .filter_map(|source| {
+                        Some((source.source_event_id.clone(), source.text_completeness?))
+                    })
+                    .collect(),
                 continued_after_restart: turn
                     .restart_admission
                     .as_ref()
@@ -4587,7 +4648,7 @@ pub(crate) struct RestartMetadata {
 }
 
 impl RestartMetadata {
-    fn profile(
+    pub(super) fn profile(
         &self,
         model: &str,
     ) -> Option<super::assistant_nyxagent_model_cache::InferenceCredential> {
@@ -4638,45 +4699,44 @@ pub(crate) fn enroll_restart(
     deployment: crate::models::assistant_conversation::ReattachDeployment,
     draining: bool,
 ) {
-    use crate::models::assistant_conversation::{
-        ExecutionAttempt, RestartAdmission, RestartOffer, RestartSource, TeamRestartSource,
-    };
+    use crate::models::assistant_conversation::{RestartSource, TeamRestartSource};
     let specialist = row.is_subagent();
+    let chat_source = super::assistant_turn_restart::chat_source(row, start);
     let Some(turn) = row.active_turn.as_mut() else {
         return;
     };
     if row.shared_agent_thread
         || row.guest_turn
         || row.guest_model_setup
-        || row.channel.is_some()
+        || (row.channel.is_some() && chat_source.is_none())
         || row.invocation_controlled
         || row.platform_thread.is_some()
         || row.platform_cleanup_pending
         || row.collaboration.is_some()
         || row.voice_parent_conversation_id.is_some()
         || start.guest
-        || start.channel.is_some()
-        || start.reply_channel.is_some()
+        || ((start.channel.is_some() || start.reply_channel.is_some()) && chat_source.is_none())
         || start
             .org_access
             .as_ref()
             .is_some_and(|access| access.shared().is_some() || access.channel().is_some())
-        || turn.channel_context.is_some()
+        || (turn.channel_context.is_some() && chat_source.is_none())
         || turn.channel_adapter_origin.is_some()
         || turn.platform_origin.is_some()
         || turn.invocation_id.is_some()
         || turn.voice_request_id.is_some()
-        || turn.channel_event_id.is_some()
+        || (turn.channel_event_id.is_some() && chat_source.is_none())
         || turn.events.iter().any(|event| {
             event.invocation_id.is_some()
-                || !event.channel_contexts.is_empty()
-                || !event.source_event_ids.is_empty()
+                || (chat_source.is_none()
+                    && (!event.channel_contexts.is_empty() || !event.source_event_ids.is_empty()))
         })
     {
         return;
     }
     let mut team_source = None;
     let source = match (&turn.automation_work, turn.origin) {
+        (None, _) if chat_source.is_some() => RestartSource::FirstPartyOwner,
         (Some(work), _)
             if matches!(work.role.as_str(), "coordinator" | "direct" | "group")
                 && !work.run_id.is_empty()
@@ -4750,6 +4810,33 @@ pub(crate) fn enroll_restart(
         }
         _ => return,
     };
+    install_restart(
+        row,
+        message_id,
+        deployment,
+        draining,
+        start.capacity.clone(),
+        source,
+        team_source,
+        chat_source,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn install_restart(
+    row: &mut AssistantConversation,
+    message_id: &str,
+    deployment: crate::models::assistant_conversation::ReattachDeployment,
+    draining: bool,
+    capacity: Option<crate::models::coordination::SlotToken>,
+    source: crate::models::assistant_conversation::RestartSource,
+    team_source: Option<crate::models::assistant_conversation::TeamRestartSource>,
+    chat_source: Option<crate::models::assistant_conversation::ChatRestartSource>,
+) {
+    use crate::models::assistant_conversation::{ExecutionAttempt, RestartAdmission, RestartOffer};
+    let Some(turn) = row.active_turn.as_mut() else {
+        return;
+    };
     let (Some(initiating_seq), Some(agent_id), Some(worker)) = (
         turn.initiating_message_seq,
         &row.agent_id,
@@ -4760,12 +4847,19 @@ pub(crate) fn enroll_restart(
     turn.restart_admission = Some(Box::new(RestartAdmission {
         continued_after_restart: false,
         generation: super::security_readiness_service::local_generation().map(str::to_owned),
-        version: if team_source.is_some() { 3 } else { 2 },
-        capacity: start.capacity.clone(),
+        version: if chat_source.is_some() {
+            4
+        } else if team_source.is_some() {
+            3
+        } else {
+            2
+        },
+        capacity,
         reattach: Some(deployment),
         window: None,
         source,
         team_source,
+        chat_source: chat_source.map(Box::new),
         initiating_message_id: message_id.into(),
         initiating_seq,
         reply_id: Uuid::new_v4().to_string(),
@@ -4780,6 +4874,7 @@ pub(crate) fn enroll_restart(
     turn.execution_attempt = Some(ExecutionAttempt {
         epoch: 0,
         claim_id: Uuid::new_v4().to_string(),
+        foreground_delivery: None,
     });
     if draining {
         let now = Utc::now();
@@ -4974,6 +5069,7 @@ pub(crate) async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                channel_text_completeness: Default::default(),
                                 continued_after_restart: saved.turn_metadata.as_ref().is_some_and(|metadata| metadata.continued_after_restart),
                                 voice_link_publication: None,
                                 links_in_chat: None,
@@ -5118,9 +5214,14 @@ artifact_recovery_target: None,
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                let saved_destinations = current.active_turn.as_ref().and_then(|turn| {
+                    let source = super::channel_supplemental_delivery::managed_source(turn)?;
+                    Some(super::channel_supplemental_delivery::saved_destinations(&current, turn, source, error.is_some()))
+                });
                 current.deliver_also = current
                     .active_turn
                     .as_ref()
+                    .filter(|_| saved_destinations.is_none())
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
                 super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
@@ -5284,7 +5385,7 @@ artifact_recovery_target: None,
                 }
                 if message.status == "completed" && let Some(origin) = super::org_channel_service::origin(&row) {
                     match Box::pin(super::org_channel_service::validate_in_session(&db,session,origin,&row.user_id,row.agent_id.as_deref().unwrap_or_default(),true)).await {
-                        Ok(_) => super::org_channel_service::transcript::publish(&db,session,&row,&message.id,&message.text,"agent").await?,
+                        Ok(_) => super::org_channel_service::transcript::publish(&db,session,&row,&message.id,&message.text,"agent",None).await?,
                         Err(e @ AppError::DatabaseError(_)) => return Err(e),
                         // Lost exposure, membership or wallet readiness stops
                         // publication, never the turn's ordinary settlement.
@@ -5305,6 +5406,10 @@ artifact_recovery_target: None,
                 if let Some(attempt) = attempt {
                     let mut saved = bson::to_document(&message).map_err(|_| AppError::Internal("Failed to encode assistant reply".into()))?;
                     saved.insert("settled_by_attempt", doc! {"epoch":attempt.epoch,"claim_id":&attempt.claim_id});
+                    if let Some(destinations) = saved_destinations.filter(|targets| !targets.is_empty()) {
+                        saved.insert("handoff_delivery", doc! {"agent_id":&row.agent_id, "targets":bson::to_bson(&destinations).map_err(|_|AppError::Internal("Failed to encode channel destinations".into()))?});
+                        saved.insert("handoff_delivery_due_at", bson::DateTime::from_chrono(now));
+                    }
                     db.collection::<bson::Document>(MESSAGES).insert_one(saved).session(&mut *session).await?;
                 } else {
                     db.collection::<AssistantMessage>(MESSAGES).insert_one(message).session(&mut *session).await?;
@@ -5346,6 +5451,7 @@ pub(crate) fn unconfirmed_window(
     let window = source.window.as_ref()?;
     (!source.credential_ended && !window.terminal).then(|| {
         crate::models::assistant_conversation::StoppedWindow {
+            manager_origin: turn.platform_origin.clone().map(Box::new),
             turn_id: turn.turn_id.clone(),
             credential_id: source.credential_id.clone(),
             window_key: window.key.clone(),
@@ -7431,6 +7537,15 @@ struct RenderedRecapLine {
     truncated: bool,
 }
 
+fn channel_recap_marker(message: &AssistantMessage) -> Option<String> {
+    let channel = message.origin == Some(TurnOrigin::Channel)
+        || message
+            .turn_metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.channel_text_completeness.is_empty());
+    channel.then(|| format!(" [truncated=true, original_bytes={}]", message.text.len()))
+}
+
 fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLine {
     let role = if message.author == Some(crate::models::assistant_message::MessageAuthor::Guest) {
         "user (guest)"
@@ -7451,7 +7566,9 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
             ""
         }
     );
-    let room = limit.saturating_sub(prefix.len() + " [truncated]".len());
+    let marker = channel_recap_marker(message);
+    let marker = marker.as_deref().unwrap_or(" [truncated]");
+    let room = limit.saturating_sub(prefix.len() + marker.len());
     let mut end = message.text.len().min(room);
     while !message.text.is_char_boundary(end) {
         end -= 1;
@@ -7460,7 +7577,7 @@ fn owner_recap_line(message: &AssistantMessage, limit: usize) -> RenderedRecapLi
     let text = format!(
         "{prefix}{}{}",
         &message.text[..end],
-        if truncated { " [truncated]" } else { "" }
+        if truncated { marker } else { "" }
     );
     RenderedRecapLine {
         text: super::voice::links::message_text(message, &text).into_owned(),
@@ -7697,13 +7814,26 @@ pub async fn conversation_history_page(
         let mut end = chars.len();
         loop {
             let partial = end < chars.len();
-            let value = json!({
+            let mut value = json!({
                 "seq": row.seq,
                 "message_id": row.id,
                 "offset": start,
+                "truncated": start != 0 || partial,
+                "original_bytes": row.text.len(),
                 "next_offset": partial.then_some(end),
                 "text": chars[start..end].iter().collect::<String>(),
             });
+            if let Some(source) = row
+                .turn_metadata
+                .as_ref()
+                .filter(|m| {
+                    row.origin == Some(TurnOrigin::Channel)
+                        && m.channel_text_completeness.len() == 1
+                })
+                .and_then(|m| m.channel_text_completeness.values().next())
+            {
+                value["source_text_completeness"] = json!(source);
+            }
             let mut candidate = messages.clone();
             candidate.push(value);
             let has_more = partial || index + 1 < rows.len() || more_rows;
@@ -7813,7 +7943,7 @@ pub fn bounded_recap_for_audience(history: &[AssistantMessage], guest: bool) -> 
     let mut reserved = match window.iter().rev().find(|message| message.role == "user") {
         Some(goal) => {
             goal_id = Some(goal.id.as_str());
-            recap_line(goal, guest, remaining)
+            recap_line(goal, guest, RECAP_CHECKPOINT_BYTES.min(remaining))
                 .map(|line| line.text)
                 .unwrap_or_default()
         }
@@ -8005,9 +8135,15 @@ fn recap_line(
         &format!("{prefix}{body}{activities}{attachments}{error}"),
     )
     .into_owned();
-    if line.len() > remaining {
+    truncated |= line.len() > remaining;
+    if truncated && let Some(marker) = channel_recap_marker(message) {
+        if remaining < prefix.len() + marker.len() {
+            return None;
+        }
+        truncate_at_boundary(&mut line, remaining - marker.len());
+        line.push_str(&marker);
+    } else {
         truncate_at_boundary(&mut line, remaining);
-        truncated = true;
     }
     Some(RenderedRecapLine {
         text: line,
@@ -8380,6 +8516,162 @@ pub async fn waiting_for_capacity(
     Ok(())
 }
 
+/// Live deltas concatenate directly. Parts restored from an upstream response
+/// snapshot retain the two-newline joining used by parse_response.
+#[derive(Clone, Default)]
+pub(super) struct OutputText {
+    parts: std::collections::BTreeMap<(u64, u64), TextPart>,
+    bytes: usize,
+}
+
+#[derive(Clone, Default)]
+struct TextPart {
+    text: String,
+    from_snapshot: bool,
+}
+
+impl OutputText {
+    fn update(&mut self, key: (u64, u64), value: &str, append: bool) -> Result<(), TurnError> {
+        let previous = self.parts.get(&key);
+        let removed = if append {
+            0
+        } else {
+            previous.map_or(0, |part| part.text.len())
+        };
+        let bytes = self.bytes - removed + value.len();
+        if bytes > MAX_OUTPUT_BYTES {
+            return Err(TurnError::internal("output_too_large", "stream"));
+        }
+        self.bytes = bytes;
+        if value.is_empty() && previous.is_none() {
+            return Ok(());
+        }
+        let part = self.parts.entry(key).or_default();
+        if !append {
+            part.text.clear();
+        }
+        part.text.push_str(value);
+        Ok(())
+    }
+
+    fn discard(&mut self, matches: impl Fn((u64, u64)) -> bool) {
+        self.parts.retain(|key, _| !matches(*key));
+        let snapshot_count = self
+            .parts
+            .values()
+            .filter(|part| part.from_snapshot)
+            .count();
+        self.bytes = self
+            .parts
+            .values()
+            .map(|part| part.text.len())
+            .sum::<usize>()
+            + snapshot_count.saturating_sub(1) * 2;
+    }
+
+    pub(super) fn text(&self) -> String {
+        let mut text = String::with_capacity(self.bytes);
+        let mut seen_snapshot = false;
+        for part in self.parts.values() {
+            if part.from_snapshot {
+                if seen_snapshot {
+                    text.push_str("\n\n");
+                }
+                seen_snapshot = true;
+            }
+            text.push_str(&part.text);
+        }
+        text
+    }
+
+    pub(super) fn layout(&self) -> Vec<crate::models::assistant_conversation::OutputPartLength> {
+        self.parts
+            .iter()
+            .map(|(&(output_index, content_index), part)| {
+                crate::models::assistant_conversation::OutputPartLength {
+                    output_index,
+                    content_index,
+                    bytes: part.text.len(),
+                    from_snapshot: part.from_snapshot,
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn restore(
+        cursor: &crate::models::assistant_conversation::SubscriberCheckpoint,
+    ) -> Option<Self> {
+        let mut remaining = cursor.window_text.as_str();
+        let mut output = Self::default();
+        let mut seen_snapshot = false;
+        for part in cursor.part_lengths.as_ref()? {
+            if part.from_snapshot {
+                if seen_snapshot {
+                    remaining = remaining.strip_prefix("\n\n")?;
+                }
+                seen_snapshot = true;
+            }
+            let (text, rest) = remaining.split_at_checked(part.bytes)?;
+            remaining = rest;
+            output.parts.insert(
+                (part.output_index, part.content_index),
+                TextPart {
+                    text: text.into(),
+                    from_snapshot: part.from_snapshot,
+                },
+            );
+        }
+        output.bytes = cursor.window_text.len();
+        (remaining.is_empty() && output.text() == cursor.window_text).then_some(output)
+    }
+
+    // The caller has already validated and size-checked the response with parse_response.
+    pub(super) fn from_snapshot(response: &Value) -> Result<Self, TurnError> {
+        let mut output = Self::default();
+        for (item_index, item) in response["output"]
+            .as_array()
+            .ok_or_else(invalid_stream)?
+            .iter()
+            .enumerate()
+        {
+            if item["type"] != "message"
+                || item["role"] != "assistant"
+                || empty_incomplete_message(item)
+            {
+                continue;
+            }
+            for (part_index, part) in item["content"].as_array().into_iter().flatten().enumerate() {
+                if part["type"] == "output_text" {
+                    let text = part["text"].as_str().ok_or_else(invalid_stream)?;
+                    output.bytes += text.len() + if output.parts.is_empty() { 0 } else { 2 };
+                    output.parts.insert(
+                        (item_index as u64, part_index as u64),
+                        TextPart {
+                            text: text.into(),
+                            from_snapshot: true,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(output)
+    }
+}
+
+fn invalid_stream() -> TurnError {
+    TurnError::internal("invalid_stream", "stream")
+}
+
+pub(super) fn empty_incomplete_message(item: &Value) -> bool {
+    item["type"] == "message"
+        && item["status"] == "incomplete"
+        && item["content"].as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .all(|part| part["type"] == "output_text" && part["text"].as_str() == Some(""))
+        })
+}
+
 /// Strict incremental Responses SSE decoder. Unknown event types are additive;
 /// malformed frames and non-monotonic sequences fail closed.
 #[derive(Default)]
@@ -8389,7 +8681,7 @@ pub struct ResponseStream {
     buffer: Vec<u8>,
     total: usize,
     pub(super) sequence: Option<u64>,
-    pub text: String,
+    pub(super) output: OutputText,
     pub terminal: Option<TurnResult>,
     pub created: Option<crate::models::assistant_conversation::RunningResponse>,
     /// Every parsed data event, including tool-progress kinds this decoder
@@ -8400,6 +8692,18 @@ pub struct ResponseStream {
     pub image_input_unsupported: bool,
 }
 impl ResponseStream {
+    pub(super) fn text_len(&self) -> usize {
+        self.terminal
+            .as_ref()
+            .map_or(self.output.bytes, |result| result.text.len())
+    }
+
+    pub(super) fn text(&self) -> String {
+        self.terminal
+            .as_ref()
+            .map_or_else(|| self.output.text(), |result| result.text.clone())
+    }
+
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), TurnError> {
         self.total += chunk.len();
         if self.total > MAX_STREAM_BYTES {
@@ -8483,6 +8787,8 @@ impl ResponseStream {
             kind,
             "response.created"
                 | "response.output_text.delta"
+                | "response.output_text.done"
+                | "response.output_item.done"
                 | "response.completed"
                 | "response.failed"
                 | "response.cancelled"
@@ -8514,24 +8820,46 @@ impl ResponseStream {
                 response_id: id.to_owned(),
                 session_id: session.to_owned(),
             });
-        } else if kind == "response.output_text.delta" {
-            let delta = event["delta"]
+        } else if matches!(
+            kind,
+            "response.output_text.delta" | "response.output_text.done"
+        ) {
+            // Older Responses streams omitted both indices on single-message deltas.
+            let index = |field: &str| {
+                event
+                    .get(field)
+                    .map_or(Ok(0), |v| v.as_u64().ok_or_else(invalid_stream))
+            };
+            let key = (index("output_index")?, index("content_index")?);
+            let append = kind == "response.output_text.delta";
+            let value = event[if append { "delta" } else { "text" }]
                 .as_str()
-                .ok_or_else(|| TurnError::internal("invalid_stream", "stream"))?;
-            if self.text.len().saturating_add(delta.len()) > MAX_OUTPUT_BYTES {
-                return Err(TurnError::internal("output_too_large", "stream"));
+                .ok_or_else(invalid_stream)?;
+            if !append {
+                if let Some(indices) = event.get("discarded_output_indices") {
+                    let discarded = indices
+                        .as_array()
+                        .ok_or_else(invalid_stream)?
+                        .iter()
+                        .map(|v| v.as_u64().ok_or_else(invalid_stream))
+                        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+                    self.output.discard(|(item, _)| discarded.contains(&item));
+                } else if value.is_empty() && event["status"] == "incomplete" {
+                    self.output.discard(|part| part == key);
+                }
             }
-            self.text.push_str(delta);
+            self.output.update(key, value, append)?;
+        } else if kind == "response.output_item.done" {
+            if empty_incomplete_message(&event["item"]) {
+                let index = event["output_index"].as_u64().ok_or_else(invalid_stream)?;
+                self.output.discard(|(item, _)| item == index);
+            }
         } else {
             let response = &event["response"];
             let result =
                 parse_response(response, kind.strip_prefix("response.").unwrap_or_default())?;
             self.image_input_unsupported = unsupported_images(response);
-            self.text.clone_from(&result.text);
             self.terminal = Some(result);
-        }
-        if self.text.len() > MAX_OUTPUT_BYTES {
-            return Err(TurnError::internal("output_too_large", "stream"));
         }
         Ok(())
     }
@@ -8555,7 +8883,11 @@ pub(super) fn parse_response(response: &Value, status: &str) -> Result<TurnResul
         .as_array()
         .ok_or_else(invalid)?
         .iter()
-        .filter(|item| item["type"] == "message" && item["role"] == "assistant");
+        .filter(|item| {
+            item["type"] == "message"
+                && item["role"] == "assistant"
+                && !empty_incomplete_message(item)
+        });
     let final_only =
         status == "completed" && messages.clone().any(|item| item["phase"] == "final_answer");
     let unphased_only = status == "completed"

@@ -65,6 +65,11 @@ impl Payload {
         result.lifecycle("created");
         result
     }
+    fn has_output(&self) -> bool {
+        self.snapshot["output"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    }
     fn lifecycle(&mut self, name: &str) {
         self.frames.push(
             json!({"type":format!("response.{name}"),"sequence_number":self.frames.len(),
@@ -122,6 +127,24 @@ pub async fn open_payload(keys: &EncryptionKeys, ciphertext: &[u8]) -> AppResult
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     super::nyxbot_response_read::ensure_indexes(db).await?;
+    use super::channel_bot_health::answer;
+    for (collection, partial) in [
+        (EVENTS, answer::event_filter()),
+        (RESPONSES, answer::response_filter()),
+    ] {
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"channel_id":1,"created_at":-1,"_id":-1})
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(partial)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     for (keys, opts) in [
         (
             doc! {"response_id":1},
@@ -234,9 +257,19 @@ pub async fn finish(
     let sealed = body.seal(keys).await?;
     // No upsert: a concurrent purge always wins. All frames and the snapshot
     // become visible atomically, before any network byte is exposed.
-    let changed = db.collection::<GatewayResponse>(RESPONSES).update_one(doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
-        "expires_at":{"$gt":bson::DateTime::now()}}, doc! {"$set":{"terminal":true,
-        "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}},"$inc":{"revision":1_i64}}).await?;
+    let mut terminal = doc! {"terminal":true,
+    "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}};
+    if event.as_ref().is_some_and(|e| e.turn_id.is_some()) && body.has_output() {
+        terminal.insert("answer_delivery", "prepared");
+    }
+    let changed = db
+        .collection::<GatewayResponse>(RESPONSES)
+        .update_one(
+            doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
+            "expires_at":{"$gt":bson::DateTime::now()}},
+            doc! {"$set":terminal,"$inc":{"revision":1_i64}},
+        )
+        .await?;
     if changed.modified_count == 1 {
         super::audit_service::log_async(
             db.clone(),
@@ -411,6 +444,22 @@ where
         {
             finish(db, keys, row, None, true).await?;
         }
+    }
+    Ok(())
+}
+
+pub async fn observe_answer_output(
+    db: &Database,
+    row: &GatewayResponse,
+    body: &Payload,
+) -> AppResult<()> {
+    if row.answer_delivery.as_deref() == Some("prepared") && body.has_output() {
+        db.collection::<Document>(RESPONSES)
+            .update_one(
+                doc! {"_id":&row.id,"answer_delivery":"prepared"},
+                doc! {"$set":{"answer_delivery":"unconfirmed"}},
+            )
+            .await?;
     }
     Ok(())
 }

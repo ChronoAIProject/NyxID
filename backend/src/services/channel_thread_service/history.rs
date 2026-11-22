@@ -157,17 +157,8 @@ pub async fn context_until(
                 history.partial = true;
                 return false;
             }
-            let mut end = m
-                .text
-                .len()
-                .min(HISTORY_MESSAGE_BYTES)
-                .min(HISTORY_BYTES - bytes - overhead);
-            while !m.text.is_char_boundary(end) {
-                end -= 1;
-            }
-            history.partial |= end < m.text.len();
-            m.text.truncate(end);
-            bytes += end + overhead;
+            history.partial |= m.limit_text(HISTORY_BYTES - bytes - overhead);
+            bytes += m.text.len() + overhead;
             true
         });
         // The total context, not each source separately, is bounded to 20

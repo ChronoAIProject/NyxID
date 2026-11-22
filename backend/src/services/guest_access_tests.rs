@@ -299,7 +299,7 @@ async fn guest_append_raw_contract_refuses_overwrite_and_remote_lookalikes() {
         .await
         .unwrap();
         assert_eq!(effects.uses, allowed);
-        assert!(effects.destructive);
+        assert_eq!(effects.destructive, !allowed);
         assert!(!effects.reads);
     }
     // A matching name at another route cannot acquire the append attestation.
@@ -351,7 +351,7 @@ async fn guest_append_raw_contract_refuses_overwrite_and_remote_lookalikes() {
         .await
         .unwrap();
         assert_eq!(effects.uses, allowed);
-        assert!(effects.destructive);
+        assert_eq!(effects.destructive, !allowed);
     }
     f.state.db.drop().await.unwrap();
 }

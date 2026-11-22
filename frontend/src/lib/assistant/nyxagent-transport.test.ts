@@ -739,6 +739,12 @@ describe("NyxAgent server-backed transport", () => {
     });
     expect(completed.messages[0]).toBe(settled);
     expect(completed.messages[1]!.blocks[0]!.text).toBe("Answer!");
+    const reset = applyDirectTurnEvent(completed, {
+      event: "block.completed", cursor: 6, block_id: "b", block: { type: "text", block_id: "b", text: "" },
+    });
+    expect(reset.messages[1]!.blocks[0]!.text).toBe("");
+    const retry = applyDirectTurnEvent(reset, { event: "block.delta", cursor: 7, block_id: "b", text: "Retry" });
+    expect(retry.messages[1]!.blocks[0]!.text).toBe("Retry");
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {

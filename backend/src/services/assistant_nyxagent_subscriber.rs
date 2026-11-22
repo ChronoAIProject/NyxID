@@ -210,6 +210,8 @@ pub(super) async fn save_refusal(
     key: &str,
     error: &TurnError,
     delay: Option<Duration>,
+    capacity_deadline: DateTime<Utc>,
+    channel_capacity_retry: bool,
 ) -> Result<WindowRefusal, TurnError> {
     let refusal = WindowRefusal {
         status: error.http_status.ok_or_else(unknown)?,
@@ -228,15 +230,19 @@ pub(super) async fn save_refusal(
         "active_turn.restart_admission.window.key":key,"active_turn.restart_admission.window.accepted":{"$ne":true},
     }).map_err(|_| unknown())?;
     let encoded = mongodb::bson::to_bson(&refusal).map_err(|_| unknown())?;
+    let mut fields = doc! {"active_turn.restart_admission.window.refusal":encoded,"active_turn.restart_admission.window.capacity_deadline":mongodb::bson::DateTime::from_chrono(capacity_deadline)};
+    if channel_capacity_retry {
+        fields.insert(
+            "active_turn.restart_admission.window.channel_capacity_retry",
+            true,
+        );
+    }
     let changed = state
         .db
         .collection::<mongodb::bson::Document>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .update_one(
-            filter,
-            doc! {"$set":{"active_turn.restart_admission.window.refusal":encoded}},
-        )
+        .update_one(filter, doc! {"$set":fields})
         .write_concern(mongodb::options::WriteConcern::majority())
         .await
         .map_err(|_| unknown())?;
@@ -258,7 +264,7 @@ pub(super) async fn reconnect(
     block: &str,
     partial: &mut String,
 ) -> Result<TurnResult, TurnError> {
-    let saved = state
+    let mut saved = state
         .db
         .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
         .find_one(
@@ -268,6 +274,17 @@ pub(super) async fn reconnect(
         .await
         .map_err(|_| unknown())?
         .ok_or_else(unknown)?;
+    if let (Some(turn), Some(watch)) = (saved.active_turn.as_mut(), &events.checkpoint) {
+        let latest = watch.borrow();
+        if latest.upstream.is_some()
+            && turn
+                .reply
+                .as_ref()
+                .is_none_or(|reply| latest.cursor > reply.cursor)
+        {
+            turn.reply = Some(latest.clone());
+        }
+    }
     let admission = saved
         .active_turn
         .as_ref()
@@ -326,13 +343,54 @@ pub(super) fn checkpoint(
     id: &str,
     sequence: u64,
     window_text: &str,
+    output: &engine::OutputText,
+    unredacted: &str,
 ) -> SubscriberCheckpoint {
     SubscriberCheckpoint {
         window_key: key.into(),
         response_id: id.into(),
         sequence,
         window_text: window_text.into(),
+        part_lengths: (window_text == unredacted).then(|| output.layout()),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_snapshot(
+    events: &mut Events,
+    block: &str,
+    partial: &mut String,
+    input: &Input,
+    credential: &AssistantCredential,
+    output: &engine::OutputText,
+    key: &str,
+    id: &str,
+    sequence: u64,
+    force: bool,
+) -> Result<(), TurnError> {
+    let raw = output.text();
+    let safe = input.redact(&raw, credential);
+    let held = engine::secret_prefix_suffix(
+        &safe,
+        &[
+            &credential.raw_key,
+            input.binding.marker.as_deref().unwrap_or(""),
+        ],
+    );
+    let visible = &safe[..safe.len() - held.len()];
+    let full = input.full_text(visible)?;
+    // Withhold a possible secret prefix. A correction can still retract text
+    // already shown while the replacement's trailing bytes are withheld.
+    if (!force && full == *partial) || (!held.is_empty() && full.starts_with(partial.as_str())) {
+        return Ok(());
+    }
+    events.emit_with_checkpoint(
+        "block.completed",
+        json!({"block_id":block,"block":{"type":"text","block_id":block,"text":full}}),
+        Some(checkpoint(key, id, sequence, visible, output, &raw)),
+    );
+    *partial = full;
+    Ok(())
 }
 
 fn identity(value: &Value, credential: &AssistantCredential) -> Option<RunningResponse> {
@@ -414,7 +472,7 @@ pub(crate) async fn cancel_background(
                 )
         })
         .map(|binding| binding.response_id.as_str());
-    let path = id.map_or_else(
+    let path = id.filter(|_| turn.platform_origin.is_none()).map_or_else(
         || "v1/responses/cancel".into(),
         |id| format!("v1/responses/{id}/cancel"),
     );
@@ -808,10 +866,14 @@ async fn recover_window(
     let cursor = prior
         .and_then(|reply| reply.upstream.as_ref())
         .filter(|cursor| cursor.window_key == key);
-    let mut sequence = cursor.map(|cursor| cursor.sequence);
-    let mut text = cursor
-        .map(|cursor| cursor.window_text.clone())
-        .unwrap_or_default();
+    // Replay through a legacy or redacted cursor to recover its item boundaries
+    // before publishing any more text to the existing block.
+    let restored = cursor.and_then(engine::OutputText::restore);
+    let publish_from = cursor.map_or(0, |cursor| cursor.sequence);
+    let mut sequence = cursor
+        .filter(|_| restored.is_some())
+        .map(|cursor| cursor.sequence);
+    let mut output = restored.unwrap_or_default();
     let mut expected = cursor.map(|cursor| cursor.response_id.clone()).or_else(|| {
         active
             .running_response
@@ -828,6 +890,16 @@ async fn recover_window(
     let mut fresh_post = post_first;
     let mut recovery = engine::Recovery::default();
     let mut refusal = window.refusal.clone();
+    let mut capacity_deadline = window.capacity_deadline;
+    let mut channel_capacity_retry = window.channel_capacity_retry;
+    let mut first_channel_refusal =
+        active.engine_attempts == 1 && !accepted && refusal.is_none() && !channel_capacity_retry;
+    let channel_guard = || {
+        super::super::assistant_turn_observability::channel_retry_guard(
+            row,
+            input.body["conversation"].as_str(),
+        )
+    };
     let mut bound = None;
     loop {
         if retry {
@@ -841,18 +913,21 @@ async fn recover_window(
             let error = post_refusal(saved.status, &saved.code, None);
             if let Some(at) = saved.retry_at {
                 tokio::time::sleep(
-                    (at.min(window.capacity_deadline) - Utc::now())
+                    (at.min(capacity_deadline) - Utc::now())
                         .to_std()
                         .unwrap_or_default(),
                 )
                 .await;
-                if Utc::now() >= window.capacity_deadline {
+                if Utc::now() >= capacity_deadline {
                     return Err(error);
                 }
-                let filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,
+                let mut filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,
                     "active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key,
                     "active_turn.restart_admission.window.refusal.retry_at":mongodb::bson::DateTime::from_chrono(at)})
                     .map_err(|_| unknown())?;
+                if channel_capacity_retry {
+                    filter.extend(channel_guard());
+                }
                 let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
                     .update_one(filter, doc! {"$unset":{"active_turn.restart_admission.window.refusal":""},"$inc":{"active_turn.engine_attempts":1}})
                     .write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_| unknown())?;
@@ -883,7 +958,25 @@ async fn recover_window(
         }
         let mut reader = if fresh_post {
             fresh_post = false;
-            if Utc::now() >= window.capacity_deadline {
+            let source_expiry = if let Some(
+                crate::models::assistant_conversation::ChatRestartSource::PrivateChannel {
+                    event_id,
+                    ..
+                },
+            ) = admission.chat_source.as_deref()
+            {
+                Some(
+                    egress
+                        .channel_retry_expiry(row, event_id)
+                        .await
+                        .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+                )
+            } else {
+                None
+            };
+            if Utc::now()
+                >= source_expiry.map_or(capacity_deadline, |expiry| capacity_deadline.min(expiry))
+            {
                 return Err(TurnError::internal("capacity_exceeded", "capacity"));
             }
             let bounds = stream_bounds();
@@ -935,12 +1028,38 @@ async fn recover_window(
                 .map_err(|_| TurnError::internal("invalid_stream", "upstream_response"))?;
                 let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 let code = upstream_error_code(status, &value);
+                if let Some(expiry) = source_expiry {
+                    if first_channel_refusal && status == 503 && code == "capacity_exceeded" {
+                        let started = active
+                            .engine_request_started_at
+                            .unwrap_or(active.started_at);
+                        capacity_deadline = started
+                            + chrono::Duration::from_std(
+                                crate::services::assistant_engine_policy::CHANNEL_CAPACITY_BUDGET,
+                            )
+                            .expect("bounded channel budget");
+                        channel_capacity_retry = true;
+                    }
+                    capacity_deadline = capacity_deadline.min(expiry);
+                    first_channel_refusal = false;
+                }
                 let error = post_refusal(status, code, request_id);
                 let delay = engine::admission_refusal(status, code).then(|| {
                     recovery.retries = recovery.retries.saturating_add(1);
                     engine::capacity_delay(recovery.retries, retry_after, rand::random())
                 });
-                refusal = Some(save_refusal(state, row, &key, &error, delay).await?);
+                refusal = Some(
+                    save_refusal(
+                        state,
+                        row,
+                        &key,
+                        &error,
+                        delay,
+                        capacity_deadline,
+                        channel_capacity_retry,
+                    )
+                    .await?,
+                );
                 retry = false;
                 continue;
             }
@@ -994,6 +1113,7 @@ async fn recover_window(
                 && before_admission(&value, window, active, admission.version);
             let not_started = status == "failed"
                 && sequence.is_none()
+                && cursor.is_none()
                 && binding.as_ref().is_some_and(|binding| {
                     value["response"]["id"] == binding.response_id
                         && value["response"]["status"] == "failed"
@@ -1004,7 +1124,7 @@ async fn recover_window(
                 let now = Utc::now();
                 if window.terminal
                     || (absent && (cursor.is_some() || expected.is_some()))
-                    || now >= window.capacity_deadline
+                    || now >= capacity_deadline
                     || (absent
                         && window
                             .absence_retry_before
@@ -1024,6 +1144,9 @@ async fn recover_window(
                 )
                 .await?;
                 let mut filter = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested":false,"credential_api_key_id":&admission.credential_id,"active_turn.restart_admission.credential_ended":{"$ne":true},"active_turn.restart_admission.window.key":&key}).map_err(|_| unknown())?;
+                if channel_capacity_retry {
+                    filter.extend(channel_guard());
+                }
                 if absent {
                     filter.insert(
                         "active_turn.restart_admission.window.absence_retry_before",
@@ -1038,7 +1161,7 @@ async fn recover_window(
                 accepted = false;
                 expected = None;
                 sequence = None;
-                text.clear();
+                output = engine::OutputText::default();
                 bound = None;
                 fresh_post = true;
                 continue;
@@ -1063,7 +1186,11 @@ async fn recover_window(
                     result.text = input.full_text(&redact(&result.text))?;
                     if status == "lost" {
                         result.error = Some(TurnError::new("executor_lost"));
-                        if partial.starts_with(&result.text) {
+                        if partial.starts_with(&result.text)
+                            && !value["response"]["output"].as_array().is_some_and(|items| {
+                                items.iter().any(engine::empty_incomplete_message)
+                            })
+                        {
                             result.text = partial.clone();
                         }
                     }
@@ -1118,7 +1245,7 @@ async fn recover_window(
             let mut decoder = ResponseStream::default();
             decoder.replay = true;
             decoder.sequence = sequence;
-            decoder.text.clone_from(&text);
+            decoder.output.clone_from(&output);
             let bounds = stream_bounds();
             let mut last_progress = tokio::time::Instant::now();
             let mut received = false;
@@ -1159,24 +1286,15 @@ async fn recover_window(
                     }
                     return Ok(result);
                 }
-                let safe = redact(&decoder.text);
-                let held = engine::secret_prefix_suffix(
-                    &safe,
-                    &[
-                        &credential.raw_key,
-                        input.binding.marker.as_deref().unwrap_or(""),
-                    ],
-                );
-                if held.is_empty()
-                    && let (Some(id), Some(seq)) = (&expected, decoder.sequence)
-                {
-                    let full = input.full_text(&safe)?;
-                    if full != *partial {
-                        events.emit_with_checkpoint("block.completed",json!({"block_id":block,"block":{"type":"text","block_id":block,"text":full}}), Some(checkpoint(&key, id, seq, &safe)));
-                    }
-                    *partial = full;
+                if let (Some(id), Some(seq)) = (&expected, decoder.sequence) {
                     sequence = Some(seq);
-                    text = safe;
+                    output.clone_from(&decoder.output);
+                    if seq >= publish_from {
+                        publish_snapshot(
+                            events, block, partial, input, credential, &output, &key, id, seq,
+                            false,
+                        )?;
+                    }
                 }
                 if let Some(error) = decoder.reader_error.take() {
                     gap = Some(error);
@@ -1189,8 +1307,8 @@ async fn recover_window(
         {
             let response = &gap["response"];
             let mut result = snapshot(response, id)?;
-            let safe = redact(&result.text);
             if response["status"] != "in_progress" {
+                let safe = redact(&result.text);
                 *image_unsupported = engine::unsupported_images(response);
                 result.text = input.full_text(&safe)?;
                 if !executor_lost(&result) {
@@ -1204,22 +1322,12 @@ async fn recover_window(
             if sequence.is_some_and(|before| before > next) {
                 return Err(unknown());
             }
-            text = result.text;
+            output = engine::OutputText::from_snapshot(response)?;
             sequence = Some(next);
-            let held = engine::secret_prefix_suffix(
-                &safe,
-                &[
-                    &credential.raw_key,
-                    input.binding.marker.as_deref().unwrap_or(""),
-                ],
-            );
-            if held.is_empty() {
-                *partial = input.full_text(&safe)?;
-                events.emit_with_checkpoint(
-                    "block.completed",
-                    json!({"block_id":block,"block":{"type":"text","block_id":block,"text":partial}}),
-                    Some(checkpoint(&key, id, next, &safe)),
-                );
+            if next >= publish_from {
+                publish_snapshot(
+                    events, block, partial, input, credential, &output, &key, id, next, true,
+                )?;
             }
         }
     }

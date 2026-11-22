@@ -3053,7 +3053,7 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
         let note = skill_request_allowed_note(&agent, &roots);
         assert!(note.chars().count() <= 3200);
         assert!(note.contains(&roots.summary));
-        assert!(note.ends_with(acks::DECISION_NARRATION));
+        assert!(note.ends_with(acks::allowed_card_continuation()));
         let note = acks::decisions_note(std::slice::from_ref(&card));
         assert!(note.contains("do not request it again"));
         assert!(!note.contains("retry"));

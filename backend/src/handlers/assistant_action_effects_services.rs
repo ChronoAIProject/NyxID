@@ -1021,6 +1021,9 @@ mod tests {
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
+    use crate::services::oauth_token_authority_service::{
+        with_fixture_read_budget, with_unavailable_user_read,
+    };
     use crate::test_utils::{
         connect_test_database, connect_transaction_test_database, test_app_state,
         test_encryption_keys, test_user, test_user_endpoint, test_user_service,
@@ -1080,10 +1083,10 @@ mod tests {
             }
             None => Body::empty(),
         };
-        let response = app
-            .oneshot(builder.body(body).expect("build request"))
-            .await
-            .expect("route response");
+        let response =
+            with_fixture_read_budget(app.oneshot(builder.body(body).expect("build request")))
+                .await
+                .expect("route response");
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1637,6 +1640,12 @@ mod tests {
         assert!(stored.state_version > version_after_set);
     }
 
+    fn assert_authority_unavailable((status, body): &(StatusCode, Value)) {
+        assert_eq!(*status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+        assert_eq!(body["error_code"], 12900);
+    }
+
     async fn assert_service_action_state(
         db: &mongodb::Database,
         expected: &UserService,
@@ -1686,20 +1695,20 @@ mod tests {
             "credential": "sk-live-replacement-credential",
         });
 
-        let (status, rotated) = crate::test_utils::retry_oauth_authority(
-            async || {
-                request(
-                    app(state.clone()),
-                    &token,
-                    "POST",
-                    "/assistant/actions/services/rotate-credential",
-                    Some(body.clone()),
-                )
-                .await
-            },
-            async || assert_service_action_state(&db, &service, 1, 0).await,
-        )
-        .await;
+        let rotate = async || {
+            request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/services/rotate-credential",
+                Some(body.clone()),
+            )
+            .await
+        };
+        let refused = with_unavailable_user_read(rotate()).await;
+        assert_authority_unavailable(&refused);
+        assert_service_action_state(&db, &service, 1, 0).await;
+        let (status, rotated) = rotate().await;
         assert_eq!(status, StatusCode::OK, "{rotated}");
         assert_eq!(rotated["replayed"], false);
         let serialized = rotated.to_string();
@@ -1724,20 +1733,10 @@ mod tests {
         );
         assert_eq!(stored.state_version, 2);
 
-        let (status, replayed) = crate::test_utils::retry_oauth_authority(
-            async || {
-                request(
-                    app(state.clone()),
-                    &token,
-                    "POST",
-                    "/assistant/actions/services/rotate-credential",
-                    Some(body.clone()),
-                )
-                .await
-            },
-            async || assert_service_action_state(&db, &stored, 2, 1).await,
-        )
-        .await;
+        let refused = with_unavailable_user_read(rotate()).await;
+        assert_authority_unavailable(&refused);
+        assert_service_action_state(&db, &stored, 2, 1).await;
+        let (status, replayed) = rotate().await;
         assert_eq!(status, StatusCode::OK, "{replayed}");
         assert_eq!(replayed["replayed"], true);
         assert_service_action_state(&db, &stored, 2, 1).await;
@@ -2049,38 +2048,31 @@ mod tests {
         let state = test_app_state(db);
         let token = access_token(&state, &actor_id);
 
-        let (status, routed) = crate::test_utils::retry_oauth_authority(
-            async || {
-                request(
-                    app(state.clone()),
-                    &token,
-                    "POST",
-                    "/assistant/actions/services/route",
-                    Some(json!({
-                        "actionRequestId": "route-evidence",
-                        "userServiceId": service.id,
-                        "viaNodeId": node_id,
-                    })),
-                )
-                .await
-            },
-            async || assert_service_action_state(&state.db, &service, 0, 0).await,
-        )
-        .await;
+        let route = async || {
+            request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/services/route",
+                Some(json!({
+                    "actionRequestId": "route-evidence",
+                    "userServiceId": service.id,
+                    "viaNodeId": node_id,
+                })),
+            )
+            .await
+        };
+        assert_authority_unavailable(&with_unavailable_user_read(route()).await);
+        assert_service_action_state(&state.db, &service, 0, 0).await;
+        let (status, routed) = route().await;
         assert_eq!(status, StatusCode::OK, "{routed}");
 
-        let (status, evidence) = crate::test_utils::retry_oauth_authority(
-            async || {
-                request(
-                    app(state.clone()),
-                    &token,
-                    "GET",
-                    &format!("/keys/{}/authorization", service.id),
-                    None,
-                )
-                .await
-            },
-            async || {},
+        let (status, evidence) = request(
+            app(state),
+            &token,
+            "GET",
+            &format!("/keys/{}/authorization", service.id),
+            None,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{evidence}");

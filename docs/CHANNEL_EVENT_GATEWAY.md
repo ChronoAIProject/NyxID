@@ -1586,8 +1586,9 @@ the existing `response_recovery_providers: ["nyxbot"]` advertisement enable
 `sequence_number: 0`, status `queued`, object `response`, empty output, stable
 `conversation.id` and original metadata. The resolved `thread_reply` choice is
 frozen before acceptance and retained on both original and replayed created
-frames. The live stream still carries its answer and completion. A replica
-consumer drops after acceptance; NyxID's existing late sender delivers turn
+frames. A mapped turn snapshot carries that same marker while running and after
+settlement, including when its completed output is empty. The live stream still
+carries its answer and completion. A replica consumer drops after acceptance; NyxID's existing late sender delivers turn
 answers to the original thread target. Requests without this negotiated prefix
 retain legacy prefix bytes; their mapping echoes only bounded original strings
 from the four allowed metadata keys.

@@ -1093,8 +1093,8 @@ guest authorization; their catalog inclusion grants no execution access.
     Sheets' `values:clear`, Docs' `batchUpdate`, IFTTT's
     triggers and tool calls), never, except a POST with a compiled NyxID
     `x-nyxid-append-only: true` attestation. This attests adding data without
-    changing or removing existing data; it does not clear Aevatar's marker or
-    bypass owner approvals. A compiled `x-nyxid-append-only-query` object may
+    changing or removing existing data. NyxID classifies a matching request as
+    a write for owner access modes and service approval rules. A compiled `x-nyxid-append-only-query` object may
     require exact query values. Sheets `values:append` requires
     `insertDataOption=INSERT_ROWS`; absent, duplicate, or overwrite values are
     refused under `use`. DELETE and `changes-existing: true` always win.
@@ -1714,6 +1714,14 @@ instructions. Retained payloads use envelope encryption, are erased on settlemen
 or cancellation, and expire after 4 hours even if delivery is deferred. An expired
 payload produces `result_expired`; terminal metadata is TTL-cleaned. Audit contains
 identifiers and stable reasons, never operation payloads, returned IDs or credentials.
+
+A CMA provisioning receipt confirms that the agent was created. The agent's event
+snapshot carries its task output. For successful provisioning and agent-input
+wakes, NyxID supplies the observed CMA agent ID and, when available, a complete
+`nyx__call_tool` request for the published snapshot GET. The event turn resolves
+the name from its current catalog using the watch's connection and target.
+The model can call it directly under the turn's ordinary permissions. If the
+lookup fails or takes more than two seconds, the turn still receives its receipt.
 
 Completion, `operation_failed`, `timeout`, `authority_lost`, `result_unavailable`,
 `result_too_large`, and submission failures resume the same thread with a stable

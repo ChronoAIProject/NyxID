@@ -738,8 +738,15 @@ use the same feature flag. The survivor takes over the original team slot,
 publishes an assignment to its saved report thread, or settles the member reply
 and mention budget together in the group transcript. A pending group follower
 receives its ordinary `group_settled` event when the group becomes quiet.
-Chat-app, guest, voice, shared-agent, organization-group and collaboration-group
-turns remain outside these two lanes.
+
+Owner-private chat turns and NyxBot event wakes require `assistant:turn-handoff-v4`
+on every serving replica. A survivor uses the admitted channel or team slot and
+the turn's saved routing. The existing event delivery worker owns the primary chat
+reply. A wake's supplemental replies carry their original destination through
+settlement. Their delivery workers skip confirmed parts and preserve uncertain
+sends for review. Personal manager chats use their admitted manager transport
+for discovery, replay and cancellation. Guest, voice, shared-agent, organization
+and collaboration lanes stay excluded.
 
 The admitting replica discovers missing metadata with the owner's existing
 private assistant credential. It allows two seconds in total before admission
@@ -770,9 +777,11 @@ override, allow 30 seconds for admission hints to expire and let admissions alre
 flight finish. Keep compatible subscribers and cancellation handlers serving.
 Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
 with a URI selecting the NyxID database. Exit 0 means the majority read on the
-primary found zero outstanding conversation records. Exit 2 prints counts for
-subscribed, offered, claimed or stopped windows, grouped by the active team lane
-when present. Run this check before removing v3 subscribers even when rolling
+primary found zero outstanding conversation records and zero saved chat replies
+awaiting delivery. Exit 2 prints counts for subscribed, offered, claimed or
+stopped windows, grouped by the active lane when present, and the number of
+pending saved deliveries. Keep v4 subscribers and delivery workers running until
+both counts reach zero before rolling back to v3. Run this check before removing v3 subscribers even when rolling
 back to a v2-capable build. V2 readers decode the compatible source and skip
 version 3 in both offer discovery and the claim update. A read error requires another
 check. A stopped window clears after confirmed cancellation or after the next

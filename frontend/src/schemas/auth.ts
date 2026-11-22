@@ -7,6 +7,12 @@ export const loginSchema = z.object({
 
 export type LoginFormData = z.infer<typeof loginSchema>;
 
+export const confirmDisplayNameSchema = z.object({
+  display_name: z.string()
+    .refine((name) => name.trim().length > 0, "Display name is required")
+    .refine((name) => new TextEncoder().encode(name).length <= 200, "Display name must be at most 200 UTF-8 bytes"),
+});
+
 export const registerSchema = z
   .object({
     // Normalize to the backend's canonical form: trimmed and uppercased.

@@ -417,6 +417,13 @@ async fn channel_thread_slack_history_bounds_scope_denials_and_cursor_budget() {
         .await
         .unwrap();
     assert!(history.partial);
+    assert!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.sender_id == "human")
+            .all(|message| message.truncated_original_bytes == Some(6000))
+    );
     assert!(history.messages.len() <= HISTORY_MESSAGES);
     assert!(
         history

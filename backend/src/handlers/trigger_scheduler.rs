@@ -320,7 +320,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. {}\n{}",
+            crate::services::assistant_acknowledgement_service::decision_narration(
+                cards.iter().any(|card| card.status == "allowed")
+            ),
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {

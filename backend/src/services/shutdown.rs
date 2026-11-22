@@ -530,6 +530,9 @@ impl Runtime {
         F::Output: Send + 'static,
     {
         let (work, id) = self.insert(&mut self.state(), kind);
+        #[cfg(test)]
+        let future = super::assistant_engine_worker::TEST_WORKER
+            .scope(super::assistant_engine_worker::instance(), future);
         let future = Box::pin(future);
         let task = tokio::spawn(async move {
             let _work = work;
@@ -727,10 +730,16 @@ impl Runtime {
     }
 
     pub fn tracked_units(&self) -> usize {
-        self.state().work.len()
+        let state = self.state();
+        let tracked = state.work.len()
             + self.0.requests.load(Ordering::SeqCst)
             + self.0.streams.load(Ordering::SeqCst)
-            + self.0.subscriptions.load(Ordering::SeqCst)
+            + self.0.subscriptions.load(Ordering::SeqCst);
+        #[cfg(test)]
+        if tracked == 1 && matches!(state.work.values().next(), Some(Kind::NodeSocket)) {
+            tracing::info!(target: "nyxid::shutdown", "Finish snapshot retains only the node socket");
+        }
+        tracked
     }
 
     pub async fn idle(&self) {

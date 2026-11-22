@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_messages";
 
+/// Completeness of the normalized UTF-8 text at one delivery boundary.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextCompleteness {
+    pub original_bytes: usize,
+    pub truncated: bool,
+}
+
 /// Provider handles and descriptive metadata only; never media bytes or captions.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAttachment {
@@ -84,6 +91,8 @@ pub struct NyxbotAdmission {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<TextCompleteness>,
     /// Private download-name overrides aligned with top-level attachments.
     /// Public callback/history DTOs continue to expose the raw source metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -203,6 +212,7 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,

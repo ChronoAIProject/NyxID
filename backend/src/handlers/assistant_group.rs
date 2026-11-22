@@ -1038,9 +1038,9 @@ async fn confirm_in_group(
                 identifier(&decided.summary),
                 decided.id,
                 if allowed {
-                    "Retry it now with that acknowledgement_id."
+                    format!("Retry it now with that acknowledgement_id. {}", crate::services::assistant_acknowledgement_service::allowed_card_continuation())
                 } else {
-                    "Do not retry it."
+                    "Do not retry it.".to_owned()
                 }
             ),
             None,

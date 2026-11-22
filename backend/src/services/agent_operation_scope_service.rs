@@ -890,7 +890,7 @@ async fn build_options(
             };
             let method = reqwest::Method::from_bytes(endpoint.method.as_bytes())
                 .map_err(|_| AppError::Internal("Invalid endpoint method".into()))?;
-            let effects = mcp_service::operation_effects(&method, metadata);
+            let effects = mcp_service::possible_operation_effects(&method, metadata);
             operations.push(OperationOption {
                 endpoint_id: endpoint.id.clone(),
                 method: endpoint.method.clone(),
@@ -1073,15 +1073,30 @@ async fn check_non_mcp_chat_context(
                 .iter()
                 .filter(|op| proxy_authorization::rule_matches(&op.rule, method, path))
             {
-                let effects = mcp_service::operation_effects(
+                let marks = request
+                    .catalog_slug
+                    .map(|slug| {
+                        super::catalog_spec_registry::operation_marks(
+                            slug,
+                            method,
+                            &operation.rule.path_template,
+                            "",
+                        )
+                    })
+                    .unwrap_or_default();
+                let effects = mcp_service::request_effects(
                     &method_value,
                     mcp_service::McpDurableEndpointMetadata {
                         risk: operation.risk,
-                        destructive: operation.destructive,
+                        destructive: operation.destructive || marks.destructive,
                         changes_existing: operation.changes_existing,
+                        append_only: marks.append_only && marks.changes_existing != Some(true),
+                        append_only_query: marks.append_only_query,
                         catalog_contract: operation.endpoint_id.is_some(),
                         ..Default::default()
                     },
+                    request.query,
+                    false,
                 );
                 matched = Some(intersect_effects(matched, effects));
             }
@@ -1265,55 +1280,16 @@ async fn raw_effects(
         .projection(doc! {"slug": 1})
         .await?
         .and_then(|row| row.get_str("slug").ok().map(str::to_owned));
-    let mut effects = None;
-    if compiled_floor
-        && let Some(slug) = catalog_slug.as_deref()
-        && let Some(spec) = super::catalog_spec_registry::spec_for_slug(slug)
-    {
-        let verb = method.as_str().to_ascii_lowercase();
-        for (template, item) in spec["paths"].as_object().into_iter().flatten() {
-            let Some(operation) = item.get(&verb) else {
-                continue;
-            };
-            let Ok(rule) = proxy_authorization::rule_from_endpoint(
-                method.as_str(),
-                template,
-                operation.get("parameters"),
-            ) else {
-                continue;
-            };
-            if !proxy_authorization::rule_matches(&rule, method.as_str(), path) {
-                continue;
-            }
-            let marks =
-                super::catalog_spec_registry::operation_marks(slug, method.as_str(), template, "");
-            let risk = operation["x-aevatar-tool"]["readOnly"]
-                .as_bool()
-                .map(|read| {
-                    if read {
-                        crate::models::service_endpoint::EndpointRisk::Read
-                    } else {
-                        crate::models::service_endpoint::EndpointRisk::Write
-                    }
-                });
-            effects = Some(intersect_effects(
-                effects,
-                mcp_service::operation_effects(
-                    method,
-                    mcp_service::McpDurableEndpointMetadata {
-                        catalog_contract: true,
-                        risk,
-                        destructive: marks.destructive,
-                        changes_existing: marks.changes_existing,
-                        append_only: marks.append_only
-                            && mcp_service::append_query_allowed(marks.append_only_query, query),
-                        append_only_query: marks.append_only_query,
-                        ..Default::default()
-                    },
-                ),
-            ));
-        }
-    }
+    let mut effects = if compiled_floor {
+        catalog_slug
+            .as_deref()
+            .and_then(super::catalog_spec_registry::spec_key_for_slug)
+            .and_then(|key| {
+                super::catalog_spec_registry::compiled_effects(key, method, path, query, false)
+            })
+    } else {
+        None
+    };
     for endpoint in candidates {
         let marks = catalog_slug
             .as_deref()
@@ -1328,18 +1304,19 @@ async fn raw_effects(
             .unwrap_or_default();
         effects = Some(intersect_effects(
             effects,
-            mcp_service::operation_effects(
+            mcp_service::request_effects(
                 method,
                 mcp_service::McpDurableEndpointMetadata {
                     risk: endpoint.risk,
                     catalog_contract: true,
                     destructive: marks.destructive,
                     changes_existing: marks.changes_existing,
-                    append_only: marks.append_only
-                        && mcp_service::append_query_allowed(marks.append_only_query, query),
+                    append_only: marks.append_only,
                     append_only_query: marks.append_only_query,
                     ..Default::default()
                 },
+                query,
+                false,
             ),
         ));
     }
@@ -1937,7 +1914,7 @@ pub async fn filter_guest_catalog(
             let Ok(method) = reqwest::Method::from_bytes(endpoint.method.as_bytes()) else {
                 return false;
             };
-            let effects = mcp_service::operation_effects(
+            let effects = mcp_service::possible_operation_effects(
                 &method,
                 service
                     .durable_endpoint_metadata
@@ -1981,6 +1958,7 @@ pub fn guest_level_allows(
 pub struct GuestHttpContext<'a> {
     pub query: Option<&'a str>,
     pub websocket: bool,
+    pub catalog_slug: Option<&'a str>,
     /// Server-computed closed inference contract on the actual outbound body.
     /// Only relaxes the webhook confirmation floor; never guest or share ACLs.
     /// Callers must reject method overrides before supplying this evidence.

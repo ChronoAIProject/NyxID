@@ -608,6 +608,8 @@ impl std::fmt::Debug for TriggerPrefill {
 /// neither they nor sender identifiers appear in Debug, logs or audit.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelTurnDelivery {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_owner_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice_language: Option<NoticeLanguage>,
     /// Set only by verified original human ingress; legacy events are ineligible.

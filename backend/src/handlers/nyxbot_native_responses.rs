@@ -211,6 +211,7 @@ async fn accept(
         request_hash,
         conversation_id: None,
         terminal: claim.is_none(),
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&state.encryption_keys).await?,
         created_at: now,
@@ -384,6 +385,7 @@ async fn claim_message(
 pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
     use crate::models::channel_thread::ThreadSenderKind as Kind;
     Sender {
+        truncated_original_bytes: None,
         original_kind: Some(match activity["actor"]["kind"].as_str() {
             Some("human") => Kind::Human,
             Some("bot") => Kind::Bot,
@@ -547,7 +549,10 @@ async fn snapshot_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((_, body, trace))) => {
+        Ok(Some((stored, body, trace))) => {
+            if let Err(error) = recovery::observe_answer_output(&state.db, &stored, &body).await {
+                return provider_refusal::error(error);
+            }
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
             }
@@ -754,6 +759,12 @@ pub(super) fn stream(
                     if stored.terminal && !relay_responses::stream_output(&state, &row, &stored, body.snapshot["status"].as_str().unwrap_or("failed")).await.unwrap_or(false) {
                         relay_responses::suppress_output(&mut body);
                     }
+                    if stored.terminal && next < body.frames.len() as u64
+                        && recovery::observe_answer_output(&state.db, &stored, &body).await.is_err()
+                    {
+                        yield Ok(axum::response::sse::Event::default().event("error").data("{\"type\":\"error\",\"code\":\"provider_unavailable\"}"));
+                        break;
+                    }
                     for frame in body.frames.iter().skip(next as usize) {
                         let seq=frame["sequence_number"].as_u64().unwrap_or_default();
                         next=seq+1;
@@ -799,7 +810,7 @@ pub(super) fn send_update<'a>(
     text: &'a str,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(async move {
-        match send_update_impl(state, row, origin, conversation, text, None).await? {
+        match send_update_impl(state, row, origin, conversation, text, None, None).await? {
             "confirmed" => Ok(()),
             _ => Err(AppError::NotFound("Native reply source unavailable".into())),
         }
@@ -812,6 +823,7 @@ pub(super) async fn send_supplemental(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
+    saved_turn: Option<&str>,
 ) -> AppResult<&'static str> {
     Box::pin(send_update_impl(
         state,
@@ -820,6 +832,7 @@ pub(super) async fn send_supplemental(
         conversation,
         text,
         None,
+        saved_turn,
     ))
     .await
 }
@@ -833,7 +846,16 @@ pub(super) async fn send_occurrence(
     text: &str,
     occurrence: &str,
 ) -> AppResult<&'static str> {
-    send_update_impl(state, row, origin, conversation, text, Some(occurrence)).await
+    send_update_impl(
+        state,
+        row,
+        origin,
+        conversation,
+        text,
+        Some(occurrence),
+        None,
+    )
+    .await
 }
 
 async fn send_update_impl(
@@ -843,6 +865,7 @@ async fn send_update_impl(
     conversation: &str,
     text: &str,
     occurrence: Option<&str>,
+    saved_turn: Option<&str>,
 ) -> AppResult<&'static str> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
@@ -929,6 +952,11 @@ async fn send_update_impl(
                 metadata: None,
             }]
         };
+        use crate::services::{channel_text_preparation as preparation,channel_text_delivery as journal};
+        let saved_plan = if let Some(turn) = saved_turn {
+            let key = crate::services::channel_supplemental_delivery::saved_key(turn,origin);
+            Some(journal::begin(&state.db,&key,&row.user_id,&event.id,&crate::services::channel_reply_plan::fingerprint(&reply_parts),reply_parts.len()).await?)
+        } else {None};
         let mut outcome = "reply_confirmed";
         for (index, part) in reply_parts.into_iter().enumerate() {
             let mut part_trace = crate::turn_trace::Operation::part(
@@ -941,15 +969,24 @@ async fn send_update_impl(
                 body["thread_reply"] = json!(true);
             }
             let idempotency = occurrence.map(|id| format!("{id}:{index}"));
-            let result = crate::turn_trace::scope(part_trace.context(), gateway_call(
+            let path = format!("/events/{}/replies", urlencode(reference));
+            let send = crate::turn_trace::scope(part_trace.context(), gateway_call(
                 state,
                 reqwest::Method::POST,
-                &format!("/events/{}/replies", urlencode(reference)),
+                &path,
                 &key,
                 Some(&body),
                 idempotency.as_deref(),
-            ))
-            .await;
+            ));
+            let (result,attempt) = if let Some(plan) = &saved_plan {
+                match preparation::claim(&state.db,plan,index).await? {
+                    journal::PartClaim::Sent(_) => continue,
+                    journal::PartClaim::Send(attempt) => {
+                        let result = preparation::with_part(&state.db,plan,index,&attempt,async {crate::services::channel_platform::revalidate_post_effect().await?;preparation::effect().await?;send.await}).await;
+                        (result,Some(attempt))
+                    }
+                }
+            } else {(send.await,None)};
             // Transport success alone is not a platform send receipt. Do not retry
             // an unknown outcome or report a rejected send as successful.
             outcome = match &result {
@@ -977,6 +1014,9 @@ async fn send_update_impl(
             );
             if outcome != "reply_confirmed" {
                 break;
+            }
+            if let (Some(plan),Some(attempt)) = (&saved_plan,attempt) {
+                journal::finish(&state.db,plan,index,&attempt,crate::models::channel_text_delivery::TextPartState::Sent,None,None).await?;
             }
         }
         state.db.collection::<NyxbotChannel>(CHANNELS).update_one(

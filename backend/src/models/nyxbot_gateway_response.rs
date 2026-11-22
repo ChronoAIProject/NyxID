@@ -18,6 +18,8 @@ pub struct GatewayResponse {
     /// Internal assistant conversation, bound in the same transaction as its turn.
     pub conversation_id: Option<String>,
     pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_delivery: Option<String>,
     pub revision: i64,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub payload_ciphertext: Vec<u8>,

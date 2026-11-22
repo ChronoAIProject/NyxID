@@ -1824,7 +1824,7 @@ async fn org_member_group_dm_group(linking_admin: bool) {
             let health = crate::services::channel_bot_health::recommend(
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true),
             );
-            assert_eq!(health.action, "none");
+            assert_eq!(health.action, "reconnect");
             assert_eq!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
                 .count_documents(doc! {"event_type":"nyxbot_thread_reply_failed","event_data.source_message_id":&id,"event_data.reason":"thread_target_rejected"}).await.unwrap(),1);
             f.state
@@ -2534,7 +2534,7 @@ async fn thread_health_records_closed_failures_once_excludes_transients_and_clea
                 &crate::services::channel_bot_health::HealthFacts::for_bot(&bot, Utc::now(), true)
             )
             .action,
-            "none"
+            "reconnect"
         );
         channel_bot_service::record_outbound_outcome(&f.state.db, &f.row.channel_bot_id, None)
             .await;

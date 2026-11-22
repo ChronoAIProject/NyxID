@@ -743,7 +743,7 @@ pub async fn create_approval_request(
             return Ok(existing);
         }
 
-        let now = Utc::now();
+        let now = approval_now();
         let expires_at = operation
             .connected_deadline
             .unwrap_or_else(|| now + Duration::seconds(i64::from(timeout_secs)));
@@ -824,7 +824,7 @@ pub async fn create_approval_request(
         )
     };
     let updated = if let Some(deadline) = operation.connected_deadline {
-        let remaining = (deadline - Utc::now()).to_std().unwrap_or_default();
+        let remaining = (deadline - approval_now()).to_std().unwrap_or_default();
         if remaining.is_zero() {
             None
         } else {
@@ -1235,7 +1235,7 @@ pub(crate) async fn process_decision_with_access(
     } else {
         None
     };
-    let now = Utc::now();
+    let now = approval_now();
     let mut update = doc! {
         "status": if approved { "approved" } else { "rejected" },
         "decided_at": bson::DateTime::from_chrono(now),
@@ -1283,7 +1283,7 @@ pub(crate) async fn process_decision_with_access(
         DecisionOutcome::Unmatched => {
             let existing = get_request(db, &current.id).await?;
             if existing.status == "expired"
-                || (existing.status == "pending" && existing.expires_at <= Utc::now())
+                || (existing.status == "pending" && existing.expires_at <= approval_now())
             {
                 return Err(AppError::Forbidden("Approval request expired".into()));
             }
@@ -1398,7 +1398,10 @@ impl DecisionMutation {
             None
         };
         let requests = db.collection::<ApprovalRequest>(REQUESTS);
-        filter.insert("expires_at", doc! {"$gt":bson::DateTime::now()});
+        filter.insert(
+            "expires_at",
+            doc! {"$gt":bson::DateTime::from_chrono(approval_now())},
+        );
         let Some(updated) = requests
             .find_one_and_update(filter, doc! {"$set":self.update.clone()})
             .return_document(ReturnDocument::After)
@@ -1822,6 +1825,32 @@ tokio::task_local! {
     pub(crate) static CALLBACK_INGRESS: chrono::DateTime<Utc>;
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static APPROVAL_CLOCK: tokio::sync::watch::Receiver<chrono::DateTime<Utc>>;
+}
+
+fn approval_now() -> chrono::DateTime<Utc> {
+    #[cfg(test)]
+    if let Ok(now) = APPROVAL_CLOCK.try_with(|clock| *clock.borrow()) {
+        return now;
+    }
+    Utc::now()
+}
+
+async fn wait_until_expiry(expires_at: chrono::DateTime<Utc>) {
+    #[cfg(test)]
+    if let Ok(mut clock) = APPROVAL_CLOCK.try_with(Clone::clone) {
+        clock
+            .wait_for(|now| *now >= expires_at)
+            .await
+            .expect("approval fixture owns the clock");
+        return;
+    }
+    let remaining = (expires_at - Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining).await;
+}
+
 const NYXBOT_CONNECTED_WRITE_SECS: u32 = 80;
 
 /// A per-request HTTP/MCP card has exactly one caller. Arm before insertion:
@@ -1906,13 +1935,10 @@ impl ConnectedWait {
         cancellation: &tokio_util::sync::CancellationToken,
         timeout_secs: u32,
     ) -> AppResult<()> {
-        let remaining = (request.expires_at - Utc::now())
-            .to_std()
-            .unwrap_or_default();
         let result = tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(AppError::ClientDisconnected),
-            () = tokio::time::sleep(remaining) => Err(AppError::Forbidden("Approval request expired".into())),
+            () = wait_until_expiry(request.expires_at) => Err(AppError::Forbidden("Approval request expired".into())),
             result = wait_for_decision(&self.db, &request.id, timeout_secs) => result,
         };
         if result.is_err()
@@ -1969,7 +1995,7 @@ pub async fn wait_for_decision(
     timeout_secs: u32,
 ) -> AppResult<()> {
     let poll_interval = std::time::Duration::from_millis(1000);
-    let deadline = Utc::now() + Duration::seconds(i64::from(timeout_secs));
+    let deadline = approval_now() + Duration::seconds(i64::from(timeout_secs));
 
     loop {
         tokio::time::sleep(poll_interval).await;
@@ -1988,10 +2014,10 @@ pub async fn wait_for_decision(
                 return Err(AppError::Forbidden("Approval request expired".to_string()));
             }
             "pending" => {
-                if Utc::now() >= request.expires_at {
+                if approval_now() >= request.expires_at {
                     return Err(AppError::Forbidden("Approval request expired".into()));
                 }
-                if Utc::now() >= deadline {
+                if approval_now() >= deadline {
                     return Err(AppError::Forbidden(
                         "Approval request timed out".to_string(),
                     ));

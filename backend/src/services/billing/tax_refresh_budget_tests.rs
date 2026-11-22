@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_utils::with_manual_clock;
 use std::time::Duration as StdDuration;
 
 #[derive(Clone)]
@@ -39,19 +40,6 @@ pub(super) async fn on_tax_read(customer: &str) {
         }
         Err(_) => {}
     }
-}
-
-// MongoDB uses real sockets. Suppress Tokio's automatic clock jumps while I/O
-// is pending so only the fake provider advances the batch and provider timers.
-async fn with_manual_clock<T>(future: impl Future<Output = T>) -> T {
-    let (release, hold) = tokio::sync::oneshot::channel::<()>();
-    let guard = tokio::task::spawn_blocking(move || hold.blocking_recv());
-    tokio::time::pause();
-    let result = future.await;
-    tokio::time::resume();
-    release.send(()).unwrap();
-    guard.await.unwrap().unwrap();
-    result
 }
 
 #[tokio::test]

@@ -675,6 +675,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/social/mobile-code/redeem",
             post(handlers::social_auth::redeem_mobile_code),
         )
+        .route(
+            "/social/continue",
+            get(handlers::social_auth::continue_signup),
+        )
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
             "/social/apple/callback",

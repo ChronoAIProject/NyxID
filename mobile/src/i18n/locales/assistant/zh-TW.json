@@ -977,7 +977,7 @@
   "{{agent}} {{status}}": "{{agent}} {{status}}",
   "{{by}} allowed": "{{by}} 已允許",
   "{{by}} denied": "{{by}} 已拒絕",
-  "{{continuationInstruction}} Then tell the user in one or two plain sentences what you did and the result.": "{{continuationInstruction}} 然後用一兩個簡單的句子告訴使用者你做了什麼以及結果。",
+  "{{continuationInstruction}} Then continue the original task and tell the user when it is finished or when you need their input.": "{{continuationInstruction}} 接著繼續完成原任務，在任務完成或需要使用者提供資訊時告知使用者。",
   "{{count}} action": "{{count}} 個操作",
   "{{count}} actions": "{{count}} 個操作",
   "{{count}} allowed by Full access": "完全存取權限允許 {{count}}",

@@ -16,6 +16,8 @@ use tokio::sync::Mutex;
 
 #[path = "nyxbot_fence_tests.rs"]
 mod fence_tests;
+#[path = "nyxbot_private_handoff_tests.rs"]
+mod private_handoff_tests;
 
 #[path = "nyxbot_provider_refusal_tests.rs"]
 mod provider_refusal_tests;
@@ -188,6 +190,14 @@ async fn setup_with_database(
     db: mongodb::Database,
     output: Value,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_with_engine(db, output, None).await
+}
+
+async fn setup_with_engine(
+    db: mongodb::Database,
+    output: Value,
+    engine_router: Option<Router>,
+) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     Box::pin(engine::ensure_indexes(&db)).await.unwrap();
     db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
         .create_index(
@@ -283,6 +293,7 @@ async fn setup_with_database(
         post(|| async { Json(json!({"id":"fixture-model-response","output":[]})) }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = engine_router.unwrap_or(upstream);
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, upstream).await.unwrap();
@@ -2991,12 +3002,14 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .unwrap();
     assert!(queued.pending_events.is_empty());
     // The owner's own message while busy is queued for the group...
+    let long_message = format!("@helper_bot {}验收完成", "文🦉e\u{301}".repeat(1496));
+    assert_eq!(long_message.chars().count(), 6000);
     let owner_queued = body_text(
         respond(
             &state,
             &agent_key,
             &group_event(
-                "@helper_bot and the budget?",
+                &long_message,
                 "7",
                 "Alice",
                 "evt-g2c",
@@ -3069,6 +3082,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     assert_eq!(conversation.pending_events.len(), 1);
     // Let the app turn and the woken group turn finish.
     wait_for_calls(&calls, 4).await;
+    assert!(calls.lock().await.iter().any(|call| {
+        call["input"]
+            .as_str()
+            .is_some_and(|input| input.contains(&long_message))
+    }));
     settle(&state, &thread.id).await;
     // The chat is listed with its settings; only the owner may talk there
     // once they say so.
@@ -5829,6 +5847,7 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
             .is_empty()
     );
     let sender = |id: &'static str| Sender {
+        truncated_original_bytes: None,
         original_kind: None,
         media: Vec::new(),
         original_message: true,

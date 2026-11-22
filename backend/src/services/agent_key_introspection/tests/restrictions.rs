@@ -270,6 +270,7 @@ async fn private_auto_connection_rechecks_consent_expiry_and_client_status() {
         scopes: "openid".into(),
         revision: None,
         write_version: None,
+        reviewed_redirect_hash: None,
         issuance_fence: None,
         allow_all_services: false,
         allowed_service_ids: None,

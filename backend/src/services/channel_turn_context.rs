@@ -20,6 +20,37 @@ pub(crate) fn display(value: &str) -> String {
     value.chars().take(80).collect()
 }
 
+/// Keep the normalized body intact up to the character budget, including the
+/// truncation marker when a projection (including an earlier one) lost text.
+pub(crate) fn bounded_message(
+    text: &str,
+    limit: usize,
+    original_bytes: usize,
+    already_truncated: bool,
+) -> (String, crate::models::channel_message::TextCompleteness) {
+    let truncated = already_truncated || text.chars().nth(limit).is_some();
+    let completeness = crate::models::channel_message::TextCompleteness {
+        original_bytes,
+        truncated,
+    };
+    if !truncated {
+        return (text.to_owned(), completeness);
+    }
+    // Carry the existing Lark/Feishu rich-post cap marker through a second cut.
+    let (text, post_marker) = match text.strip_suffix("[post truncated]") {
+        Some(body) => (body.trim_end(), "\n[post truncated]"),
+        None => (text, ""),
+    };
+    let marker =
+        format!("{post_marker}\n[message truncated, original {original_bytes} UTF-8 bytes]");
+    let mut value: String = text
+        .chars()
+        .take(limit.saturating_sub(marker.len()))
+        .collect();
+    value.push_str(&marker);
+    (value, completeness)
+}
+
 async fn identity(
     db: &Database,
     channel: &NyxbotChannel,
@@ -131,6 +162,9 @@ async fn source_note(
             .ok_or_else(|| AppError::Forbidden("Channel source unavailable".into()))?
     };
     let mut context = identity(db, &channel, source).await?;
+    if let Some(completeness) = source.text_completeness {
+        context["text_completeness"] = json!(completeness);
+    }
     context["source_event_id"] = json!(source.source_event_id);
     if let Some(event) = event {
         context["event_id"] = json!(event);
@@ -185,4 +219,34 @@ pub(crate) async fn turn_notes(db: &Database, row: &AssistantConversation) -> Ap
         }
     }
     Ok(notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_text_projection_preserves_exact_boundary_and_marks_nested_truncation() {
+        let limit = crate::services::assistant_nyxagent::MAX_MESSAGE_CHARS;
+        let text = "🦉".repeat(limit);
+        let (complete, info) = bounded_message(&text, limit, text.len(), false);
+        assert!(complete == text);
+        assert!(!info.truncated);
+
+        let over = format!("{text}完");
+        let (partial, info) = bounded_message(&over, limit, over.len(), false);
+        assert_eq!(partial.chars().count(), limit);
+        assert!(partial.ends_with(&format!(
+            "[message truncated, original {} UTF-8 bytes]",
+            over.len()
+        )));
+        assert!(info.truncated);
+        assert_eq!(info.original_bytes, over.len());
+
+        let (partial, info) = bounded_message("A\n[post truncated]", limit, 90_000, true);
+        assert!(partial.contains("[post truncated]"));
+        assert!(partial.contains("90000 UTF-8 bytes"));
+        assert!(info.truncated);
+        assert_eq!(info.original_bytes, 90_000);
+    }
 }

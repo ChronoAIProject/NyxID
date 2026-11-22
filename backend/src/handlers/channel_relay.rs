@@ -174,6 +174,8 @@ pub struct UpdateReplyResponse {
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_completeness: Option<crate::models::channel_message::TextCompleteness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery: Option<DeliveryItem>,
     pub attachments: Vec<MessageAttachmentItem>,
     pub id: String,
@@ -402,6 +404,7 @@ pub(crate) fn message_to_item(
     base_url: &str,
 ) -> MessageItem {
     MessageItem {
+        text_completeness: msg.text_completeness,
         delivery: None,
         attachments: msg
             .attachments
@@ -1945,11 +1948,14 @@ async fn deliver_reply(
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: platform_secrets.as_ref(),
     };
-    let send_result = if let Some(parts) = crate::services::channel_reply_plan::ordinary(
+    let parts = crate::services::channel_reply_plan::ordinary(
         &outbound,
         adapter.platform_id(),
         platform_conversation_id,
-    )? {
+    )?;
+    let send_result = if let Ok(key) = crate::services::channel_supplemental_delivery::SAVED_RELAY_KEY.try_with(Clone::clone) {
+        Box::pin(crate::services::channel_reply_delivery::send_saved_parts(&key,&state.db,&state.http_client,adapter,&bot,&original,&attributed_api_key_id,platform_conversation_id,&credentials,parts.unwrap_or_else(||vec![outbound.clone()]))).await.map(|(stored,outcome)| {stored_parts=Some(stored);outcome})
+    } else if let Some(parts) = parts {
         Box::pin(crate::services::channel_reply_delivery::send_parts(
             &state.db,
             &state.http_client,
@@ -4462,6 +4468,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -4498,6 +4505,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5003,6 +5011,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5620,6 +5629,7 @@ mod tests {
             .await
             .unwrap();
         let colliding = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
@@ -5918,6 +5928,7 @@ mod tests {
         }
         // Another chat's reply shares the platform message ID, not the bucket.
         let sibling = ChannelMessage {
+            text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,

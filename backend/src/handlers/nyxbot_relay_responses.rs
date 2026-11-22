@@ -94,6 +94,7 @@ pub(super) async fn prepare(
         request_hash: sha256_hex(request.to_string()),
         conversation_id: None,
         terminal: false,
+        answer_delivery: None,
         revision: 0,
         payload_ciphertext: payload.seal(&state.encryption_keys).await?,
         created_at: event.created_at,

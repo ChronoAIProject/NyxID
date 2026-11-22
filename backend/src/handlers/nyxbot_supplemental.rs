@@ -22,6 +22,8 @@ enum Outcome {
 }
 
 pub struct Decision {
+    pub(super) saved_result: bool,
+    pub(crate) source: Option<sources::ResultSource>,
     pub purpose: Purpose,
     pub anchor: Anchor,
     pub event: Option<String>,
@@ -33,6 +35,8 @@ pub struct Decision {
 impl Decision {
     pub fn new(purpose: Purpose) -> Self {
         Self {
+            saved_result: false,
+            source: None,
             purpose,
             anchor: Anchor::None,
             event: None,
@@ -114,7 +118,13 @@ pub async fn event_anchor(
 ) -> AppResult<Option<String>> {
     decision.event = Some(event.id.clone());
     decision.anchor = Anchor::EventSource;
-    let Some(id) = &event.relay_message_id else {
+    let Some(id) = event.relay_message_id.as_ref().or_else(|| {
+        event
+            .delivery
+            .as_ref()
+            .filter(|delivery| decision.saved_result && delivery.transport == "direct")
+            .map(|_| &event.event_id)
+    }) else {
         decision.skip(Reason::MissingAnchor);
         return Ok(None);
     };
@@ -173,7 +183,8 @@ pub async fn relay(
         decision.skip(Reason::AuthorityRefused);
         return Ok(());
     }
-    let id = match sources::source(&state.db, row, origin).await? {
+    let id = match sources::source_for(&state.db, &row.id, origin, decision.source.as_ref()).await?
+    {
         sources::Source::Missing => {
             decision.skip(Reason::MissingAnchor);
             return Ok(());
@@ -226,55 +237,86 @@ pub async fn relay(
     if decision.purpose.result() {
         // Complete local authority and credential preparation before the claim;
         // the ordinary adapter still revalidates immediately before sending.
-        use crate::handlers::channel_relay as relay;
-        let auth = route_key_auth(state, channel).await?;
-        let body = relay::AsyncReplyRequest {
-            message_id: id.clone(),
-            thread_reply: false,
-            reply: relay::AsyncReplyBody {
-                text: Some(text.to_owned()),
-                metadata: crate::services::channel_reply_plan::assistant_metadata(
-                    &channel.platform,
-                ),
-                attachments: Vec::new(),
-            },
-        };
-        let context =
-            relay::resolve_reply_request_context(state, &HeaderMap::new(), Some(&auth), &body)
-                .await?;
-        let adapter = relay::reply_adapter(state, &context)?;
-        let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
-        crate::services::channel_credentials::resolve_bot_token(
-            &state.db,
-            &state.encryption_keys,
-            adapter.as_ref(),
-            &bot,
-        )
-        .await?;
-        prepare_result_text(
-            text,
-            &channel.platform,
-            thread.platform_chat_id.as_deref().unwrap_or_default(),
-        )?;
-        if let Err(reason) = sources::claim_result(
-            &state.db,
-            &row.user_id,
-            &row.id,
-            row.active_turn.as_ref().map(|t| t.turn_id.as_str()),
-            origin,
-        )
-        .await?
+        prepare_local_result(state, channel, thread, &id, text).await?;
+        if !decision.saved_result
+            && let Err(reason) = sources::claim_result(
+                &state.db,
+                &row.user_id,
+                &row.id,
+                row.active_turn.as_ref().map(|turn| turn.turn_id.as_str()),
+                origin,
+            )
+            .await?
         {
             decision.skip(reason);
             return Ok(());
         }
     }
     decision.dispatch(Egress::LocalRelay);
-    crate::services::channel_reply_notice::supplemental(Box::pin(direct_reply(
-        state, channel, &id, text, None,
+    crate::services::channel_reply_notice::supplemental(Box::pin(send_local(
+        state, channel, &id, origin, text, decision,
     )))
     .await?;
     decision.outcome("confirmed");
+    Ok(())
+}
+
+pub(super) async fn send_local(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    id: &str,
+    origin: &ChannelOrigin,
+    text: &str,
+    decision: &Decision,
+) -> AppResult<()> {
+    let send = direct_reply(state, channel, id, text, None);
+    if decision.saved_result {
+        let turn = decision
+            .turn
+            .as_deref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        sources::SAVED_RELAY_KEY
+            .scope(sources::saved_key(turn, origin), send)
+            .await
+    } else {
+        send.await
+    }
+}
+
+pub(super) async fn prepare_local_result(
+    state: &AppState,
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
+    id: &str,
+    text: &str,
+) -> AppResult<()> {
+    use crate::handlers::channel_relay as relay;
+    let auth = route_key_auth(state, channel).await?;
+    let body = relay::AsyncReplyRequest {
+        message_id: id.to_owned(),
+        thread_reply: false,
+        reply: relay::AsyncReplyBody {
+            text: Some(text.to_owned()),
+            metadata: crate::services::channel_reply_plan::assistant_metadata(&channel.platform),
+            attachments: Vec::new(),
+        },
+    };
+    let context =
+        relay::resolve_reply_request_context(state, &HeaderMap::new(), Some(&auth), &body).await?;
+    let adapter = relay::reply_adapter(state, &context)?;
+    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+    crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
+    prepare_result_text(
+        text,
+        &channel.platform,
+        thread.platform_chat_id.as_deref().unwrap_or_default(),
+    )?;
     Ok(())
 }
 
@@ -293,8 +335,15 @@ pub async fn native(
     }
     decision.anchor = Anchor::EventSource;
     decision.dispatch(Egress::GatewayEvent);
-    let outcome =
-        native_responses::send_supplemental(state, channel, origin, conversation, text).await?;
+    let outcome = native_responses::send_supplemental(
+        state,
+        channel,
+        origin,
+        conversation,
+        text,
+        decision.turn.as_deref().filter(|_| decision.saved_result),
+    )
+    .await?;
     decision.outcome(outcome);
     Ok(())
 }

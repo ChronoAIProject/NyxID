@@ -171,6 +171,10 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    /// One entry per represented channel source, keyed by its accepted event ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub channel_text_completeness:
+        std::collections::BTreeMap<String, super::channel_message::TextCompleteness>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continued_after_restart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

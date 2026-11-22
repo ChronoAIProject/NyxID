@@ -1493,6 +1493,9 @@ async fn channel_media_relay_gateway_first_photo_home_guest_and_caption_never_de
             let message=messages.find_one(doc! {"conversation_id":&current.id,"turn_id":&written.turn_id,"role":{"$ne":"assistant"}}).await.unwrap().unwrap();
             let captured = calls.lock().await.last().unwrap().clone();
             assert!(current.active_turn.is_none());
+            let input = captured_text(&captured);
+            let (_, caption) = input.rsplit_once("]\n\n").unwrap();
+            assert_eq!(caption, text, "{transport}/{sender}");
             if sender == "guest" {
                 assert!(current.guest_turn);
                 assert_ne!(Some(&current.id), owner_conversation.as_ref());
@@ -1695,6 +1698,8 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         body["input"][0]["content"][0]["text"] = json!("OLD RENDERING must disappear");
         let text = if kind == "capped" {
             format!("{}\n[post truncated]", "Dinner ".repeat(5000))
+        } else if kind == "all_failed" {
+            String::new()
         } else {
             "Dinner".into()
         };
@@ -1706,10 +1711,12 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
                 .await
                 .contains("Here is your answer")
         );
-        let input = calls.lock().await.last().unwrap().to_string();
+        let captured = calls.lock().await.last().unwrap().clone();
+        let input = captured.to_string();
         assert!(!input.contains("OLD RENDERING"));
         if kind == "all_failed" {
             assert!(input.contains(crate::services::assistant_channel_media::FAILED_NOTE));
+            assert!(captured_text(&captured).trim_end().ends_with(']'));
         } else {
             assert!(input.contains("too large"));
             assert!(!input.contains("too_large"));

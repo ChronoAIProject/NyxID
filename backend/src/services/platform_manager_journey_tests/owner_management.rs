@@ -141,6 +141,7 @@ impl ManagementEgress {
             user_id,
             turn,
             platform_origin: Some(origin),
+            ..
         } = context
         else {
             return Err(AppError::Internal(
