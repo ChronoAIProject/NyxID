@@ -5474,7 +5474,7 @@ async fn specialist_drafts_and_owner_approval_publishes_its_own_skill() {
     assert!(event.text.contains(&format!("agent_id {}", agent.id)));
     assert!(!event.text.contains(['"', '\n']));
     assert!(event.text.contains("1.0"));
-    assert!(event.text.contains(acks::DECISION_NARRATION));
+    assert!(event.text.contains(acks::allowed_card_continuation()));
 
     f.state.db.drop().await.unwrap();
 }

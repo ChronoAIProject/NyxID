@@ -1,3 +1,4 @@
+import allowedCardContinuation from "../../../../shared/allowed-card-continuation.json";
 import { translateApp } from "../../i18n/appTranslation";
 import type {
   AssistantAcknowledgement,
@@ -115,10 +116,9 @@ export function needsClientContinuation(
 
 /** The turn that resumes the assistant after an allowed card; matches the web. */
 export function continuationText(row: AssistantAcknowledgement): string {
-  return translateApp(
-    "{{continuationInstruction}} Then tell the user in one or two plain sentences what you did and the result.",
-    { continuationInstruction: continuationInstruction(row)},
-  );
+  return translateApp(`{{continuationInstruction}} ${allowedCardContinuation}`, {
+    continuationInstruction: continuationInstruction(row),
+  });
 }
 
 function continuationInstruction(row: AssistantAcknowledgement): string {

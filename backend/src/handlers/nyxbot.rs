@@ -4287,6 +4287,12 @@ async fn start_chat_turn(
         } else {
             " With this message the owner declined the pending action; do not retry it."
         });
+        if allow {
+            note.push(' ');
+            note.push_str(
+                crate::services::assistant_acknowledgement_service::allowed_card_continuation(),
+            );
+        }
     }
     let title = if shared {
         None

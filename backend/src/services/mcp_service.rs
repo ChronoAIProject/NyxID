@@ -4042,7 +4042,12 @@ impl AutomaticReceipt {
     }
 }
 
+type ServiceApprovalWait =
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync>;
+
 pub struct PreparedProxyCall {
+    /// Create the connected approval only after this exact action passes assistant admission.
+    service_approval: Option<ServiceApprovalWait>,
     lark_message: Option<super::lark_im_tool::MessageMode>,
     managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
@@ -4065,6 +4070,16 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn defer_service_approval(
+        &mut self,
+        wait: impl FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.service_approval = Some(Box::new(wait));
+    }
+
     pub(crate) async fn admit_execution_permission(
         &self,
         state: &crate::AppState,
@@ -4585,6 +4600,7 @@ pub(crate) fn http_carries_method_override(
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
+        service_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -4717,6 +4733,7 @@ fn prepare_proxy_tool_call_inner(
         managed_base: None,
         attachment_binding: None,
         resource_source: None,
+        service_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -5883,7 +5900,7 @@ impl ToolResponse {
 
     /// Only the server's execution gate can construct this control response.
     /// Provider bodies are always downstream content, even if they resemble it.
-    fn policy_refusal(refusal: serde_json::Value) -> Self {
+    fn policy_refusal(refusal: impl std::fmt::Display) -> Self {
         Self {
             resources: None,
             concurrency: None,
@@ -6250,12 +6267,18 @@ pub fn execute_tool_resolved<'a>(
             proxy_service::Redirects::SameOrigin
         };
         let managed = super::telnyx_platform_service::contract(&target.service).is_some();
-        let lease = super::service_concurrency_service::acquire(
-            db,
-            &target.service,
-            exec_ctx.actor_user_id.unwrap_or(user_id),
-        )
-        .await?;
+        // A connected human decision can outlive a service's capacity budget.
+        // Acquire its slot only once the owner has decided.
+        let lease = if prepared.service_approval.is_some() {
+            None
+        } else {
+            super::service_concurrency_service::acquire(
+                db,
+                &target.service,
+                exec_ctx.actor_user_id.unwrap_or(user_id),
+            )
+            .await?
+        };
         let im_kind = super::lark_im_tool::kind(endpoint);
         let message_mode = prepared.lark_message.clone();
         let execution = execute_tool_resolved_boxed(
@@ -6289,16 +6312,7 @@ pub fn execute_tool_resolved<'a>(
         if managed {
             return execution.await;
         }
-        let mut outcome = match lease {
-            Some(lease) => {
-                let mut outcome = lease.run(execution).await?;
-                if let McpToolExecutionOutcome::Response(response) = &mut outcome {
-                    response.concurrency = Some(lease);
-                }
-                outcome
-            }
-            None => execution.await?,
-        };
+        let mut outcome = hold_tool_capacity(lease, execution).await?;
         if let (Some(kind), McpToolExecutionOutcome::Response(response)) = (im_kind, &mut outcome)
             && matches!(response.origin, ToolResponseOrigin::Downstream)
         {
@@ -6335,6 +6349,20 @@ pub fn execute_tool_resolved<'a>(
         }
         Ok(outcome)
     })
+}
+
+async fn hold_tool_capacity(
+    lease: Option<super::service_concurrency_service::Lease>,
+    execution: futures::future::BoxFuture<'_, AppResult<McpToolExecutionOutcome>>,
+) -> AppResult<McpToolExecutionOutcome> {
+    let Some(lease) = lease else {
+        return execution.await;
+    };
+    let mut outcome = lease.run(execution).await?;
+    if let McpToolExecutionOutcome::Response(response) = &mut outcome {
+        response.concurrency = Some(lease);
+    }
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6401,6 +6429,16 @@ where
     Box::pin(make())
 }
 
+fn forward_with_capacity<'a, F>(
+    lease: Option<super::service_concurrency_service::Lease>,
+    make: impl FnOnce() -> F,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>>
+where
+    F: std::future::Future<Output = AppResult<McpToolExecutionOutcome>> + Send + 'a,
+{
+    Box::pin(hold_tool_capacity(lease, box_mcp_forwarding(make)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_resolved_inner(
     redirects: proxy_service::Redirects,
@@ -6412,7 +6450,7 @@ async fn execute_tool_resolved_inner(
     billing_principal_user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
-    prepared: PreparedProxyCall,
+    mut prepared: PreparedProxyCall,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
     connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
@@ -6545,6 +6583,8 @@ async fn execute_tool_resolved_inner(
     };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
+    let deferred = prepared.service_approval.take();
+    let approval_deferred = deferred.is_some();
     if let Some(chat) = assistant_chat.as_ref()
         && let McpToolSource::UserManaged {
             user_service_id,
@@ -6674,6 +6714,13 @@ async fn execute_tool_resolved_inner(
                 ToolResponse::policy_refusal(refusal),
             ));
         }
+        if let Some(wait) = deferred
+            && let Err(message) = wait().await
+        {
+            return Ok(McpToolExecutionOutcome::Response(
+                ToolResponse::policy_refusal(message),
+            ));
+        }
         if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
                 admission.bind_async_submission(db, watch, &target).await?;
@@ -6693,6 +6740,10 @@ async fn execute_tool_resolved_inner(
                 .await?;
             assistant_admission = Some(admission);
         }
+    } else if approval_deferred {
+        return Err(AppError::Forbidden(
+            "Assistant service approval requires a chat connection".into(),
+        ));
     }
 
     target.require_credential_materialized()?;
@@ -6706,7 +6757,20 @@ async fn execute_tool_resolved_inner(
         &prepared.server_owned_headers,
     ))
     .await?;
-    box_mcp_forwarding(move || async move {
+    let deferred_lease = if approval_deferred {
+        super::service_concurrency_service::acquire(
+            db,
+            &target.service,
+            exec_ctx.actor_user_id.unwrap_or(user_id),
+        )
+        .await?
+    } else {
+        None
+    };
+    let managed = super::telnyx_platform_service::contract(&target.service).is_some();
+    let service_lease = service_lease.or_else(|| deferred_lease.clone());
+    let capacity = deferred_lease.filter(|_| !managed);
+    forward_with_capacity(capacity, move || async move {
         if let Some(permit) = &target.execution_permission {
             let mut headers = axum::http::HeaderMap::new();
             for (name, value) in &prepared.parameter_headers {
@@ -6719,6 +6783,7 @@ async fn execute_tool_resolved_inner(
             permit.validate_prepared_headers(&headers)?;
         }
         let PreparedProxyCall {
+            service_approval: _,
             lark_message: _,
             managed_base,
             attachment_binding,
