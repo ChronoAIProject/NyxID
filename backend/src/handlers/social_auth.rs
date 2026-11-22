@@ -1363,30 +1363,35 @@ fn build_success_redirect_url(
     tokens: Option<&token_service::IssuedTokens>,
     signup_has_name: Option<bool>,
 ) -> String {
-    match target {
+    // The release image builds with Rust 1.93, which has no `if let` match guards.
+    if let (
         SocialRedirectTarget::Web {
             frontend_url,
             return_to,
-        } if let Some(has_name) = signup_has_name => {
-            let mode = if has_name { "provider" } else { "empty" };
-            let mut location = format!(
-                "{}/register?confirm_name={mode}",
-                frontend_url.trim_end_matches('/')
-            );
-            if let Some(return_to) = return_to {
-                location.push_str("&return_to=");
-                if return_to.starts_with(&format!("{}/", frontend_url.trim_end_matches('/'))) {
-                    location.push_str(&urlencoding::encode(return_to));
-                } else {
-                    let resume = format!(
-                        "/api/v1/auth/social/continue?return_to={}",
-                        urlencoding::encode(return_to)
-                    );
-                    location.push_str(&urlencoding::encode(&resume));
-                }
+        },
+        Some(has_name),
+    ) = (target, signup_has_name)
+    {
+        let mode = if has_name { "provider" } else { "empty" };
+        let mut location = format!(
+            "{}/register?confirm_name={mode}",
+            frontend_url.trim_end_matches('/')
+        );
+        if let Some(return_to) = return_to {
+            location.push_str("&return_to=");
+            if return_to.starts_with(&format!("{}/", frontend_url.trim_end_matches('/'))) {
+                location.push_str(&urlencoding::encode(return_to));
+            } else {
+                let resume = format!(
+                    "/api/v1/auth/social/continue?return_to={}",
+                    urlencoding::encode(return_to)
+                );
+                location.push_str(&urlencoding::encode(&resume));
             }
-            location
         }
+        return location;
+    }
+    match target {
         SocialRedirectTarget::Web {
             frontend_url,
             return_to,
