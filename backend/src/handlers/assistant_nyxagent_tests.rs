@@ -5022,7 +5022,16 @@ async fn denied_owner_action_queues_plain_narration_without_an_execution_continu
         .unwrap();
     assert!(event.text.contains("Delete node Workstation"));
     assert!(event.text.contains("Do not execute or retry"));
-    assert!(event.text.contains(acknowledgements::DECISION_NARRATION));
+    assert!(
+        event
+            .text
+            .contains("A denied card means that action was not sent")
+    );
+    assert!(
+        !event
+            .text
+            .contains(acknowledgements::allowed_card_continuation())
+    );
     f.state.db.drop().await.unwrap();
 }
 

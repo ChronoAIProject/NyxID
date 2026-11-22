@@ -497,8 +497,10 @@ pub async fn decision_in_session(
     }
     // The decision and continuation commit together, including specialist work.
     let text = format!(
-        "The owner {} the confirmation (acknowledgement_id {}). Continue within existing authority. Never retry a denied action. Report the result.",
-        card.status, card.id,
+        "The owner {} the confirmation (acknowledgement_id {}). Continue within existing authority. Never retry a denied action. {}",
+        card.status,
+        card.id,
+        super::assistant_acknowledgement_service::decision_narration(card.status == "allowed"),
     );
     let mut event = super::assistant_team_service::event("permission_decided", text, None)
         .bound_to(

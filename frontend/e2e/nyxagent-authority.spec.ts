@@ -49,6 +49,9 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/sessions", (route) =>
     route.fulfill({ json: [] }),
   );
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) =>
+    route.fulfill({ json: { sessions: [] } }),
+  );
   await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) =>
     route.fulfill({ json: [] }),
   );
@@ -76,7 +79,7 @@ async function settled(page: import("@playwright/test").Page) {
 }
 
 const CONFIRMED =
-  /^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\. Then tell the user in one or two plain sentences what you did and the result\.$/;
+  /^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\. Then continue the original task and tell the user when it is finished or when you need their input\.$/;
 
 test("every chat runs with Full access: services and account tools need no cards", async ({
   page,

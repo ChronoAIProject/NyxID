@@ -1167,8 +1167,10 @@ pub(crate) async fn continuation(
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
     let text = format!(
-        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. Then tell the user in one or two plain sentences what you did and the result.",
-        card.status, card.id
+        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. {}",
+        card.status,
+        card.id,
+        super::assistant_acknowledgement_service::decision_narration(card.status == "allowed")
     );
     let now = Utc::now();
     let request = enqueue_in_session(

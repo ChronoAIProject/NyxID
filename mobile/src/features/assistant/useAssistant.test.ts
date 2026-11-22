@@ -340,7 +340,7 @@ test("an allowed card resumes the chat as a continuation bound to that card", as
   assert.equal(sent[0].conversationId, A);
   assert.equal(sent[0].acknowledgementId, card);
   assert.match(sent[0].text, /^Confirmed: Create a scheduled automation/);
-  assert.match(sent[0].text, /what you did and the result\.$/);
+  assert.match(sent[0].text, /continue the original task and tell the user when it is finished or when you need their input\.$/);
   h.unmount();
 });
 

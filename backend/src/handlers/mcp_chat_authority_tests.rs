@@ -1534,19 +1534,34 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
         operation_descriptor::SshOperationKind::Exec,
         Some("ls"),
     );
-    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
-        .await
-        .unwrap_err();
+    let refused =
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)), None)
+            .await
+            .unwrap_err();
     assert_eq!(result(refused, true).await["error"], "owner_only");
-    authorize_mcp_operation(&f.state, &auth, target.clone(), &delete, Some(json!(1)))
-        .await
-        .unwrap_or_else(|_| panic!("DELETE"));
+    authorize_mcp_operation(
+        &f.state,
+        &auth,
+        target.clone(),
+        &delete,
+        Some(json!(1)),
+        None,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("DELETE"));
     for method in ["GET", "POST", "PUT", "PATCH"] {
         let operation =
             operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
-        authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
-            .await
-            .unwrap_or_else(|_| panic!("{method}"));
+        authorize_mcp_operation(
+            &f.state,
+            &auth,
+            target.clone(),
+            &operation,
+            Some(json!(1)),
+            None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{method}"));
     }
 }
 
@@ -6193,17 +6208,19 @@ async fn sheets_connection(f: &Fixture, url: &str) -> String {
         .await
         .unwrap();
     }
-    team::set_grants(
-        db,
-        &f.owner,
-        &f.chat.agent_id,
-        team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
-            service_ids: vec![id.clone()],
-            ..Default::default()
-        }),
-    )
-    .await
-    .unwrap();
+    if !f.chat.is_orchestrator() {
+        team::set_grants(
+            db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Add(crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    }
     catalog.id
 }
 
@@ -6264,6 +6281,133 @@ async fn sheets_insert_rows_auto_specialist_executes_append_and_confirms_edits()
     );
     server.abort();
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sheets_put_requires_one_action_card_then_one_service_approval() {
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME};
+    use crate::services::{feature_flag_admin_service as flags, feature_flag_service};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let mut f = Box::pin(orchestrator_fixture("sheets_card_before_service")).await;
+    let db = &f.state.db;
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updatedCells":1})))
+        .mount(&server)
+        .await;
+    sheets_connection(&f, &server.uri()).await;
+    set_access_mode(&f, crate::models::assistant_settings::AccessMode::Nyxmode).await;
+    db.collection::<bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id": &f.owner},
+            doc! {"$unset": {"approval_required": ""}},
+        )
+        .await
+        .unwrap();
+    flags::mutate(
+        db,
+        feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+        flags::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(f.owner.clone()),
+            enabled: Some(true),
+        },
+        &crate::services::audit_service::AuditActor {
+            user_id: f.owner.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    let request = crate::services::assistant_nyxagent::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: Vec::new(),
+        agent_id: None,
+        conversation_id: None,
+        text: "Update the weekly ledger".into(),
+        model: None,
+        access_mode: None,
+    };
+    let mut start = crate::services::assistant_nyxagent::TurnStart::from(&request);
+    start.execution_enrollment = true;
+    f.row = Box::pin(crate::services::assistant_nyxagent::begin_turn(
+        db,
+        &f.owner,
+        start,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().execution_task.is_some());
+    assert!(auth.execution_permission.is_some());
+    let requests = db.collection::<ApprovalRequest>(COLLECTION_NAME);
+    let tool = "sheets__sheets_update_values";
+    let mut args = json!({"spreadsheetId":"sheet","range":"'Weekly Ledger'!A1","valueInputOption":"RAW","body":{"values":[["value"]]}});
+    let next_approval = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(request) = requests.find_one(doc! {"status":"pending"}).await.unwrap() {
+                    return request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("service approval")
+    };
+    let card = tokio::select! {
+        response = call(&f, &auth, tool, args.clone()) => result(response, true).await,
+        _ = next_approval() => panic!("service approval raised before the action card"),
+    };
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert_eq!(requests.count_documents(doc! {}).await.unwrap(), 0);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let id = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(db, &f.owner, &f.row.id, id, true)
+        .await
+        .unwrap();
+    args["acknowledgement_id"] = json!(id);
+    let retry = authenticate(&f).await;
+    let (response, ()) = tokio::join!(direct_call(&f, &retry, tool, args), async {
+        let request = next_approval().await;
+        assert_eq!(
+            request.approval_mode,
+            crate::models::service_approval_config::ApprovalMode::PerRequest
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        approval_service::process_decision(
+            db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &request.id,
+            true,
+            None,
+            None,
+            "web",
+        )
+        .await
+        .unwrap();
+    });
+    assert_eq!(result(response, false).await["updatedCells"], 1);
+    assert_eq!(requests.count_documents(doc! {}).await.unwrap(), 1);
+    let cards = acks::history(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].status, "used");
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method.as_str(), "PUT");
+    assert_eq!(
+        sent[0].body_json::<Value>().unwrap(),
+        json!({"values":[["value"]]})
+    );
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

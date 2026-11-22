@@ -3906,7 +3906,14 @@ fn dispatch_service_tool<'a>(
         };
         let operation = prepared.operation_descriptor();
         match box_tool_future(|| {
-            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
+            authorize_mcp_tool_operation(
+                state,
+                auth,
+                service,
+                &operation,
+                request.id.clone(),
+                Some(&mut prepared),
+            )
         })
         .await
         {
@@ -4293,6 +4300,7 @@ async fn authorize_mcp_tool_operation(
     service: &mcp_service::McpToolService,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    prepared: Option<&mut mcp_service::PreparedProxyCall>,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     let target = crate::services::mcp_approval::approval_target_for_tool(
         &state.db,
@@ -4308,7 +4316,15 @@ async fn authorize_mcp_tool_operation(
             true,
         )
     })?;
-    authorize_mcp_operation(state, auth, target, operation, request_id).await
+    authorize_mcp_operation(
+        state,
+        auth,
+        target,
+        operation,
+        request_id,
+        prepared.filter(|_| auth.chat.is_some() && service.source.is_user_service()),
+    )
+    .await
 }
 
 #[allow(clippy::result_large_err)]
@@ -4318,6 +4334,7 @@ async fn authorize_mcp_operation(
     target: crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    prepared: Option<&mut mcp_service::PreparedProxyCall>,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     // A shell can do anything: SSH stays the owner's. Service calls were
     // checked against the owner's guest access before this point.
@@ -4378,35 +4395,44 @@ async fn authorize_mcp_operation(
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
+    if let Some(prepared) = prepared {
+        let state = state.clone();
+        let auth = auth.clone();
+        let operation = operation.clone();
+        prepared.defer_service_approval(move || {
+            Box::pin(async move {
+                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending).await
+            })
+        });
+    } else {
+        wait_for_mcp_approval(state, auth, &target, operation, &pending)
+            .await
+            .map_err(|message| tool_result(request_id, &message, true))?;
+    }
+    Ok(None)
+}
+
+async fn wait_for_mcp_approval(
+    state: &AppState,
+    auth: &McpAuthContext,
+    target: &crate::services::mcp_approval::McpApprovalTarget,
+    operation: &operation_descriptor::OperationDescriptor,
+    pending: &approval_service::PendingApproval,
+) -> Result<(), String> {
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
-        &approval_owner_user_id,
-        &pending,
+        &auth.effective_approval_owner_user_id(),
+        pending,
     )
     .await
-    .map_err(|e| {
-        tool_result(
-            request_id.clone(),
-            &format!("Approval check failed: {e}"),
-            true,
-        )
-    })?;
-    let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
-        tool_result(
-            request_id.clone(),
-            "Approval recipient list unexpectedly empty",
-            true,
-        )
-    })?;
+    .map_err(|e| format!("Approval check failed: {e}"))?;
+    let timeout_recipient = notify_user_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| "Approval recipient list unexpectedly empty".to_owned())?;
     let channel = notification_service::get_or_create_channel(&state.db, &timeout_recipient)
         .await
-        .map_err(|e| {
-            tool_result(
-                request_id.clone(),
-                &format!("Approval channel lookup failed: {e}"),
-                true,
-            )
-        })?;
+        .map_err(|e| format!("Approval channel lookup failed: {e}"))?;
     let timeout_secs = channel.approval_timeout_secs;
     let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
@@ -4419,7 +4445,7 @@ async fn authorize_mcp_operation(
         auth.api_key_id.as_deref(),
     )
     .await
-    .map_err(|_| tool_result(request_id.clone(), "Group approval is unavailable", true))?;
+    .map_err(|_| "Group approval is unavailable".to_owned())?;
     let waiter = approval_service::ConnectedWait::for_service(
         &state.db,
         &pending.resolution.mode,
@@ -4429,13 +4455,7 @@ async fn authorize_mcp_operation(
         timeout_secs,
     )
     .await
-    .map_err(|e| {
-        tool_result(
-            request_id.clone(),
-            &format!("Approval check failed: {e}"),
-            true,
-        )
-    })?;
+    .map_err(|e| format!("Approval check failed: {e}"))?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -4457,11 +4477,7 @@ async fn authorize_mcp_operation(
     )
     .await
     .map_err(|_| {
-        tool_result(
-            request_id.clone(),
-            &serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string(),
-            true,
-        )
+        serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string()
     })?;
 
     if let Some(chat) = auth.chat.as_ref() {
@@ -4472,7 +4488,7 @@ async fn authorize_mcp_operation(
             false,
         )
         .await
-        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+        .map_err(|_| ACTIVITY_RECORDING_RETRY.to_owned())?;
     }
     let req_id = approval_request.id.clone();
     waiter
@@ -4485,7 +4501,7 @@ async fn authorize_mcp_operation(
         .map_err(|error| {
             let outcome =
                 approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
-            tool_result(request_id.clone(), &outcome.to_string(), true)
+            outcome.to_string()
         })?;
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
@@ -4495,18 +4511,12 @@ async fn authorize_mcp_operation(
             true,
         )
         .await
-        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+        .map_err(|_| ACTIVITY_RECORDING_RETRY.to_owned())?;
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
             .await
-            .map_err(|_| {
-                tool_result(
-                    request_id,
-                    "The originating invocation turn was stopped or replaced",
-                    true,
-                )
-            })?;
+            .map_err(|_| "The originating invocation turn was stopped or replaced".to_owned())?;
     }
-    Ok(None)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5645,7 +5655,7 @@ async fn handle_meta_call_tool(
     }
 
     let execution_arguments = webhook_execution_arguments(auth, &inner_args);
-    let prepared = match mcp_service::prepare_chat_proxy_tool_call(
+    let mut prepared = match mcp_service::prepare_chat_proxy_tool_call(
         &state.db,
         &state.encryption_keys,
         if crate::services::raw_attachment_tool::has_handle(endpoint, &execution_arguments)
@@ -5731,7 +5741,14 @@ async fn handle_meta_call_tool(
     };
     let operation = prepared.operation_descriptor();
     match box_tool_future(|| {
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone())
+        authorize_mcp_tool_operation(
+            state,
+            auth,
+            service,
+            &operation,
+            request_id.clone(),
+            Some(&mut prepared),
+        )
     })
     .await
     {
@@ -7101,6 +7118,7 @@ async fn handle_mcp_ssh_exec(
         },
         &operation,
         request_id.clone(),
+        None,
     )
     .await
     {
@@ -8791,6 +8809,7 @@ mod tests {
                     target,
                     &operation,
                     Some(serde_json::json!(42)),
+                    None,
                 ),
             )
             .await;
@@ -8984,7 +9003,7 @@ mod tests {
         let proxy_auto_allowed = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_auto_allowed.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_ok()
         );
@@ -9023,7 +9042,7 @@ mod tests {
         let proxy_grant_covered = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_grant_covered.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_ok()
         );
@@ -9062,7 +9081,7 @@ mod tests {
             crate::errors::AppError::ApprovalFailed { .. }
         ));
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, None)
                 .await
                 .is_err()
         );

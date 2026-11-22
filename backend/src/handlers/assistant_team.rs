@@ -379,7 +379,7 @@ pub(crate) async fn owner_denial_decided(
             format!(
                 "The owner denied: {}. Do not execute or retry this action. Explain plainly what you skipped. {}",
                 engine::excerpt(&row.summary, 2000),
-                acks::DECISION_NARRATION
+                acks::decision_narration(false)
             ),
             None,
         ),
@@ -796,7 +796,7 @@ pub(crate) async fn permission_decided(
         }
     );
     note.push(' ');
-    note.push_str(acks::DECISION_NARRATION);
+    note.push_str(&acks::decision_narration(allowed));
     if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
         let mut event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
@@ -964,7 +964,7 @@ fn skill_request_allowed_note(
         agent.id,
         request.id,
         excerpt(&request.summary, 2000),
-        acks::DECISION_NARRATION,
+        acks::decision_narration(true),
     )
 }
 
