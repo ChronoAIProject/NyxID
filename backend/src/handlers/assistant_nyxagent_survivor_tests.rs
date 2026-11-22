@@ -406,6 +406,69 @@ async fn scripted_windows_with_limit(
     (saved, reply, keys)
 }
 
+async fn wait_for_phase<F: std::future::Future>(event: &'static str, future: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(90), future)
+        .await
+        .expect(event)
+}
+
+// Subscribe first, then check durable state. This also catches a write that
+// commits between finding no match and awaiting the next change.
+async fn wait_for_turn_state(
+    db: &mongodb::Database,
+    filter: bson::Document,
+) -> AssistantConversation {
+    let conversations = db.collection::<AssistantConversation>(COLLECTION_NAME);
+    let mut changes = conversations.watch().await.unwrap();
+    loop {
+        if let Some(row) = conversations.find_one(filter.clone()).await.unwrap() {
+            return row;
+        }
+        changes
+            .next()
+            .await
+            .expect("conversation change stream ended")
+            .unwrap();
+    }
+}
+
+async fn wait_for_checkpoint(db: &mongodb::Database, sequence: usize, expected: &str) {
+    let row = wait_for_phase(
+        "durable replay checkpoint",
+        wait_for_turn_state(
+            db,
+            doc! {
+                "user_id": OWNER, "active_turn.reply.upstream.response_id": RESPONSE,
+                "active_turn.reply.upstream.sequence": sequence as i64,
+            },
+        ),
+    )
+    .await;
+    let checkpoint = row.active_turn.unwrap().reply.unwrap();
+    assert_eq!(checkpoint.text, expected);
+    assert_eq!(checkpoint.upstream.unwrap().window_text, expected);
+}
+
+async fn released_usage(state: &AppState) -> Vec<crate::models::usage_meter::UsageMeterRow> {
+    let mut changes = state
+        .db
+        .collection::<bson::Document>(crate::models::usage_meter::COLLECTION_NAME)
+        .watch()
+        .await
+        .unwrap();
+    loop {
+        let rows = crate::services::channel_x_tests::billing::rows(state).await;
+        if !rows.is_empty() && rows.iter().all(|row| row.released) {
+            return rows;
+        }
+        changes
+            .next()
+            .await
+            .expect("usage change stream ended")
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn survivor_recovers_before_created_and_after_checkpoint_with_one_execution() {
     for ((mid_answer, review, trimmed, stop_reply, refusal), discard_cursor) in [
@@ -443,6 +506,8 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
         next.encryption_keys = first.encryption_keys.clone();
         let posts = Arc::new(AtomicUsize::new(0));
         let admissions = posts.clone();
+        let dispatched = Arc::new(tokio::sync::Notify::new());
+        let post_received = dispatched.clone();
         let requests = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let keys = requests.clone();
         let reads = Arc::new(AtomicUsize::new(0));
@@ -453,7 +518,7 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
         let replay_db = db.clone();
         let foreground_reply = terminal.clone();
         let upstream = Router::new().route("/v1/responses",post(move |headers: HeaderMap,Json(body): Json<Value>| {
-            let keys = keys.clone(); let admissions = admissions.clone(); let foreground_reply = foreground_reply.clone(); async move {
+            let keys = keys.clone(); let admissions = admissions.clone(); let post_received = post_received.clone(); let foreground_reply = foreground_reply.clone(); async move {
                 if let Some(code) = refusal {
                     if admissions.fetch_add(1, Ordering::SeqCst) == 0 {
                         assert_eq!(body["background"], true);
@@ -465,6 +530,7 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                 assert_eq!(body["background"],true); assert_eq!(body["store"],true); assert_eq!(body["stream"],true);
                 keys.lock().await.push((headers["idempotency-key"].to_str().unwrap().into(),headers["authorization"].to_str().unwrap().into()));
                 admissions.fetch_add(1,Ordering::SeqCst);
+                post_received.notify_one();
                 let stream = async_stream::stream! {
                     if let Some(cursor) = discard_cursor {
                         for frame in &discarded_attempt_frames()[..=cursor] {
@@ -509,17 +575,7 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
                     let after = if index == 0 { cursor } else { RETRY_DELTA };
                     assert_eq!(uri.query(), Some(format!("after={after}").as_str()));
                     if index == 1 {
-                        tokio::time::timeout(Duration::from_secs(8), async {
-                            loop {
-                                let current = replay_db.collection::<AssistantConversation>(COLLECTION_NAME).find_one(doc! {"user_id":OWNER}).await.unwrap().unwrap();
-                                if let Some(reply) = current.active_turn.unwrap().reply
-                                    && reply.upstream.is_some_and(|c| c.sequence == RETRY_DELTA as u64 && c.window_text == RETRIED_ANSWER) {
-                                    assert_eq!(reply.text, RETRIED_ANSWER);
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_millis(30)).await;
-                            }
-                        }).await.unwrap();
+                        wait_for_checkpoint(&replay_db, RETRY_DELTA, RETRIED_ANSWER).await;
                     }
                     let frames = discarded_attempt_frames();
                     let end = if index == 0 { RETRY_DELTA } else { frames.len()-1 };
@@ -809,36 +865,30 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
             db.drop().await.unwrap();
             continue;
         }
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                if posts.load(Ordering::SeqCst) == 1
-                    && (!mid_answer
-                        || engine::get(&db, OWNER, &row.id)
-                            .await
-                            .unwrap()
-                            .active_turn
-                            .unwrap()
-                            .reply
-                            .is_some_and(|reply| {
-                                let expected_text = match discard_cursor {
-                                    Some(BEFORE_DISCARD) => "abandoned attempt.",
-                                    Some(AFTER_DISCARD) => "",
-                                    _ => "hello",
-                                };
-                                reply.text == expected_text
-                                    && reply.upstream.is_some_and(|cursor| {
-                                        cursor.sequence == discard_cursor.unwrap_or(1) as u64
-                                            && cursor.window_text == expected_text
-                                    })
-                            }))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(30)).await;
-            }
-        })
-        .await
-        .expect("background dispatch and optional durable checkpoint");
+        wait_for_phase("predecessor response POST", dispatched.notified()).await;
+        if mid_answer {
+            let expected = match discard_cursor {
+                Some(BEFORE_DISCARD) => "abandoned attempt.",
+                Some(AFTER_DISCARD) => "",
+                _ => "hello",
+            };
+            wait_for_checkpoint(&db, discard_cursor.unwrap_or(1), expected).await;
+        } else if funded {
+            // The proxy owns settlement once the predecessor has the response
+            // headers. The mock still withholds every response.created frame.
+            let accepted = wait_for_phase(
+                "predecessor accepted the response headers",
+                wait_for_turn_state(
+                    &db,
+                    doc! {
+                        "_id": &row.id, "active_turn.restart_admission.window.accepted": true,
+                    },
+                ),
+            )
+            .await;
+            assert!(accepted.active_turn.unwrap().running_response.is_none());
+        }
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
         let approval = if trimmed {
             let card_id = Uuid::new_v4().to_string();
             db.collection::<bson::Document>("assistant_acknowledgements").insert_one(doc! {
@@ -1207,10 +1257,12 @@ async fn survivor_recovers_before_created_and_after_checkpoint_with_one_executio
             survivor::take_one(&next, &offered, workers::instance())
         );
         assert_ne!(left.unwrap(), right.unwrap());
-        let saved = settled(&next).await;
+        wait_for_phase("survivor runner completed", next.shutdown.idle()).await;
+        let saved = engine::get(&db, OWNER, &offered.id).await.unwrap();
+        assert!(saved.active_turn.is_none());
         if funded {
             use crate::models::{billing_wallet::BillingWallet, credits::Credits};
-            let usage = crate::services::channel_x_tests::billing::settled(&next).await;
+            let usage = wait_for_phase("durable usage releases", released_usage(&next)).await;
             let controls: Vec<_> = usage
                 .iter()
                 .filter(|record| record.service_id.as_deref() == Some(service.id.as_str()))
