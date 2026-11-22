@@ -224,9 +224,8 @@ async fn recover_notice(
         };
         let bot =
             super::channel_bot_service::get_bot(&state.db, &installation.channel_bot_id).await?;
-        let token = zeroize::Zeroizing::new(
-            super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?,
-        );
+        let token =
+            super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
         let db = state.db.clone();
         let captured = row.clone();
         let mut session = db.client().start_session().await?;

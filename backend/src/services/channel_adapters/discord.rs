@@ -987,7 +987,8 @@ mod tests {
         assert_eq!(
             channel_bot_service::decrypt_bot_token(&state.encryption_keys, &created.bot)
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_str(),
             "private-token"
         );
         // Two prefixes are not silently normalized twice: verification must use

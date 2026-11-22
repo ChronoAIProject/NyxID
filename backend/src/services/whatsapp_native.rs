@@ -146,11 +146,9 @@ pub async fn verify_platform_identity(
     let app_secret = Zeroizing::new(
         String::from_utf8(app_secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
     );
-    let token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let app_token = Zeroizing::new(format!("{}|{}", config.meta_app_id, app_secret.as_str()));
     let debug = graph_read(
         http,
@@ -496,11 +494,9 @@ async fn activate_gateway_inner(
     let secret = Zeroizing::new(
         String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
     );
-    let system_token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let verify_token = native_verify_token(db, keys, &config).await?;
     callback::configure_subscription(
         &config.meta_app_id,
@@ -640,11 +636,9 @@ pub async fn restore_relay(
     let secret = Zeroizing::new(
         String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
     );
-    let system_token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let replacement = if config.callback.relay_token_replaced_at.is_none() {
         Some(
             rollback::issue_for_restore(db, bot, config.revision)

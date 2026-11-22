@@ -111,9 +111,7 @@ pub async fn select(
             "gateway_native_unavailable".into(),
         ));
     }
-    let token = zeroize::Zeroizing::new(
-        super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-    );
+    let token = super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
     let identity = discord_read(bot, &token, "/users/@me").await?;
     if identity["id"].as_str() != Some(&bot.platform_bot_id)
         || identity["bot"] != true
@@ -201,9 +199,8 @@ pub async fn credentials(
             if bot_id != &bot.platform_bot_id {
                 return Err(AppError::Forbidden("gateway_bot_identity_mismatch".into()));
             }
-            let token = zeroize::Zeroizing::new(
-                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-            );
+            let token =
+                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
             Ok(json!({"agent_key":agent,"discord_bot_token":token.as_str()}))
         }
         Some(GatewaySource::WhatsApp {
@@ -242,9 +239,8 @@ pub async fn credentials(
             let app_secret = zeroize::Zeroizing::new(
                 String::from_utf8(app_secret).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
             );
-            let token = zeroize::Zeroizing::new(
-                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-            );
+            let token =
+                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
             // The relay Verify Token is hash-only. Native management receives a
             // separate, envelope-encrypted token generated on its first
             // management request; it is never returned by the settings API.

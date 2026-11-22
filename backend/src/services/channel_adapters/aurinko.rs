@@ -20,7 +20,6 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::LazyLock, time::Duration};
-use zeroize::Zeroizing;
 
 const ORIGIN: &str = "https://api.aurinko.io";
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
