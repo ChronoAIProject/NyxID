@@ -9755,6 +9755,22 @@ absence alone never proves no creation. A stale revision/observation returns
 conflict; an invalid action returns validation failure. Authority/storage
 unavailability is retryable. No action deletes a replacement version.
 
+For a Discord bot stopped by `create_outcome_unconfirmed`, use the owner's
+NyxID bot page to identify its `channel_bot_id`. Page through the release list
+and inspect the corresponding parent release. The list and inspection expose
+`channel_bot_id` and `dispatch_started_at` (null for an undispatched attempt
+or when historical data is unavailable). Give the gateway operator the captured
+creator, gateway service, reserved `record_id` and dispatch time so they can
+verify that the original request has drained and the connection is absent.
+Repeated missing reads and elapsed time alone cannot establish this.
+
+Only after that verification and the 24-hour minimum, submit `confirm_missing`
+with `dispatch_drained: true`, the inspected revision and the inspected
+`{"status":"missing"}` observation. If the revision changes, inspect again.
+Once the release settles, the sweep starts the 90-second Discord drain and
+relay discovery resumes when all fences clear. If the gateway operator cannot
+establish the dispatch outcome, leave the release under automatic observation.
+
 ### OAuth consent decisions
 
 Browser consent forms submit a `browser_form=true` marker. Successful, denied,

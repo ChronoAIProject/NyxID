@@ -685,6 +685,12 @@ async fn discord_2323_unknown_create_health_explains_gateway_proof_without_extra
                 .contains("cannot yet confirm the record was never created")
         );
         assert!(recommendation.text.contains("keeps checking automatically"));
+        assert!(recommendation.text.contains("Ask a platform administrator"));
+        assert!(
+            recommendation
+                .text
+                .contains("original request can no longer complete")
+        );
         assert!(
             recommendation
                 .text

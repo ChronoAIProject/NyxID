@@ -2955,3 +2955,10 @@ Parked releases for other platforms are not claimed by this re-observation
 worker. Their existing platform-specific release and administrator-review
 flows remain authoritative; this worker does not change their retry or
 cleanup behavior.
+
+For `create_outcome_unconfirmed`, send a platform administrator the link to the
+existing bot's NyxID page. The administrator can match the Channel Bot ID to
+the release and check the original dispatch with the gateway operator.
+Re-registering the same Discord bot under a fresh local ID cannot establish
+what happened to the old request. The review procedure covers the evidence
+required to resume this bot and its existing route. [Gateway release review](API.md#nyxbot-gateway-release-review)
