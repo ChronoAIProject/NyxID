@@ -921,9 +921,9 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .or_else(|_| std::env::var("HTTPS_PROXY"))
         .or_else(|_| std::env::var("https_proxy"))
     {
-        tracing::debug!("ChatGPT HTTP via proxy: {proxy_url}");
+        tracing::debug!(host = %crate::services::url_validation::url_host_for_logs(&proxy_url), "ChatGPT HTTP via proxy");
         let proxy = reqwest::Proxy::https(&proxy_url)
-            .map_err(|e| AppError::Internal(format!("Invalid proxy URL: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("Invalid proxy URL: {}", e.without_url())))?;
         builder = builder.proxy(proxy);
     }
 
@@ -970,7 +970,9 @@ fn build_chatgpt_request(
         .header("User-Agent", codex_user_agent())
         .body(request_text)
         .build()
-        .map_err(|e| AppError::Internal(format!("Failed to build HTTP request: {e}")))
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to build HTTP request: {}", e.without_url()))
+        })
 }
 
 fn build_chatgpt_api_url(api_url: &str, query: Option<&str>) -> String {
@@ -1041,9 +1043,8 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
         translate_response,
         is_streaming,
         request_len = request_text.len(),
-        api_url,
-        "ChatGPT HTTP request body: {}",
-        &request_text,
+        host = %crate::services::url_validation::url_host_for_logs(&api_url),
+        "Sending ChatGPT HTTP request",
     );
 
     let client = chatgpt_http_client()?;
@@ -1075,6 +1076,7 @@ pub(crate) async fn send_to_chatgpt_with_api_url(
             AppError::Internal("ChatGPT backend did not respond within 30 seconds".to_string())
         })?
         .map_err(|e| {
+            let e = e.without_url();
             tracing::error!("ChatGPT HTTP request failed: {e}");
             AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
         })?;

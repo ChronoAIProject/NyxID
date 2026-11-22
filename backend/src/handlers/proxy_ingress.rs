@@ -3,7 +3,7 @@ use std::future::Future;
 
 use axum::{
     body::Body,
-    extract::OriginalUri,
+    extract::{MatchedPath, OriginalUri},
     http::{Method, Request},
     response::Response,
 };
@@ -94,6 +94,7 @@ pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
             crate::mw::refusal_throttle::RETRY_SECONDS,
         ));
     }
+    let route = request.extensions().get::<MatchedPath>().cloned();
     let guard = ProbeGuard::new(limiter, key, admission == Admission::Probe);
     let (result, dispatched) = destination_routing::observe_http_dispatch(forward(request)).await;
     let code = if dispatched {
@@ -105,16 +106,17 @@ pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
             .filter(|error| error.counts_for_refusal_throttle())
             .map(AppError::error_code)
     };
+    let path = route.as_ref().map_or("<unmatched>", MatchedPath::as_str);
     match guard.finish(code) {
         Some(Transition::Armed { code, count }) => tracing::warn!(
             request_digest = %hex::encode(key),
-            caller_id = %caller, caller_kind = kind, service, path = uri.path(),
+            caller_id = %caller, caller_kind = kind, service, path,
             method = method.as_str(), error_code = code, count,
             "Proxy refusal throttle armed"
         ),
         Some(Transition::Cleared { code, count }) => tracing::warn!(
             request_digest = %hex::encode(key),
-            caller_id = %caller, caller_kind = kind, service, path = uri.path(),
+            caller_id = %caller, caller_kind = kind, service, path,
             method = method.as_str(), error_code = code, count,
             "Proxy refusal throttle cleared"
         ),

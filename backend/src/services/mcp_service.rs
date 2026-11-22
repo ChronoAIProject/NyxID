@@ -1825,7 +1825,7 @@ async fn load_user_tools_with_grants(
                         None if !template_rows.endpoints.is_empty() => {
                             tracing::warn!(
                                 user_service_id = %us.id,
-                                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                                 "User-mounted spec unusable; falling back to catalog template endpoints"
                             );
                             (template_rows, false, false)
@@ -2243,7 +2243,7 @@ async fn try_user_spec_endpoints(
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 "Parsed user OpenAPI spec contained no operations"
             );
             None
@@ -2251,7 +2251,7 @@ async fn try_user_spec_endpoints(
         Err(error) => {
             tracing::warn!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 %error,
                 "Failed to parse user OpenAPI spec"
             );

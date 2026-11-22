@@ -159,7 +159,7 @@ pub async fn browser_csrf_middleware(
 
     let Some(request_origin) = extract_request_origin(request.headers()) else {
         tracing::warn!(
-            path = %request.uri().path(),
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             "Blocked unsafe browser request without Origin or Referer"
         );
         return Err(AppError::Forbidden(
@@ -173,7 +173,7 @@ pub async fn browser_csrf_middleware(
     }
 
     tracing::warn!(
-        path = %request.uri().path(),
+        path = %crate::mw::request_trace::route_label(request.extensions()),
         origin = %request_origin,
         allowed_origins = ?allowed,
         "Blocked unsafe browser request with disallowed origin"

@@ -1764,7 +1764,7 @@ pub async fn rate_limit_middleware(
     // Check per-IP rate limit first
     if !per_ip_limiter.check_shared(client_ip).await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             ip = %client_ip,
             "Per-IP rate limit exceeded"
         );
@@ -1774,7 +1774,7 @@ pub async fn rate_limit_middleware(
     // Also check global rate limit as a safety net
     if !global_limiter.check_shared().await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             "Global rate limit exceeded"
         );
         return Err(AppError::RateLimited);
@@ -1796,8 +1796,13 @@ pub async fn device_code_rate_limit_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())
-        .await?;
+    enforce_device_code_ip_rate_limit(
+        &limiters,
+        request.headers(),
+        peer,
+        crate::mw::request_trace::route_label(request.extensions()),
+    )
+    .await?;
 
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 64 * 1024)
@@ -1808,7 +1813,7 @@ pub async fn device_code_rate_limit_middleware(
         && !limiters.per_pubkey.check_shared(&pubkey).await?
     {
         tracing::warn!(
-            path = %parts.uri.path(),
+            path = %crate::mw::request_trace::route_label(&parts.extensions),
             device_pubkey = %hex::encode(pubkey),
             "Device-code per-pubkey rate limit exceeded"
         );

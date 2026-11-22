@@ -61,7 +61,7 @@ pub async fn cmd_register(
     // M2: Use ws:// for localhost (wss:// requires TLS not available in dev)
     let ws_url = url.unwrap_or("ws://localhost:3001/api/v1/nodes/ws");
 
-    tracing::info!(url = %ws_url, "Registering node...");
+    tracing::info!("Registering node...");
 
     let (node_id, auth_token, signing_secret) = ws_client::register_node(ws_url, token).await?;
 
@@ -112,7 +112,6 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
 
     tracing::info!(
         node_id = %node_config.node.id,
-        server = %node_config.server.url,
         storage = %node_config.storage_backend,
         credentials = shared_creds.snapshot().count(),
         "Starting node agent"
