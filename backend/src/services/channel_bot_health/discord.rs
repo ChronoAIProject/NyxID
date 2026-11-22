@@ -293,7 +293,7 @@ pub fn advice(intake: &Intake) -> Option<super::Recommendation> {
         ),
         RELAY_BLOCKED if intake.block_reason == Some("create_outcome_unconfirmed") => (
             "contact_admin",
-            "NyxID could not confirm whether the gateway created this bot connection. The gateway currently reports it as not found, but cannot yet confirm the record was never created. NyxID keeps checking automatically, up to one hour apart. Relay intake stays paused until cleanup is confirmed and the 90-second safety drain finishes, so a second Discord session cannot start.",
+            "The gateway reports this connection as missing and cannot yet confirm the record was never created. NyxID keeps checking automatically, up to one hour apart. Ask a platform administrator to review the release using the link to this bot’s NyxID page and verify with the gateway that the original request can no longer complete. Relay intake stays paused until cleanup is confirmed and the 90-second drain finishes, so a second Discord session cannot start.",
         ),
         RELAY_BLOCKED if intake.block_reason == Some("preserved") => (
             "contact_admin",

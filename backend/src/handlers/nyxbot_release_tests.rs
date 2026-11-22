@@ -1660,9 +1660,12 @@ async fn release_debug_admin_dto_and_audit_metadata_exclude_credential_material(
         .await
         .unwrap();
     let debug = format!("{reserved:?}");
-    let dto = crate::handlers::nyxbot_gateway_releases::ReleaseResponse::from(
-        current(&state, &reserved.id).await,
-    );
+    let dispatched = current(&state, &reserved.id).await;
+    let started_at = dispatched.dispatch_started_at.unwrap();
+    let dto = crate::handlers::nyxbot_gateway_releases::ReleaseResponse::from(dispatched);
+    let review = serde_json::to_value(&dto).unwrap();
+    assert_eq!(review["channel_bot_id"], row.channel_bot_id);
+    assert_eq!(review["dispatch_started_at"], json!(started_at));
     let serialized = serde_json::to_string(&dto).unwrap();
     let audit = state
         .db
