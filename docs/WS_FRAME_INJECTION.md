@@ -88,7 +88,7 @@ The route is `PUT /api/v1/user-services/{service_id}`. Send
 
 ## Catalog Defaults
 
-Platform operators can set catalog-level defaults with the admin service editor
+Platform admins can set catalog-level defaults with the admin service editor
 or `PUT /api/v1/services/{service_id}`. These defaults apply to catalog-backed
 user services that have no user-owned rules. Custom endpoints do not have a
 catalog fallback, so configure them through the user-level path above.
@@ -97,6 +97,8 @@ catalog fallback, so configure them through the user-level path above.
 
 Each service can define at most 4 WebSocket frame injection rules. Each template is limited to 4096 bytes and only supports `${credential}` interpolation.
 
-Each WebSocket connection can fire at most 8 injected frames. This prevents repeated challenge frames from causing unbounded credential replay.
+Credential placeholders apply only to frames sent to the downstream service. The rule validator enforces this when saving rules. On the direct bridge, a caller-facing rule can reply with a literal template. If a stored caller-facing rule contains a credential placeholder, the bridge skips the reply and forwards the original frame. Node-routed connections evaluate rules only for frames received from the downstream service and send the reply back to that service.
 
-Credentials are never included in logs, errors, or audit payloads. Successful injection emits the metadata-only audit event `ws_frame_auth_injected` with the service id, trigger kind, frame index, and node routing metadata when applicable.
+Each connection evaluates up to 8 matching rules, including skipped replies.
+
+Credentials are never included in logs, errors, or audit payloads. A matched rule emits the metadata-only audit event `ws_frame_auth_injected` with the service id, trigger kind, frame index, and node routing metadata when applicable. A skipped reply carries `outcome: "skipped"`.
