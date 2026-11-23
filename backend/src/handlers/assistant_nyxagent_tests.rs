@@ -2980,13 +2980,14 @@ async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
         created_at: Utc::now(),
     };
     let mine = request(&key.name, "pending", 5);
+    let elapsed = request(&key.name, "pending", -1);
     state
         .db
         .collection::<ApprovalRequest>(APPROVALS)
         .insert_many([
             mine.clone(),
             request(&key.name, "approved", 5),
-            request(&key.name, "pending", -1),
+            elapsed.clone(),
             request("Some other agent", "pending", 5),
         ])
         .await
@@ -3027,6 +3028,11 @@ async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
     )
     .await
     .unwrap();
+    assert!(
+        page.approval_history
+            .iter()
+            .any(|row| row.id == elapsed.id && row.status == "pending")
+    );
     let approvals = serde_json::to_value(&page.approvals).unwrap();
     assert_eq!(approvals.as_array().unwrap().len(), 13, "{approvals}");
     assert!(

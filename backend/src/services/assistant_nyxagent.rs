@@ -5714,6 +5714,8 @@ async fn chat_approvals(
             .await?
             .try_collect()
             .await?;
+        // A decision can commit between the pending and history reads.
+        rows.retain(|pending| !recent.iter().any(|later| later.id == pending.id));
         rows.extend(recent);
         // Activity IDs come from the authenticated conversation page. They
         // also identify legacy HTTP cards that have no requester label.
@@ -5754,11 +5756,7 @@ fn chat_approval(
             |p| p.review_path.clone(),
         ),
         execution_proposal: proposal,
-        status: if row.status == "pending" && row.expires_at <= Utc::now() {
-            "expired".into()
-        } else {
-            row.status
-        },
+        status: row.status,
         id: row.id,
         service_slug: row.service_slug,
         service_name: row.service_name,
