@@ -50,6 +50,27 @@ for (const width of [1440, 390]) {
           await page.getByRole("button", { name: language === "en" ? "Open chats" : language === "zh-CN" ? "打开聊天" : "開啟聊天" }).click();
         }
         const nav = page.getByRole("navigation").filter({ has: page.getByRole("button", { name: "Regular chat 1", exact: true }) });
+        if (width >= 1024) {
+          const column = page.getByRole("complementary", { name: language === "en" ? "Threads" : language === "zh-CN" ? "对话" : "對話", exact: true });
+          const list = column.getByRole("navigation");
+          await expect(column).toBeVisible();
+          const sidebar = page.locator('aside[data-tour="sidebar"]:visible');
+          await expect(sidebar.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(0);
+          await expect(list.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(12);
+          const search = column.getByRole("searchbox");
+          await search.fill("Regular chat 12");
+          await expect(list.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(1);
+          await expect(list.getByRole("button", { name: "Regular chat 12", exact: true })).toBeVisible();
+          await search.fill("");
+          await expect(list.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(12);
+          await page.screenshot({ path: testInfo.outputPath(`thread-column-${mode}-${language}.png`) });
+          await page.keyboard.press("Escape");
+          await expect(column).not.toBeVisible();
+          await expect(sidebar.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveCount(0);
+          await page.reload();
+          await expect(column).not.toBeVisible();
+          return;
+        }
         await expect(nav.getByRole("button", { name: /^Regular chat \d+$/ })).toHaveText([
           "Regular chat 1", "Regular chat 2", "Regular chat 3", "Regular chat 4", "Regular chat 5",
           "Regular chat 8", "Regular chat 10", /^Regular chat 11/,

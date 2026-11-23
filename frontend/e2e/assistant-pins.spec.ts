@@ -8,6 +8,12 @@ async function showChats(page: Page) {
   await expect(nav.or(page.getByRole("button", { name: "Open chats" })).first()).toBeVisible();
   if (!(await nav.isVisible())) await page.getByRole("button", { name: "Open chats" }).click();
   await expect(nav).toBeVisible();
+  const threads = page.getByRole("complementary", { name: "Threads", exact: true });
+  if (page.viewportSize()!.width >= 1024 && new URL(page.url()).pathname === "/assistant" && !(await threads.isVisible())) {
+    await nav.getByRole("button", { name: /^NyxBot —/ }).click();
+    await expect(threads).toBeVisible();
+  }
+  if (await threads.isVisible()) return threads;
   return nav;
 }
 
@@ -58,7 +64,7 @@ async function seedParentChatTopics(page: Page) {
   await page.reload();
   const nav = await showChats(page);
   const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
-  await header.click();
+  if (await header.getAttribute("aria-expanded") === "false") await header.click();
   return { header, group: header.locator("..") };
 }
 
@@ -99,7 +105,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.reload();
     const nav = await showChats(page);
     const header = nav.getByRole("button", { name: "Topics bot on Telegram, 8 chats", exact: true });
-    await header.click();
+    if (await header.getAttribute("aria-expanded") === "false") await header.click();
     group = header.locator("..");
     await expectTopicOrder(group, [...pins, "Engineering topic 0"]);
     for (const title of pins) {
@@ -190,6 +196,7 @@ test("channel pins stay within their bot across keyboard actions, reload and Sho
   const nav = await showChats(page);
   const first = nav.getByRole("button", { name: "First bot on Telegram, 7 chats", exact: true });
   const second = nav.getByRole("button", { name: "Second bot on Telegram, 7 chats", exact: true });
+  if (await first.getAttribute("aria-expanded") === "true") await first.click();
   const group = second.locator("..");
   const rows = group.locator("[data-conversation-options]");
   await second.click();
@@ -206,6 +213,7 @@ test("channel pins stay within their bot across keyboard actions, reload and Sho
   await testInfo.attach("channel-pins-in-bot", { body: await page.screenshot({ path: testInfo.outputPath("channel-pins-in-bot.png") }), contentType: "image/png" });
   await page.reload();
   await showChats(page);
+  if (await first.getAttribute("aria-expanded") === "true") await first.click();
   await expect(second).toHaveAttribute("aria-expanded", "false");
   await second.click();
   await expect(rows).toHaveCount(5);
