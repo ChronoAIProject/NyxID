@@ -980,9 +980,18 @@ An existing conversation reader can pass the workflow's `source_event_id` to
 `GET /api/v1/channel-conversations/{id}/messages?source_event_id=<alias>`.
 The alias is the 64-character lowercase hexadecimal value from verified channel
 context. The conversation ID is the same NyxID route ID used for the message
-history. This request uses the existing resource-owner or organization-reader
-authorization. A specialist's execution identity and the source alias carry
-no conversation-read authority.
+history. The existing conversation ACL admits the resource owner and active
+members of the owning organization, including viewers. The lookup applies to
+NyxID-relayed events. Native gateway ingress, including native Discord and
+WhatsApp, uses its own receipt paths.
+
+Readers who supply the exact retained alias can see source and result metadata
+for its bound turn, including turns associated with a private channel
+conversation. The response is limited to the alias, the original inbound ID,
+the recorded platform message and sender IDs, the provider response ID, and
+the turn and reply status fields. Message text, attachments, assistant
+conversation and turn IDs, execution identity, and gateway credentials stay
+outside this response. The alias is a lookup key under the conversation ACL.
 
 Before using any returned IDs, require a top-level `source_event_id` that
 exactly equals the requested alias and an `inbound_message_id` that is a
@@ -1001,13 +1010,16 @@ answer, and use outbound rows to cross-check platform message IDs.
 
 `turn_status` reports the exact assistant turn's status. `reply_status` reports
 NyxID's local reply evidence. `confirmed` records the completion of NyxID's
-reply operation. `reply_evidence` identifies a gateway reply-target receipt
-or a complete set of locally recorded platform part receipts. `reply_kind`
+reply operation. `reply_evidence` distinguishes explicit confirmation returned
+by the gateway reply target from a complete set of locally recorded platform
+part receipts. `reply_kind`
 marks confirmed output as `completed_turn_output`, `failed_turn_output`, or
 `unclassified`. Failed-turn output can include a failure notice or partial
 answer and does not establish a successful final answer.
-`pending` covers preparation or a receipt wait. `handed_to_gateway` means
-the gateway took responsibility for delivery. `unconfirmed`, `unknown`,
+`pending` covers preparation or a receipt wait, including a gateway 409
+`routed_reply_in_progress` admission. `handed_to_gateway` records provider
+stream or replay custody. A terminal provider frame carries no platform
+receipt evidence. `unconfirmed`, `unknown`,
 `silent` and `refused` preserve distinct local outcomes. A missing
 `response_id` or missing delivery evidence leaves the corresponding join
 or result unknown.
