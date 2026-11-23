@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
+import { AssistantUploadSession } from "./AssistantUploadSession";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 
 type E = { type: any; props: Record<string, any> };
@@ -16,6 +17,8 @@ function setup(page: "details" | "context" | "title" = "details") {
     accessChanges: any[] = [],
     invalidations: any[] = [];
   const modelUpdate = deferred<any>();
+  const queries: any[] = [];
+  const drafts = new Map<string, AssistantUploadSession>();
   const modelSource = {
     data: [
       { id: "nyxagent/chat", label: "Fast", available: true },
@@ -54,7 +57,7 @@ function setup(page: "details" | "context" | "title" = "details") {
   };
   const rename = deferred<any>(),
     remove = deferred<void>();
-  let route = { params: { conversationId: "nyxa-thread", agentId: agent.id } };
+  let route: { params: import("../../app/navigationTypes").WorkspaceContentParamList["AssistantDetails"] } = { params: { conversationId: "nyxa-thread", agentId: agent.id } };
   const navigation = {
     goBack: () => actions.push(["back"]),
     push: (name: string, params: any) => actions.push(["push", name, params]),
@@ -74,8 +77,9 @@ function setup(page: "details" | "context" | "title" = "details") {
     },
     "react-native": { Alert: { alert: (...a: any[]) => alerts.push(a) } },
     "@tanstack/react-query": {
-      useQuery: (o: any) =>
-        o.queryKey[1] === "models"
+      useQuery: (o: any) => {
+        queries.push(o);
+        return o.queryKey[1] === "models"
           ? modelSource
           : o.queryKey[1] === "platform-models"
             ? platformSource
@@ -86,7 +90,8 @@ function setup(page: "details" | "context" | "title" = "details") {
                     throw new Error("offline after save");
                   },
                 }
-              : { data: { agents: [agent] }, refetch: async () => {} },
+              : { data: { agents: [agent] }, refetch: async () => {} };
+      },
       useQueryClient: () => ({
         cancelQueries: async () => {},
         setQueryData: (_key: any, update: any) => {
@@ -122,6 +127,7 @@ function setup(page: "details" | "context" | "title" = "details") {
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/assistantApi": {
       assistantApi: {
+        platformModels: (scope: object) => scope,
         changeModel: (id: string, model: string) => {
           writes.push(["model", id, model]);
           return modelUpdate.promise;
@@ -139,6 +145,7 @@ function setup(page: "details" | "context" | "title" = "details") {
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/auth/authAccount": { getAuthAccountId: () => "owner-a" },
     "./assistantDraftStore": {
+      assistantDraftStore: { get: (key: string) => drafts.get(key) },
       discardUploadDraft: async (owner: string, key: string) => {
         writes.push(["clear", owner, key]);
       },
@@ -195,6 +202,14 @@ function setup(page: "details" | "context" | "title" = "details") {
     writes,
     alerts,
     invalidations,
+    discovery: () => queries.findLast((q) => q.queryKey[1] === "platform-models"),
+    draft: (key: string, session: AssistantUploadSession, isNyxBot = false) => {
+      drafts.set(`uploads:${key}`, session);
+      if (isNyxBot) agent.kind = "nyxbot";
+      history = undefined;
+      route = { params: { draftKey: key, agentId: isNyxBot ? undefined : agent.id, draftEpoch: epoch } };
+      h.render();
+    },
     guard: () => guard,
     changeTitle: (value: string) => {
       title().props.onChangeText(value);
@@ -430,5 +445,59 @@ test("Working context owns a main-page Back guard while reset is pending", () =>
   assert.equal(x.guard().disabled, false);
   context.props.onManageMemory("specialist");
   assert.equal(x.actions[0][1], "AgentDetail");
+  x.h.unmount();
+});
+
+test("unsent NyxBot and specialist details discover models and retain selection per composer", async () => {
+  const x = setup();
+  function newDraft() {
+    return new AssistantUploadSession({
+      // Details can edit the selected draft while its composer is unfocused.
+      current: () => false,
+      available: () => false,
+      changed: () => {},
+      createDraft: async () => "nyxa-new",
+      fileSize: () => 3,
+      readBytes: async () => new Uint8Array(3),
+      upload: async () => { throw new Error("unexpected upload"); },
+      remove: async () => {},
+      disposeFile: () => {},
+    });
+  }
+  const first = newDraft();
+  x.draft("first", first);
+  assert.equal(x.discovery().enabled, true);
+  assert.equal(x.discovery().queryFn({}).agentId, "specialist");
+  assert.equal(x.discovery().queryFn({}).conversationId, undefined);
+  assert.equal(x.button("Offline model").props.disabled, true);
+  x.button("QA model").props.onPress();
+  await x.h.settle();
+  assert.equal(x.button("Current model").props.value, "QA model");
+  assert.equal(x.button("QA model").props.accessibilityState.checked, true);
+  assert.equal(first.model, "nyxid/qa");
+  assert.deepEqual(x.writes, []);
+
+  x.platformSource.data = [];
+  x.h.render();
+  assert.equal(x.button("Current model").props.detail, "The current model is unavailable.");
+  x.platformSource.isError = true;
+  x.h.render();
+  assert.ok(x.button("Retry loading models"));
+
+  const second = newDraft();
+  const oldChoice = x.button("Deep").props.onPress;
+  x.draft("second", second, true);
+  await oldChoice();
+  assert.equal(second.model, undefined);
+  assert.equal(x.discovery().queryFn({}).agentId, "specialist"); // effective NyxBot fixture
+  x.button("Deep").props.onPress();
+  await x.h.settle();
+  assert.equal(second.model, "nyxagent/research");
+  assert.equal(first.model, "nyxid/qa");
+  const switchedChoice = x.button("Fast").props.onPress;
+  x.accountChange();
+  await switchedChoice();
+  assert.equal(second.model, "nyxagent/research");
+  assert.equal(x.discovery().enabled, false);
   x.h.unmount();
 });

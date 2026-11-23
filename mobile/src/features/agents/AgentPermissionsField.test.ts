@@ -673,3 +673,47 @@ test("unexpected save rejection shows a retry error without losing the draft", a
   await state.harness.settle();
   assert.equal(state.closed(), 1);
 });
+
+test("compact keyboard search renders discovery status and restores the selected filter and save", () => {
+  const state = setup({ options: [], value: { services: [], account_read: false, guest_access: {} }, connectionsLoading: true });
+  const viewport = state.one((row) => row.type === "KeyboardViewport");
+  const search = () => state.one((row) => row.type === "TextInput");
+  const text = () => state.all().map((row) => row.props.children).filter((copy) => typeof copy === "string");
+  viewport.props.onViewportChange({ y: 48, height: 206 });
+  state.harness.flush();
+  assert.ok(state.all().some((row) => row.type === "SkeletonRows"));
+  assert.equal(text().some((copy) => copy.startsWith("No connected services")), false);
+  state.props.connectionsLoading = false;
+  state.props.connectionsError = true;
+  state.harness.render();
+  assert.ok(state.all().some((row) => row.type === "Notice" && row.props.tone === "error"));
+  state.search("research");
+  assert.equal(text().some((copy) => copy.startsWith("No matching services")), false);
+  state.props.options = options;
+  state.harness.render();
+  assert.ok(state.checkbox("Document research"));
+  assert.ok(state.all().some((row) => row.type === "Notice"));
+  state.props.connectionsError = false;
+  state.harness.render();
+  state.search("no such service");
+  assert.ok(text().some((copy) => copy.startsWith("No matching services")));
+
+  viewport.props.onViewportChange(undefined);
+  state.harness.flush();
+  state.one((row) => row.props.accessibilityLabel === "Selected services").props.onPress();
+  state.search("research");
+  assert.deepEqual(state.rowIds(), []);
+  viewport.props.onViewportChange({ y: 48, height: 206 });
+  state.harness.flush();
+  assert.equal(search().props.placeholder, "Search all services");
+  assert.deepEqual(state.rowIds(), ["svc-opaque-7"]);
+  state.select("Document research");
+  search().props.onSubmitEditing();
+  assert.equal(state.dismissedKeyboard(), 1);
+  viewport.props.onViewportChange(undefined);
+  state.harness.flush();
+  assert.equal(state.one((row) => row.props.accessibilityLabel === "Selected services").props.accessibilityState.selected, true);
+  assert.equal(state.action().props.disabled, false);
+  assert.deepEqual(state.saves, []);
+  state.harness.unmount();
+});

@@ -705,3 +705,24 @@ test("restored previews validate cache metadata without reading or uploading unt
   assert.equal(pending?.resumable, false);
   h.session.dispose();
 });
+
+test("a failed required identity checkpoint prevents every queued upload until explicit retry", async () => {
+  let failed = false;
+  const h = harness({
+    saveDraft: async (session) => {
+      if (session.conversationId && !failed) {
+        failed = true;
+        throw new Error("Disk full");
+      }
+    },
+  });
+  h.session.add([file("one.txt"), file("two.txt")]);
+  await until(() => h.session.entries.get("2")?.resumable === true);
+  assert.equal(h.uploads.length, 0);
+  assert.equal(h.drafts.length, 1);
+  h.session.resume();
+  await until(() => !h.session.blocked);
+  assert.equal(h.drafts.length, 1);
+  assert.deepEqual(h.uploads.map((upload) => upload.id), ["nyxa-upload-draft", "nyxa-upload-draft"]);
+  h.session.dispose();
+});

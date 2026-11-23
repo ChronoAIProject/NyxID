@@ -322,9 +322,13 @@ function GroupEditor({
           onPress: () =>
             void perform(async () => {
               const owner = getAuthAccountId();
+              const epoch = getAuthEpoch();
               if (kind === "delete") await groupsApi.remove(baseline.id);
               else await groupsApi.leave(baseline.id);
-              void discardUploadDraft(owner, `crew:${baseline.id}`).catch(() => {});
+              void discardUploadDraft(owner, `crew:${baseline.id}`).catch(() => {
+                if (epoch === getAuthEpoch() && owner === getAuthAccountId())
+                  Alert.alert(translateApp("The draft could not be discarded. Try again."));
+              });
               if (
                 scope.current.mounted &&
                 scope.current.epoch === getAuthEpoch()

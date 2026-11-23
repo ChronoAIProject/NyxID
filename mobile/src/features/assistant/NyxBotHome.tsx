@@ -46,6 +46,7 @@ import {
   awayItems,
   greetingFor,
 } from "./nyxBotHomeModel";
+import { RIGHT_PANEL_WIDTH } from "../../components/workspace/workspaceLayout";
 import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
 
 type Props = {
@@ -75,6 +76,7 @@ export function NyxBotHome({
 }: Props) {
   const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const railIndicator = useRailScrollIndicator();
+  const [hostWidth, setHostWidth] = useState<number>();
   useAppLanguage();
   const { colors } = useTheme();
   const { epoch, active, online, available } = useGroupAvailability();
@@ -173,6 +175,11 @@ export function NyxBotHome({
         scrollProps?.contentContainerStyle,
       ]}
       {...railIndicator}
+      onLayout={(event) => {
+        const { width } = event.nativeEvent.layout;
+        if (width > 0) setHostWidth(width);
+        scrollProps?.onLayout?.(event);
+      }}
     >
       <View style={styles.greeting}>
         <AgentAvatar
@@ -308,6 +315,7 @@ export function NyxBotHome({
               const failed = item.agent.last_reply?.status === "failed";
               return (
                 <HomeRow
+                  hostWidth={hostWidth}
                   key={item.key}
                   leading={<AgentAvatar agent={item.agent} size="lg" />}
                   title={name}
@@ -409,6 +417,7 @@ export function NyxBotHome({
         >
           {section.agents.map((agent) => (
             <HomeRow
+              hostWidth={hostWidth}
               key={agent.id}
               leading={<AgentAvatar agent={agent} size="lg" />}
               title={chatAgentLabel(agent)}
@@ -502,6 +511,7 @@ export function NyxBotHome({
         ) : null}
         {groups.map((group) => (
           <HomeRow
+            hostWidth={hostWidth}
             key={group.id}
             leading={<AgentAvatarStack agents={group.members} max={3} />}
             title={group.name}
@@ -564,6 +574,7 @@ export function NyxBotHomePanel({
 }) {
   const cornerWindow = useContext(WorkspaceCornerSensorContext);
   const railIndicator = useRailScrollIndicator();
+  const [hostWidth, setHostWidth] = useState(RIGHT_PANEL_WIDTH);
   useAppLanguage();
   const { active, available, online } = useGroupAvailability();
   const agents = useQuery({
@@ -598,6 +609,9 @@ export function NyxBotHomePanel({
       contentContainerStyle={styles.panelContent}
       keyboardShouldPersistTaps="handled"
       {...railIndicator}
+      onLayout={({ nativeEvent: { layout } }) => {
+        if (layout.width > 0) setHostWidth(layout.width);
+      }}
     >
       <Label accessibilityRole="header" style={styles.panelTitle}>
         {translateApp("While you were away")}
@@ -623,6 +637,7 @@ export function NyxBotHomePanel({
       <HomeGroup title={translateApp("Recent updates")}>
         {updates.slice(0, 3).map((item) => (
           <HomeRow
+            hostWidth={hostWidth}
             key={item.key}
             leading={<AgentAvatar agent={item.agent} size="lg" />}
             title={chatAgentLabel(item.agent)}
@@ -646,6 +661,7 @@ export function NyxBotHomePanel({
       <HomeGroup title={translateApp("Pending approvals")}>
         {requests.map((item) => (
           <HomeRow
+            hostWidth={hostWidth}
             key={item.key}
             leading={<AgentAvatar agent={item.agent} size="lg" />}
             title={chatAgentLabel(item.agent)}
@@ -690,6 +706,7 @@ export function NyxBotHomePanel({
           .filter((agent) => agent.status !== "destroyed")
           .map((agent) => (
             <HomeRow
+              hostWidth={hostWidth}
               key={agent.id}
               leading={<AgentAvatar agent={agent} size="lg" />}
               title={chatAgentLabel(agent)}
@@ -771,6 +788,7 @@ function HomeGroup({
 
 /** A home list row: the whole row opens its chat or crew. */
 function HomeRow({
+  hostWidth,
   leading,
   title,
   badge,
@@ -780,6 +798,7 @@ function HomeRow({
   disabled,
   accessibilityLabel,
 }: {
+  hostWidth?: number;
   leading: React.ReactNode;
   title: string;
   badge?: React.ReactNode;
@@ -792,7 +811,7 @@ function HomeRow({
   useAppLanguage();
   const { colors } = useTheme();
   const { width, fontScale } = useWindowDimensions();
-  const compact = width / Math.max(1, fontScale) < 360;
+  const compact = (hostWidth ?? width) / Math.max(1, fontScale) < 360;
   const metadata = meta ? <Label muted style={styles.metadata}>{meta}</Label> : null;
   return (
     <Pressable

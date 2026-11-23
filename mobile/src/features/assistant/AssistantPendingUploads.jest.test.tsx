@@ -516,3 +516,36 @@ it("restored drafts offer explicit recovery alongside a scrollable attachment st
   expect(dismiss).toHaveBeenCalledTimes(1);
   expect(remove).toHaveBeenCalledWith("2");
 });
+
+it("disables only the busy remove button while an attachment is being removed", async () => {
+  const files = [
+    { ...file(1, "draft.png"), error: "Previous removal failed", removing: true },
+    file(2, "other.txt"),
+  ];
+  const remove = jest.fn();
+  await render(
+    <AssistantPendingUploads files={files} disabled={false} remove={remove} />,
+  );
+  const busy = screen.getByRole("button", { name: "Remove draft.png", busy: true });
+  expect(busy).toBeDisabled();
+  expect(screen.getByText("Removing attachment…")).toBeTruthy();
+  const other = screen.getByRole("button", { name: "Remove other.txt" });
+  expect(other).toBeEnabled();
+  await fireEvent.press(other);
+  expect(remove).toHaveBeenCalledWith("2");
+});
+
+it("offers a discard retry while the attachment strip is unavailable", async () => {
+  const retryDiscard = jest.fn();
+  await render(
+    <AssistantPendingUploads
+      files={[file(1, "draft.txt")]}
+      disabled={false}
+      remove={jest.fn()}
+      retryDiscard={retryDiscard}
+    />,
+  );
+  expect(screen.queryByTestId("composer-attachments")).toBeNull();
+  await fireEvent.press(screen.getByRole("button", { name: "Retry discard" }));
+  expect(retryDiscard).toHaveBeenCalledTimes(1);
+});

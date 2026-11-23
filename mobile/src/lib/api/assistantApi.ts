@@ -66,11 +66,11 @@ export const assistantApi = {
       await requestJson(`${ROOT}/models`, { signal }),
     );
   },
-  async platformModels(id: string, signal?: AbortSignal) {
-    const query = new URLSearchParams({
-      limit: "100",
-      conversation_id: conversationIdSchema.parse(id),
-    });
+  async platformModels(scope: { conversationId?: string; agentId?: string }, signal?: AbortSignal) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (scope.conversationId)
+      query.set("conversation_id", conversationIdSchema.parse(scope.conversationId));
+    else if (scope.agentId) query.set("agent_id", scope.agentId);
     const rows: ConversationModel[] = [];
     const cursors = new Set<string>();
     for (;;) {

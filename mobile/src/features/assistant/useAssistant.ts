@@ -28,6 +28,7 @@ import { settledInterruptedTurn } from "./interruptedTurn";
 import {
   assistantTurnBody,
   restoreRefusedAssistantSend,
+  isAttachmentBindRefusal,
 } from "./assistantTurnRequest";
 import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import {
@@ -472,6 +473,7 @@ export function useAssistant(
       retryOf?: string,
       uploads?: AssistantUploadedMessage,
       acknowledgementId?: string,
+      model?: string,
     ) => {
       if (sendLock.current) throw localizedError("A message is already being sent.");
       if (!activeRef.current) throw localizedError("Reconnect to send a message.");
@@ -500,6 +502,7 @@ export function useAssistant(
       assistantTurnBody({
         conversationId: selected.current ?? uploads?.conversationId,
         agentId,
+        model,
         text,
         retryOf,
         acknowledgementId,
@@ -533,6 +536,7 @@ export function useAssistant(
           {
             conversationId: id,
             agentId,
+            model,
             text,
             retryOf,
             acknowledgementId,
@@ -568,6 +572,8 @@ export function useAssistant(
           if (!refused) adoptKnownDraft();
           setRecoveryRequired(!refused);
           if (refused) {
+            if (uploads?.attachmentIds.length && isAttachmentBindRefusal(cause))
+              throw cause;
             setError(() => (errorMessage(cause)));
           } else {
             // Keep this separate from request errors: final refresh, live

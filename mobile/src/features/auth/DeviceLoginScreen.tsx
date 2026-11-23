@@ -30,7 +30,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
+import { WorkspaceSheetContext, useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
   Keyboard,
@@ -43,7 +43,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import {
   ChevronDown,
@@ -234,18 +234,7 @@ function requestedAtValue(preview: AuthDevicePreview, nowMs: number): string {
   return `${formatDeviceLoginRelativeTime(preview.initiated_at, nowMs)} · ${formatTimestamp(preview.initiated_at)}`;
 }
 
-function ManualCodeModal({
-  visible,
-  value,
-  errorMessage,
-  isPending,
-  coolingDown,
-  colors,
-  styles,
-  onChange,
-  onDismiss,
-  onSubmit,
-}: {
+type ManualCodeModalProps = {
   visible: boolean;
   value: string;
   errorMessage: string | null;
@@ -256,18 +245,11 @@ function ManualCodeModal({
   onChange: (value: string) => void;
   onDismiss: () => void;
   onSubmit: () => void;
-}) {
-  const { t } = useAppLanguage();
-  const inputRef = useRef<TextInput>(null);
-  const insets = useSafeAreaInsets();
-  const reducedMotion = useReducedMotion();
-  const normalizedCode = normalizeAuthDeviceUserCode(value);
+};
 
-  useEffect(() => {
-    if (!visible) return;
-    const timeout = setTimeout(() => inputRef.current?.focus(), 180);
-    return () => clearTimeout(timeout);
-  }, [visible]);
+function ManualCodeModal(props: ManualCodeModalProps) {
+  const { visible, onDismiss } = props;
+  const reducedMotion = useReducedMotion();
 
   return (
     <Modal
@@ -284,7 +266,40 @@ function ManualCodeModal({
         onDismiss();
       }}
     >
-      <KeyboardViewport>
+      <SafeAreaProvider>
+        <WorkspaceSheetContext.Provider value={null}>
+          <ManualCodeContent {...props} />
+        </WorkspaceSheetContext.Provider>
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+function ManualCodeContent({
+  visible,
+  value,
+  errorMessage,
+  isPending,
+  coolingDown,
+  colors,
+  styles,
+  onChange,
+  onDismiss,
+  onSubmit,
+}: ManualCodeModalProps) {
+  const { t } = useAppLanguage();
+  const inputRef = useRef<TextInput>(null);
+  const insets = useSafeAreaInsets();
+  const normalizedCode = normalizeAuthDeviceUserCode(value);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timeout = setTimeout(() => inputRef.current?.focus(), 180);
+    return () => clearTimeout(timeout);
+  }, [visible]);
+
+  return (
+    <KeyboardViewport>
       <View
         accessibilityViewIsModal
         style={[styles.modalRoot, { paddingTop: insets.top }]}
@@ -375,8 +390,7 @@ function ManualCodeModal({
           />
         </ScrollView>
       </View>
-      </KeyboardViewport>
-    </Modal>
+    </KeyboardViewport>
   );
 }
 

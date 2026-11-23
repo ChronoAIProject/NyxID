@@ -14,13 +14,21 @@ const savedRow = z.object({
   handle: z.string(),
   kind: z.enum(["file", "image", "pasted-text"]),
   item: attachmentSchema.optional(),
+  needsReupload: z.boolean().optional(),
 });
 const draftSchema = z.object({
   conversationId: z.string().optional(),
+  keepConversation: z.boolean().optional(),
+  model: z.string().optional(),
+  discardPending: z.boolean().optional(),
   rows: z.array(savedRow).max(MAX_ASSISTANT_ATTACHMENTS),
   reselect: z.boolean(),
 });
 export type UploadDraft = z.infer<typeof draftSchema>;
+
+export function uploadCachePrefix(uri: string): string {
+  return `${uri.replace(/\/+$/, "")}/`;
+}
 
 export function relativeCachePath(
   uri: string,
@@ -88,37 +96,74 @@ type Storage = {
 export function createUploadDraftRecovery(storage: Storage) {
   const prefix = (owner: string) =>
     "nyxid.upload-draft.v1." + encodeURIComponent(owner) + ":";
-  let pending = Promise.resolve();
-  function ordered<T>(operation: () => Promise<T>) {
-    const result = pending.then(operation);
-    pending = result.then(
+  const pending = new Map<string, Promise<void>>();
+  const discards = new Map<string, Promise<void>>();
+  function ordered<T>(owner: string, operation: () => Promise<T>) {
+    const result = (pending.get(owner) ?? Promise.resolve()).then(operation);
+    const next = result.then(
       () => {},
       () => {},
     );
+    pending.set(owner, next);
+    void next.then(() => {
+      if (pending.get(owner) === next) pending.delete(owner);
+    });
     return result;
+  }
+  async function read(id: string): Promise<UploadDraft | undefined> {
+    const raw = await storage.getItem(id);
+    if (!raw) return;
+    try {
+      return draftSchema.parse(JSON.parse(raw));
+    } catch {
+      return { rows: [], reselect: true };
+    }
   }
   return {
     load(owner: string, key: string) {
-      return ordered(async () => {
-        const raw = await storage.getItem(prefix(owner) + key);
-        if (!raw) return;
-        try {
-          return draftSchema.parse(JSON.parse(raw));
-        } catch {
-          return { rows: [], reselect: true } satisfies UploadDraft;
-        }
+      return ordered(owner, () => read(prefix(owner) + key));
+    },
+    save(owner: string, key: string, draft: UploadDraft, guard?: () => void) {
+      const id = prefix(owner) + key;
+      if (discards.has(id))
+        return Promise.reject(new Error("Attachment draft is pending discard"));
+      const value =
+        draft.rows.length || draft.reselect || draft.keepConversation || draft.model || draft.discardPending
+          ? JSON.stringify(draft)
+          : undefined;
+      return ordered(owner, async () => {
+        guard?.();
+        const existing = await read(id);
+        guard?.();
+        if (existing?.discardPending && !draft.discardPending)
+          throw new Error("Attachment draft is pending discard");
+        if (value) await storage.setItem(id, value);
+        else await storage.removeItem(id);
       });
     },
-    save(owner: string, key: string, draft: UploadDraft) {
+    discard(owner: string, key: string, release: (draft: UploadDraft) => Promise<void>) {
       const id = prefix(owner) + key;
-      const value =
-        draft.rows.length || draft.reselect ? JSON.stringify(draft) : undefined;
-      return ordered(() =>
-        value ? storage.setItem(id, value) : storage.removeItem(id),
-      );
+      const current = discards.get(id);
+      if (current) return current;
+      const operation = ordered(owner, async () => {
+        const draft = await read(id);
+        if (!draft) return;
+        const cleanup = {
+          conversationId: draft.conversationId,
+          rows: draft.rows,
+          reselect: false,
+          discardPending: true,
+        };
+        if (!draft.discardPending || draft.model || draft.keepConversation)
+          await storage.setItem(id, JSON.stringify(cleanup));
+        await release(cleanup);
+        await storage.removeItem(id);
+      }).finally(() => discards.delete(id));
+      discards.set(id, operation);
+      return operation;
     },
     other(owner: string) {
-      return ordered(async () => {
+      return ordered(owner, async () => {
         const start = prefix(owner);
         for (const key of await storage.getAllKeys()) {
           if (!key.startsWith(start)) continue;
@@ -127,12 +172,35 @@ export function createUploadDraftRecovery(storage: Storage) {
         }
       });
     },
-    clear(owner: string) {
-      return ordered(async () => {
+    clear(owner: string, releaseLocal?: (draft: UploadDraft) => void) {
+      return ordered(owner, async () => {
         const keys = (await storage.getAllKeys()).filter((key) =>
           key.startsWith(prefix(owner)),
         );
-        if (keys.length) await storage.multiRemove(keys);
+        if (!releaseLocal) {
+          if (keys.length) await storage.multiRemove(keys);
+          return;
+        }
+        const cleared: string[] = [];
+        for (const key of keys) {
+          const draft = await read(key);
+          if (!draft) continue;
+          if (draft.discardPending) continue;
+          try {
+            releaseLocal(draft);
+            cleared.push(key);
+          } catch {
+            // Keep a local-only retry record if the OS refused cache removal.
+            await storage.setItem(key, JSON.stringify({
+              rows: draft.rows.filter((row) => row.file.path).map(({ file, handle, kind }) => ({
+                file, handle, kind,
+              })),
+              reselect: false,
+              discardPending: true,
+            } satisfies UploadDraft));
+          }
+        }
+        if (cleared.length) await storage.multiRemove(cleared);
       });
     },
   };

@@ -27,7 +27,7 @@ const request = (id: string) => ({
   summary: `Approve ${id}`,
 });
 
-function setup(widePanel = false, panel = false, cornerWindow = false, width = 393) {
+function setup(widePanel = false, panel = false, cornerWindow = false, width = 393, fontScale = 1) {
   const state = {
     agents: [
       agent("nyxbot", { kind: "nyxbot" }),
@@ -95,7 +95,7 @@ function setup(widePanel = false, panel = false, cornerWindow = false, width = 3
       ScrollView: "ScrollView",
       View: "View",
       StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 },
-      useWindowDimensions: () => ({ width, height: 800, fontScale: 1 }),
+      useWindowDimensions: () => ({ width, height: 800, fontScale }),
     },
     "lucide-react-native": {
       Bot: "Bot",
@@ -492,4 +492,28 @@ test("P9 ordinary Home greeting retains base uncapped scaling and wrapping", () 
   assert.equal(greeting.props.maxFontSizeMultiplier, undefined);
   assert.equal(greeting.props.numberOfLines, undefined);
   x.harness.unmount();
+});
+
+test("wide Home rows use their measured host and the wide companion starts compact", () => {
+  for (const [panel, fontScale, initialLines] of [
+    [false, 1, 1],
+    [true, 1, undefined],
+    [false, 3.5, undefined],
+  ] as const) {
+    const home = setup(panel, panel, false, 1200, fontScale);
+    const row = () => home.all().find((node) => node.props.accessibilityLabel === "Open finished's latest work")!;
+    const titleLines = () => row().props.children[1].props.children[0].props.children[0].props.numberOfLines;
+    assert.equal(titleLines(), initialLines);
+    const scroll = home.all().find((node) => node.type === "ScrollView" && node.props.onLayout)!;
+    scroll.props.onLayout({ nativeEvent: { layout: { width: 280 } } });
+    home.harness.flush();
+    assert.equal(titleLines(), undefined);
+    assert.equal(row().props.accessibilityRole, "button");
+    for (const label of ["Chat with finished", ...(!panel ? ["Open crew Launch crew"] : [])]) {
+      const item = home.all().find((node) => node.props.accessibilityLabel === label);
+      assert.ok(item, label);
+      assert.equal(item.props.children[1].props.children[0].props.children[0].props.numberOfLines, undefined);
+    }
+    home.harness.unmount();
+  }
 });

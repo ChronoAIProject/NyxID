@@ -1,7 +1,7 @@
 import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { translateApp } from "../../i18n/appTranslation";
-import { assistantDraftStore, discardUploadDraft } from "./assistantDraftStore";
+import { assistantDraftStore, discardUploadDraft, pendingUploadDiscard } from "./assistantDraftStore";
 import { useEffect, useRef, useState } from "react";
 import {
   ActionSheetIOS,
@@ -17,7 +17,7 @@ import { requireOptionalNativeModule } from "expo";
 import type { ImagePickerAsset } from "expo-image-picker";
 import { File, Paths } from "expo-file-system";
 import { getAuthAccountId } from "../../lib/auth/authAccount";
-import { relativeCachePath } from "./uploadDraftRecovery";
+import { relativeCachePath, uploadCachePrefix } from "./uploadDraftRecovery";
 import { uploadDraftStorage } from "./uploadDraftStorage";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
@@ -33,16 +33,16 @@ import {
 } from "./assistantUploads";
 import type { AttachmentSourceChoice } from "./AttachmentSourcePicker";
 
-const cachePrefix = () => `${Paths.cache.uri.replace(/\/+$/, "")}/`;
+const cachePrefix = () => uploadCachePrefix(Paths.cache.uri);
 
-function disposeFile(file: PickedAssistantFile) {
+function disposeFile(file: PickedAssistantFile, strict = false) {
   // DocumentPicker copies into cache; never remove a user's original document.
-  if (!file.uri.startsWith(cachePrefix())) return;
+  if (!relativeCachePath(file.uri, cachePrefix())) return;
   try {
     const cached = new File(file.uri);
     if (cached.exists) cached.delete();
-  } catch {
-    /* cache eviction */
+  } catch (cause) {
+    if (strict) throw cause;
   }
 }
 function nativeFile(file: PickedAssistantFile) {
@@ -110,7 +110,7 @@ export function useAssistantUploads({
   const key = JSON.stringify([
     epoch,
     owner,
-    generation,
+    retainKey ? null : generation,
     retainKey ? null : (agentId ?? null),
     conversationId ?? null,
     groupId ?? null,
@@ -121,6 +121,10 @@ export function useAssistantUploads({
     | undefined
   >(undefined);
   function createSession() {
+    const authorityGuard = () => {
+      if (epoch !== getAuthEpoch() || owner !== getAuthAccountId())
+        throw localizedError("This composer is no longer available.");
+    };
     let ctx: AssistantUploadSession;
     const dependencies = {
       current: () =>
@@ -136,6 +140,7 @@ export function useAssistantUploads({
                 session.snapshot((uri) =>
                   relativeCachePath(uri, cachePrefix()),
                 ),
+                authorityGuard,
               )
           : undefined,
       reservedMentionHandles: () => live.current.reservedMentionHandles ?? [],
@@ -181,24 +186,16 @@ export function useAssistantUploads({
           signal,
           onProgress,
         ),
-      remove: (id, attachmentId) =>
-        epoch === getAuthEpoch() && owner === getAuthAccountId()
-          ? assistantUploadsApi.remove(
-              { kind: groupId ? "groups" : "conversations", id },
-              attachmentId,
-            )
-          : Promise.resolve(),
+      remove: (id, attachmentId, signal) =>
+        assistantUploadsApi.remove(
+          { kind: groupId ? "groups" : "conversations", id },
+          attachmentId,
+          { expectedAccountId: owner ?? undefined, authorityGuard, signal },
+        ),
     } satisfies ConstructorParameters<typeof AssistantUploadSession>[0];
-    const retained =
-      retainKey &&
-      context.current?.key !== key &&
-      context.current?.retainKey === retainKey
-        ? undefined
-        : retainKey
-          ? assistantDraftStore.get<AssistantUploadSession>(
-              `uploads:${retainKey}`,
-            )
-          : undefined;
+    const retained = retainKey
+      ? assistantDraftStore.get<AssistantUploadSession>(`uploads:${retainKey}`)
+      : undefined;
     ctx =
       retained && !retained.disposed
         ? retained
@@ -206,10 +203,12 @@ export function useAssistantUploads({
     ctx.restoring = !!owner && !!retainKey && !ctx.restored;
     ctx.rebind(dependencies);
     if (retainKey)
-      assistantDraftStore.set(`uploads:${retainKey}`, ctx, () => ctx.dispose());
+      assistantDraftStore.set(`uploads:${retainKey}`, ctx, () =>
+        ctx.suspend(owner !== getAuthAccountId()),
+      );
     return ctx;
   }
-  if (!context.current || context.current.key !== key)
+  if (!context.current || context.current.key !== key || context.current.session.disposed)
     context.current = { key, retainKey, session: createSession() };
   const session = context.current.session;
   current.current = session;
@@ -222,8 +221,12 @@ export function useAssistantUploads({
       current.current === session &&
       owner === getAuthAccountId() &&
       epoch === getAuthEpoch();
-    void uploadDraftStorage
-      .load(owner, retainKey)
+    void (async () => {
+      await pendingUploadDiscard(owner, retainKey)?.catch(() => {
+        // Hydrate the durable retry marker after a failed discard.
+      });
+      return uploadDraftStorage.load(owner, retainKey);
+    })()
       .then((draft) => {
         if (!owns() || !draft) return;
         const prefix = cachePrefix();
@@ -243,9 +246,7 @@ export function useAssistantUploads({
       })
       .finally(() => {
         if (!owns()) return;
-        session.restoring = false;
-        session.restored = true;
-        setVersion((n) => n + 1);
+        session.finishRestore();
       });
     return () => {
       active = false;
@@ -288,14 +289,14 @@ export function useAssistantUploads({
           const retain =
             retainKey &&
             epoch === getAuthEpoch() &&
-            session.entries.size > 0 &&
-            !session.sending &&
+            (session.entries.size > 0 || session.sending || session.discardPending || session.hasDraft) &&
             assistantDraftStore.get<AssistantUploadSession>(
               `uploads:${retainKey}`,
             ) === session;
           if (retain) session.interrupt();
           else {
-            session.dispose();
+            if (retainKey) session.suspend(owner !== getAuthAccountId());
+            else session.dispose();
             if (
               retainKey &&
               assistantDraftStore.get<AssistantUploadSession>(
@@ -305,7 +306,7 @@ export function useAssistantUploads({
               assistantDraftStore.delete(`uploads:${retainKey}`);
           }
           if (pendingPicker.current?.session === session) {
-            pendingPicker.current.files.forEach(disposeFile);
+            pendingPicker.current.files.forEach((file) => disposeFile(file));
             pendingPicker.current = undefined;
           }
         }
@@ -337,7 +338,7 @@ export function useAssistantUploads({
       !online
     ) {
       pendingPicker.current = undefined;
-      pending.files.forEach(disposeFile);
+      pending.files.forEach((file) => disposeFile(file));
       pending.session.picking = false;
       if (pending.session === session && epoch === getAuthEpoch()) {
         session.reselect = true;
@@ -368,7 +369,7 @@ export function useAssistantUploads({
       session.entries.size >= MAX_ASSISTANT_ATTACHMENTS
     )
       return;
-    if (session.restoring) return;
+    if (session.restoring || session.discardPending) return;
     pickerLock.current = true;
     setPicking(true);
     setError(undefined);
@@ -556,7 +557,7 @@ export function useAssistantUploads({
         !live.current.focused ||
         !live.current.online
       )
-        files.forEach(disposeFile);
+        files.forEach((file) => disposeFile(file));
       else {
         pendingPicker.current = { session, epoch, files };
         transferred = true;
@@ -576,7 +577,7 @@ export function useAssistantUploads({
     } finally {
       if (!transferred) {
         session.picking = false;
-        pickedCopies.forEach(disposeFile);
+        pickedCopies.forEach((file) => disposeFile(file));
         if (
           current.current === session &&
           owner === getAuthAccountId() &&
@@ -688,8 +689,19 @@ export function useAssistantUploads({
       } catch {
         if (current.current === session && epoch === getAuthEpoch())
           setError(() =>
-            translateApp("The attachment draft could not be discarded. Try again."),
+            translateApp("The draft could not be discarded. Try again."),
           );
+      }
+    },
+    retryDiscard: async () => {
+      if (!retainKey || current.current !== session ||
+          epoch !== getAuthEpoch() || !live.current.focused) return;
+      try {
+        await discardUploadDraft(owner, retainKey);
+        if (epoch === getAuthEpoch()) setVersion((value) => value + 1);
+      } catch {
+        if (epoch === getAuthEpoch() && current.current === session)
+          setError(() => translateApp("The draft could not be discarded. Try again."));
       }
     },
     picking: picking || session.restoring,

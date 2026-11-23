@@ -45,6 +45,7 @@ export function AssistantPendingUploads({
   dismiss,
   resume,
   canResume,
+  retryDiscard,
 }: {
   files: PendingAssistantUpload[];
   remove: (key: string) => void;
@@ -55,6 +56,7 @@ export function AssistantPendingUploads({
   dismiss: () => void;
   resume: () => void;
   canResume: boolean;
+  retryDiscard?: () => void;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
@@ -104,6 +106,16 @@ export function AssistantPendingUploads({
       )),
     [files, strip.tile, disabled, showMentionHandles, remove],
   );
+
+  if (retryDiscard) {
+    return (
+      <ActionButton
+        label={t("Retry discard")}
+        onPress={retryDiscard}
+        variant="secondary"
+      />
+    );
+  }
 
   return (
     <>
@@ -287,6 +299,8 @@ function PendingUploadCard({
   const fileType = FILE_TYPES[type] ?? suffix?.toUpperCase() ?? t("Attachment");
   const name = row.item?.label ?? row.file.name;
   const status = assistantUploadStatus(row);
+  const removing = row.removing === true;
+  const removeDisabled = disabled || removing;
   const handle = showMentionHandles && !row.item ? `@${row.handle}` : undefined;
   let media: ReactNode;
   if (safePreview && image) {
@@ -353,7 +367,7 @@ function PendingUploadCard({
       <View style={styles.body} pointerEvents={hasThumbnail ? "none" : "auto"}>
         {hasThumbnail ? null : media}
       </View>
-      {row.error ? (
+      {row.error && !removing ? (
         <View pointerEvents="none" style={styles.failureOverlay}>
           <Label
             style={[
@@ -390,8 +404,8 @@ function PendingUploadCard({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={t("Remove {{name}}", { name: row.file.name })}
-        accessibilityState={{ disabled }}
-        disabled={disabled}
+        accessibilityState={{ disabled: removeDisabled, busy: removing }}
+        disabled={removeDisabled}
         onPress={() => remove(row.key)}
         style={styles.close}
       >
