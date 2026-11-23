@@ -1075,6 +1075,9 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             super::super::phase_b_tests::enroll_global(&f.state.db, &f.owner).await;
             approval_timeout(&f, 10).await;
             let (app, mut request) = connected_request(&f, kind).await;
+            let app = app.layer(axum::middleware::from_fn(
+                crate::handlers::proxy::ingress::approval_wait_budget,
+            ));
             if idempotency {
                 request
                     .headers_mut()
@@ -1083,6 +1086,9 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             request
                 .headers_mut()
                 .insert("x-nyxid-approval-mode", "async".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("x-nyxid-approval-wait-seconds", "10".parse().unwrap());
             let response =
                 tokio::time::timeout(std::time::Duration::from_secs(3), app.oneshot(request))
                     .await
@@ -1092,6 +1098,7 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
                 .await
                 .unwrap();
             let pending = row(&f).await;
+            assert!((pending.expires_at - pending.created_at).num_seconds() > 10);
             assert!(v2::proposal(&pending).unwrap().background_allowed);
             assert!(v2::proposal(&pending).unwrap().waiter_until.is_none());
             assert!(f.server.received_requests().await.unwrap().is_empty());
@@ -1111,6 +1118,11 @@ async fn external_async_requires_nyxid_header_with_optional_dedupe_and_never_for
             let calls = f.server.received_requests().await.unwrap();
             assert_eq!(calls.len(), 1);
             assert!(!calls[0].headers.contains_key("x-nyxid-approval-mode"));
+            assert!(
+                !calls[0]
+                    .headers
+                    .contains_key("x-nyxid-approval-wait-seconds")
+            );
             f.cleanup().await;
         }
     }

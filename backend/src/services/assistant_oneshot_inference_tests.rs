@@ -596,55 +596,84 @@ async fn assistant_oneshot_never_uses_org_fallback_even_with_live_membership() {
 
 #[tokio::test]
 async fn assistant_oneshot_timeout_cancels_without_retry_and_settles_meter() {
-    let (mut state, service, mock) = fixture(InferenceWireProtocol::OpenaiResponses).await;
-    billed(&mut state, &service).await;
-    completion(
-        &mock,
-        InferenceWireProtocol::OpenaiResponses,
-        "Too late",
-        Duration::from_secs(30),
-    )
-    .await;
-    let mut bounds = limits();
-    bounds.timeout = Duration::from_secs(10);
-    let inference = one_shot_text(&state, ACTOR, "Summarize", "Data", bounds);
-    tokio::pin!(inference);
-    // Database and HTTP dispatch use real I/O and driver timers. Keep their
-    // deadlines running until the provider has received the inference request.
-    let dispatched = async {
-        while !mock
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .any(|request| request.url.path() == "/responses")
-        {
-            tokio::task::yield_now().await;
-        }
-    };
-    tokio::select! {
-        _ = &mut inference => panic!("inference finished before the provider received it"),
-        result = tokio::time::timeout(Duration::from_secs(20), dispatched) => {
-            result.expect("provider dispatch stalled while waiting for the timeout test request");
+    async fn watchdog<T>(phase: &str, work: impl Future<Output = T>) -> T {
+        const WATCHDOG: Duration = Duration::from_secs(30);
+        tokio::select! {
+            result = work => result,
+            () = futures_timer::Delay::new(WATCHDOG) => panic!("one-shot {phase} exceeded {WATCHDOG:?}"),
         }
     }
-    crate::test_utils::with_manual_clock(async {
-        tokio::time::advance(bounds.timeout + Duration::from_millis(1)).await;
+
+    let (state, mock) = watchdog("billed fixture setup", async {
+        let (mut state, service, mock) = fixture(InferenceWireProtocol::OpenaiResponses).await;
+        billed(&mut state, &service).await;
+        completion(
+            &mock,
+            InferenceWireProtocol::OpenaiResponses,
+            "Too late",
+            Duration::from_secs(120),
+        )
+        .await;
+        (state, mock)
     })
     .await;
-    assert!(inference.await.is_none());
-    let requests = mock.received_requests().await.unwrap();
+
+    let bounds = TextLimits {
+        timeout: Duration::from_secs(10),
+        ..limits()
+    };
+    let mut inference = Box::pin(one_shot_text(&state, ACTOR, "Summarize", "Data", bounds));
+    let dispatch_and_expire = crate::test_utils::with_manual_clock(async {
+        let dispatched = async {
+            loop {
+                if mock
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url.path() == "/responses")
+                {
+                    break;
+                }
+                // Billing can need its 10 ms ledger batch timer to admit the POST.
+                // Pace the clock so 30 s of real I/O costs at most 1.5 s of the
+                // 3 s model-list deadline.
+                futures_timer::Delay::new(Duration::from_millis(100)).await;
+                tokio::time::advance(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut inference => panic!("inference finished before the provider received /responses"),
+            () = dispatched => {}
+        }
+        tokio::time::advance(bounds.timeout + Duration::from_millis(1)).await;
+    });
+    watchdog(
+        "provider dispatch and deadline advance",
+        dispatch_and_expire,
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), inference)
+            .await
+            .expect("one-shot cancellation watchdog expired after the overall deadline")
+            .is_none()
+    );
+
+    let rows = crate::services::channel_x_tests::billing::settled(&state).await;
+    assert_eq!(rows.len(), 2, "expected both usage meters to settle");
+    for metric in [BillingMetric::Requests, BillingMetric::Tokens] {
+        assert!(
+            rows.iter().any(|row| row.metric == metric
+                && row.status == crate::models::usage_meter::UsageStatus::Finalized),
+            "expected a finalized {metric:?} meter"
+        );
+    }
+    let requests = watchdog("final provider request log", mock.received_requests())
+        .await
+        .unwrap();
     let paths: Vec<_> = requests.iter().map(|r| r.url.path()).collect();
     assert_eq!(paths, ["/models", "/responses"]);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let rows = crate::services::channel_x_tests::billing::settled(&state).await;
-        if rows.len() == 2 {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 #[tokio::test]

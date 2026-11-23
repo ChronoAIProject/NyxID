@@ -352,6 +352,7 @@
   "Waiting for authorization": "等待授权",
   "Waiting for the committed approved decision.": "正在等待批准决定提交完成。",
   "Waiting for the committed denied decision.": "正在等待拒绝决定提交完成。",
+  "Waiting for the server": "正在等待服务器确认",
   "You allowed": "你已允许",
   "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.": "你来选择账号、路由和凭据。完成后，助手只会获得经代理的访问权限。",
   "You denied": "你已拒绝",

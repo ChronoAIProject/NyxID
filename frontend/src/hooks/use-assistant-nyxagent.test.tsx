@@ -128,6 +128,39 @@ it("keeps polling a CMA job after the assistant turn has ended", async () => {
   unmount();
 }, 8000);
 
+it("polls pending approvals through fifteen seconds after the latest pending deadline", async () => {
+  vi.useFakeTimers();
+  const start = Date.parse("2026-09-17T00:01:00Z");
+  vi.setSystemTime(start);
+  page.conversation.active_turn = null;
+  const approval = {
+    id: "old", service_slug: "sheets", service_name: "Sheets", summary: "Append row",
+    status: "pending" as const, approval_mode: "per_request" as const, agent_key_prefix: "",
+    created_at: page.conversation.created_at, expires_at: new Date(start - 60_000).toISOString(),
+  };
+  page.approvals = [
+    approval,
+    { ...approval, id: "last-pending", expires_at: new Date(start - 13_000).toISOString() },
+    { ...approval, id: "decided", status: "approved", expires_at: new Date(start + 60_000).toISOString() },
+  ];
+  const { unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(),
+  }), { wrapper });
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const reads = () => requests.filter((request) => request.includes(`/conversations/${id}?`)).length;
+
+  await advance(0);
+  const initial = reads();
+  expect(initial).toBeGreaterThan(0);
+  await advance(2000);
+  expect(reads()).toBe(initial + 1);
+  await advance(2000);
+  expect(reads()).toBe(initial + 2);
+  await advance(6000);
+  expect(reads()).toBe(initial + 2);
+  unmount();
+});
+
 it("polls only selected history every two seconds and refreshes the agent's threads once on settlement",
   async () => {
     const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({

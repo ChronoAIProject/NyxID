@@ -563,7 +563,7 @@ pub(super) async fn direct_response(
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers() {
         if let Some(value) =
-            direct_response_header_value(status, name.as_str(), value.as_bytes(), sse, location)
+            forwarded_response_header_value(status, name.as_str(), value.as_bytes(), sse, location)
         {
             builder = builder.header(name, value);
         }
@@ -859,10 +859,13 @@ pub(super) async fn node_response(
             (status, headers, Body::from_stream(stream))
         }
     };
+    let http_status =
+        StatusCode::from_u16(status).map_err(|error| AppError::Internal(error.to_string()))?;
     let is_sse = node_is_sse_headers(&headers);
-    let mut builder = Response::builder().status(status);
+    let mut builder = Response::builder().status(http_status);
     for (name, value) in headers {
         if let Some(value) = forwarded_response_header_value(
+            http_status,
             &name.to_ascii_lowercase(),
             value.as_bytes(),
             is_sse,

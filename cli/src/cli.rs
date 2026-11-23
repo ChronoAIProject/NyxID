@@ -4997,7 +4997,7 @@ pub enum ProxyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Send a request through the NyxID proxy
+    /// Send a proxy request. Eligible approvals return a pending ID (exit 2) for approval status.
     Request {
         /// Service slug or UUID
         service: String,
@@ -5013,6 +5013,12 @@ pub enum ProxyCommands {
         /// Extra headers (repeatable, format: Key:Value)
         #[arg(long = "header", short = 'H')]
         headers: Vec<String>,
+        /// Connected approval wait budget in seconds (10–300, default 80).
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u32).range(10..=300))]
+        approval_wait: Option<u32>,
+        /// Omit the connected wait budget and use the server's configured timeout.
+        #[arg(long, conflicts_with = "approval_wait")]
+        no_approval_wait: bool,
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
@@ -5237,6 +5243,13 @@ pub enum ApprovalCommands {
     /// Show approval request details
     Show {
         /// Request ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read the decision and any retained execution result using the original requester credentials
+    Status {
+        /// Approval request ID returned by the proxy
         id: String,
         #[command(flatten)]
         auth: AuthArgs,

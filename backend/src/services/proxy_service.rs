@@ -4827,6 +4827,10 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     ))
 }
 
+/// Relative references followed before the response was returned to the proxy.
+#[derive(Clone)]
+pub(crate) struct FollowedLocations(pub Vec<reqwest::header::HeaderValue>);
+
 async fn return_or_follow_same_origin(
     target: &ProxyTarget,
     mut client: Client,
@@ -4836,10 +4840,11 @@ async fn return_or_follow_same_origin(
     use reqwest::header::{
         CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, TRANSFER_ENCODING,
     };
-    for hop in 0.. {
+    let mut followed = Vec::new();
+    let mut response = loop {
         let replay = request.try_clone();
         let response = client.execute(request).await.map_err(|error| {
-            if hop > 0 && super::proxy_destination::http::refused_connection(&error) {
+            if !followed.is_empty() && super::proxy_destination::http::refused_connection(&error) {
                 target.log_destination_refusal();
                 ForwardRequestError::Application(super::proxy_destination::refused())
             } else {
@@ -4847,26 +4852,29 @@ async fn return_or_follow_same_origin(
             }
         })?;
         let status = response.status();
-        if hop == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
-            return Ok(response);
+        if followed.len() == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            break response;
         }
         let Some(mut next) = replay else {
-            return Ok(response);
+            break response;
         };
-        let Some(url) = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|v| v.to_str().ok())
+        let Some(location) = response.headers().get(LOCATION) else {
+            break response;
+        };
+        let Some(url) = location
+            .to_str()
+            .ok()
             .and_then(|location| next.url().join(location).ok())
         else {
-            return Ok(response);
+            break response;
         };
         if next.url().origin() != url.origin()
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            return Ok(response);
+            break response;
         }
+        followed.push(location.clone());
         *next.url_mut() = url;
         next.url_mut().set_fragment(None);
         if status.as_u16() == 303
@@ -4888,8 +4896,13 @@ async fn return_or_follow_same_origin(
             Box::pin(guard.revalidate()).await?;
         }
         request = next;
+    };
+    if !followed.is_empty() {
+        response
+            .extensions_mut()
+            .insert(FollowedLocations(followed));
     }
-    unreachable!()
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
