@@ -332,7 +332,7 @@ async fn decrypt_field(
             )
             .await?
         }
-        None if keys.allow_legacy_record_reads() => Zeroizing::new(keys.decrypt(value).await?),
+        None if keys.allow_legacy_record_reads() => keys.decrypt(value).await?,
         _ => {
             return Err(AppError::Internal(
                 "Saved login format is unavailable".into(),
@@ -623,7 +623,10 @@ mod tests {
         assert_eq!(legacy.secret_context_version, None);
         // A compatible old reader receives the exact prior encrypted format.
         assert_eq!(
-            keys.decrypt(&legacy.username_encrypted).await.unwrap(),
+            keys.decrypt(&legacy.username_encrypted)
+                .await
+                .unwrap()
+                .as_slice(),
             b"legacy-username"
         );
         assert!(

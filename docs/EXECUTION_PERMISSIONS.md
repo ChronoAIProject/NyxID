@@ -645,6 +645,21 @@ NyxID control header is never forwarded to the provider. Opted-in calls return
 the same occurrence. Server-owned watches and voice continuations retain their existing
 durable source lifecycle. They do not borrow a foreground request's waiter.
 
+For a connected approval, callers can send `X-NyxID-Approval-Wait-Seconds`
+with one decimal integer from 10 through 300. The wait and the card expire
+together, measured from request receipt, at the shorter of that budget and
+the configured approval timeout. Existing route-specific deadlines still apply.
+Omitting the header uses the existing connected wait. An invalid or repeated
+value returns HTTP 400 before approval creation. On an eligible v2 proposal,
+`X-NyxID-Approval-Mode: async` takes precedence over a valid wait budget.
+NyxID consumes both control headers before dispatch.
+
+`nyxid proxy request` requests async approval and supplies an 80-second
+connected wait budget. Use `--approval-wait <secs>` to change the budget or
+`--no-approval-wait` to use the server's connected wait. A pending v2 response
+prints the request ID and exits with code 2. Run `nyxid approval status <id>`
+with the original credential to read the decision and execution result.
+
 For opted-in requests the approval-required response carries the opaque request ID. Poll
 `GET /api/v1/approvals/requests/{id}/status` with the **same parent key, login child
 (if any), and actor**. The additive `execution` field reports state, a safe failure

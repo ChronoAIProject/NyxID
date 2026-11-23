@@ -559,7 +559,8 @@ untrusted data and every read is re-authorized against the active assistant
 turn.
 
 Use maintained, pure-Rust `lopdf` for PDF parsing/text and `zip` plus `quick-xml`
-for DOCX. They avoid external converters, shell commands and Office execution;
+for DOCX. Text extraction avoids external converters, shell commands and Office execution;
+the opt-in PDF image fallback below separately uses the packaged Poppler worker.
 DOCX extraction needs only bounded ZIP entries and WordprocessingML paragraphs.
 UTF-8 text, CSV and JSON receive bounded structural validation. Pin compatible
 versions in Cargo.lock. `lopdf` 0.38 is a compatible release in this workspace:
@@ -619,6 +620,99 @@ extractions persist their character count; only legacy rows need decryption to
 compute it and back-fill the count once. Unreadable legacy text leaves that upload’s
 coverage unavailable without hiding the draft. A complete scope declaration is the author's
 claim, not a server guarantee; reduced scope needs separate owner acceptance.
+
+### Scanned PDF pages
+
+PDF extraction classifies each page using non-whitespace characters, preserving
+page numbers, extracted text and sections. The additive `pdf` metadata reports
+`no_text`, `mixed` or `text`, `text_pages`, `image_pages`, `unread_pages` and a
+bounded reason. `text_pages` lists pages with text available for the read tool.
+`image_pages` lists page images included in requests that completed without an
+image-input rejection. This records input delivery. The model still needs to
+inspect the content. A mixed PDF only renders pages without text. Legacy PDFs
+are classified from their encrypted page spans.
+If the preparation deadline expires while those spans are being decrypted,
+classification remains `unknown` and the authorized parent's pages remain unread.
+
+Every request identifies the PDF images it carries and the pages accepted in
+prior requests in that turn. Tool-image continuations carry their own input.
+The encrypted subscriber checkpoint preserves those facts across stream
+reconnects and worker replacement. Cancellation or an incomplete response
+leaves unconfirmed pages unavailable. A later request cannot erase delivery
+confirmed in an earlier request. Old transcript claims without confirmation
+are displayed as unconfirmed. A shared group post displays the common PDF
+attachment. Each specialist's own thread and turn store its coverage.
+
+The default-off `assistant:pdf-vision` personal/org/global feature flag enables
+this fallback. Upgrade every API replica and encrypted-record migration worker
+before enabling it. The renderer adapter uses Debian Bookworm `poppler-utils`
+(`pdftoppm`) in the backend runtime image on both linux/amd64 and linux/arm64;
+CI test execution installs it explicitly. Native development may set the absolute
+`NYXID_PDF_RENDERER` path; the default is `/usr/bin/pdftoppm`. No shell, inherited
+credentials, remote converter, OCR service or automatic downloads are used.
+Missing dependencies produce an explicit unread-page outcome and metadata-only
+logs keyed by conversation, turn, parent attachment and page, never parser stderr
+or document content.
+
+At most eight pages per PDF are rendered at 2048 pixels on the long edge, JPEG
+quality 85, at most 2 MiB per encoded page. Ordinary images and derived pages share
+the upstream/model image-count, per-image and total-byte limits (ten images and
+16 MiB maximum for PDF planning). A page gets eight wall seconds and six CPU
+seconds; a PDF gets twenty wall seconds from parent authorization lookup through
+coverage/source loading and decryption, memory/worker waits, rendering and page
+persistence. An authorization timeout fails closed. A later preparation timeout
+keeps already staged pages and reports the remaining pages as unread; it does
+not consume image capacity for an unstaged page. Linux workers have a 128 MiB
+address-space limit. Before loading the PDF, each render operation reserves 160 MiB of the
+existing 192 MiB byte budget, covering the worker, source and encoded/encrypted
+buffers. Two worker slots are additionally bounded by that shared byte budget.
+Stop/future cancellation and deadlines kill the converter process group and
+reap the direct child. Attachment HTTP buffers retain their byte reservation
+until consumed or dropped.
+
+A derived `pdf_page` is one inline encrypted row with `parent_attachment_id`,
+`page` and `render_version`, never a payload chunk or another user attachment.
+It has no children. Parent/page/version are bound in contextual encryption and
+the migration adapter distinguishes it from chunks. Creation serializes with
+parent deletion and live-turn changes. Reads and platform-model image proofs
+resolve the parent PDF through the same thread Agent Key, live turn, document
+ACL and current document-retention policy, including policy shortening before
+cleanup. Group/channel guests cannot turn a forbidden document into an allowed
+image. Parent cleanup and owner/conversation erasure remove direct page rows.
+Derived rows reserve string values of the form `pdf/<render_version>/<page>`
+in the legacy sparse `(parent_attachment_id, chunk_index)` index. The source
+reader addresses numeric chunk indexes. Startup also keeps a partial unique
+page index and upgrades earlier derived rows in batches of 100 before restoring
+the old sparse index if absent. It preserves each page ID and encryption
+context. Before upgrading a fleet that ran the earlier draft renderer, disable
+the flag and let existing PDF turns settle. This prevents old writers from
+inserting new rows during conversion.
+
+An older server can restart on the same database and read the original
+attachment. Older encryption integrity and key-retirement code needs the
+upgraded page reader to verify derived rows. If that maintenance must run on an
+older binary, disable PDF vision and drain in-flight PDF turns before removing
+the derived cache. In the intended NyxID database, run the following in
+`mongosh`. The filter selects only derived page rows. Original uploads, numeric
+payload chunks, and transcript coverage remain available.
+
+```javascript
+const derived = { origin: "pdf_page" };
+while (true) {
+  const ids = db.assistant_attachments.find(derived, { _id: 1 })
+    .limit(100).toArray().map(({ _id }) => _id);
+  if (!ids.length) break;
+  db.assistant_attachments.deleteMany({ ...derived, _id: { $in: ids } });
+}
+```
+
+When upgraded servers re-enable the flag, a later turn can render fresh page
+rows from a retained source. Flag-off, text-only models, unsupported image
+capabilities, and renderer or image limits report the pages still unavailable.
+`nyx__attachment_read` retains its text pagination contract. A terminal text
+page has `complete: true` and `next_offset: null`. The `pdf` field reports
+visual coverage. Fully scanned files return the no-extracted-text
+result with their page numbers.
 
 ## Images and upstream compatibility
 
@@ -714,7 +808,7 @@ shared byte budget described above.
 - `DELETE` the corresponding attachment URL removes only an unbound upload;
   owner `GET` serves bytes with `nosniff` and sandbox CSP.
 - `GET /assistant-attachments/{uuid}/content` accepts only the bound thread Agent
-  Key and only user-upload images. Delegated account-read credentials are denied.
+  Key and bound user-upload images or derived PDF pages. Delegated account-read credentials are denied.
 
 Paths above are relative to `/api/v1`. Deploy NyxID and the separate NyxAgent
 image PR independently: missing capability metadata is a supported fallback.

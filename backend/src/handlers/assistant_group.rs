@@ -116,7 +116,12 @@ pub(crate) fn message_response(
         feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
-        attachments: row.attachments.into_iter().map(Into::into).collect(),
+        attachments: row.attachments.into_iter().map(|mut item| {
+            // The shared post is common to every recipient. Coverage belongs
+            // to the individual execution that inspected the file.
+            item.pdf = None;
+            item.into()
+        }).collect(),
         id: row.id,
         seq: row.seq,
         role: row.role,

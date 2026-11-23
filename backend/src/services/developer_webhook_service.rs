@@ -6,7 +6,6 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::generate_random_token;
@@ -203,7 +202,7 @@ impl DeveloperWebhookDispatcher {
             return Ok(());
         };
         let secret = match self.encryption_keys.decrypt(encrypted_secret).await {
-            Ok(secret) => Zeroizing::new(secret),
+            Ok(secret) => secret,
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to decrypt developer webhook secret");
                 return Err(DeliveryFailure {
@@ -542,16 +541,15 @@ mod tests {
             Some(first_key_id.as_str())
         );
         assert!(!format!("{configured:?}").contains(&first_secret));
-        let stored_first = Zeroizing::new(
-            keys.decrypt(
+        let stored_first = keys
+            .decrypt(
                 configured
                     .connection_webhook_secret_encrypted
                     .as_deref()
                     .expect("encrypted secret"),
             )
             .await
-            .expect("decrypt first secret"),
-        );
+            .expect("decrypt first secret");
         assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
 
         let (rotated, second_secret, second_key_id) = rotate_secret(&db, &keys, &client_id, &owner)
@@ -559,16 +557,15 @@ mod tests {
             .expect("rotate webhook secret");
         assert_ne!(first_secret, second_secret);
         assert_ne!(first_key_id, second_key_id);
-        let stored_second = Zeroizing::new(
-            keys.decrypt(
+        let stored_second = keys
+            .decrypt(
                 rotated
                     .connection_webhook_secret_encrypted
                     .as_deref()
                     .expect("rotated encrypted secret"),
             )
             .await
-            .expect("decrypt rotated secret"),
-        );
+            .expect("decrypt rotated secret");
         assert_eq!(stored_second.as_slice(), second_secret.as_bytes());
 
         let disabled = disable(&db, &client_id, &owner)

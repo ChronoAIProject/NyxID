@@ -143,9 +143,8 @@ pub async fn verify_platform_identity(
         )
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let app_secret = Zeroizing::new(
-        String::from_utf8(app_secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let app_secret = crate::crypto::guarded_utf8(app_secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
@@ -245,9 +244,8 @@ pub async fn native_verify_token(
             .decrypt(ciphertext)
             .await
             .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))?;
-        return Ok(Zeroizing::new(String::from_utf8(plaintext).map_err(
-            |_| refusal("native_whatsapp_verify_token_unavailable"),
-        )?));
+        return crate::crypto::guarded_utf8(plaintext)
+            .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"));
     }
     let generated = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
     let encrypted = keys
@@ -292,9 +290,8 @@ pub async fn native_verify_token(
         .decrypt(ciphertext)
         .await
         .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))?;
-    Ok(Zeroizing::new(String::from_utf8(plaintext).map_err(
-        |_| refusal("native_whatsapp_verify_token_unavailable"),
-    )?))
+    crate::crypto::guarded_utf8(plaintext)
+        .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))
 }
 
 /// Only configuration, never a claim that CMA has verified credentials or intake.
@@ -491,9 +488,8 @@ async fn activate_gateway_inner(
         )
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let secret = Zeroizing::new(
-        String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let secret = crate::crypto::guarded_utf8(secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
@@ -633,9 +629,8 @@ pub async fn restore_relay(
         )
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let secret = Zeroizing::new(
-        String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
+    let secret = crate::crypto::guarded_utf8(secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
     let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;

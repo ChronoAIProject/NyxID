@@ -121,6 +121,7 @@ function setup({
         useSafeAreaFrame: () => geometry?.provider ?? { y: 0, height: 852 },
       },
       "expo-linear-gradient": { LinearGradient: "Gradient" },
+      expo: { requireOptionalNativeModule: () => null },
       "lucide-react-native": {},
       "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
       "../../lib/accessibility/useReducedMotion": {

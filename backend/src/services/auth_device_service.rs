@@ -71,8 +71,8 @@ pub enum PollClaim {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountDelivery {
-    pub access_token: String,
-    pub refresh_token: String,
+    pub access_token: Zeroizing<String>,
+    pub refresh_token: Zeroizing<String>,
     pub expires_in: i64,
     pub user_id: String,
     pub session_id: String,
@@ -817,14 +817,14 @@ pub async fn decrypt_tokens(
     encryption_keys: &EncryptionKeys,
     encrypted_access: &[u8],
     encrypted_refresh: &[u8],
-) -> AppResult<(String, String)> {
-    let access_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_access).await?);
-    let refresh_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_refresh).await?);
+) -> AppResult<(Zeroizing<String>, Zeroizing<String>)> {
+    let access_plaintext = encryption_keys.decrypt(encrypted_access).await?;
+    let refresh_plaintext = encryption_keys.decrypt(encrypted_refresh).await?;
 
-    let access_token = String::from_utf8(access_plaintext.to_vec()).map_err(|_| {
+    let access_token = crate::crypto::guarded_utf8(access_plaintext).map_err(|_| {
         AppError::Internal("auth-device delivery access token is not valid UTF-8".to_string())
     })?;
-    let refresh_token = String::from_utf8(refresh_plaintext.to_vec()).map_err(|_| {
+    let refresh_token = crate::crypto::guarded_utf8(refresh_plaintext).map_err(|_| {
         AppError::Internal("auth-device delivery refresh token is not valid UTF-8".to_string())
     })?;
 
@@ -2460,8 +2460,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(decrypted_access, access);
-        assert_eq!(decrypted_refresh, refresh);
+        assert_eq!(decrypted_access.as_str(), access);
+        assert_eq!(decrypted_refresh.as_str(), refresh);
     }
 
     #[tokio::test]

@@ -62,7 +62,7 @@ pub(crate) async fn decrypt_context(
     if version == Some(3) {
         keys.decrypt_record(ciphertext, context).await
     } else if version.is_none() && keys.allow_legacy_record_reads() {
-        keys.decrypt(ciphertext).await.map(Zeroizing::new)
+        keys.decrypt(ciphertext).await
     } else {
         Err(AppError::Internal(
             "Record field requires contextual migration".into(),
