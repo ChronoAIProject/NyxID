@@ -32,6 +32,8 @@ staging environment before the approver confirms a session.
   Add explicit tests for resume/reselection, discard retry and per-file removal.
 - Preserve the current redacted device-login Debug implementations, job health
   state and application management observations when integrating AppState changes.
+- Move approval/denial tracing spans to the shared bound implementations so
+  local and staging decisions retain identical row/session trace coverage.
 - Register the PDF companion pod in the native synchronization check.
 - Show the trusted staging hostname and a staging-specific approval label from
   the server-returned staging binding. Requester-supplied origin/name hints do not

@@ -600,7 +600,6 @@ pub(super) fn preview_row(
     )
 }
 
-#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
 pub async fn approve(
     db: &Database,
     config: &AppConfig,
@@ -623,6 +622,7 @@ pub async fn approve(
     .await
 }
 
+#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn approve_bound(
     db: &Database,
@@ -791,15 +791,15 @@ pub(super) async fn approve_bound(
     Ok(())
 }
 
+pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+    deny_bound(db, hmac_key, input, None).await
+}
+
 #[tracing::instrument(
     name = "auth_device.deny",
     skip_all,
     fields(row_id, user_id = %input.user_id)
 )]
-pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
-    deny_bound(db, hmac_key, input, None).await
-}
-
 pub(super) async fn deny_bound(
     db: &Database,
     hmac_key: &[u8],
