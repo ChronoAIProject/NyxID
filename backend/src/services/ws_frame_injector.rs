@@ -29,22 +29,43 @@ pub struct WsFrame {
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InjectionAction {
-    pub send_frame: WsFrame,
+pub struct InjectionAction<'a> {
+    rule: &'a WsFrameInjection,
     pub forward_original: bool,
     pub trigger_kind: &'static str,
     pub frame_index_in: usize,
-    pub direction: WsFrameDirection,
-    pub credential_sha256_prefix: String,
 }
 
-pub fn evaluate(
-    rules: &[WsFrameInjection],
+const CREDENTIAL_PLACEHOLDER: &str = "${credential}";
+
+impl InjectionAction<'_> {
+    pub fn frame_for_caller(&self) -> Option<WsFrame> {
+        if self.rule.template.contains(CREDENTIAL_PLACEHOLDER) {
+            return None;
+        }
+        Some(WsFrame {
+            kind: self.rule.frame_kind,
+            payload: self.rule.template.as_bytes().to_vec(),
+        })
+    }
+
+    pub fn frame_for_downstream(&self, credential: &str) -> WsFrame {
+        WsFrame {
+            kind: self.rule.frame_kind,
+            payload: self
+                .rule
+                .template
+                .replace(CREDENTIAL_PLACEHOLDER, credential)
+                .into_bytes(),
+        }
+    }
+}
+
+pub fn evaluate<'a>(
+    rules: &'a [WsFrameInjection],
     state: &mut InjectorState,
     frame: &IncomingFrame,
-    credential: &str,
-) -> Option<InjectionAction> {
+) -> Option<InjectionAction<'a>> {
     let frame_index_in = match frame.direction {
         WsFrameDirection::Downstream => {
             let idx = state.downstream_frame_index;
@@ -72,20 +93,11 @@ pub fn evaluate(
         };
 
         state.total_injections_fired = state.total_injections_fired.saturating_add(1);
-        let payload = rule
-            .template
-            .replace("${credential}", credential)
-            .into_bytes();
         return Some(InjectionAction {
-            send_frame: WsFrame {
-                kind: rule.frame_kind,
-                payload,
-            },
+            rule,
             forward_original: !rule.consume_trigger,
             trigger_kind,
             frame_index_in,
-            direction: rule.direction,
-            credential_sha256_prefix: credential_hash_prefix(credential),
         });
     }
 
@@ -103,6 +115,13 @@ pub fn validate_rules(rules: &[WsFrameInjection]) -> AppResult<()> {
         if rule.template.len() > MAX_TEMPLATE_BYTES {
             return Err(AppError::ValidationError(format!(
                 "ws_frame_injections[{idx}].template must not exceed {MAX_TEMPLATE_BYTES} bytes"
+            )));
+        }
+        if rule.direction == WsFrameDirection::Upstream
+            && rule.template.contains(CREDENTIAL_PLACEHOLDER)
+        {
+            return Err(AppError::ValidationError(format!(
+                "ws_frame_injections[{idx}].template: credential placeholders apply only to frames sent to the downstream service"
             )));
         }
         validate_template_does_not_embed_credentials(idx, &rule.template)?;
@@ -187,7 +206,7 @@ fn validate_json_path(idx: usize, path: &str) -> AppResult<()> {
 }
 
 fn validate_template_does_not_embed_credentials(idx: usize, template: &str) -> AppResult<()> {
-    let stripped = template.replace("${credential}", "");
+    let stripped = template.replace(CREDENTIAL_PLACEHOLDER, "");
     if stripped.contains("nyxid_") || contains_jwt_like_literal(&stripped) {
         return Err(AppError::ValidationError(format!(
             "ws_frame_injections[{idx}].template must not embed credential-looking literals"
@@ -228,6 +247,19 @@ mod tests {
     }
 
     #[test]
+    fn credential_placeholder_validation_follows_the_recipient() {
+        let mut rule = ha_rule();
+        validate_rules(std::slice::from_ref(&rule)).unwrap();
+        rule.direction = WsFrameDirection::Upstream;
+        let err = validate_rules(std::slice::from_ref(&rule)).unwrap_err();
+        assert!(err.to_string().contains(
+            "credential placeholders apply only to frames sent to the downstream service"
+        ));
+        rule.template = "ready".into();
+        validate_rules(&[rule]).unwrap();
+    }
+
+    #[test]
     fn first_frame_trigger_fires_exactly_once() {
         let rules = vec![WsFrameInjection {
             trigger: WsFrameTrigger::FirstFrameFromDownstream,
@@ -238,8 +270,8 @@ mod tests {
         }];
         let mut state = InjectorState::default();
 
-        assert!(evaluate(&rules, &mut state, &text_downstream("first"), "CRED").is_some());
-        assert!(evaluate(&rules, &mut state, &text_downstream("second"), "CRED").is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("first")).is_some());
+        assert!(evaluate(&rules, &mut state, &text_downstream("second")).is_none());
     }
 
     #[test]
@@ -260,7 +292,6 @@ mod tests {
             &rules,
             &mut state,
             &text_downstream(r#"{"hello":{"type":"auth_required"}}"#),
-            "TOKEN",
         )
         .expect("match");
         assert_eq!(action.trigger_kind, "json_field_equals");
@@ -276,7 +307,6 @@ mod tests {
                 &rules,
                 &mut state,
                 &text_downstream(r#"{"type":"auth_ok"}"#),
-                "TOKEN",
             )
             .is_none()
         );
@@ -292,7 +322,7 @@ mod tests {
             payload: br#"{"type":"auth_required"}"#.to_vec(),
         };
 
-        assert!(evaluate(&rules, &mut state, &frame, "TOKEN").is_none());
+        assert!(evaluate(&rules, &mut state, &frame).is_none());
     }
 
     #[test]
@@ -304,11 +334,10 @@ mod tests {
             &rules,
             &mut state,
             &text_downstream(r#"{"type":"auth_required"}"#),
-            "TEST_CRED",
         )
         .expect("match");
         assert_eq!(
-            String::from_utf8(action.send_frame.payload).expect("utf8"),
+            String::from_utf8(action.frame_for_downstream("TEST_CRED").payload).expect("utf8"),
             r#"{"type":"auth","access_token":"TEST_CRED"}"#
         );
     }
@@ -333,7 +362,6 @@ mod tests {
                     &rules,
                     &mut state,
                     &text_downstream(r#"{"type":"auth_required"}"#),
-                    "TOKEN",
                 )
                 .is_some()
             );
@@ -343,7 +371,6 @@ mod tests {
                 &rules,
                 &mut state,
                 &text_downstream(r#"{"type":"auth_required"}"#),
-                "TOKEN",
             )
             .is_none()
         );
@@ -356,10 +383,9 @@ mod tests {
         let mut state = InjectorState::default();
 
         let action = evaluate(
-            &[rule],
+            std::slice::from_ref(&rule),
             &mut state,
             &text_downstream(r#"{"type":"auth_required"}"#),
-            "TOKEN",
         )
         .expect("match");
         assert!(action.forward_original);
@@ -370,7 +396,7 @@ mod tests {
         let rules = vec![ha_rule()];
         let mut state = InjectorState::default();
 
-        assert!(evaluate(&rules, &mut state, &text_downstream("{"), "TOKEN").is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("{")).is_none());
     }
 
     #[test]
@@ -576,12 +602,12 @@ mod tests {
             kind: WsFrameKind::Text,
             payload: b"upstream data".to_vec(),
         };
-        assert!(evaluate(&rules, &mut state, &upstream, "CRED").is_none());
+        assert!(evaluate(&rules, &mut state, &upstream).is_none());
         assert_eq!(state.upstream_frame_index, 1);
         assert_eq!(state.downstream_frame_index, 0);
 
         // The first downstream frame should still trigger (index 0)
-        assert!(evaluate(&rules, &mut state, &text_downstream("first"), "CRED").is_some());
+        assert!(evaluate(&rules, &mut state, &text_downstream("first")).is_some());
         assert_eq!(state.downstream_frame_index, 1);
     }
 
@@ -599,14 +625,14 @@ mod tests {
         let mut state = InjectorState::default();
 
         // Frames 0 and 1 should not match
-        assert!(evaluate(&rules, &mut state, &text_downstream("frame-0"), "C").is_none());
-        assert!(evaluate(&rules, &mut state, &text_downstream("frame-1"), "C").is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("frame-0")).is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("frame-1")).is_none());
         // Frame 2 should match
-        let action = evaluate(&rules, &mut state, &text_downstream("frame-2"), "C").unwrap();
+        let action = evaluate(&rules, &mut state, &text_downstream("frame-2")).unwrap();
         assert_eq!(action.trigger_kind, "frame_index_from_downstream");
         assert_eq!(action.frame_index_in, 2);
         // Frame 3 should not match
-        assert!(evaluate(&rules, &mut state, &text_downstream("frame-3"), "C").is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("frame-3")).is_none());
     }
 
     // --- InjectorState defaults ---
@@ -633,7 +659,7 @@ mod tests {
         let mut state = InjectorState::default();
 
         // Downstream frame should not trigger an upstream-direction rule
-        assert!(evaluate(&rules, &mut state, &text_downstream("hello"), "CRED").is_none());
+        assert!(evaluate(&rules, &mut state, &text_downstream("hello")).is_none());
     }
 
     // --- consume_trigger true consumes frame ---
@@ -644,10 +670,9 @@ mod tests {
         let mut state = InjectorState::default();
 
         let action = evaluate(
-            &[rule],
+            std::slice::from_ref(&rule),
             &mut state,
             &text_downstream(r#"{"type":"auth_required"}"#),
-            "TOKEN",
         )
         .expect("should match");
         assert!(!action.forward_original);
@@ -706,34 +731,12 @@ mod tests {
             &rules,
             &mut state,
             &text_downstream(r#"{"type":"auth_required"}"#),
-            "C",
         )
         .expect("match");
         assert_eq!(
-            String::from_utf8(action.send_frame.payload).unwrap(),
+            String::from_utf8(action.frame_for_downstream("C").payload).unwrap(),
             "FIRST C"
         );
-    }
-
-    // --- credential_sha256_prefix in action ---
-
-    #[test]
-    fn action_contains_credential_hash_prefix() {
-        let rules = vec![ha_rule()];
-        let mut state = InjectorState::default();
-
-        let action = evaluate(
-            &rules,
-            &mut state,
-            &text_downstream(r#"{"type":"auth_required"}"#),
-            "secret-token",
-        )
-        .expect("match");
-        assert_eq!(
-            action.credential_sha256_prefix,
-            credential_hash_prefix("secret-token")
-        );
-        assert_eq!(action.credential_sha256_prefix.len(), 12);
     }
 
     // --- json trigger on non-utf8 binary payload ---
@@ -748,6 +751,6 @@ mod tests {
             kind: WsFrameKind::Text,
             payload: vec![0xFF, 0xFE, 0xFD],
         };
-        assert!(evaluate(&rules, &mut state, &frame, "TOKEN").is_none());
+        assert!(evaluate(&rules, &mut state, &frame).is_none());
     }
 }

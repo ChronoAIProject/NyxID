@@ -5961,6 +5961,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_frame_credentials_apply_only_to_downstream_replies() {
+        let (socket, mut peer) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        let rules = serde_json::from_value(serde_json::json!([{
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "upstream"
+        }, {
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "downstream"
+        }]))
+        .unwrap();
+        let session = tokio::spawn(run_ws_proxy_session_with_limits(
+            "node-frame-test".into(),
+            socket,
+            control_rx,
+            tx,
+            Default::default(),
+            rules,
+            Some("fixture-node-credential".to_owned().into()),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+        let challenge = r#"{"type":"auth_required"}"#;
+        control_tx
+            .send(WsProxyControl::Text(challenge.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            challenge
+        );
+        peer.send(Message::Text(challenge.into())).await.unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            "fixture-node-credential"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({
+                "type": "ws_frame_injected", "request_id": "node-frame-test",
+                "trigger_kind": "json_field_equals", "frame_index": 0
+            })
+        );
+        peer.send(Message::Text("ready".into())).await.unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(reply["data"], "ready");
+        drop(control_tx);
+        session.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn ws_proxy_session_reports_idle_timeout() {
         let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let (downstream_ws, _peer_ws) = duplex_websocket_pair().await;
