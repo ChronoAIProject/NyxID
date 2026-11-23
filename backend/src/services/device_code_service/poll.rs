@@ -4,7 +4,6 @@ use mongodb::{
     bson::{self, doc},
     options::ReturnDocument,
 };
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::device_code::{generate_user_code, verify_poll_signature};
@@ -145,12 +144,12 @@ async fn decrypt_delivery_secret(
     encryption_keys: &EncryptionKeys,
     encrypted: Option<&[u8]>,
     label: &str,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     let encrypted = encrypted.ok_or_else(|| {
         AppError::Internal(format!("approved device code missing delivery {label}"))
     })?;
-    let plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-    String::from_utf8(plaintext.to_vec()).map_err(|_| {
+    let plaintext = encryption_keys.decrypt(encrypted).await?;
+    crate::crypto::guarded_utf8(plaintext).map_err(|_| {
         AppError::Internal(format!(
             "approved device code delivery {label} is not valid UTF-8"
         ))
@@ -774,9 +773,9 @@ mod tests {
         assert_eq!(
             poll_response,
             DeviceCodePoll::Approved {
-                api_key: "nyx_secret".to_string(),
+                api_key: "nyx_secret".to_string().into(),
                 node_id: "node-1".to_string(),
-                refresh_token: "refresh_secret".to_string(),
+                refresh_token: "refresh_secret".to_string().into(),
                 expires_in: DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
                 api_key_expires_at: Some("2099-01-01T00:00:00+00:00".into()),
             }

@@ -81,13 +81,11 @@ impl Input {
         window: &ReattachWindow,
     ) -> Result<Self, TurnError> {
         let encrypted = window.input.as_ref().ok_or_else(unknown)?;
-        let bytes = zeroize::Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&encrypted.bytes, &aad(row, &window.key)?)
-                .await
-                .map_err(|_| unknown())?,
-        );
+        let bytes = state
+            .encryption_keys
+            .decrypt_with_aad(&encrypted.bytes, &aad(row, &window.key)?)
+            .await
+            .map_err(|_| unknown())?;
         serde_json::from_slice(&bytes).map_err(|_| unknown())
     }
 

@@ -138,7 +138,7 @@ fn version_not_found() -> ResponseTemplate {
     ResponseTemplate::new(404).set_body_json(json!({"code":"skill_version_not_found","status":404}))
 }
 
-async fn decode(f: &Fixture, encrypted: &[u8]) -> Vec<u8> {
+async fn decode(f: &Fixture, encrypted: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
     f.state.encryption_keys.decrypt(encrypted).await.unwrap()
 }
 

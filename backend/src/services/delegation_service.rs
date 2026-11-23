@@ -167,7 +167,7 @@ pub(crate) async fn materialize_optional_auto_provision_snapshot(
                 provider_slug: binding.provider_slug.clone(),
                 injection_method: binding.injection_method.clone(),
                 injection_key: binding.injection_key.clone(),
-                credential: credential.into(),
+                credential,
             });
         }
     }
@@ -503,7 +503,7 @@ async fn materialize_provider_requirements(
             provider_slug: provider.slug.clone(),
             injection_method,
             injection_key,
-            credential: credential.into(),
+            credential,
         });
     }
 

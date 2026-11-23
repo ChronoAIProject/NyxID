@@ -302,9 +302,7 @@ async fn decrypt_platform_field(
             )
             .await
         }
-        None if keys.allow_legacy_record_reads() => {
-            keys.decrypt(encrypted).await.map(Zeroizing::new)
-        }
+        None if keys.allow_legacy_record_reads() => keys.decrypt(encrypted).await,
         _ => Err(AppError::Internal(
             "Invalid platform credential storage version".into(),
         )),

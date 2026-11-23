@@ -658,10 +658,10 @@ async fn decrypt_capability(
             )
             .await
         }
-        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => keys
-            .decrypt_with_aad(bytes, &capability_aad(id, owner))
-            .await
-            .map(Zeroizing::new),
+        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => {
+            keys.decrypt_with_aad(bytes, &capability_aad(id, owner))
+                .await
+        }
         _ => Err(AppError::Internal(
             "Unsupported preserved capability format".into(),
         )),

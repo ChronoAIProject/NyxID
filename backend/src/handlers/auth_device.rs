@@ -78,8 +78,10 @@ pub struct AuthDevicePollBody {
 #[serde(tag = "auth_kind", rename_all = "snake_case")]
 pub enum AuthDevicePollResponse {
     AccountSession {
-        access_token: String,
-        refresh_token: String,
+        #[schema(value_type = String)]
+        access_token: zeroize::Zeroizing<String>,
+        #[schema(value_type = String)]
+        refresh_token: zeroize::Zeroizing<String>,
         token_type: &'static str,
         expires_in: i64,
     },

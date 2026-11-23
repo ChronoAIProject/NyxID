@@ -236,9 +236,8 @@ pub async fn credentials(
                 )
                 .await
                 .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
-            let app_secret = zeroize::Zeroizing::new(
-                String::from_utf8(app_secret).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
-            );
+            let app_secret = crate::crypto::guarded_utf8(app_secret)
+                .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
             let token =
                 super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
             // The relay Verify Token is hash-only. Native management receives a
