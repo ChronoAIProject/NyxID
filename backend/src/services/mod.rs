@@ -364,6 +364,7 @@ pub mod channel_image_delivery;
 pub mod channel_image_preparation;
 pub(crate) mod channel_notices;
 pub mod channel_retry_ingress;
+pub(crate) mod channel_source_result;
 pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
 pub mod collaboration_group_service;

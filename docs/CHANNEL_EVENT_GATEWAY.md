@@ -974,6 +974,45 @@ a fixed notice only to an existing authorized owner thread. No
 public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
+### Reconciling a retained relay source
+
+An existing conversation reader can pass the workflow's `source_event_id` to
+`GET /api/v1/channel-conversations/{id}/messages?source_event_id=<alias>`.
+The alias is the 64-character lowercase hexadecimal value from verified channel
+context. The conversation ID is the same NyxID route ID used for the message
+history. This request uses the existing resource-owner or organization-reader
+authorization. A specialist's execution identity and the source alias carry
+no conversation-read authority.
+
+The response includes the original `inbound_message_id`, its native
+`platform_message_id` and `sender_platform_id` when recorded, and the provider
+`response_id` when retained. The relay activity's event UUID is the NyxID
+inbound message ID. That UUID also appears as `reply_to_message_id` on related
+outbound message rows. A source may have several related messages, such as an
+explicit tool post and an automatic reply. For CMA-owned delivery, use the
+designated consumer's receipt for the exact event and response to identify the
+answer, and use outbound rows to cross-check platform message IDs.
+
+`turn_status` reports the exact assistant turn's status. `reply_status` reports
+NyxID's local reply evidence. `confirmed` records the completion of NyxID's
+reply operation. `reply_evidence` identifies a gateway reply-target receipt
+or a complete set of locally recorded platform part receipts. `reply_kind`
+marks confirmed output as `completed_turn_output`, `failed_turn_output`, or
+`unclassified`. Failed-turn output can include a failure notice or partial
+answer and does not establish a successful final answer.
+`pending` covers preparation or a receipt wait. `handed_to_gateway` means
+the gateway took responsibility for delivery. `unconfirmed`, `unknown`,
+`silent` and `refused` preserve distinct local outcomes. A missing
+`response_id` or missing delivery evidence leaves the corresponding join
+or result unknown.
+
+Ordinary text source aliases expire 24 hours after admission. Media events can
+be retained for seven days, with response-read mappings still limited to
+24 hours. Unknown, expired and out-of-conversation sources return 404.
+For a weekly ledger, snapshot the exact source mapping while it is retained
+and associate later receipts by the saved IDs. A lookup does not extend
+retention or schedule execution.
+
 ### Reply-target receipts and dispatch lookup
 
 `POST /reply-targets/{ref}/messages` with exactly `409` and

@@ -1,8 +1,8 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,8 @@ use crate::handlers::channel_bots::hash_conversation_id;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, channel_bot_service, channel_relay_service, channel_routing_service, org_service,
+    audit_service, channel_bot_service, channel_relay_service, channel_routing_service,
+    channel_source_result, org_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -586,6 +587,7 @@ pub struct ConversationMessagesQuery {
     pub page: u64,
     #[serde(default = "default_per_page")]
     pub per_page: u64,
+    pub source_event_id: Option<String>,
 }
 
 fn default_page() -> u64 {
@@ -630,13 +632,13 @@ pub struct ConversationMessagesResponse {
 
 /// GET /api/v1/channel-conversations/{id}/messages
 ///
-/// List messages for a conversation. Accessible by the bot owner (session auth).
+/// List messages or resolve an exact retained source under the conversation ACL.
 pub async fn list_conversation_messages(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(conversation_id): Path<String>,
     Query(params): Query<ConversationMessagesQuery>,
-) -> AppResult<Json<ConversationMessagesResponse>> {
+) -> AppResult<Response> {
     let actor = auth_user.user_id.to_string();
 
     // Resolve owner access on the conversation itself. Read-level access
@@ -644,6 +646,34 @@ pub async fn list_conversation_messages(
     // message metadata.
     let (owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
+
+    if let Some(alias) = params.source_event_id {
+        if alias.len() != 64
+            || !alias
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(AppError::ValidationError("Invalid source event ID".into()));
+        }
+        let result = channel_source_result::lookup(&state.db, &conversation, &alias)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Source event not found".into()))?;
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ConversationSourceResult {
+                source_event_id: alias,
+                inbound_message_id: result.inbound_message_id,
+                platform_message_id: result.platform_message_id,
+                sender_platform_id: result.sender_platform_id,
+                response_id: result.response_id,
+                turn_status: result.turn_status,
+                reply_status: result.reply_status,
+                reply_evidence: result.reply_evidence,
+                reply_kind: result.reply_kind,
+            }),
+        )
+            .into_response());
+    }
 
     let per_page = params.per_page.clamp(1, 100);
     let (messages, total) = channel_relay_service::list_messages(
@@ -689,8 +719,26 @@ pub async fn list_conversation_messages(
         total,
         page: params.page,
         per_page,
-    }))
+    })
+    .into_response())
 }
+
+#[derive(Serialize)]
+struct ConversationSourceResult {
+    source_event_id: String,
+    inbound_message_id: String,
+    platform_message_id: Option<String>,
+    sender_platform_id: Option<String>,
+    response_id: Option<String>,
+    turn_status: &'static str,
+    reply_status: &'static str,
+    reply_evidence: Option<&'static str>,
+    reply_kind: Option<&'static str>,
+}
+
+#[cfg(test)]
+#[path = "channel_conversation_source_tests.rs"]
+mod source_tests;
 
 #[cfg(test)]
 mod tests {
