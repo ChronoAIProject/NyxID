@@ -164,23 +164,8 @@ export function NyxBotHome({
       return;
     onChat(agentId, conversationId, requestId);
   };
-  return (
-    <ScrollView
-      keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="on-drag"
-      {...scrollProps}
-      style={[{ flex: 1, minHeight: 0 }, scrollProps?.style]}
-      contentContainerStyle={[
-        styles.content,
-        scrollProps?.contentContainerStyle,
-      ]}
-      {...railIndicator}
-      onLayout={(event) => {
-        const { width } = event.nativeEvent.layout;
-        if (width > 0) setHostWidth(width);
-        scrollProps?.onLayout?.(event);
-      }}
-    >
+  const content = (
+    <>
       <View style={styles.greeting}>
         <AgentAvatar
           agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
@@ -556,6 +541,28 @@ export function NyxBotHome({
           </Quiet>
         ) : null}
       </HomeGroup>
+    </>
+  );
+  return (
+    <ScrollView
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag"
+      {...scrollProps}
+      style={[{ flex: 1, minHeight: 0 }, scrollProps?.style]}
+      contentContainerStyle={[
+        styles.content,
+        scrollProps?.contentContainerStyle,
+      ]}
+      {...railIndicator}
+    >
+      <View
+        style={styles.contentRows}
+        onLayout={({ nativeEvent: { layout } }) => {
+          if (layout.width > 0) setHostWidth(layout.width);
+        }}
+      >
+        {content}
+      </View>
     </ScrollView>
   );
 }
@@ -602,17 +609,8 @@ export function NyxBotHomePanel({
       requestId,
     );
   };
-  return (
-    <ScrollView
-      testID="nyxbot-home-right-panel"
-      style={styles.panelScroll}
-      contentContainerStyle={styles.panelContent}
-      keyboardShouldPersistTaps="handled"
-      {...railIndicator}
-      onLayout={({ nativeEvent: { layout } }) => {
-        if (layout.width > 0) setHostWidth(layout.width);
-      }}
-    >
+  const content = (
+    <>
       <Label accessibilityRole="header" style={styles.panelTitle}>
         {translateApp("While you were away")}
       </Label>
@@ -722,6 +720,24 @@ export function NyxBotHomePanel({
           <Quiet>{translateApp("No agents yet.")}</Quiet>
         ) : null}
       </HomeGroup>
+    </>
+  );
+  return (
+    <ScrollView
+      testID="nyxbot-home-right-panel"
+      style={styles.panelScroll}
+      contentContainerStyle={styles.panelContent}
+      keyboardShouldPersistTaps="handled"
+      {...railIndicator}
+    >
+      <View
+        style={styles.panelRows}
+        onLayout={({ nativeEvent: { layout } }) => {
+          if (layout.width > 0) setHostWidth(layout.width);
+        }}
+      >
+        {content}
+      </View>
     </ScrollView>
   );
 }
@@ -932,7 +948,8 @@ function Quiet({ title, children }: PropsWithChildren<{ title?: string }>) {
 
 const styles = StyleSheet.create({
   panelScroll: { flex: 1, minWidth: 0 },
-  panelContent: { padding: 16, gap: 4, paddingBottom: 32 },
+  panelContent: { padding: 16, paddingBottom: 32 },
+  panelRows: { gap: 4 },
   panelTitle: {
     fontFamily: fonts.displaySemi,
     fontSize: 18,
@@ -940,7 +957,8 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
   },
   suggestionActions: { flexDirection: "row", gap: 8 },
-  content: { paddingTop: 24, paddingBottom: 24, gap: 28 },
+  content: { paddingTop: 24, paddingBottom: 24 },
+  contentRows: { gap: 28 },
   greeting: { flexDirection: "row", alignItems: "center", gap: 12 },
   greetingText: { flex: 1, gap: 6 },
   title: { fontFamily: fonts.displaySemi, fontSize: 24, lineHeight: 30 },

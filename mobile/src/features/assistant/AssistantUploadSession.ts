@@ -216,9 +216,14 @@ export class AssistantUploadSession {
     }
   }
   async saveDraft() {
+    await this.persistDraft(false);
+  }
+  private async persistDraft(preparingDiscard: boolean) {
     if (this.restoring || this.disposed || !this.deps.saveDraft) return;
     await this.writeDraft(async () => {
-      if (!this.restoring && !this.disposed) await this.deps.saveDraft?.(this);
+      // Prepare the cleanup record only after queued uploads have stopped.
+      if (!this.restoring && !this.disposed && this.discardPending === preparingDiscard)
+        await this.deps.saveDraft?.(this);
     });
   }
   private writeDraft(write: () => Promise<void>) {
@@ -543,7 +548,7 @@ export class AssistantUploadSession {
     await this.draft?.catch(() => undefined);
     this.notice = translateApp(DISCARD_FAILED);
     this.notify();
-    await this.saveDraft();
+    await this.persistDraft(true);
   }
   dispose() {
     if (this.disposed) return;
