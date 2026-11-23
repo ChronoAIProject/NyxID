@@ -693,6 +693,24 @@ const ALLOWLIST: &[Verifier] = &[
         "NyxID public-authority assertion (typ nyxid-public+jwt)",
         "see verify_assertion decoding_key entry",
     ),
+    // Production-to-staging sign-in decisions are operation assertions, not access tokens.
+    v(
+        "services/staging_qr.rs",
+        "verify",
+        "jsonwebtoken::decode",
+        1,
+        "production staging-device assertion (typ nyxid-staging-device+jwt)",
+        "RS256 with the mounted production public key (one pinned key, no kid selection \
+         or fallback); exact issuer and staging receiver audience, typ, zero leeway, \
+         20s lifetime and bounded iat. Production requires a live first-party human \
+         session, personal feature entitlement, active verified person and MFA before \
+         signing approval. Staging matches the verified email and exact request/account \
+         binding; approve_bound fences current account/MFA state with the pending, \
+         unexpired one-time claim. Denial binds the same request. No OAuth consent or \
+         access-token authority; production bearer tokens fail typ/claim validation. \
+         Key rotation requires replacing the pinned PEM and restarting staging; \
+         unavailable database/transport authority fails without issuing a session",
+    ),
     // Non-NyxID keys (recorded so a new JWT verifier anywhere is reviewed).
     v(
         "crypto/dpop.rs",

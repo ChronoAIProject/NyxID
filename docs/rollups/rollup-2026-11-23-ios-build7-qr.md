@@ -105,3 +105,17 @@ changes. This rollup takes its implementation from the reviewed PR commits and
 does not include that worktree's newer notification or composer edits. Reconcile
 that branch against this rollup when preparing its eventual PR to avoid
 reintroducing the same attachment restoration.
+
+## CI follow-up
+
+The first full backend and coverage runs each failed only the JWT verifier
+inventory: the staging operation assertion had not been registered. The other
+backend test shards passed, including the two-server staging QR integration.
+The verifier has now been reviewed and recorded with its exact token class,
+pinned-key rotation policy, issuer/audience/type/lifetime checks, live production
+session and entitlement, staging account and request binding, transactional
+one-time claim and failure behavior. The inventory scanner remains unchanged.
+
+The rollup also merged current dev at `3fae30d94`, retaining its zeroizing
+account-delivery tokens and the newer PDF/backend and CI fixes. Final validation
+runs against that updated integration.
