@@ -252,23 +252,31 @@ on Drive and Workspace.
 ## File access for organization channel guests
 
 Grant the specialist a connection authenticated as a dedicated Google account.
+For event-only workflows, prefer the standalone Google Sheets connection
+(`api-google-sheets`) to limit the published operations to Sheets. Its default
+Google OAuth scope is still `drive`. Scope and file sharing determine which
+spreadsheets the credential can reach.
 Give that account Editor access to the event workbook so it can read the event
 and append questions. Keep unrelated files, mail, and calendars inaccessible
 to that account, including access inherited through groups or shared drives.
 Select only the OAuth scopes needed by the specialist. With `drive.file` the
-workbook also needs to be created or authorized for the OAuth app. Verify both
-the expected read and append and a Google denial for an unrelated workbook
-through the same connection.
+workbook also needs to be created or authorized for the OAuth app. The
+`drive.readonly` scope supports reads only. Verify the expected read and append
+and a Google denial for an unrelated workbook through the same connection.
 
 Guest Grants select the connections and operation types guests can use.
 `all_operations: true` applies the guest access level across the operations the
-specialist can use. Guest-only selections accept catalog endpoint IDs and
-reject resource value rules. Ordinary specialist operation scopes can apply
-value limits across the specialist's turns, including organization channel
+specialist can use. Workspace at `use` with `all_operations: true` can expose
+other non-destructive actions, including Drive, Gmail, and Calendar reads and
+permitted sends or creates. Actual access depends on the effective approval
+policy, the connected account's OAuth scopes, and Google's ACLs.
+Guest-only endpoint selection requires `assistant:guest-operation-scopes`.
+It accepts catalog endpoint IDs and rejects resource value rules. The separate
+`assistant:operation-scopes` flag lets the acting administrator author ordinary
+specialist operation scopes through the **operations** API. Those scopes can
+apply value limits across the specialist's turns, including organization channel
 guests. For Sheets, select the appropriate endpoint IDs and pin `spreadsheetId`
-and, when needed, `range` with exact or `one_of` input rules. Author those rules
-through the specialist's **operations** API when `assistant:operation-scopes`
-is enabled for the acting administrator. See [Operation scopes](AGENT_OPERATION_SCOPES.md).
+and, when needed, `range` with exact or `one_of` input rules. See [Operation scopes](AGENT_OPERATION_SCOPES.md).
 
 The effective approval policy also applies. For an organization channel guest
 using the organization's Workspace connection, NyxID checks the organization's
@@ -293,6 +301,9 @@ shared by callers whose approvals resolve to that organization's Workspace
 catalog policy. Its scope reaches beyond the specialist and channel, so use
 an exact workbook and range in the rule. A different spelling or range, such as
 `Questions` in place of `Questions!A:H`, needs its own reviewed exact rule.
+For live verification, identify the Google account behind the connection,
+verify its effective OAuth scopes and file sharing, and confirm the applicable
+global preference and service override for the exact operation.
 
 ## Mixed-version rollout
 

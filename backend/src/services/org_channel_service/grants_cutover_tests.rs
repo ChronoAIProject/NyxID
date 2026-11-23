@@ -945,6 +945,10 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
 
     let origin = f.guest("visitor").await;
     let row = channel_turn(&f, &origin, "Read the event and record a question").await;
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    let traceparent = crate::turn_trace::TurnContext::for_turn(turn_id)
+        .unwrap()
+        .traceparent();
     let key = credentials::load_for_conversation(
         &db,
         &f.org.state.encryption_keys,
@@ -965,6 +969,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         let request = Request::builder()
             .method(method)
             .uri(path)
+            .header("traceparent", &traceparent)
             .header("x-api-key", key.raw_key.as_str());
         match body {
             Some(body) => request
@@ -1126,6 +1131,34 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                     .contains("anything that needs their approval")
             );
         }
+        let mut uncorrelated = request("POST", append_path.clone(), Some(written.clone()));
+        uncorrelated.headers_mut().remove("traceparent");
+        let refusal = Box::pin(router.clone().oneshot(uncorrelated))
+            .await
+            .unwrap();
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+        let mut overwrite = args.clone();
+        overwrite["insertDataOption"] = json!("OVERWRITE");
+        for call in mcp_appends(&overwrite) {
+            let reply = mcp_result(call).await;
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            let refusal: Value =
+                serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(refusal["error"], "owner_only");
+        }
+        let mut missing_input = args.clone();
+        missing_input.as_object_mut().unwrap().remove("range");
+        for call in mcp_appends(&missing_input) {
+            let reply = mcp_result(call).await;
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(
+                reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Invalid tool arguments")
+            );
+        }
         assert_eq!(
             echo.calls.lock().unwrap().len(),
             1,
@@ -1174,7 +1207,12 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             GlobalApprovalMode::WritesOnly
         );
         for (method, path, body, status) in [
-            ("POST", append_path, Some(written.clone()), StatusCode::OK),
+            (
+                "POST",
+                append_path.clone(),
+                Some(written.clone()),
+                StatusCode::OK,
+            ),
             (
                 "POST",
                 format!(
@@ -1250,9 +1288,45 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             refusal["error"]["message"],
             "Fixture account has no access to this workbook"
         );
+        let reply = mcp_result(rpc(
+            "tools/call",
+            json!({
+                "name":"api-google-workspace__sheets_get_values",
+                "arguments":{"spreadsheetId":"unshared-workbook","range":"A1"}
+            }),
+        ))
+        .await;
+        assert_eq!(reply["result"]["isError"], true, "{reply}");
+
+        echo.fail_appends
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let failed = Box::pin(router.clone().oneshot(request(
+            "POST",
+            append_path,
+            Some(written.clone()),
+        )))
+        .await
+        .unwrap();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        for call in mcp_appends(&args) {
+            let reply = mcp_result(call).await;
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            assert!(
+                reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Error (500)")
+            );
+        }
 
         let calls = echo.calls.lock().unwrap();
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 9);
+        assert!(calls[6..].iter().all(|call| {
+            call["request"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("POST {append_resource}?"))
+        }));
         assert!(
             calls
                 .iter()
@@ -1291,8 +1365,83 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             assert_eq!(received, body);
         }
     };
-    TARGET_HTTP_CLIENT_BUILDER
-        .scope(echo.client_builder.clone(), exercise_guest_routes)
-        .await;
+    let (_, traces) = crate::turn_trace::capture(
+        TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(), exercise_guest_routes),
+    )
+    .await;
+    for (stage, reason, status, count) in [
+        ("proxy", "approval_required", Some(403), 2),
+        ("proxy", "guest_operation_denied", Some(403), 2),
+        ("proxy", "downstream_http_error", Some(403), 1),
+        ("proxy", "downstream_http_error", Some(500), 1),
+        ("mcp", "approval_required", None, 4),
+        ("mcp", "guest_operation_denied", None, 2),
+        ("mcp", "invalid_tool_arguments", None, 2),
+        ("mcp", "downstream_http_error", Some(403), 1),
+        ("mcp", "downstream_http_error", Some(500), 2),
+    ] {
+        let outcome = if reason == "downstream_http_error" {
+            "failed"
+        } else {
+            "rejected"
+        };
+        let observed = traces.iter().filter(|record| {
+            record["turn_id"] == *turn_id
+                && record["stage"] == stage
+                && record["guest_service_failure"] == reason
+                && record["outcome"] == outcome
+                && record["http_status"] == json!(status)
+        });
+        assert_eq!(observed.count(), count, "{stage} {reason}");
+    }
+    let gap = traces
+        .iter()
+        .find(|record| {
+            record["gap_reason"] == "missing_parent"
+                && record["guest_service_failure"] == "approval_required"
+        })
+        .unwrap();
+    assert!(gap["turn_id"].is_null() && gap["trace_id"].is_null());
+    assert!(
+        traces
+            .iter()
+            .any(|record| record["gap_reason"] == "missing_parent"
+                && record["guest_service_failure"].is_null()
+                && record["request_id"] == gap["request_id"])
+    );
+    let trace_text = json!(traces).to_string();
+    for private in [
+        "api-google-workspace",
+        "sheets_append_values",
+        "unshared-workbook",
+        "Guest question",
+        "INSERT_ROWS",
+        "test-google-token",
+    ] {
+        assert!(!trace_text.contains(private));
+    }
+    let saved = crate::services::assistant_nyxagent::get(&db, &row.user_id, &row.id)
+        .await
+        .unwrap();
+    let active = saved.active_turn.unwrap();
+    assert_eq!(active.turn_id, *turn_id);
+    for (reason, kind, status, count) in [
+        ("approval_required", "tool_error", None, 4),
+        ("guest_operation_denied", "tool_error", None, 2),
+        ("invalid_tool_arguments", "tool_error", None, 2),
+        ("downstream_http_error", "service_status", Some(403), 1),
+        ("downstream_http_error", "service_status", Some(500), 2),
+    ] {
+        let observed = active
+            .activities
+            .iter()
+            .filter_map(|activity| activity.failure.as_ref())
+            .filter(|failure| {
+                failure.reason.as_deref() == Some(reason)
+                    && failure.kind == kind
+                    && failure.status == status
+            });
+        assert_eq!(observed.count(), count, "activity {reason}");
+    }
     db.drop().await.unwrap();
 }
