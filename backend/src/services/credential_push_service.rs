@@ -545,12 +545,10 @@ pub(super) fn build_credential_params_from_fields(
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some("Authorization".to_string()),
-            header_value: Some({
-                let encoded = zeroize::Zeroizing::new(
-                    base64::engine::general_purpose::STANDARD.encode(credential),
-                );
-                zeroize::Zeroizing::new(["Basic ", &encoded].concat())
-            }),
+            header_value: Some(zeroize::Zeroizing::new(format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(credential)
+            ))),
             param_name: None,
             param_value: None,
             target_url,

@@ -1,4 +1,3 @@
-use crate::crypto::secret_json::to_secret_string;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -399,7 +398,7 @@ impl NodeDispatch {
         let node_id = fence.node_id.clone();
         let request_id = request.request_id.clone();
         let path = internal_path(&node_id, "proxy");
-        let body = to_secret_string(&ProxyEnvelope {
+        let body = serde_json::to_vec(&ProxyEnvelope {
             fence: fence.clone(),
             request,
             signature,
@@ -409,7 +408,6 @@ impl NodeDispatch {
                 "Failed to encode internal node proxy request: {error}"
             )))
         })?;
-        let body = Bytes::from_owner(body);
         let headers = self.auth.signed_headers("POST", &path, &body);
         let url = join_internal_url(&base_url, &path).map_err(NodeProxyFailure::before_dispatch)?;
         let cancel_path = internal_path(&node_id, "proxy-cancel");
@@ -527,7 +525,7 @@ impl NodeDispatch {
 
     pub(crate) async fn proxy_upload(
         &self,
-        request: nyxid_machine::Request<nyxid_crypto::secret_json::WireJson>,
+        request: nyxid_machine::Request,
         body: Body,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let node_id = request.node_id.clone();
@@ -545,23 +543,21 @@ impl NodeDispatch {
             OwnerTarget::Remote { fence, base_url } => {
                 let path = internal_path(&node_id, "proxy-upload");
                 let envelope =
-                    to_secret_string(&MachineEnvelope { fence, request }).map_err(|_| {
+                    serde_json::to_vec(&MachineEnvelope { fence, request }).map_err(|_| {
                         NodeProxyFailure::before_dispatch(AppError::Internal(
                             "Upload envelope encoding failed".into(),
                         ))
                     })?;
-                let encoded = zeroize::Zeroizing::new(
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(envelope.as_bytes()),
-                );
-                let mut header = HeaderValue::from_str(&encoded).expect("base64 header");
-                header.set_sensitive(true);
                 let url = join_internal_url(&base_url, &path)
                     .map_err(NodeProxyFailure::before_dispatch)?;
                 let response = self
                     .http_client
                     .post(url)
-                    .headers(self.auth.signed_headers("POST", &path, envelope.as_bytes()))
-                    .header("x-nyxid-upload-open", header)
+                    .headers(self.auth.signed_headers("POST", &path, &envelope))
+                    .header(
+                        "x-nyxid-upload-open",
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&envelope),
+                    )
                     .body(reqwest::Body::wrap_stream(body.into_data_stream()))
                     .send()
                     .await
@@ -1045,10 +1041,9 @@ impl NodeDispatch {
     > {
         let machine_desktop = matches!(&operation, DuplexOpen::MachineDesktop { .. });
         let path = internal_path(node_id, "duplex");
-        let body = to_secret_string(&DuplexEnvelope { fence, operation }).map_err(|error| {
+        let body = serde_json::to_vec(&DuplexEnvelope { fence, operation }).map_err(|error| {
             AppError::Internal(format!("Failed to encode node duplex request: {error}"))
         })?;
-        let body = Bytes::from_owner(body);
         let mut url = join_internal_url(&base_url, &path)?;
         url.set_scheme(if base_url.scheme() == "https" {
             "wss"
@@ -1076,7 +1071,9 @@ impl NodeDispatch {
                 })?;
         socket
             .send(TungsteniteMessage::Text(
-                body.try_into().expect("serialized JSON is UTF-8"),
+                String::from_utf8(body)
+                    .expect("serialized JSON is UTF-8")
+                    .into(),
             ))
             .await
             .map_err(|_| AppError::NodeOffline("Node owner replica is unavailable".to_string()))?;
@@ -1355,10 +1352,9 @@ impl NodeDispatch {
             OwnerTarget::Remote { fence, base_url } => {
                 let path = internal_path(node_id, "command");
                 let body =
-                    to_secret_string(&CommandEnvelope { fence, command }).map_err(|error| {
+                    serde_json::to_vec(&CommandEnvelope { fence, command }).map_err(|error| {
                         AppError::Internal(format!("Failed to encode node command: {error}"))
                     })?;
-                let body = Bytes::from_owner(body);
                 let response = self
                     .http_client
                     .post(join_internal_url(&base_url, &path)?)
@@ -1493,9 +1489,9 @@ struct ProxyEnvelope {
 }
 
 #[derive(Serialize, Deserialize)]
-struct MachineEnvelope<P = serde_json::Value> {
+struct MachineEnvelope {
     fence: NodeOwnerFence,
-    request: nyxid_machine::Request<P>,
+    request: nyxid_machine::Request,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2149,11 +2145,7 @@ async fn internal_proxy_upload(
     if encoded.len() > 64 * 1024 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let mut envelope = zeroize::Zeroizing::new(Vec::new());
-    if base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode_vec(encoded, &mut envelope)
-        .is_err()
-    {
+    let Ok(envelope) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let path = internal_path(&node_id, "proxy-upload");
@@ -2164,9 +2156,7 @@ async fn internal_proxy_upload(
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Ok(envelope) =
-        serde_json::from_slice::<MachineEnvelope<nyxid_crypto::secret_json::WireJson>>(&envelope)
-    else {
+    let Ok(envelope) = serde_json::from_slice::<MachineEnvelope>(&envelope) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     if envelope.request.node_id != node_id
@@ -2180,7 +2170,7 @@ async fn internal_proxy_upload(
     {
         return fence_refusal();
     }
-    let limit = envelope.request.parameters.0["max_bytes"]
+    let limit = envelope.request.parameters["max_bytes"]
         .as_u64()
         .unwrap_or(0)
         .min(crate::services::machine_gateway_service::GIT_MAX_BYTES as u64)

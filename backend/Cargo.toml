@@ -87,7 +87,6 @@ ed25519-dalek = { version = "2", features = ["alloc"] }
 ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 deunicode = "1.6"
-nyxid-crypto = { path = "../nyxid-crypto" }
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-machine = { path = "../machine" }

@@ -163,7 +163,7 @@ fn proxy_request(request_id: &str) -> NodeProxyRequest {
         service_slug: "service-slug".to_string(),
         base_url: "https://service.invalid".to_string(),
         method: "GET".to_string(),
-        path: "/v1/data".into(),
+        path: "/v1/data".to_string(),
         query: None,
         headers: vec![].into(),
         body: None,
@@ -783,7 +783,7 @@ async fn remote_ws_passthrough_forwards_text_binary_and_close() {
                     session_id: sent_session,
                     service_slug: "socket".to_string(),
                     base_url: "wss://socket.invalid".to_string(),
-                    path: "/events".into(),
+                    path: "/events".to_string(),
                     query: None,
                     headers: (vec![]).into(),
                     ws_frame_injections: vec![],
@@ -869,7 +869,7 @@ async fn remote_ws_passthrough_preserves_large_binary_frames() {
                     session_id: sent_session,
                     service_slug: "socket".to_string(),
                     base_url: "wss://socket.invalid".to_string(),
-                    path: "/events".into(),
+                    path: "/events".to_string(),
                     query: None,
                     headers: (vec![]).into(),
                     ws_frame_injections: vec![],
@@ -1136,11 +1136,7 @@ async fn machine_gateway_upload_streams_across_replicas_without_buffering() {
         for _ in 0..64 {yield Ok::<_,std::io::Error>(bytes::Bytes::from(vec![0x5a;65536]));}
     });
     let dispatch = fixture.caller_dispatch.clone();
-    let calling = tokio::spawn(async move {
-        dispatch
-            .proxy_upload(request.with_parameters_owner(), body)
-            .await
-    });
+    let calling = tokio::spawn(async move { dispatch.proxy_upload(request, body).await });
     let metadata = tokio::time::timeout(Duration::from_secs(5), fixture.outbound.recv())
         .await
         .unwrap()

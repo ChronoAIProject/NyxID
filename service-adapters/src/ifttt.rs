@@ -126,17 +126,8 @@ impl Client {
     ) -> Result<Response, Error> {
         validate_request(base_url, method, path, query, body)?;
         validate_credential(key)?;
-        let url = zeroize::Zeroizing::new(
-            [
-                BASE_URL,
-                "/",
-                path.trim_start_matches('/'),
-                "/with/key/",
-                key,
-            ]
-            .concat(),
-        );
-        let mut request = self.0.post(url.as_str());
+        let url = format!("{BASE_URL}/{}/with/key/{key}", path.trim_start_matches('/'));
+        let mut request = self.0.post(url);
         for (name, value) in headers {
             if !matches!(
                 name.to_ascii_lowercase().as_str(),

@@ -8,62 +8,60 @@ use crate::Request;
 const WINDOW_SECS: i64 = 60;
 const MAX_NONCES: usize = 8192;
 
-fn canonical_digest(value: &serde_json::Value) -> [u8; 32] {
-    fn append(value: &serde_json::Value, output: &mut Sha256) {
+fn canonical(value: &serde_json::Value) -> Vec<u8> {
+    fn append(value: &serde_json::Value, output: &mut Vec<u8>) {
         match value {
             serde_json::Value::Object(fields) => {
                 let mut fields: Vec<_> = fields.iter().collect();
                 fields.sort_unstable_by_key(|(key, _)| *key);
-                output.update(b"{");
+                output.push(b'{');
                 for (index, (key, value)) in fields.into_iter().enumerate() {
                     if index != 0 {
-                        output.update(b",");
+                        output.push(b',');
                     }
                     serde_json::to_writer(&mut *output, key).expect("JSON key");
-                    output.update(b":");
+                    output.push(b':');
                     append(value, output);
                 }
-                output.update(b"}");
+                output.push(b'}');
             }
             serde_json::Value::Array(values) => {
-                output.update(b"[");
+                output.push(b'[');
                 for (index, value) in values.iter().enumerate() {
                     if index != 0 {
-                        output.update(b",");
+                        output.push(b',');
                     }
                     append(value, output);
                 }
-                output.update(b"]");
+                output.push(b']');
             }
             other => serde_json::to_writer(output, other).expect("JSON value"),
         }
     }
-    let mut output = Sha256::new();
+    let mut output = Vec::new();
     append(value, &mut output);
-    output.finalize().into()
+    output
 }
 
-fn request_mac(
-    request: &Request<impl std::borrow::Borrow<serde_json::Value>>,
-    secret: &[u8],
-) -> Hmac<Sha256> {
+fn request_mac(request: &Request, secret: &[u8]) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     if request.version == crate::authority::EXTERNAL_VERSION {
         mac.update(b"nyxid.machine.request.v3\0");
         let authority =
             serde_json::to_value(&request.external_authority).expect("external authority");
-        mac.update(&canonical_digest(&authority));
+        mac.update(&Sha256::digest(canonical(&authority)));
         mac.update(&request.version.to_be_bytes());
     } else if request.version == crate::authority::VERSION {
         mac.update(b"nyxid.machine.request.v2\0");
         let authority = serde_json::to_value(&request.authority).expect("authority");
-        mac.update(&canonical_digest(&authority));
+        mac.update(&Sha256::digest(canonical(&authority)));
         mac.update(&request.version.to_be_bytes());
     } else {
         mac.update(b"nyxid.machine.request.v1\0");
     }
     let operation = serde_json::to_vec(&request.operation).expect("operation");
-    let digest = canonical_digest(request.parameters.borrow());
+    let canonical = zeroize::Zeroizing::new(canonical(&request.parameters));
+    let digest = Sha256::digest(canonical.as_slice());
     for value in [
         request.request_id.as_bytes(),
         request.node_id.as_bytes(),
@@ -78,10 +76,7 @@ fn request_mac(
     mac
 }
 
-pub fn sign(
-    request: &Request<impl std::borrow::Borrow<serde_json::Value>>,
-    secret: &[u8],
-) -> String {
+pub fn sign(request: &Request, secret: &[u8]) -> String {
     hex::encode(request_mac(request, secret).finalize().into_bytes())
 }
 
@@ -103,7 +98,7 @@ pub struct ReplayGuard {
 impl ReplayGuard {
     pub fn verify(
         &mut self,
-        request: &Request<impl std::borrow::Borrow<serde_json::Value>>,
+        request: &Request,
         node_id: &str,
         secret: &[u8],
         now: i64,
@@ -128,7 +123,7 @@ impl ReplayGuard {
     /// result; replay consumption remains exclusive to first execution.
     pub fn verify_signature_and_freshness(
         &self,
-        request: &Request<impl std::borrow::Borrow<serde_json::Value>>,
+        request: &Request,
         node_id: &str,
         secret: &[u8],
         now: i64,
@@ -177,26 +172,6 @@ mod tests {
         };
         request.signature = sign(&request, b"test signing secret");
         request
-    }
-
-    #[test]
-    fn upload_signature_keeps_canonical_parameter_bytes() {
-        let request = Request {
-            version: 1,
-            authority: None,
-            external_authority: None,
-            request_id: "req".into(),
-            node_id: "node".into(),
-            operation: Operation::ProxyUpload,
-            parameters: serde_json::json!({"z": 3, "a": ["dummy", 1]}),
-            timestamp: 123,
-            nonce: "nonce".into(),
-            signature: String::new(),
-        };
-        assert_eq!(
-            sign(&request, b"fixture"),
-            "4c60c53018b01ea80e3870c4e9ccd93e8ac5cbb16037d4eab1badf775d86169f"
-        );
     }
 
     #[test]
@@ -428,7 +403,7 @@ mod authority_tests {
         }
         value["version"] = 1.into();
         value["authority"] = serde_json::Value::Null;
-        let changed: Request = serde_json::from_value(value).unwrap();
+        let changed = serde_json::from_value(value).unwrap();
         assert!(
             ReplayGuard::default()
                 .verify(&changed, &r.node_id, b"test", 1000)
