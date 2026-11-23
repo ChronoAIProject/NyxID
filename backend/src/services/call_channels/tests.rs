@@ -4234,6 +4234,7 @@ async fn nyxagent_egress_uses_its_turn_key_for_explicit_policy_blocks() {
         raw_key: claim.credential.raw_key,
     };
     let authority = NyxAgentExecutionContext::Owner {
+        attempt: None,
         user_id: f.b.user_id.clone(),
         turn: TurnRef {
             conversation_id: claim.conversation.id,

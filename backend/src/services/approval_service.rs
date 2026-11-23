@@ -3461,12 +3461,21 @@ mod tests {
         specialist.role = crate::models::assistant_conversation::AgentRole::Subagent;
         let deadline = |mode: ApprovalMode, descriptor: OperationDescriptor, chat| {
             let db = &f.state.db;
+            let caller_key = &f.chat.api_key_id;
             async move {
                 let mut operation = ApprovalRequestOperation::from_descriptor(&descriptor, None);
+                operation.fresh_decision = true;
+                operation.caller_api_key_id = Some(caller_key.clone());
+                let expected_key = operation.caller_api_key_id.clone();
+                let expected_protocol = operation.protocol.clone();
                 let mut waiter =
                     ConnectedWait::for_service(db, &mode, &mut operation, &descriptor, chat, 300)
                         .await
                         .unwrap();
+                assert!(operation.fresh_decision);
+                assert_eq!(operation.caller_api_key_id, expected_key);
+                assert_eq!(operation.protocol, expected_protocol);
+                assert_eq!(operation.connected_request_id, waiter.occurrence);
                 // This policy check created no row to clean up.
                 waiter.occurrence = None;
                 operation.connected_deadline

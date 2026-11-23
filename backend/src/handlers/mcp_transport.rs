@@ -4508,7 +4508,7 @@ async fn wait_for_mcp_approval(
         })?;
     approval_service::recheck_after_decision(
         &state.db,
-        &approval_owner_user_id,
+        &auth.effective_approval_owner_user_id(),
         &target.service_owner_user_id,
         &target.service_id,
         operation,
@@ -4517,7 +4517,7 @@ async fn wait_for_mcp_approval(
         &approval_request.approval_mode,
     )
     .await
-    .map_err(|error| tool_result(request_id.clone(), &error.to_string(), true))?;
+    .map_err(|error| error.to_string())?;
 
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
