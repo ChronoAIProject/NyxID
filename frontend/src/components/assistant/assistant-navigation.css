@@ -1,0 +1,40 @@
+.assistant-threads-column {
+  display: none;
+  min-height: 0;
+  flex-shrink: 0;
+  width: clamp(240px, 21vw, 304px);
+  margin-top: calc(var(--spacing) * 3);
+  margin-bottom: calc(var(--spacing) * 2);
+  border-right: 1px solid color-mix(in oklab, var(--color-border) 38%, transparent);
+  border-radius: 1rem 0 0 1rem;
+  overflow: hidden;
+  background: var(--color-background);
+}
+
+@media (min-width: 1024px) {
+  .assistant-threads-column:not(:empty) { display: block; }
+  .assistant-threads-column:not(:empty) + div > main { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+}
+
+.assistant-agent-row {
+  min-height: calc(var(--spacing) * 10);
+}
+
+.assistant-thread-panel {
+  background: var(--color-background);
+}
+
+.assistant-thread-new {
+  color: var(--color-foreground);
+}
+
+.assistant-thread-new:hover {
+  background: var(--color-overlay);
+}
+
+.assistant-thread-search::-webkit-search-cancel-button { display: none; }
+
+.assistant-thread-new:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
