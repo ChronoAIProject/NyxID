@@ -498,7 +498,7 @@ async fn exercise_account_policy(default_on: bool) {
                 } else {
                     client
                         .get(format!("{base}/identity"))
-                        .bearer_auth(&delivery.access_token)
+                        .bearer_auth(delivery.access_token.as_str())
                 }
                 .send()
                 .await

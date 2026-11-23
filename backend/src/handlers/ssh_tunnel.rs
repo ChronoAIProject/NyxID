@@ -1406,6 +1406,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,

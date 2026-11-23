@@ -111,6 +111,7 @@ function images(
   return {
     images: attachments.map((attachment) => ({
       id: attachment.id,
+      ...(attachment.pdf ? { pdf: attachment.pdf } : {}),
       expired: attachment.expired,
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,

@@ -2832,6 +2832,44 @@ mod tests {
     use crate::models::node::NodeConnectionOwner;
     use chrono::{Duration, Utc};
 
+    #[tokio::test]
+    async fn older_node_owner_relays_location_headers() {
+        let headers = vec![
+            (
+                "Location".to_owned(),
+                "https://files.example/export".to_owned(),
+            ),
+            ("Operation-Location".into(), "/jobs/1".into()),
+            ("Content-Location".into(), "result".into()),
+            ("etag".into(), "version".into()),
+        ];
+        for kind in ["complete", "streaming"] {
+            let encoded = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&headers).unwrap());
+            let envelope = axum::http::Response::builder()
+                .header(INTERNAL_PROXY_KIND, kind)
+                .header(INTERNAL_PROXY_STATUS, "302")
+                .header(INTERNAL_PROXY_HEADERS, encoded)
+                .body(reqwest::Body::from(""))
+                .unwrap();
+            let result = NodeDispatch::decode_proxy_response(envelope.into(), "request".into())
+                .await
+                .unwrap();
+            match result {
+                ProxyResponseType::Complete(response) => assert_eq!(response.headers, headers),
+                ProxyResponseType::Streaming(mut rx) => {
+                    let Some(StreamChunk::Start {
+                        headers: received, ..
+                    }) = rx.recv().await
+                    else {
+                        panic!("expected stream headers")
+                    };
+                    assert_eq!(received, headers);
+                }
+            }
+        }
+    }
+
     fn owner(instance_name: &str, generation_id: &str) -> NodeConnectionOwner {
         let now = Utc::now();
         NodeConnectionOwner {

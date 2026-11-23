@@ -760,6 +760,41 @@ pub struct UpdateKeyRequest {
     pub copy_oauth_client_from: Option<String>,
 }
 
+impl UpdateKeyRequest {
+    fn is_endpoint_only(&self) -> bool {
+        matches!(
+            self,
+            Self {
+                endpoint_url: Some(_),
+                label: None,
+                icon_url: None,
+                auth_method: None,
+                auth_key_name: None,
+                node_id: None,
+                credential: None,
+                use_platform_key: None,
+                is_active: None,
+                admin_only: None,
+                identity_propagation_mode: None,
+                identity_include_user_id: None,
+                identity_include_email: None,
+                identity_include_name: None,
+                identity_jwt_audience: None,
+                forward_access_token: None,
+                inject_delegation_token: None,
+                delegation_token_scope: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                copy_oauth_client_from: None,
+            }
+        )
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteKeyResponse {
     pub message: String,
@@ -1800,6 +1835,13 @@ pub async fn update_key(
         )?);
     }
 
+    let custom_url_only = actor == user_id_str
+        && view.catalog_service_id.is_none()
+        && view.service_type == "http"
+        && view.node_id.as_deref().is_none_or(str::is_empty)
+        && !view.auto_connected
+        && body.is_endpoint_only();
+
     // NOTE: label writes are intentionally deferred past the strict
     // node push below. A label change combined with a node-routed
     // credential update must be atomic — committing the label before
@@ -2395,6 +2437,36 @@ pub async fn update_key(
     } else {
         None
     };
+
+    if custom_url_only && let Some(migration) = target_migration.as_ref().filter(|m| m.is_direct())
+    {
+        // Custom discovery depends on the service ID, slug and spec. Resolve
+        // the full authorized response before writing the direct endpoint.
+        let mut response = key_response_from_view(view);
+        enrich_key_response(
+            &state.db,
+            &state.node_ws_manager,
+            &actor,
+            state.config.node_heartbeat_timeout_secs,
+            state.config.base_url.trim_end_matches('/'),
+            &mut response,
+        )
+        .await?;
+        crate::handlers::service_history::enrich_summaries(
+            &state.db,
+            &auth_user,
+            std::slice::from_mut(&mut response),
+        )
+        .await?;
+        let (endpoint, service) = migration
+            .commit_for_connection(&state.db, &key_id, response.state_version)
+            .await?;
+        response.endpoint_url = Some(endpoint.url);
+        if let Some(authorship) = &mut response.authorship {
+            authorship.last_change = service.last_change.as_ref().map(Into::into);
+        }
+        return Ok(Json(response));
+    }
 
     // Deferred label write. See the matching note at the top of the
     // handler: committing the label up front would break the atomic

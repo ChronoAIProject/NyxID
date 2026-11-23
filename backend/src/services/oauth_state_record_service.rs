@@ -99,7 +99,7 @@ pub(crate) async fn decrypt(
             return Err(invalid());
         }
         let ciphertext = hex::decode(encoded).map_err(|_| invalid())?;
-        Zeroizing::new(keys.decrypt(&ciphertext).await?)
+        keys.decrypt(&ciphertext).await?
     };
     validate(&bytes)?;
     Ok(Zeroizing::new(

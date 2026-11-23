@@ -2,8 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use zeroize::Zeroizing;
-
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
@@ -249,7 +247,7 @@ impl RegistrationDescriptor {
         let mut secrets = super::channel_platform::PlatformVerifySecrets::default();
         for field in self.fields.iter().filter(|field| field.webhook_secret) {
             if let Ok(encrypted) = document.get_binary_generic(field.storage) {
-                let bytes = Zeroizing::new(keys.decrypt(encrypted).await?);
+                let bytes = keys.decrypt(encrypted).await?;
                 let value = std::str::from_utf8(&bytes).map_err(|_| {
                     AppError::Internal("invalid webhook secret encoding".to_string())
                 })?;

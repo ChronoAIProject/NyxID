@@ -58,12 +58,14 @@ async fn root(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now() - age;
     let extracted = super::super::attachment_extraction::Extracted {
+        pdf: None,
         content_type: mime.into(),
         text: "private extracted text".into(),
         sections: Vec::new(),
     };
     let row = AssistantUpload {
         filename_is_original: None,
+        pdf: None,
         source: None,
         content_sha256: None,
         secret_context_versions: Default::default(),
@@ -1385,3 +1387,51 @@ async fn image_claim_cursor_round_trips_the_lease_checkpoint_across_pages_and_ho
 
 #[path = "assistant_group_image_cleanup_tests.rs"]
 mod group_image_cleanup;
+
+#[tokio::test]
+async fn pdf_derived_pages_inherit_document_expiry_and_are_purged_with_root() {
+    let (state, owner, thread) = fixture().await;
+    let id = root(
+        &state,
+        &owner,
+        &thread,
+        "application/pdf",
+        true,
+        Duration::days(2),
+    )
+    .await;
+    let child = Uuid::new_v4().to_string();
+    state.db.collection::<Document>(ATTACHMENTS).insert_one(doc!{"_id":&child,"origin":"pdf_page","parent_attachment_id":&id,"user_id":&owner,"conversation_id":&thread,"content_type":"image/jpeg","created_at":bson::DateTime::now(),"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}}).await.unwrap();
+    policy(
+        &state,
+        &owner,
+        Policy {
+            document_days: 1,
+            image_days: 365,
+            tool_image_days: None,
+            ..Policy::default()
+        },
+    )
+    .await;
+    assert!(matches!(
+        require_available(&state.db, doc! {"_id":&child}).await,
+        Err(AppError::AssistantAttachmentExpired)
+    ));
+    assert_eq!(sweep(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .count_documents(doc! {"$or":[{"_id":&id},{"parent_attachment_id":&id}]})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        require_available(&state.db, doc! {"_id":&child})
+            .await
+            .is_err()
+    );
+    assert_eq!(sweep(&state.db).await.unwrap(), 0);
+    state.db.drop().await.unwrap();
+}

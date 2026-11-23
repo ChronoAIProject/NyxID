@@ -1384,7 +1384,7 @@ function NyxAgentThreadPage() {
                 ...chat.acknowledgements.map(
                   (row) => `${row.id}:${row.status}`,
                 ),
-                ...chat.approvals.map((row) => `approval:${row.id}`),
+                ...chat.approvals.map((row) => `approval:${row.id}:${row.status ?? "pending"}:${row.expires_at}`),
               ].join(",")}
               bottomInset={composerHeight}
               // A linked review card may sit outside the mounted window.

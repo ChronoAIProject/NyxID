@@ -445,13 +445,11 @@ async fn materialize_and_send(
     if authority.receipt.configuration.identity.platform == EntryPlatform::Discord {
         let handle = authority.handle.as_ref().ok_or_else(refused)?;
         check_handle(handle, &authority.receipt)?;
-        let plaintext = Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&handle.ciphertext, handle.binding_digest.as_bytes())
-                .await
-                .map_err(|_| refused())?,
-        );
+        let plaintext = state
+            .encryption_keys
+            .decrypt_with_aad(&handle.ciphertext, handle.binding_digest.as_bytes())
+            .await
+            .map_err(|_| refused())?;
         if plaintext.len() > 4096 {
             return Ok(NativeSendOutcome::Refused);
         }

@@ -223,7 +223,8 @@ def run(name):
               "outcome": "skipped", "stage": "configuration", "rollback": "none"}
     raw, webhook = os.getenv("NYXID_CHECK_ACCOUNT"), os.getenv("NYXID_CHECK_ALERT_URL")
     if not raw or not webhook:
-        print("::notice::NyxBot deployment check skipped. Environment check secrets are incomplete.")
+        print("::warning::NyxBot deployment check skipped. Configure both NYXID_CHECK_ACCOUNT "
+              "and NYXID_CHECK_ALERT_URL in this deployment environment; NyxBot is unverified.")
         return record
     target = load_target(name, os.getenv("NYXID_DEPLOY_TARGET"))
     try:

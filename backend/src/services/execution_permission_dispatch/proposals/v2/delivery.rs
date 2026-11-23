@@ -96,13 +96,12 @@ pub(super) async fn claim_inner(
         return Ok(None);
     }
     crate::services::security_readiness_service::require_serving(db, READINESS).await?;
-    let raw = Zeroizing::new(
-        keys.decrypt_with_aad(
+    let raw = keys
+        .decrypt_with_aad(
             &p.payload.as_ref().ok_or_else(conflict)?.bytes,
             aad(&row.id).as_bytes(),
         )
-        .await?,
-    );
+        .await?;
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }

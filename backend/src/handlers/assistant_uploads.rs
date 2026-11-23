@@ -155,9 +155,27 @@ pub async fn thread_image(
         .as_ref()
         .map(std::sync::Arc::as_ref)
         .ok_or_else(|| AppError::Forbidden("A thread Agent Key is required".into()))?;
+    // Retain the egress byte reservation with the actual HTTP buffer.
+    let reservation =
+        uploads::byte_budget::reserve(crate::services::attachment_extraction::MAX_BYTES).await?;
     let (mime, bytes) =
         uploads::chat_bytes(&state.db, &state.encryption_keys, chat, &id, true).await?;
-    content(mime, bytes)
+    let mut response = content(mime, Vec::new())?;
+    *response.body_mut() = Body::from(bytes::Bytes::from_owner(ReservedContent {
+        bytes,
+        _reservation: reservation,
+    }));
+    Ok(response)
+}
+
+struct ReservedContent {
+    bytes: Vec<u8>,
+    _reservation: uploads::byte_budget::ByteReservation,
+}
+impl AsRef<[u8]> for ReservedContent {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 fn content(mime: String, bytes: Vec<u8>) -> AppResult<Response> {

@@ -129,10 +129,10 @@ async fn oauth_endpoint_authenticates_client_and_returns_service_bound_evidence(
         let response = oauth::introspect(
             State(state.clone()),
             Form(IntrospectRequest {
-                token: f.key.full_key.clone(),
+                token: f.key.full_key.clone().into(),
                 token_type_hint: Some("api_key".into()),
                 client_id: Some(f.client.id.clone()),
-                client_secret: Some(credential),
+                client_secret: Some(credential.into()),
                 service_id: service,
                 resource_request: Default::default(),
             }),

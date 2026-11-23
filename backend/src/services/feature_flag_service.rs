@@ -290,6 +290,13 @@ const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_PDF_VISION_FLAG_KEY: &str = "assistant:pdf-vision";
+const ASSISTANT_PDF_VISION_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_PDF_VISION_FLAG_KEY,
+    description: "Render PDF pages without text for vision models after upgrading all attachment readers and encryption workers.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_CHANNEL_MEDIA_FLAG_KEY: &str = "assistant:channel-media";
 const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
@@ -542,6 +549,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -611,6 +619,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
@@ -3466,6 +3475,7 @@ mod tests {
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
+                "assistant:pdf-vision",
                 "assistant:channel-guest-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",

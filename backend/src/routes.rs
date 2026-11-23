@@ -1030,7 +1030,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // dedicated, more restrictive per-user rate limiter for LLM routes (e.g., 5
     // req/s per user) to prevent API quota burn and separate LLM traffic from
     // lightweight auth requests.
-    let llm_routes = llm_billing_routes!(register_billing_routes, Router::new());
+    let llm_routes = llm_billing_routes!(register_billing_routes, Router::new()).layer(
+        middleware::from_fn(handlers::proxy::ingress::approval_wait_budget),
+    );
 
     let sa_admin_routes = Router::new()
         .route(
@@ -3283,7 +3285,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::mw::auth::reject_oauth_client_tokens,
         ));
 
-    let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
+    let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new()).layer(
+        middleware::from_fn(handlers::proxy::ingress::approval_wait_budget),
+    );
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()

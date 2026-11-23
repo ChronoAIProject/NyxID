@@ -940,6 +940,14 @@ introduced. Upgrade all API readers and billing workers before enabling the
 three Sandbox metrics; old enum readers are unsafe
 once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 
+### PDF vision renderer
+
+`NYXID_PDF_RENDERER` optionally supplies an absolute path to `pdftoppm` for native
+development. The backend image installs Poppler for both supported Linux
+architectures and defaults to `/usr/bin/pdftoppm`. The runtime
+`assistant:pdf-vision` feature flag controls fallback; see
+[uploads](chat/10-uploads.md#scanned-pdf-pages) for bounds and rollout.
+
 
 ## Android App Links
 

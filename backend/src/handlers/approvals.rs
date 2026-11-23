@@ -2374,6 +2374,16 @@ mod tests {
     }
 
     #[test]
+    fn approval_2874_cli_contract_deserializes_into_handler_request() {
+        let request: DecideRequest = serde_json::from_str(include_str!(
+            "../../../cli/tests/fixtures/approval-decision.json"
+        ))
+        .unwrap();
+        assert!(request.approved);
+        assert_eq!(request.duration_sec, None);
+    }
+
+    #[test]
     fn decide_response_serialization_with_decided_at() {
         let resp = DecideResponse {
             id: "req_1".to_string(),
