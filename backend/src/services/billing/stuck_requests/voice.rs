@@ -95,7 +95,7 @@ pub(super) async fn read(
             .max_time(std::time::Duration::from_millis(500))
             .session(&mut *tx)
             .await?;
-        while let Some(call) = cursor.stream(&mut *tx).try_next().await? {
+        while let Some(call) = next_document(&mut cursor, tx).await? {
             calls.insert(
                 call.get_str("_id").map_err(|_| unavailable())?.to_owned(),
                 call,
@@ -111,7 +111,7 @@ pub(super) async fn read(
             .max_time(std::time::Duration::from_millis(500))
             .session(&mut *tx)
             .await?;
-        while let Some(w) = cursor.stream(&mut *tx).try_next().await? {
+        while let Some(w) = next_document(&mut cursor, tx).await? {
             checkpoints.insert(
                 w.get_str("billing_request_id")
                     .map_err(|_| unavailable())?
