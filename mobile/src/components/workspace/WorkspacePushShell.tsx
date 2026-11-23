@@ -65,6 +65,7 @@ import {
   type WorkspaceColumnHeaderControls,
 } from "./workspaceColumnHeader";
 import { useWorkspaceStatusOffset } from "./useWorkspaceStatusOffset";
+import { WorkspaceKeyboardFocusBoundary } from "./WorkspaceKeyboardFocusBoundary";
 
 export type WorkspaceContentTransitionHandle = {
   fadeOut: (onHidden: () => void) => void;
@@ -566,7 +567,8 @@ export function WorkspacePushShell(props: Props) {
           }
           style={[styles.content, clipStyle]}
         >
-          <View
+          <WorkspaceKeyboardFocusBoundary
+            blocked={active}
             testID="workspace-slab-body"
             style={styles.content}
             // Observes every touch in the slab (pages, headers, rail, sheets)
@@ -600,7 +602,7 @@ export function WorkspacePushShell(props: Props) {
                 </WorkspaceRailMotionContext.Provider>
               </WorkspaceQuickRailContext.Provider>
             </WorkspaceCornerSensorContext.Provider>
-          </View>
+          </WorkspaceKeyboardFocusBoundary>
         </Animated.View>
         {props.enabled &&
         !props.obscured &&

@@ -108,6 +108,9 @@ function setup(reduced = false, width = 402, height = 874, platform = "ios") {
     "./useWorkspaceStatusOffset": {
       useWorkspaceStatusOffset: () => statusOffset,
     },
+    "./WorkspaceKeyboardFocusBoundary": {
+      WorkspaceKeyboardFocusBoundary: "WorkspaceKeyboardFocusBoundary",
+    },
     "./workspaceQuickRailPreference": {
       useQuickRailHidden: () => [
         railHidden,
@@ -319,28 +322,39 @@ test("Android excludes the closed compact drawer from native focus search and sh
   const x = setup(false, 402, 874, "android");
   const sidebarStyle = () =>
     Object.assign({}, ...x.find("workspace-sidebar-base").props.style);
+  const boundary = () =>
+    x.all().find((node) => node.type === "WorkspaceKeyboardFocusBoundary")!;
 
   assert.equal(sidebarStyle().display, "none");
+  assert.equal(boundary().props.blocked, false);
+  assert.ok(elements(boundary()).includes(x.child));
+  assert.ok(!elements(boundary()).includes(x.sidebar));
   assert.ok(x.all().includes(x.sidebar));
   assert.ok(x.all().includes(x.child));
 
   x.handlers().onStart();
   x.render();
   assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, true);
   x.handlers().onUpdate({ translationX: 240 });
   x.handlers().onEnd({ velocityX: 0 });
   x.render();
   x.springComplete();
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
+  assert.equal(boundary().props.blocked, true);
+  assert.ok(!elements(boundary()).includes(x.find("workspace-sidebar-close-sliver")));
 
   x.find("workspace-sidebar-close-sliver").props.onPress();
   x.render();
   assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, true);
   x.lastComplete();
   assert.equal(sidebarStyle().display, "none");
+  assert.equal(boundary().props.blocked, false);
 
   x.rotate(1194, 834);
   assert.equal(sidebarStyle().display, undefined);
+  assert.equal(boundary().props.blocked, false);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
   x.harness.unmount();
 });
