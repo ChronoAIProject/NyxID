@@ -25,11 +25,13 @@ enum Statement {
     SourceRead,
 }
 
+type ParentWatch = Arc<Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>>;
+
 /// Pause an actual driver statement before dispatch, without a failpoint or
 /// fabricated Mongo error. A separate client can change its snapshot's parent.
 struct Gate {
     target: Arc<Mutex<Option<String>>>,
-    next_parent: Arc<Mutex<Option<(String, tokio::sync::oneshot::Sender<()>)>>>,
+    next_parent: ParentWatch,
     hit: Option<tokio::sync::oneshot::Receiver<()>>,
     resume: std::sync::mpsc::Sender<()>,
     conflicts: Arc<AtomicUsize>,
@@ -38,9 +40,7 @@ struct Gate {
 impl Gate {
     async fn database(kind: Statement, ordinal: usize) -> (Database, Self) {
         let target = Arc::new(Mutex::new(None::<String>));
-        let next_parent = Arc::new(Mutex::new(
-            None::<(String, tokio::sync::oneshot::Sender<()>)>,
-        ));
+        let next_parent: ParentWatch = Arc::new(Mutex::new(None));
         let (notify, hit) = tokio::sync::oneshot::channel();
         let (resume, wait) = std::sync::mpsc::channel();
         let pause = Mutex::new(Some((notify, wait)));
