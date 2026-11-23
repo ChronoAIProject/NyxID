@@ -11,26 +11,42 @@ async fn pdf_index_upgrade_preserves_chunk_and_page_uniqueness() {
     use mongodb::{IndexModel, options::IndexOptions};
     let db = crate::test_utils::connect_transaction_test_database("pdf_indexes").await;
     let collection = db.collection::<bson::Document>(COLLECTION_NAME);
-    collection
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! {"parent_attachment_id":1,"chunk_index":1})
-                .options(IndexOptions::builder().unique(true).sparse(true).build())
-                .build(),
-        )
-        .await
-        .unwrap();
+    let old_index = || {
+        IndexModel::builder()
+            .keys(doc! {"parent_attachment_id":1,"chunk_index":1})
+            .options(IndexOptions::builder().unique(true).sparse(true).build())
+            .build()
+    };
     collection
         .insert_one(doc! {"_id":"chunk","parent_attachment_id":"pdf","chunk_index":0_i64})
         .await
         .unwrap();
-    collection.insert_one(doc! {"_id":"page1","origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":1_i64,"render_version":"v1"}).await.unwrap();
-    let page2 = doc! {"_id":"page2","origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":2_i64,"render_version":"v1"};
-    assert!(collection.insert_one(&page2).await.is_err());
-    for _ in 0..2 {
-        pdf::ensure_indexes(&db).await.unwrap();
-    }
-    collection.insert_one(page2).await.unwrap();
+    collection.insert_many((1..=120_i64).map(|page| {
+        doc! {"_id":format!("page{page}"), "origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":page,"render_version":"v1"}
+    })).await.unwrap();
+    assert!(collection.create_index(old_index()).await.is_err());
+    let (first, second) = tokio::join!(pdf::ensure_indexes(&db), pdf::ensure_indexes(&db));
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        collection
+            .count_documents(doc! {"origin":pdf::ORIGIN,"chunk_index":{"$type":"string"}})
+            .await
+            .unwrap(),
+        120
+    );
+    assert_eq!(
+        collection
+            .find_one(doc! {"parent_attachment_id":"pdf","chunk_index":0_i64})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("_id")
+            .unwrap(),
+        "chunk"
+    );
+    collection.create_index(old_index()).await.unwrap();
+    collection.insert_one(doc! {"_id":"next","origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":121_i64,"render_version":"v1","chunk_index":"pdf/v1/121"}).await.unwrap();
     assert!(
         collection
             .insert_one(
@@ -39,7 +55,9 @@ async fn pdf_index_upgrade_preserves_chunk_and_page_uniqueness() {
             .await
             .is_err()
     );
-    assert!(collection.insert_one(doc! {"_id":"duplicate_page","origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":2_i64,"render_version":"v1"}).await.is_err());
+    assert!(collection.insert_one(doc! {"_id":"duplicate_page","origin":pdf::ORIGIN,"parent_attachment_id":"pdf","page":2_i64,"render_version":"v1","chunk_index":"pdf/v1/2"}).await.is_err());
+    pdf::ensure_indexes(&db).await.unwrap();
+    collection.create_index(old_index()).await.unwrap();
     db.drop().await.unwrap();
 }
 async fn enable(db: &Database) {
@@ -105,6 +123,7 @@ async fn bound(
 
 #[tokio::test]
 async fn scanned_pdf_web_and_channel_share_images_authority_proofs_and_retention() {
+    let _budget_guard = byte_budget::test_guard().await;
     use sha2::{Digest, Sha256};
     for channel in [false, true] {
         let (state, row, item, mut chat) = bound(&[None, Some("Available text")], channel).await;
@@ -280,6 +299,7 @@ async fn scanned_pdf_web_and_channel_share_images_authority_proofs_and_retention
 
 #[tokio::test]
 async fn pdf_fallbacks_and_original_images_share_one_budget_and_report_unread_pages() {
+    let _budget_guard = byte_budget::test_guard().await;
     let (state, row, item, chat) = bound(&[None; 10], false).await;
     let no_text = read(
         &state.db,
@@ -313,6 +333,27 @@ async fn pdf_fallbacks_and_original_images_share_one_budget_and_report_unread_pa
         assert_eq!(input.reports[0].1.reason.as_deref(), Some(reason));
         assert!(input.images.is_empty());
     }
+    // Poison the stored source. Ineligible PDF plans must stop before any payload read.
+    let source = doc! {"parent_attachment_id": &item.id, "chunk_index": 0_i64};
+    let chunks = state.db.collection::<bson::Document>(COLLECTION_NAME);
+    let stored = chunks.find_one(source.clone()).await.unwrap().unwrap();
+    chunks.delete_one(source).await.unwrap();
+    for (field, value, reason) in [
+        ("sources", json!(["unknown"]), "agent_unsupported"),
+        ("content_types", json!(["image/png"]), "agent_unsupported"),
+        ("max_images", json!(0), "image_limit"),
+        ("max_total_bytes", json!(0), "image_limit"),
+        ("max_image_bytes", json!(0), "image_limit"),
+    ] {
+        let mut cap = capabilities();
+        cap["input_image"][field] = value;
+        let result = pdf::prepare(&state, &row, std::slice::from_ref(&item), &cap, false)
+            .await
+            .unwrap();
+        assert!(result.images.is_empty());
+        assert_eq!(result.reports[0].1.reason.as_deref(), Some(reason));
+    }
+    chunks.insert_one(stored).await.unwrap();
     let limited = pdf::prepare(
         &state,
         &row,
@@ -355,7 +396,62 @@ async fn pdf_fallbacks_and_original_images_share_one_budget_and_report_unread_pa
     );
     assert!(input.reports[0].1.image_pages.is_empty());
     assert_eq!(input.reports[0].1.unread_pages.len(), 10);
-    assert!(input.notice().contains("NOT read"));
+    assert!(input.delivery().notice().contains("unavailable_pages"));
+    let flags = state
+        .db
+        .collection::<bson::Document>("feature_flag_overrides");
+    flags
+        .update_one(
+            doc! {"flag_key":"assistant:pdf-vision"},
+            doc! {"$set":{"enabled":false}},
+        )
+        .await
+        .unwrap();
+    let off = pdf::prepare(&state, &row, std::slice::from_ref(&item), &cap, false)
+        .await
+        .unwrap();
+    assert!(off.images.is_empty());
+    let roots = state.db.collection::<bson::Document>(COLLECTION_NAME);
+    let filter = doc! {"origin":pdf::ORIGIN};
+    let ids: Vec<_> = roots
+        .find(filter.clone())
+        .projection(doc! {"_id":1})
+        .limit(100)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let ids: Vec<_> = ids
+        .iter()
+        .map(|page| page.get_str("_id").unwrap())
+        .collect();
+    roots
+        .delete_many(doc! {"origin":pdf::ORIGIN,"_id":{"$in":ids}})
+        .await
+        .unwrap();
+    assert_eq!(roots.count_documents(filter).await.unwrap(), 0);
+    let parent = super::for_chat(&state.db, &chat, &item.id).await.unwrap();
+    assert_eq!(
+        payload(&state.db, &state.encryption_keys, &parent)
+            .await
+            .unwrap()
+            .1,
+        pdf_fixture(&[None; 10], 90)
+    );
+    flags
+        .update_one(
+            doc! {"flag_key":"assistant:pdf-vision"},
+            doc! {"$set":{"enabled":true}},
+        )
+        .await
+        .unwrap();
+    let regenerated = pdf::prepare(&state, &row, std::slice::from_ref(&item), &cap, false)
+        .await
+        .unwrap();
+    assert_eq!(regenerated.images.len(), 2);
+    assert_ne!(regenerated.images[0].id, limited.images[0].id);
+
     // Settlement downgrades staged/sent pages on Stop, outside render cancellation.
     state
         .db
@@ -388,7 +484,7 @@ async fn pdf_fallbacks_and_original_images_share_one_budget_and_report_unread_pa
         .await
         .unwrap();
     assert!(
-        pdf::for_chat(&state.db, &chat, &limited.images[0].id)
+        pdf::for_chat(&state.db, &chat, &regenerated.images[0].id)
             .await
             .is_err()
     );
@@ -420,6 +516,7 @@ fn legacy_pdf_classification_ignores_separator_newlines_and_read_ranges() {
 
 #[tokio::test]
 async fn pdf_staged_pages_are_unread_when_begin_turn_reclaims_an_expired_lease() {
+    let _budget_guard = byte_budget::test_guard().await;
     let (state, row, item, _) = bound(&[None, None], false).await;
     enable(&state.db).await;
     let input = pdf::prepare(
@@ -475,7 +572,54 @@ async fn pdf_staged_pages_are_unread_when_begin_turn_reclaims_an_expired_lease()
 }
 
 #[tokio::test]
+async fn stale_worker_cannot_publish_pdf_coverage_for_a_reclaimed_same_turn() {
+    let _budget = byte_budget::test_guard().await;
+    let (state, stale, item, _) = bound(&[None], false).await;
+    let turn = stale.active_turn.as_ref().unwrap();
+    let conversations = state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        );
+    conversations
+        .update_one(
+            doc! {"_id":&stale.id},
+            doc! {"$set":{
+                "active_turn.worker_instance":{"id":"new-worker"},
+                "active_turn.execution_attempt":{"epoch":2_i64,"claim_id":"new-claim"},
+            }},
+        )
+        .await
+        .unwrap();
+    let now = conversations
+        .find_one(doc! {"_id":&stale.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&now.active_turn.as_ref().unwrap().turn_id, &turn.turn_id);
+    let report = crate::models::assistant_upload::PdfCoverage {
+        image_pages: vec![1],
+        image_input_confirmed: true,
+        ..Default::default()
+    };
+    let outcomes = [(item.id.clone(), report.clone())];
+    use crate::services::assistant_nyxagent_runtime::images::record_pdf_outcomes;
+    assert!(
+        record_pdf_outcomes(&state, &stale, &outcomes)
+            .await
+            .is_err()
+    );
+    record_pdf_outcomes(&state, &now, &outcomes).await.unwrap();
+    let saved = turn_attachments(&state.db, &stale.user_id, &stale.id, &turn.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(saved[0].pdf.as_ref(), Some(&report));
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_worker_cannot_write_pdf_coverage_after_reclaim_transaction() {
+    let _budget_guard = byte_budget::test_guard().await;
     let (state, row, item, _) = bound(&[None, None], false).await;
     enable(&state.db).await;
     let prepared = pdf::prepare(
@@ -563,6 +707,7 @@ async fn blank_non_pdf_keeps_generic_read_guidance() {
 #[tokio::test]
 #[ignore = "local private sample only; NYXID_PDF_SAMPLE points outside repository"]
 async fn local_private_pdf_regression() {
+    let _budget_guard = byte_budget::test_guard().await;
     let path = std::env::var_os("NYXID_PDF_SAMPLE").expect("local sample path");
     let bytes = std::fs::read(path).unwrap();
     let extracted = attachment_extraction::extract(bytes.clone(), "pdf".into())

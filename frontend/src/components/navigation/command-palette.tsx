@@ -1,6 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect, useCallback, useState, useMemo } from "react";
+import { useEffect, useCallback, useState, useMemo, useId, useRef } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { useNavigate } from "@tanstack/react-router";
 import {
   LayoutDashboard,
@@ -31,6 +32,7 @@ import {
   CalendarClock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { canRestoreFocus } from "@/lib/assistant/panel-focus";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 
@@ -109,6 +111,9 @@ export function CommandPalette({
   useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
+  const listId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
   const [query, setQueryRaw] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -116,6 +121,11 @@ export function CommandPalette({
     setQueryRaw(q);
     setSelectedIndex(0);
   }, []);
+
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) setQuery("");
+    onOpenChange(nextOpen);
+  }, [onOpenChange, setQuery]);
 
   const filtered = useMemo(() => {
     const visibleItems = ALL_ITEMS.filter(
@@ -151,42 +161,32 @@ export function CommandPalette({
     [navigate, onOpenChange, setQuery],
   );
 
-  useEffect(() => {
-    if (!open) return;
-
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onOpenChange(false);
-        setQuery("");
-      }
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1));
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.max(i - 1, 0));
-      }
-      if (e.key === "Enter" && filtered.length > 0) {
-        e.preventDefault();
-        const item = filtered[selectedIndex];
-        if (item) handleSelect(item);
-      }
+  function handleInputKey(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === "ArrowDown" && filtered.length > 0) {
+      e.preventDefault();
+      setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1));
     }
-
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [open, filtered, selectedIndex, onOpenChange, handleSelect]);
+    if (e.key === "ArrowUp" && filtered.length > 0) {
+      e.preventDefault();
+      setSelectedIndex((i) => Math.max(i - 1, 0));
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const item = filtered[Math.min(selectedIndex, filtered.length - 1)];
+      if (item) handleSelect(item);
+    }
+  }
 
   useEffect(() => {
     function handleGlobalKey(e: KeyboardEvent) {
+      if (open || e.defaultPrevented) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        onOpenChange(!open);
+        onOpenChange(true);
       }
-      if (e.key === "/" && !open) {
+      if (e.key === "/") {
         e.preventDefault();
         onOpenChange(true);
       }
@@ -195,70 +195,98 @@ export function CommandPalette({
     return () => window.removeEventListener("keydown", handleGlobalKey);
   }, [open, onOpenChange]);
 
-  if (!open) return null;
+  const activeIndex = Math.min(selectedIndex, filtered.length - 1);
+  const activeId = activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined;
+  useEffect(() => {
+    if (open && activeId) {
+      document.getElementById(activeId)?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [activeId, open]);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-start justify-center pt-[18vh]">
-      <div
-        className="fixed inset-0 bg-black/70 backdrop-blur-sm"
-        onClick={() => { onOpenChange(false); setQuery(""); setSelectedIndex(0); }}
-        role="button"
-        tabIndex={-1}
-        aria-label={translateUi("Close search")}
-        onKeyDown={(e) => { if (e.key === "Escape") { onOpenChange(false); setQuery(""); } }}
-      />
-
-      <div className="relative z-10 w-full max-w-[640px] flex flex-col">
-        {/* Search input bar */}
-        <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-popover shadow-lg px-5 h-14">
-          <Search className="h-5 w-5 shrink-0 text-text-tertiary" />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={translateUi("Search pages, actions, or keywords...")}
-            className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
-            autoFocus
-          />
-          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 type-row-title text-text-tertiary">{translateUi("esc")}</kbd>
-        </div>
-
-        {/* Results */}
-        {filtered.length > 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg p-2 max-h-[360px] overflow-y-auto">
-            {filtered.map((item, i) => (
-              <button
-                key={`${item.to ?? "action"}-${item.label}`}
-                type="button"
-                onClick={() => handleSelect(item)}
-                onMouseEnter={() => setSelectedIndex(i)}
-                className={cn(
-                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-14 transition-colors duration-300",
-                  i === selectedIndex
-                    ? "bg-overlay-strong text-foreground"
-                    : "text-muted-foreground hover:bg-overlay",
-                )}
-              >
-                <item.icon
-                  className={cn(
-                    "h-4 w-4 shrink-0",
-                    i === selectedIndex ? "text-nyx-secondary-400" : "text-text-tertiary",
-                  )}
-                />
-                <span className="flex-1">{translateUi(item.label)}</span>
-                {item.group === "action" && (
-                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-muted-foreground">{translateUi("Action")}</span>
-                )}
+    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay
+          data-command-overlay=""
+          className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm"
+        />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className="fixed left-1/2 top-[18vh] z-[101] flex w-full max-w-[640px] -translate-x-1/2 flex-col outline-none"
+          onKeyDown={(event) => event.stopPropagation()}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            inputRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (canRestoreFocus(openerRef.current)) openerRef.current.focus();
+          }}
+        >
+          <Dialog.Title className="sr-only">{translateUi("Search pages, actions, or keywords...")}</Dialog.Title>
+          {/* Search input bar */}
+          <div className="flex items-center gap-3 rounded-2xl border border-hairline bg-popover shadow-lg px-5 h-14 focus-within:border-foreground focus-within:ring-2 focus-within:ring-foreground">
+            <Search aria-hidden="true" className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <input
+              ref={inputRef}
+              type="text"
+              role="combobox"
+              aria-label={translateUi("Search pages, actions, or keywords...")}
+              aria-autocomplete="list"
+              aria-expanded={filtered.length > 0}
+              aria-controls={filtered.length > 0 ? listId : undefined}
+              aria-activedescendant={activeId}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleInputKey}
+              placeholder={translateUi("Search pages, actions, or keywords...")}
+              className="flex-1 bg-transparent text-15 text-foreground placeholder:text-muted-foreground outline-none"
+            />
+            <Dialog.Close asChild>
+              <button type="button" aria-label={translateUi("Close search")} className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 type-row-title text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground">
+                <kbd>{translateUi("esc")}</kbd>
               </button>
-            ))}
+            </Dialog.Close>
           </div>
-        )}
 
-        {query.trim() && filtered.length === 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg py-8 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}&rdquo;
-          </div>
-        )}
-      </div>
-    </div>
+          {/* Results */}
+          {filtered.length > 0 && (
+            <div id={listId} role="listbox" aria-label={translateUi("Search pages, actions, or keywords...")} className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg p-2 max-h-[360px] overflow-y-auto">
+              {filtered.map((item, i) => (
+                <button
+                  key={`${item.to ?? "action"}-${item.label}`}
+                  type="button"
+                  role="option"
+                  id={`${listId}-${i}`}
+                  aria-selected={i === activeIndex}
+                  tabIndex={-1}
+                  onClick={() => handleSelect(item)}
+                  onMouseEnter={() => setSelectedIndex(i)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left text-14 transition-colors duration-300",
+                    i === activeIndex
+                      ? "border-foreground bg-overlay-strong text-foreground"
+                      : "border-transparent text-muted-foreground hover:bg-overlay",
+                  )}
+                >
+                  <item.icon aria-hidden="true" className="h-4 w-4 shrink-0 text-current" />
+                  <span className="flex-1">{translateUi(item.label)}</span>
+                  {item.group === "action" && (
+                    <span className="type-secondary-strong uppercase tracking-[1.5px] text-muted-foreground">{translateUi("Action")}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {query.trim() && filtered.length === 0 && (
+            <div role="status" className="mt-2 rounded-2xl border border-hairline bg-popover shadow-lg py-8 text-center text-14 text-muted-foreground">{translateUi("No results for “")}{query}&rdquo;
+            </div>
+          )}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

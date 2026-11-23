@@ -988,6 +988,7 @@ async fn read_tool_file(
         && let Ok(text) = std::str::from_utf8(&bytes)
     {
         let extracted = Extracted {
+            pdf: None,
             content_type: row.content_type.clone(),
             text: text.to_owned(),
             sections: vec![crate::services::attachment_extraction::Section {
@@ -1087,6 +1088,10 @@ pub async fn read(
                 .into_iter()
                 .find(|a| a.id == row.id)
                 .and_then(|a| a.pdf)
+                .map(|mut pdf| {
+                    pdf_vision::discard_unconfirmed_images(&mut pdf, "image_delivery_unconfirmed");
+                    pdf
+                })
                 .unwrap_or_else(|| pdf_vision::coverage(&extracted)),
         )
     } else {
@@ -1120,9 +1125,6 @@ pub async fn read(
     if let Some(pdf) = &pdf {
         value["pdf"] = json!(pdf);
         value["text_complete"] = value["complete"].clone();
-        if !pdf.unread_pages.is_empty() {
-            value["complete"] = json!(false);
-        }
         value["instructions"] = json!(
             "Text availability does not prove every page was read. Pages without text require this turn’s delivered PDF images; never infer unread page contents."
         );
@@ -2138,29 +2140,14 @@ fn image_plan_for_origin(
     base: &str,
     origin: &str,
 ) -> (Vec<Value>, Vec<String>) {
-    let cap = &capabilities["input_image"];
-    let enabled = capabilities["protocol"] == "nyxagent-input-image-v1"
-        && cap["version"] == 1
-        && cap["sources"]
-            .as_array()
-            .is_some_and(|s| s.iter().any(|v| v == "nyxid_attachment_url"));
+    let mut budget = ImageBudget::new(capabilities, base);
     let mut parts = Vec::new();
     let mut omitted = Vec::new();
-    let mut total = 0u64;
     for item in items.iter().filter(|a| {
         (a.origin == origin || (origin == "user_upload" && a.origin == pdf_vision::ORIGIN))
             && a.content_type.starts_with("image/")
     }) {
-        let bytes = item.size.max(0) as u64;
-        if enabled
-            && parts.len() < (cap["max_images"].as_u64().unwrap_or(0).min(10) as usize)
-            && bytes <= cap["max_image_bytes"].as_u64().unwrap_or(0)
-            && total.saturating_add(bytes) <= cap["max_total_bytes"].as_u64().unwrap_or(0)
-            && cap["content_types"]
-                .as_array()
-                .is_some_and(|s| s.iter().any(|v| v == &item.content_type))
-        {
-            total += bytes;
+        if budget.take(&item.content_type, item.size.max(0) as u64) {
             parts.push(json!({
                 "type": "input_image",
                 "image_url": format!(
@@ -2173,6 +2160,60 @@ fn image_plan_for_origin(
         }
     }
     (parts, omitted)
+}
+
+struct ImageBudget<'a> {
+    types: &'a [Value],
+    remaining_images: u64,
+    max_image_bytes: u64,
+    remaining_bytes: u64,
+}
+
+impl<'a> ImageBudget<'a> {
+    fn new(capabilities: &'a Value, base: &str) -> Self {
+        let cap = &capabilities["input_image"];
+        let enabled = capabilities["protocol"] == "nyxagent-input-image-v1"
+            && cap["version"] == 1
+            && cap["sources"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|v| v == "nyxid_attachment_url"))
+            && url::Url::parse(base).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.path() == "/"
+            });
+        Self {
+            types: if enabled {
+                cap["content_types"].as_array().map_or(&[], Vec::as_slice)
+            } else {
+                &[]
+            },
+            remaining_images: cap["max_images"].as_u64().unwrap_or(0).min(10),
+            max_image_bytes: cap["max_image_bytes"].as_u64().unwrap_or(0),
+            remaining_bytes: cap["max_total_bytes"].as_u64().unwrap_or(0),
+        }
+    }
+
+    fn supports(&self, content_type: &str) -> bool {
+        self.types.iter().any(|value| value == content_type)
+    }
+
+    fn fits(&self, bytes: u64) -> bool {
+        self.remaining_images > 0 && bytes <= self.max_image_bytes && bytes <= self.remaining_bytes
+    }
+
+    fn take(&mut self, content_type: &str, bytes: u64) -> bool {
+        if !self.supports(content_type) || !self.fits(bytes) {
+            return false;
+        }
+        self.remaining_images -= 1;
+        self.remaining_bytes -= bytes;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -2188,6 +2229,9 @@ mod integration_tests {
     };
     pub(super) async fn fixture() -> (crate::AppState, String, String) {
         let db = connect_transaction_test_database("uploads").await;
+        fixture_with_database(db).await
+    }
+    pub(super) async fn fixture_with_database(db: Database) -> (crate::AppState, String, String) {
         pdf_vision::ensure_indexes(&db).await.unwrap();
         let user = Uuid::new_v4().to_string();
         db.collection(USERS)
@@ -3895,5 +3939,7 @@ mod channel_upload_tests {
     }
 }
 
+#[cfg(test)]
+mod pdf_review_tests;
 #[cfg(test)]
 mod pdf_tests;

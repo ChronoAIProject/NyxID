@@ -169,7 +169,13 @@ pub struct AttachmentResponse {
     label: String,
 }
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
-    fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+    fn from(mut row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+        if let Some(pdf) = &mut row.pdf {
+            crate::services::assistant_upload_service::pdf_vision::discard_unconfirmed_images(
+                pdf,
+                "image_delivery_unconfirmed",
+            );
+        }
         Self {
             filename: row.artifact.filename,
             source: row.artifact.source,

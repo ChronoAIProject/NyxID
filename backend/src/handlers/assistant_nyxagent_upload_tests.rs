@@ -591,10 +591,11 @@ async fn upload_classification_uses_bytes_and_case_insensitive_extensions_not_br
 
 #[tokio::test]
 async fn scanned_pdf_runtime_delivers_parent_pages_through_real_thread_image_route() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use tower::ServiceExt;
-    for channel in [false, true] {
+    for (channel, replace_credential) in [(false, false), (true, false), (false, true)] {
         let (state, calls, server) = setup_options_with_tools(
-            None,
+            replace_credential.then_some((401, "agent_key_required")),
             Duration::ZERO,
             Vec::new(),
             true,
@@ -716,6 +717,53 @@ async fn scanned_pdf_runtime_delivers_parent_pages_through_real_thread_image_rou
         .await
         .unwrap();
         assert!(result.error.is_none(), "{:?}", result.error);
+        if replace_credential {
+            let captures = calls.lock().await;
+            assert_eq!(captures.len(), 2);
+            let first = captures[0].body["input"][0]["content"].as_array().unwrap();
+            assert_eq!(
+                first
+                    .iter()
+                    .filter(|part| part["type"] == "input_image")
+                    .count(),
+                8
+            );
+            let retry = captures[1].body["input"][0]["content"].as_array().unwrap();
+            assert_eq!(
+                retry
+                    .iter()
+                    .filter(|part| part["type"] == "input_image")
+                    .count(),
+                1
+            );
+            assert!(
+                retry[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("credential_replaced")
+            );
+            let saved = crate::services::assistant_upload_service::turn_attachments(
+                &state.db,
+                OWNER,
+                &id,
+                &row.active_turn.as_ref().unwrap().turn_id,
+            )
+            .await
+            .unwrap();
+            let report = saved
+                .iter()
+                .find(|item| item.id == upload.id)
+                .unwrap()
+                .pdf
+                .as_ref()
+                .unwrap();
+            assert!(report.image_pages.is_empty());
+            assert_eq!(report.unread_pages, [1, 2]);
+            assert_eq!(report.reason.as_deref(), Some("credential_replaced"));
+            server.abort();
+            state.db.drop().await.unwrap();
+            continue;
+        }
         let body = calls.lock().await.last().unwrap().body.clone();
         let parts = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 16); // request text, ordinary image, seven labeled PDF images
@@ -808,6 +856,12 @@ async fn scanned_pdf_runtime_delivers_parent_pages_through_real_thread_image_rou
         let text = read_document(&state, &credential, &upload.id, 0).await;
         assert_eq!(text["error"], "attachment_has_no_extracted_text");
         assert_eq!(text["pdf"]["image_pages"], json!([1, 2]));
+        let mixed = read_document(&state, &credential, &second.id, 0).await;
+        assert!(mixed["text"].as_str().unwrap().contains("Second page text"));
+        assert_eq!(mixed["complete"], true);
+        assert_eq!(mixed["text_complete"], true);
+        assert_eq!(mixed["next_offset"], Value::Null);
+        assert_eq!(mixed["pdf"]["unread_pages"], json!([7, 8, 9]));
         server.abort();
         state.db.drop().await.unwrap();
     }

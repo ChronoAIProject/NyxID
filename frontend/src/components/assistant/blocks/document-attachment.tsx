@@ -56,7 +56,7 @@ export function DocumentAttachment({
           {translateUi("PDF pages with text: {{pages}}", { pages: attachment.pdf.text_pages.join(", ") || "—" })}
           {" · "}{translateUi("Pages sent as images: {{pages}}", { pages: attachment.pdf.image_pages.join(", ") || "—" })}
           {attachment.pdf.unread_pages.length > 0 && <>
-            {" · "}{translateUi("Unread pages: {{pages}}. This document has not been fully read.", { pages: attachment.pdf.unread_pages.join(", ") })}
+            {" · "}{translateUi("Pages without text or confirmed image delivery: {{pages}}", { pages: attachment.pdf.unread_pages.join(", ") })}
           </>}
         </p>
       )}

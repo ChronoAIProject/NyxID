@@ -13,6 +13,7 @@ use tokio::{
 };
 
 pub const MAX_BYTES: usize = nyxid_machine::MAX_ATTACHMENT_UPLOAD_BYTES;
+pub(crate) const MAX_PDF_PAGES: usize = 200;
 const MAX_TEXT: usize = 1_000_000;
 const MAX_EXPANDED: u64 = 40 * 1024 * 1024;
 const MAX_OUTPUT: usize = 8 * 1024 * 1024;
@@ -95,7 +96,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             ));
         }
         let pages = document.get_pages();
-        if pages.is_empty() || pages.len() > 200 {
+        if pages.is_empty() || pages.len() > MAX_PDF_PAGES {
             return Err(bad("PDF must contain at most 200 pages."));
         }
         let mut out = Extracted {

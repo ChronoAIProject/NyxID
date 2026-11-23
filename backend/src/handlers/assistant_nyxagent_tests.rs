@@ -393,11 +393,11 @@ async fn setup_options_with_tool_gate(
                     if matches!(failure, Some("invalid_stream" | "invalid_stream_confirmed")) {
                         return (StatusCode::OK, "not an event stream").into_response();
                     }
-                    if matches!(failure, Some("held_success" | "held_budget")) {
+                    if matches!(failure, Some("held_success" | "held_budget" | "held_pdf_rejected")) {
                         let stream = futures::stream::pending::<Result<axum::body::Bytes, Infallible>>();
                         return ([("content-type", "text/event-stream")], Body::from_stream(stream)).into_response();
                     }
-                    if matches!(failure, Some("lookup_budget" | "lookup_success")) {
+                    if matches!(failure, Some("lookup_budget" | "lookup_success" | "lookup_pdf_rejected")) {
                         return ([("content-type","text/event-stream")], "data: {\"type\":\"error\",\"error\":{\"code\":\"subscriber_expired\"}}\n\n").into_response();
                     }
                     if matches!(failure, Some("http_credential" | "http_slow_credential" | "http_credential_confirmed_absent")) {
@@ -514,11 +514,13 @@ async fn setup_options_with_tool_gate(
             if script.get(index) == Some(&"http_budget_absent") {
                 return Json(json!({"status":"not_found","response_id":null,"conversation_id":null,"last_sequence_number":null,"response":null})).into_response();
             }
-            let Some(kind @ ("lookup_budget" | "lookup_success" | "held_success" | "held_budget")) = script.get(index).copied() else {return StatusCode::NOT_FOUND.into_response()};
+            let Some(kind @ ("lookup_budget" | "lookup_success" | "held_success" | "held_budget" | "lookup_pdf_rejected" | "held_pdf_rejected")) = script.get(index).copied() else {return StatusCode::NOT_FOUND.into_response()};
             let budget = matches!(kind, "lookup_budget" | "held_budget");
             let status = if budget {"failed"}else{"completed"};
+            let notices = matches!(kind, "lookup_pdf_rejected" | "held_pdf_rejected")
+                .then(|| json!([{"code":"image_input_unsupported"}]));
             let id = format!("resp_{}_{index:032x}",&SESSION[5..]);
-            Json(json!({"status":status,"response_id":id,"conversation_id":SESSION,"last_sequence_number":2,"response":{"id":id,"conversation":{"id":SESSION},"status":status,"error":budget.then(||json!({"code":"tool_budget_exhausted"})),"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("window {index}")}]}]}})).into_response()
+            Json(json!({"status":status,"response_id":id,"conversation_id":SESSION,"last_sequence_number":2,"response":{"id":id,"conversation":{"id":SESSION},"status":status,"nyxagent_notices":notices,"error":budget.then(||json!({"code":"tool_budget_exhausted"})),"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("window {index}")}]}]}})).into_response()
         }
     }));
     let upstream = upstream.route(

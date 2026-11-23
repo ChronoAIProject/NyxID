@@ -69,6 +69,9 @@ pub struct PdfCoverage {
     pub text_pages: Vec<u32>,
     pub image_pages: Vec<u32>,
     pub unread_pages: Vec<u32>,
+    /// Older workers recorded planned images before dispatch.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub image_input_confirmed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -80,6 +83,9 @@ pub struct PdfPage {
     pub id: String,
     pub origin: String,
     pub parent_attachment_id: String,
+    /// String keys share the old sparse index with numeric payload chunk keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<String>,
     pub page: u32,
     pub render_version: String,
     pub user_id: String,

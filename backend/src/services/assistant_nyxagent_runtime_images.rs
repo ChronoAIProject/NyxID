@@ -300,6 +300,24 @@ pub(crate) async fn renew(
     Ok(())
 }
 
+pub(super) fn image_rejected(error: &TurnError) -> bool {
+    error.code == "image_input_unsupported"
+        || error.upstream_code.as_deref() == Some("image_input_unsupported")
+}
+
+pub(super) async fn settle_pdf_request(
+    state: &AppState,
+    row: &AssistantConversation,
+    pdf: &mut uploads::pdf_vision::Delivery,
+    unavailable: Option<&str>,
+    completed: bool,
+) -> Result<(), TurnError> {
+    if pdf.settle_request(unavailable, completed) {
+        record_pdf_outcomes(state, row, &pdf.reports).await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn record_pdf_outcomes(
     state: &AppState,
     row: &AssistantConversation,
@@ -315,7 +333,8 @@ pub(crate) async fn record_pdf_outcomes(
     let conversation_id = row.id.clone();
     let user_id = row.user_id.clone();
     let turn_id = turn.turn_id.clone();
-    let group_id = row.group_id.clone();
+    let fence = engine::WorkerFence::matching(row, doc! {"active_turn.stop_requested": false})
+        .map_err(|_| TurnError::internal("cancelled", "stop"))?;
     let reports = reports.to_vec();
     let mut session = db
         .client()
@@ -324,34 +343,25 @@ pub(crate) async fn record_pdf_outcomes(
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
     let result = session
         .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let operation: AppResult<()> = async {
-                // This write fence is in the same retried transaction as both
-                // transcript mirrors. Stop, reclaim and settlement therefore
-                // serialize before an old worker can publish its coverage.
+                // Serialize with Stop, settlement and same-turn worker reclaim.
                 let now = bson::DateTime::now();
                 let started_after = bson::DateTime::from_chrono(
-                    Utc::now()
-                        - chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS),
+                    Utc::now() - chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS),
                 );
+                let mut filter = fence.clone();
+                filter.insert("$or", bson::to_bson(&[
+                    doc! {"active_turn.lease_expires_at": {"$gt": now}},
+                    doc! {"active_turn.lease_expires_at": bson::Bson::Null,
+                          "active_turn.started_at": {"$gt": started_after}},
+                ]).map_err(|_| AppError::Internal("PDF coverage fence encoding failed".into()))?);
                 let touched = db
                     .collection::<bson::Document>(
                         crate::models::assistant_conversation::COLLECTION_NAME,
                     )
-                    .update_one(
-                        doc! {
-                            "_id": &conversation_id,
-                            "user_id": &user_id,
-                            "active_turn.turn_id": &turn_id,
-                            "active_turn.stop_requested": false,
-                            "$or": [
-                                {"active_turn.lease_expires_at": {"$gt": now}},
-                                {"active_turn.lease_expires_at": bson::Bson::Null,
-                                 "active_turn.started_at": {"$gt": started_after}},
-                            ],
-                        },
-                        doc! {"$currentDate":{"updated_at":true}},
-                    )
+                    .update_one(filter, doc! {"$currentDate":{"updated_at":true}})
                     .session(&mut *session)
                     .await?;
                 if touched.matched_count != 1 {
@@ -365,19 +375,11 @@ pub(crate) async fn record_pdf_outcomes(
                         crate::models::assistant_message::COLLECTION_NAME,
                     )
                     .update_one(
-                        doc! {"user_id":&user_id,"conversation_id":&conversation_id,"turn_id":&turn_id,"attachments.id":id},
-                        update.clone(),
+                        doc! {"user_id":&user_id,"conversation_id":&conversation_id,"turn_id":&turn_id,"role":{"$ne":"assistant"},"attachments.id":id},
+                        update,
                     )
                     .session(&mut *session)
                     .await?;
-                    if let Some(group) = &group_id {
-                        db.collection::<mongodb::bson::Document>(
-                            crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
-                        )
-                        .update_one(doc! {"group_id":group,"attachments.id":id}, update)
-                        .session(&mut *session)
-                        .await?;
-                    }
                 }
                 Ok(())
             }

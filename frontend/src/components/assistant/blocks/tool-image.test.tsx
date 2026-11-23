@@ -95,8 +95,8 @@ it("shows scanned PDF page coverage without fetching or claiming a complete read
   } }} />);
   expect(screen.getByRole("status")).toHaveTextContent("PDF pages with text: 1");
   expect(screen.getByRole("status")).toHaveTextContent("Pages sent as images: 2");
-  expect(screen.getByRole("status")).toHaveTextContent("Unread pages: 3, 4");
-  expect(screen.getByRole("status")).toHaveTextContent("has not been fully read");
+  expect(screen.getByRole("status")).toHaveTextContent("Pages without text or confirmed image delivery: 3, 4");
+  expect(screen.getByRole("status")).not.toHaveTextContent("fully read");
   expect(screen.getAllByRole("button")).toHaveLength(1);
   expect(assistantHttp).not.toHaveBeenCalled();
 });

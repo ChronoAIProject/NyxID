@@ -626,11 +626,22 @@ claim, not a server guarantee; reduced scope needs separate owner acceptance.
 PDF extraction classifies each page using non-whitespace characters, preserving
 page numbers, extracted text and sections. The additive `pdf` metadata reports
 `no_text`, `mixed` or `text`, `text_pages`, `image_pages`, `unread_pages` and a
-bounded failure reason. `text_pages` means text is available for on-demand reads;
-`image_pages` means this turn submitted a page image, not proof that a model read
-or correctly understood it. A mixed PDF retains text extraction and only renders
-pages without text. Whitespace separators and empty sections are never evidence
-of usable text. Legacy rows are classified from their encrypted page spans.
+bounded reason. `text_pages` lists pages with text available for the read tool.
+`image_pages` lists page images included in requests that completed without an
+image-input rejection. This records input delivery. The model still needs to
+inspect the content. A mixed PDF only renders pages without text. Legacy PDFs
+are classified from their encrypted page spans.
+If the preparation deadline expires while those spans are being decrypted,
+classification remains `unknown` and the authorized parent's pages remain unread.
+
+Every request identifies the PDF images it carries and the pages accepted in
+prior requests in that turn. Tool-image continuations carry their own input.
+The encrypted subscriber checkpoint preserves those facts across stream
+reconnects and worker replacement. Cancellation or an incomplete response
+leaves unconfirmed pages unavailable. A later request cannot erase delivery
+confirmed in an earlier request. Old transcript claims without confirmation
+are displayed as unconfirmed. A shared group post displays the common PDF
+attachment. Each specialist's own thread and turn store its coverage.
 
 The default-off `assistant:pdf-vision` personal/org/global feature flag enables
 this fallback. Upgrade every API replica and encrypted-record migration worker
@@ -647,8 +658,12 @@ At most eight pages per PDF are rendered at 2048 pixels on the long edge, JPEG
 quality 85, at most 2 MiB per encoded page. Ordinary images and derived pages share
 the upstream/model image-count, per-image and total-byte limits (ten images and
 16 MiB maximum for PDF planning). A page gets eight wall seconds and six CPU
-seconds; a PDF gets twenty wall seconds. Linux workers have a 128 MiB address-space
-limit. Before loading the PDF, each render operation reserves 160 MiB of the
+seconds; a PDF gets twenty wall seconds from parent authorization lookup through
+coverage/source loading and decryption, memory/worker waits, rendering and page
+persistence. An authorization timeout fails closed. A later preparation timeout
+keeps already staged pages and reports the remaining pages as unread; it does
+not consume image capacity for an unstaged page. Linux workers have a 128 MiB
+address-space limit. Before loading the PDF, each render operation reserves 160 MiB of the
 existing 192 MiB byte budget, covering the worker, source and encoded/encrypted
 buffers. Two worker slots are additionally bounded by that shared byte budget.
 Stop/future cancellation and deadlines kill the converter process group and
@@ -664,19 +679,40 @@ resolve the parent PDF through the same thread Agent Key, live turn, document
 ACL and current document-retention policy, including policy shortening before
 cleanup. Group/channel guests cannot turn a forbidden document into an allowed
 image. Parent cleanup and owner/conversation erasure remove direct page rows.
-Startup installs separate partial unique indexes for chunks and PDF pages before
-retiring the legacy sparse chunk index, which would otherwise reject a second
-page with the same parent. Old binaries must not restart while derived pages
-remain: they recreate that incompatible sparse index.
+Derived rows reserve string values of the form `pdf/<render_version>/<page>`
+in the legacy sparse `(parent_attachment_id, chunk_index)` index. The source
+reader addresses numeric chunk indexes. Startup also keeps a partial unique
+page index and upgrades earlier derived rows in batches of 100 before restoring
+the old sparse index if absent. It preserves each page ID and encryption
+context. Before upgrading a fleet that ran the earlier draft renderer, disable
+the flag and let existing PDF turns settle. This prevents old writers from
+inserting new rows during conversion.
 
-Flag-off, text-only/unsupported models, renderer failures, page/image/byte limits
-and upstream image-unsupported notices retain explicit unread page numbers in
-turn context and the one parent attachment's history metadata. The document read
-tool reports unavailable text without denying valid current-turn visual input;
-text pagination completion does not imply a complete document review. Disable
-the flag to return to text-only input; retain compatible readers/migration code
-while any derived rows remain. Real NyxAgent/provider and Lark delivery acceptance
-is separate from local fixtures and container rendering smoke tests.
+An older server can restart on the same database and read the original
+attachment. Older encryption integrity and key-retirement code needs the
+upgraded page reader to verify derived rows. If that maintenance must run on an
+older binary, disable PDF vision and drain in-flight PDF turns before removing
+the derived cache. In the intended NyxID database, run the following in
+`mongosh`. The filter selects only derived page rows. Original uploads, numeric
+payload chunks, and transcript coverage remain available.
+
+```javascript
+const derived = { origin: "pdf_page" };
+while (true) {
+  const ids = db.assistant_attachments.find(derived, { _id: 1 })
+    .limit(100).toArray().map(({ _id }) => _id);
+  if (!ids.length) break;
+  db.assistant_attachments.deleteMany({ ...derived, _id: { $in: ids } });
+}
+```
+
+When upgraded servers re-enable the flag, a later turn can render fresh page
+rows from a retained source. Flag-off, text-only models, unsupported image
+capabilities, and renderer or image limits report the pages still unavailable.
+`nyx__attachment_read` retains its text pagination contract. A terminal text
+page has `complete: true` and `next_offset: null`. The `pdf` field reports
+visual coverage. Fully scanned files return the no-extracted-text
+result with their page numbers.
 
 ## Images and upstream compatibility
 

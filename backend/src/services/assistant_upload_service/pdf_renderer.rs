@@ -47,10 +47,18 @@ impl Drop for ProcessGroup {
 
 pub(super) async fn render(bytes: &[u8], page: u32) -> RenderResult<Vec<u8>> {
     let path = std::env::var_os("NYXID_PDF_RENDERER").unwrap_or_else(|| "/usr/bin/pdftoppm".into());
-    render_with(Path::new(&path), bytes, page, Duration::from_secs(8)).await
+    render_with(
+        &WORKERS,
+        Path::new(&path),
+        bytes,
+        page,
+        Duration::from_secs(8),
+    )
+    .await
 }
 
 async fn render_with(
+    workers: &Semaphore,
     path: &Path,
     bytes: &[u8],
     page: u32,
@@ -63,7 +71,7 @@ async fn render_with(
     {
         return Err(failed());
     }
-    let _worker = WORKERS.acquire().await.map_err(|_| failed())?;
+    let _worker = workers.acquire().await.map_err(|_| failed())?;
     let mut command = tokio::process::Command::new(path);
     command
         .args([
@@ -162,13 +170,20 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_pages_missing_converter_and_timeout() {
         assert!(
-            render_with(Path::new("relative"), b"pdf", 1, Duration::from_secs(1))
-                .await
-                .is_err()
+            render_with(
+                &WORKERS,
+                Path::new("relative"),
+                b"pdf",
+                1,
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err()
         );
         assert!(render(b"pdf", 0).await.is_err());
         assert!(
             render_with(
+                &WORKERS,
                 Path::new("/missing-nyxid-renderer"),
                 b"pdf",
                 1,
@@ -178,14 +193,15 @@ mod tests {
             .is_err()
         );
         assert!(
-            render_with(Path::new("/bin/cat"), b"pdf", 1, Duration::ZERO)
+            render_with(&WORKERS, Path::new("/bin/cat"), b"pdf", 1, Duration::ZERO)
                 .await
                 .is_err()
         );
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod cancellation_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -205,8 +221,17 @@ mod cancellation_tests {
             )
             .unwrap();
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let workers = std::sync::Arc::new(Semaphore::new(1));
+            let fixture_workers = workers.clone();
             let task = tokio::spawn(async move {
-                render_with(&script, b"%PDF-test", 1, Duration::from_secs(5)).await
+                render_with(
+                    &fixture_workers,
+                    &script,
+                    b"%PDF-test",
+                    1,
+                    Duration::from_secs(5),
+                )
+                .await
             });
             let child = tokio::time::timeout(Duration::from_secs(4), async {
                 loop {
@@ -243,12 +268,13 @@ mod cancellation_tests {
             })
             .await
             .expect("converter child must not survive Stop/timeout");
+            assert!(workers.try_acquire().is_ok());
         }
-        assert_eq!(WORKERS.available_permits(), 2);
     }
 
     #[tokio::test]
     async fn pdf_real_converter_rotates_and_bounds_pixels_and_encoded_bytes() {
+        let _guard = super::super::byte_budget::test_guard().await;
         let pdf = super::super::super::attachment_extraction::pdf_fixture(&[None], 90);
         let _budget = super::super::byte_budget::reserve(RESERVATION)
             .await

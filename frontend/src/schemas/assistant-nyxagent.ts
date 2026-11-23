@@ -39,7 +39,7 @@ export const nyxAgentAttachmentSchema = z.object({
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   pdf: z.object({
-    classification: z.enum(["no_text", "mixed", "text"]),
+    classification: z.enum(["no_text", "mixed", "text", "unknown"]),
     text_pages: z.array(z.number().int().positive()).max(200),
     image_pages: z.array(z.number().int().positive()).max(200),
     unread_pages: z.array(z.number().int().positive()).max(200),

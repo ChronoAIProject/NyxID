@@ -794,6 +794,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Work (a): bounded result/transfer body; middleware retains work through EOF/Drop.",
     ),
     (
+        "services/assistant_upload_service/pdf_renderer.rs",
+        "render_with",
+        "method::spawn",
+        1,
+        "The turn awaits the renderer. Dropping the render future kills the process group, and the child uses kill_on_drop.",
+    ),
+    (
         "services/attachment_extraction.rs",
         "extract_deadline",
         "method::spawn",

@@ -612,3 +612,189 @@ async fn node_endpoint_2126_detached_legacy_key_cannot_enable_unconfirmed_fallba
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_2098_direct_url_put_returns_its_commit_after_competing_write_and_read_failure() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    let (committed, observed) = tokio::sync::oneshot::channel();
+    let (resume, wait) = std::sync::mpsc::channel();
+    let barrier = Mutex::new(Some((committed, wait)));
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let armed = paused.clone();
+    let db = test_utils::connect_transaction_test_database_with_command_handler(
+        "keys_2098_commit_snapshot",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Succeeded(event) = event
+                && event.command_name == "commitTransaction"
+                && armed.load(std::sync::atomic::Ordering::Acquire)
+                && let Some((committed, wait)) = barrier.lock().unwrap().take()
+            {
+                committed.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(15)).unwrap();
+            }
+        }),
+    )
+    .await;
+    let state = test_utils::test_app_state(db.clone());
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection("users")
+        .insert_one(test_utils::test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let token = NodeMigrationFixture::token(&state, &owner);
+    let request = crate::handlers::curation_tests::request;
+    let (status, created) = request(
+        &state,
+        "POST",
+        "/api/v1/keys",
+        &token,
+        Some(json!({
+            "slug":"commit-snapshot", "label":"Commit snapshot", "auth_method":"bearer",
+            "credential":"fixture-secret", "endpoint_url":"https://example.com/start",
+            "openapi_spec_url":"https://example.com/openapi.json",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let endpoint = created["endpoint_id"].as_str().unwrap();
+    let id = created["id"].as_str().unwrap();
+    let path = format!("/api/v1/keys/{id}");
+    let competing = mongodb::Client::with_uri_str(test_utils::selected_test_database_uri())
+        .await
+        .unwrap()
+        .database(db.name());
+    let endpoints = competing.collection::<bson::Document>(USER_ENDPOINTS);
+
+    paused.store(true, std::sync::atomic::Ordering::Release);
+    let put = tokio::spawn({
+        let (state, token, path) = (state.clone(), token.clone(), path.clone());
+        async move {
+            request(
+                &state,
+                "PUT",
+                &path,
+                &token,
+                Some(json!({
+                    "endpoint_url":"https://example.com/committed",
+                })),
+            )
+            .await
+        }
+    });
+    let observe = async {
+        tokio::time::timeout(Duration::from_secs(15), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved = endpoints
+            .find_one(doc! {"_id":endpoint})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.get_str("url").unwrap(),
+            "https://example.com/committed"
+        );
+        endpoints
+            .update_one(
+                doc! {"_id":endpoint},
+                doc! {"$set":{
+                    "url":"https://example.com/competing",
+                }},
+            )
+            .await
+            .unwrap();
+        // A second read of this response dependency would fail after commit.
+        competing
+            .collection::<bson::Document>(USER_SERVICES)
+            .update_one(doc! {"_id":id}, doc! {"$set":{"slug": 17_i32}})
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+    };
+    observe.await;
+    let (status, response) = put.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["endpoint_url"], "https://example.com/committed");
+    assert_eq!(response["id"], id);
+    assert_eq!(response["proxy_url"], created["proxy_url"]);
+    assert_eq!(response["proxy_url_slug"], created["proxy_url_slug"]);
+    assert_eq!(response["openapi_url"], created["openapi_url"]);
+    let (status, _) = request(&state, "GET", &path, &token, None).await;
+    assert!(status.is_server_error());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn keys_2098_prepared_edit_rejects_deleted_connection_and_stale_endpoint() {
+    use crate::services::node_target_service::Migration;
+    let db = test_utils::connect_transaction_test_database("keys_2098_stale_commit").await;
+    let state = test_utils::test_app_state(db.clone());
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection("users")
+        .insert_one(test_utils::test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let token = NodeMigrationFixture::token(&state, &owner);
+    let (status, created) = crate::handlers::curation_tests::request(
+        &state,
+        "POST",
+        "/api/v1/keys",
+        &token,
+        Some(json!({
+            "slug":"prepared-edit", "label":"Prepared edit", "auth_method":"bearer",
+            "credential":"fixture-secret", "endpoint_url":"https://example.com/start",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let endpoint = created["endpoint_id"].as_str().unwrap();
+    let version = created["state_version"].as_i64().unwrap();
+    let endpoints = db.collection::<bson::Document>(USER_ENDPOINTS);
+    for deleted in [false, true] {
+        let migration =
+            Migration::prepare(&db, &owner, &owner, endpoint, "https://example.com/stale")
+                .await
+                .unwrap();
+        let expected = if deleted {
+            db.collection::<bson::Document>(USER_SERVICES)
+                .update_one(
+                    doc! {"_id":id},
+                    doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+                )
+                .await
+                .unwrap();
+            "https://example.com/competing"
+        } else {
+            endpoints
+                .update_one(
+                    doc! {"_id":endpoint},
+                    doc! {"$set":{
+                        "url":"https://example.com/competing",
+                    }},
+                )
+                .await
+                .unwrap();
+            "https://example.com/competing"
+        };
+        assert!(matches!(
+            migration.commit_for_connection(&db, id, version).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            endpoints
+                .find_one(doc! {"_id":endpoint})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("url")
+                .unwrap(),
+            expected
+        );
+    }
+    db.drop().await.unwrap();
+}
