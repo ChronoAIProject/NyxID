@@ -97,7 +97,7 @@ async fn render(
             let mut cursor = db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME)
                 .find(doc! {"group_id":group_id,"user_id":owner,"seq":{"$gt":since_seq,"$lte":upper_seq},"role":{"$ne":"user"}})
                 .sort(doc! {"seq":-1}).limit(12).session(&mut *tx).await?;
-            let rows: Vec<_> = cursor.stream(tx).try_collect().await?;
+            let rows: Vec<_> = crate::db::read_documents(&mut cursor, tx).await?;
             let mut lines: Vec<_> = rows
                 .iter()
                 .map(|row| {
@@ -347,7 +347,7 @@ pub async fn partition_in_session(
         .projection(doc! {"_id":1,"wake_claim.id":1})
         .session(&mut *tx)
         .await?;
-    let live: Vec<_> = rows.stream(tx).try_collect().await?;
+    let live: Vec<_> = crate::db::read_documents(&mut rows, tx).await?;
     Ok(events.into_iter().partition(|event| match &event.wake {
         Some(WakeReference::Watch(watch)) => {
             watch.ready_at <= now

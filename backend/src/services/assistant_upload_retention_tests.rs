@@ -491,6 +491,79 @@ async fn sweep_deletes_root_chunks_and_text_preserves_scoped_placeholder_and_is_
         0
     );
 }
+
+#[tokio::test]
+async fn cancelling_upload_deletion_during_get_more_preserves_chunks() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use tokio::sync::Notify;
+
+    let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+    let fixture = connect_transaction_test_database("upload_drop_get_more").await;
+    let mut options =
+        mongodb::options::ClientOptions::parse(crate::test_utils::selected_test_database_uri())
+            .await
+            .unwrap();
+    options.app_name = Some(fixture.name().to_owned());
+    let started = std::sync::Arc::new(Notify::new());
+    let seen = started.clone();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(command) = event
+            && command.command_name == "getMore"
+            && command.command.get_str("collection") == Ok(ATTACHMENTS)
+        {
+            seen.notify_one();
+        }
+    }));
+    let client = mongodb::Client::with_options(options).unwrap();
+    let db = client.database(fixture.name());
+    let root = doc! { "_id": "root", "origin": "user_upload" };
+    let uploads = db.collection::<Document>(ATTACHMENTS);
+    uploads.insert_one(&root).await.unwrap();
+    uploads
+        .insert_many((0..101).map(|id| {
+            doc! {
+                "_id": id.to_string(), "parent_attachment_id": "root",
+            }
+        }))
+        .await
+        .unwrap();
+
+    let mut session = client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let admin = fixture.client().database("admin");
+    admin
+        .run_command(doc! {
+            "configureFailPoint": "failCommand", "mode": {"times": 1},
+            "data": {"failCommands": ["getMore"], "appName": fixture.name(),
+                "blockConnection": true, "blockTimeMS": 1000},
+        })
+        .await
+        .unwrap();
+    tokio::select! {
+        biased;
+        () = started.notified() => {},
+        result = delete_root(&db, &mut session, &root) => panic!("deletion finished before cancellation: {result:?}"),
+    }
+    admin
+        .run_command(doc! {"configureFailPoint":"failCommand","mode":"off"})
+        .await
+        .unwrap();
+    session.abort_transaction().await.unwrap();
+    assert_eq!(
+        uploads
+            .count_documents(doc! {})
+            .session(&mut session)
+            .await
+            .unwrap(),
+        102
+    );
+    session.start_transaction().await.unwrap();
+    delete_root(&db, &mut session, &root).await.unwrap();
+    session.commit_transaction().await.unwrap();
+    assert_eq!(uploads.count_documents(doc! {}).await.unwrap(), 0);
+    fixture.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn sweep_stale_lease_and_stale_policy_cannot_delete() {
     let (state, owner, thread) = fixture().await;

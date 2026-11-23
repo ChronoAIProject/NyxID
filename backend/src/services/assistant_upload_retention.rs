@@ -451,7 +451,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
         .projection(doc! {"_id":1})
         .session(&mut *session)
         .await?;
-    let roots: Vec<Document> = children.stream(&mut *session).try_collect().await?;
+    let roots: Vec<Document> = crate::db::read_documents(&mut children, session).await?;
     let ids: Vec<&str> = roots
         .iter()
         .filter_map(|row| row.get_str("_id").ok())
