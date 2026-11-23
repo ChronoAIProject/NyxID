@@ -377,7 +377,7 @@ async fn stuck_request_inventory_pins_history_across_cursor_batches() {
             .unwrap()
             .unwrap();
     let mut rows = Vec::new();
-    for i in 0..600 {
+    for i in 0..inventory::PAGE_ROWS {
         let mut row = raw.clone();
         row.insert("_id", format!("cursor-{i}"));
         row.insert("transaction_id", format!("cursor-{i}"));
@@ -406,13 +406,14 @@ async fn stuck_request_inventory_pins_history_across_cursor_batches() {
     .await
     .unwrap();
     let result = result.unwrap();
+    let total = inventory::PAGE_ROWS + 1;
     assert_eq!(result.len(), 1, "{result:?}");
     assert!(
         result[0]
             .technical_details
             .as_ref()
             .unwrap()
-            .contains("rows=601 distinct_requests=601"),
+            .contains(&format!("rows={total} distinct_requests={total}")),
         "{}",
         result[0].technical_details.as_ref().unwrap()
     );

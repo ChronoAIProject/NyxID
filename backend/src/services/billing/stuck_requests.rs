@@ -5,6 +5,7 @@ mod ownership;
 mod selection;
 mod voice;
 use crate::{
+    db::{next_document, read_documents},
     errors::{AppError, AppResult},
     models::{credits::Credits, service_billing::BillingMetric, usage_meter::UsageHold},
 };
@@ -20,30 +21,6 @@ const MAX_ALLOCATIONS: usize = 128;
 
 fn unavailable() -> AppError {
     AppError::Internal("Request ownership inventory unavailable".into())
-}
-// Diagnostic and recovery deadlines can cancel an in-flight getMore. In
-// MongoDB 3.7, dropping a pending SessionCursorStream panics while returning
-// its buffer to the cursor. advance() leaves that buffer outside the stream's
-// polling state, allowing the cancelled cursor and transaction to be dropped.
-async fn next_document(
-    cursor: &mut mongodb::SessionCursor<Document>,
-    session: &mut mongodb::ClientSession,
-) -> AppResult<Option<Document>> {
-    if cursor.advance(session).await? {
-        Ok(Some(cursor.deserialize_current()?))
-    } else {
-        Ok(None)
-    }
-}
-async fn read_documents(
-    cursor: &mut mongodb::SessionCursor<Document>,
-    session: &mut mongodb::ClientSession,
-) -> AppResult<Vec<Document>> {
-    let mut rows = Vec::new();
-    while let Some(row) = next_document(cursor, session).await? {
-        rows.push(row);
-    }
-    Ok(rows)
 }
 fn present(row: &Document, key: &str) -> bool {
     row.get(key).is_some_and(|v| v != &Bson::Null)
