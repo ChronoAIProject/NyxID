@@ -1078,7 +1078,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                 ),
             ]
         };
-        let mcp_result = async |call| {
+        let mcp_result = async |call: Request<Body>| {
             let reply = Box::pin(router.clone().oneshot(call)).await.unwrap();
             assert_eq!(reply.status(), StatusCode::OK);
             serde_json::from_slice::<Value>(
