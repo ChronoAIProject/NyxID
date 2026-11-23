@@ -1,63 +1,151 @@
-import { useContext, type ReactNode } from "react";
-import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
-import { StyleSheet, View } from "react-native";
-import { MoreHorizontal, SquarePen } from "lucide-react-native";
+import {
+  Bell,
+  Info,
+  MoreHorizontal,
+  Settings,
+  SlidersHorizontal,
+  SquarePen,
+} from "lucide-react-native";
+import { FloatingItem } from "../../components/FloatingControl";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useTheme } from "../../theme/ThemeContext";
-import { ChatIconButton } from "./ChatSurface";
+import {
+  notificationBadge,
+  notificationBellLabel,
+} from "../notifications/notificationPresentation";
+import { ChatHeaderMenu, type ChatMenuOption } from "./ChatHeaderMenu";
 
-/**
- * Ordinary bars: the bell (when notifications are enabled), New chat and More.
- * Duo rail mode renders only More here; New chat and Scan QR are on the rail.
- * Scan QR is otherwise in the side menu's Quick actions. Targets never shrink;
- * the identity owns all width negotiation. Every bar floats each control in
- * its own 44pt glass capsule, 8pt apart.
- */
 export function ChatHeaderActions({
   newChatDisabled,
+  menuDisabled,
+  menuScope,
   onNewChat,
-  onOptions,
+  onDetails,
+  onSettings,
   notifications,
+  onVoicePreferences,
 }: {
   newChatDisabled?: boolean;
+  menuDisabled?: boolean;
+  menuScope: string;
   onNewChat: () => void;
-  onOptions: () => void;
-  notifications?: ReactNode;
+  onDetails: () => void;
+  onSettings: () => void;
+  notifications?: {
+    unread: number;
+    needsDecision: number;
+    disabled?: boolean;
+    onPress: () => void;
+  };
+  onVoicePreferences?: () => void;
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const duo = useContext(WorkspaceQuickRailContext);
-  const more = (
-    <ChatIconButton
-      label={t("Chat options")}
-      onPress={onOptions}
-      floating
-    >
-      <MoreHorizontal size={23} color={colors.textPrimary} />
-    </ChatIconButton>
-  );
-  if (duo)
-    return (
-      <View testID="chat-header-actions" style={styles.actions}>
-        {more}
-      </View>
-    );
+  const notificationCount = notifications
+    ? notificationBadge(notifications.unread || notifications.needsDecision)
+    : undefined;
+  const options: ChatMenuOption[] = [
+    { id: "details", label: t("Chat details"), Icon: Info, onPress: onDetails },
+    ...(notifications
+      ? [
+          {
+            id: "notifications",
+            label: t("Notifications"),
+            accessibilityLabel: notificationBellLabel(
+              notifications.unread,
+              notifications.needsDecision,
+            ),
+            badge: notificationCount,
+            badgeColor:
+              notifications.needsDecision > 0
+                ? colors.warningTone.text
+                : colors.textSecondary,
+            Icon: Bell,
+            disabled: notifications.disabled,
+            onPress: notifications.onPress,
+          },
+        ]
+      : []),
+    {
+      id: "settings",
+      label: t("Settings"),
+      Icon: Settings,
+      onPress: onSettings,
+    },
+    ...(onVoicePreferences
+      ? [
+          {
+            id: "voice-preferences",
+            label: t("Voice preferences"),
+            Icon: SlidersHorizontal,
+            onPress: onVoicePreferences,
+          },
+        ]
+      : []),
+  ];
   return (
-    <View testID="chat-header-actions" style={styles.actions}>
-      {notifications}
-      <ChatIconButton
-        label={t("New chat")}
-        onPress={onNewChat}
-        disabled={newChatDisabled}
-        floating
-      >
-        <SquarePen size={21} color={colors.textPrimary} />
-      </ChatIconButton>
-      {more}
-    </View>
+    <ChatHeaderMenu
+      scope={menuScope}
+      disabled={menuDisabled}
+      options={options}
+      controls={(openMenu, trigger) => (
+        <>
+          <FloatingItem
+            accessibilityLabel={t("New chat")}
+            onPress={onNewChat}
+            disabled={newChatDisabled}
+          >
+            <SquarePen size={21} color={colors.textPrimary} />
+          </FloatingItem>
+          <FloatingItem
+            ref={trigger}
+            accessibilityLabel={t("Chat options")}
+            accessibilityState={{ expanded: false }}
+            onPress={openMenu}
+            disabled={menuDisabled}
+          >
+            <MoreHorizontal size={23} color={colors.textPrimary} />
+          </FloatingItem>
+        </>
+      )}
+    />
   );
 }
 
-const styles = StyleSheet.create({
-  actions: { flexDirection: "row", alignItems: "center", flexShrink: 0, gap: 8 },
-});
+export function CrewHeaderActions({
+  scope,
+  disabled,
+  onSettings,
+}: {
+  scope: string;
+  disabled?: boolean;
+  onSettings: () => void;
+}) {
+  const { t } = useAppLanguage();
+  const { colors } = useTheme();
+  return (
+    <ChatHeaderMenu
+      scope={scope}
+      disabled={disabled}
+      options={[
+        {
+          id: "settings",
+          label: t("Settings"),
+          Icon: Settings,
+          onPress: onSettings,
+        },
+      ]}
+      controls={(openMenu, trigger) => (
+        <FloatingItem
+          ref={trigger}
+          accessibilityLabel={t("Crew options")}
+          accessibilityState={{ expanded: false }}
+          onPress={openMenu}
+          disabled={disabled}
+        >
+          <MoreHorizontal size={23} color={colors.textPrimary} />
+        </FloatingItem>
+      )}
+    />
+  );
+}

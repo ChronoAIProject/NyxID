@@ -41,7 +41,6 @@ import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceAgentPicker } from "../../components/workspace/WorkspaceAgentPicker";
 import { ChatHeaderActions } from "./ChatHeaderActions";
 import { workspaceSidebarLayout } from "../../components/workspace/workspacePushState";
-import { NotificationBell } from "../notifications/NotificationBell";
 import {
   useNotificationIndicator,
   useNotificationRuntime,
@@ -193,7 +192,10 @@ import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
 import { retryInput } from "./assistantState";
 import type { AssistantAcknowledgement } from "./assistantTypes";
-import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
+import {
+  useRailScrollIndicator,
+  WorkspaceRailMotionContext,
+} from "../../components/workspace/workspaceFloatingInset";
 
 type AssistantScreenProps = {
   contextual?: boolean;
@@ -276,6 +278,8 @@ export function AssistantScreen({
   // The Duo's rail (folded or unfolded) carries New chat, Notifications, Scan
   // QR and Recent chats, and this chat's bar controls (it has no bar there).
   const quickRail = useContext(WorkspaceQuickRailContext);
+  const fullScreen = useContext(WorkspaceRailMotionContext)?.fullScreen ?? false;
+  const columnHeader = quickRail && !fullScreen;
   const { t } = useAppLanguage();
   const bubble = chatBubbleColors(mode, bubblePalette);
   const chatColumn = useChatColumn();
@@ -880,38 +884,18 @@ export function AssistantScreen({
     afterPickerDismissal(() => navigation.push("Notifications"));
   }
 
-  function openChatOptions() {
-    const hasVoice = !!voiceThread && voiceThread === assistant.conversationId;
-    // The Duo: More is always Chat details (Settings and Notifications are
-    // on the rail; a live voice call keeps its own preferences control).
-    // Wide windows keep Settings and Notifications in the persistent sidebar.
-    if (quickRail || !hasVoice) return openDetails();
-    const current = () =>
+  const hasVoicePreferences =
+    !!voiceThread && voiceThread === assistant.conversationId;
+  const voiceMenuSurface = hasVoicePreferences ? voiceSurfaceToken : undefined;
+  function openVoicePreferences() {
+    if (
       getAuthEpoch() === voiceEpoch &&
       currentVoiceSurface.current === voiceSurfaceToken &&
-      voiceContext.current.conversationId === voiceThread;
-    const epoch = getAuthEpoch();
-    const stillCurrent = () =>
-      hasVoice ? current() : getAuthEpoch() === epoch;
-    Alert.alert(t("Chat options"), undefined, [
-      ...(hasVoice
-        ? [
-            {
-              text: t("Voice preferences"),
-              onPress: () => {
-                if (current()) setVoicePreferencesOpen(true);
-              },
-            },
-          ]
-        : []),
-      {
-        text: t("Chat details"),
-        onPress: () => {
-          if (stillCurrent()) openDetails();
-        },
-      },
-      { text: t("Cancel"), style: "cancel" },
-    ]);
+      voiceContext.current.focused &&
+      voiceContext.current.conversationId === voiceThread
+    ) {
+      setVoicePreferencesOpen(true);
+    }
   }
   function openSettings() {
     // The same Settings sheet the sidebar's Settings row opens.
@@ -920,32 +904,71 @@ export function AssistantScreen({
     );
   }
 
+  const menuScope = JSON.stringify([
+    pickerScope,
+    assistant.agentId,
+    assistant.conversationId,
+    voiceThread,
+    bell.enabled,
+  ]);
   const headerHandlers = useRef({
     newChat,
-    openOptions: openChatOptions,
+    openDetails,
     openNotifications,
+    openSettings,
+    openVoicePreferences,
+    menuScope,
+    focused,
+    headerDisabled,
   });
   headerHandlers.current = {
     newChat,
-    openOptions: openChatOptions,
+    openDetails,
     openNotifications,
+    openSettings,
+    openVoicePreferences,
+    menuScope,
+    focused,
+    headerDisabled,
   };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
+    function selectOption(
+      option: "openDetails" | "openNotifications" | "openSettings" | "openVoicePreferences",
+    ) {
+      const current = headerHandlers.current;
+      if (
+        current.focused &&
+        (option !== "openNotifications" || !current.headerDisabled) &&
+        current.menuScope === menuScope &&
+        getAuthEpoch() === voiceEpoch &&
+        (!voiceMenuSurface || currentVoiceSurface.current === voiceMenuSurface)
+      ) {
+        current[option]();
+      }
+    }
     const actions = () => (
       <WorkspaceHeaderVisibility>
         <ChatHeaderActions
           newChatDisabled={newChatDisabled}
+          menuDisabled={!focused}
+          menuScope={menuScope}
           onNewChat={() => headerHandlers.current.newChat()}
-          onOptions={() => headerHandlers.current.openOptions()}
+          onDetails={() => selectOption("openDetails")}
+          onSettings={() => selectOption("openSettings")}
           notifications={
-            bell.enabled ? (
-              <NotificationBell
-                unread={bell.unread}
-                needsDecision={bell.needsDecision}
-                disabled={headerDisabled}
-                onPress={() => headerHandlers.current.openNotifications()}
-              />
-            ) : null
+            bell.enabled
+              ? {
+                  unread: bell.unread,
+                  needsDecision: bell.needsDecision,
+                  disabled: headerDisabled,
+                  onPress: () => selectOption("openNotifications"),
+                }
+              : undefined
+          }
+          onVoicePreferences={
+            voiceMenuSurface
+              ? () => selectOption("openVoicePreferences")
+              : undefined
           }
         />
       </WorkspaceHeaderVisibility>
@@ -993,7 +1016,11 @@ export function AssistantScreen({
     bell.enabled,
     bell.unread,
     bell.needsDecision,
-    narrowHeader,
+    quickRail,
+    focused,
+    menuScope,
+    voiceEpoch,
+    voiceMenuSurface,
     t,
   ]);
 
@@ -1026,7 +1053,7 @@ export function AssistantScreen({
     },
     more: {
       label: t("Chat options"),
-      onPress: () => headerHandlers.current.openOptions(),
+      onPress: () => headerHandlers.current.openDetails(),
     },
   });
 
@@ -1897,9 +1924,9 @@ export function AssistantScreen({
               setVoicePreferencesOpen(false);
             }}
             onSnapshot={receiveVoiceSnapshot}
-            // The Duo's More opens Chat details, so the call shows its own
-            // preferences control there.
-            preferencesOpen={quickRail ? undefined : voicePreferencesOpen}
+            // The status column's More opens Details directly, so the call
+            // exposes preferences in its own controls in that layout.
+            preferencesOpen={columnHeader ? undefined : voicePreferencesOpen}
             onPreferencesClose={() => setVoicePreferencesOpen(false)}
             onUpdate={() => void assistant.recover()}
             onReview={(acknowledgementId) => {
@@ -1994,7 +2021,7 @@ export function AssistantScreen({
               // Phones: idle composers are one row; anything typed, attached,
               // uploading or dictating keeps the full two-row layout.
               compactWhenIdle={
-                quickRail && narrowHeader &&
+                narrowHeader &&
                 !dictation.active &&
                 uploads.files.length === 0 &&
                 !uploads.picking &&
@@ -2002,7 +2029,7 @@ export function AssistantScreen({
               }
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={quickRail ? layout : undefined}
+                  layout={narrowHeader ? layout : undefined}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||

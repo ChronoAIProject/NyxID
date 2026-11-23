@@ -161,6 +161,7 @@ pub struct AppState {
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
+    pub staging_qr: services::staging_qr::Peer,
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
@@ -1209,9 +1210,12 @@ async fn server_run(cli: Cli) {
         services::crash_report_export::CrashConfig::from_config(&config)
             .expect("Invalid crash reporting configuration"),
     );
+    let staging_qr = services::staging_qr::Peer::from_environment(&config)
+        .expect("Invalid staging QR configuration");
     let state = AppState {
         jobs,
         app_management_observations: Arc::default(),
+        staging_qr,
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
         crash_reports: crash_reports.clone(),

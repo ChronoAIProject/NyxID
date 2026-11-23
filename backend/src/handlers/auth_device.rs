@@ -136,7 +136,7 @@ crate::errors::redacted_debug!(
     AuthDevicePreviewBody,
 );
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct AuthDevicePreviewResponse {
     pub supports_grant_choice: bool,
     pub requested_profile: Option<String>,
@@ -915,6 +915,9 @@ fn trace_poll_error(client_ip_hash: &str, outcome: &str) {
 
 #[cfg(test)]
 mod tests {
+    mod staging_qr_tests {
+        include!("auth_device/staging_qr_tests.rs");
+    }
     use super::*;
     use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
     use axum::http::{StatusCode, header};

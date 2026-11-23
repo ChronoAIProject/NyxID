@@ -11,13 +11,16 @@ function elements(node: Element): Element[] {
   )];
 }
 
-function setup(granted: boolean) {
+function setup(granted: boolean, enabledFeatures: string[] = []) {
+  const routed: string[] = [];
   let permission = { granted, canAskAgain: true };
   const jsx = (type: unknown, props: Element["props"]) => ({ type, props });
   const h = hookHarness<Element>({
+    "../../lib/api/mobileApi": { mobileApi: { getAccountProfile: async () => ({ capabilities: { enabled_features: enabledFeatures } }) } },
+    "../../lib/auth/sessionStore": { authSessionGeneration: () => 0 },
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
-      View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
+      Platform: { OS: "ios" }, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator",
       StyleSheet: { create: (styles: unknown) => styles, absoluteFill: {} },
       useWindowDimensions: () => ({ width: 466, height: 678 }),
       AppState: { addEventListener: () => ({ remove() {} }) },
@@ -31,9 +34,9 @@ function setup(granted: boolean) {
     "../../lib/systemStatusActivity": activity,
   });
   const module = h.load(fileURLToPath(new URL("./DeviceCodeScanner.tsx", import.meta.url))) as typeof import("./DeviceCodeScanner");
-  h.mount(() => module.DeviceCodeScanner({ onCancel() {}, onCode() {}, onManualEntry() {} }));
+  h.mount(() => module.DeviceCodeScanner({ onCancel() {}, onCode(code, kind) { routed.push(kind + "/" + code); }, onManualEntry() {} }));
   return {
-    h,
+    h, routed,
     camera: () => elements(h.value()).find((node) => node.type === "CameraView"),
     permission: (granted: boolean) => { permission = { ...permission, granted }; h.render(); },
   };
@@ -72,4 +75,14 @@ test("camera errors or revoked permission release activity without waiting for a
   assert.equal(activity.systemStatusActivityActive(), true);
   x.h.unmount();
   assert.equal(activity.systemStatusActivityActive(), false);
+});
+
+test("only a flagged iOS account can leave the scanner with a staging request", async () => {
+  for (const enabled of [false, true]) {
+    const screen = setup(true, enabled ? ["auth:staging-qr-login"] : []);
+    await screen.camera()!.props.onBarcodeScanned({ data: "https://staging.nyxid.ai/login/device?user_code=ABCD-EFGH" });
+    await screen.h.settle();
+    assert.deepEqual(screen.routed, enabled ? ["staging-device/ABCDEFGH"] : []);
+    screen.h.unmount();
+  }
 });

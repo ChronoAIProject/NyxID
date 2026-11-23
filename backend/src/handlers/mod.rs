@@ -139,6 +139,7 @@ pub mod social_auth;
 pub mod ssh_exec;
 pub mod ssh_tunnel;
 pub mod ssh_web_terminal;
+pub mod staging_qr;
 pub mod telegram_new;
 pub mod trigger_webhooks;
 pub mod triggers;

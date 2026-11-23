@@ -21,6 +21,7 @@ export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
   OAUTH_REFRESH_CLIENT_AUTH: "auth:oauth-refresh-client-auth-v1",
+  STAGING_QR_LOGIN: "auth:staging-qr-login",
   INVITATION_CODE: "auth:invitation-code",
   OAUTH_EXACT_REDIRECTS: "auth:oauth-exact-redirects-v1",
   APP_TOKEN_MANAGEMENT: "auth:app-token-management-v1",

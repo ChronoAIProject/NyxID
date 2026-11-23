@@ -7,8 +7,18 @@ type E = { type: unknown; props: Record<string, any> };
 const flat = (style: unknown) =>
   Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
 
-function load(rail: { inset: number; fullScreen: boolean; progress: { value: number } } | null) {
-  const animation = { duration: () => animation, reduceMotion: () => animation };
+function load(
+  rail: {
+    inset: number;
+    fullScreen: boolean;
+    progress: { value: number };
+  } | null,
+) {
+  const animation = {
+    duration: () => animation,
+    reduceMotion: () => animation,
+    withInitialValues: () => animation,
+  };
   const h = hookHarness<E>({
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
@@ -19,6 +29,7 @@ function load(rail: { inset: number; fullScreen: boolean; progress: { value: num
       default: { View: "Animated.View" },
       FadeIn: animation,
       FadeOut: animation,
+      ZoomIn: animation,
       ReduceMotion: { System: "system" },
       // The worklet runs on the UI thread; here it is evaluated directly.
       useAnimatedStyle: (worklet: () => object) => ({ animated: worklet() }),
@@ -46,7 +57,11 @@ test("the content inset animates from the rail's 66pt to the 12pt-margin layout 
     [0.5, 20 + 33], // mid-transition: the content reflows smoothly
     [1, 20], // full screen: only its own padding (the 12pt-margin layout)
   ] as const) {
-    const motion = load({ inset: 66, fullScreen: progress === 1, progress: { value: progress } });
+    const motion = load({
+      inset: 66,
+      fullScreen: progress === 1,
+      progress: { value: progress },
+    });
     const view = motion.render("RailInsetView", {
       ownPaddingRight: 20,
       style: { padding: 20 },
@@ -54,7 +69,11 @@ test("the content inset animates from the rail's 66pt to the 12pt-margin layout 
     });
     assert.equal(view.type, "Animated.View");
     const style = [view.props.style].flat();
-    assert.equal(style[1].animated.paddingRight, expected, `progress ${progress}`);
+    assert.equal(
+      style[1].animated.paddingRight,
+      expected,
+      `progress ${progress}`,
+    );
     assert.equal(flat(style[0]).padding, 20);
   }
   // No rail (ordinary phones, iPads): a plain static view.
@@ -71,15 +90,25 @@ test("the grouped capsule fades out with full screen and back in with rail mode"
     [0.4, 0.6],
     [1, 0],
   ] as const) {
-    const motion = load({ inset: 66, fullScreen: progress === 1, progress: { value: progress } });
+    const motion = load({
+      inset: 66,
+      fullScreen: progress === 1,
+      progress: { value: progress },
+    });
     const view = motion.render("RailShortcutsView", { children: "Capsule" });
-    assert.ok(Math.abs([view.props.style].flat()[1].animated.opacity - opacity) < 1e-9);
+    assert.ok(
+      Math.abs([view.props.style].flat()[1].animated.opacity - opacity) < 1e-9,
+    );
   }
 });
 
 test("over liquid glass the grouped capsule's wrapper never fades (glass under a fading ancestor stops rendering)", () => {
   const motion = load({ inset: 66, fullScreen: true, progress: { value: 1 } });
-  const view = motion.render("RailShortcutsView", { fadeOpacity: false, style: { gap: 4 }, children: "Capsule" });
+  const view = motion.render("RailShortcutsView", {
+    fadeOpacity: false,
+    style: { gap: 4 },
+    children: "Capsule",
+  });
   assert.deepEqual(flat(view.props.style), { gap: 4 });
 });
 
@@ -89,10 +118,16 @@ test("the shortcuts' icons fade with the grouped capsule on the UI thread (the o
     [0.25, 0.75],
     [1, 0],
   ] as const) {
-    const motion = load({ inset: 66, fullScreen: progress === 1, progress: { value: progress } });
+    const motion = load({
+      inset: 66,
+      fullScreen: progress === 1,
+      progress: { value: progress },
+    });
     const icon = motion.render("RailShortcutIcon", { children: "New chat" });
     assert.equal(icon.type, "Animated.View");
-    assert.ok(Math.abs([icon.props.style].flat()[1].animated.opacity - opacity) < 1e-9);
+    assert.ok(
+      Math.abs([icon.props.style].flat()[1].animated.opacity - opacity) < 1e-9,
+    );
     assert.equal(icon.props.children, "New chat");
   }
   assert.deepEqual(
@@ -105,6 +140,6 @@ test("the shortcuts' icons fade with the grouped capsule on the UI thread (the o
       "RailShortcutIcon",
       "RailShortcutsView",
     ],
-    "no header motion: the header capsule never moves",
+    "capsule menus own their size animation while the rail header stays in place",
   );
 });

@@ -2461,6 +2461,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/v2/poll-web",
             post(handlers::auth_device::poll_auth_device_web_v2),
         )
+        .route(
+            "/staging/receive",
+            post(handlers::staging_qr::receive).layer(DefaultBodyLimit::max(12 * 1024)),
+        )
         .route("/request", post(handlers::auth_device::request_auth_device))
         .route("/poll", post(handlers::auth_device::poll_auth_device))
         .route(
@@ -3716,6 +3720,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/auth/login-code/{id}/revoke",
             post(handlers::login_code::revoke),
+        )
+        .route(
+            "/auth/device/staging",
+            post(handlers::staging_qr::forward).layer(DefaultBodyLimit::max(1024)),
         )
         .route(
             "/auth/device/approve",

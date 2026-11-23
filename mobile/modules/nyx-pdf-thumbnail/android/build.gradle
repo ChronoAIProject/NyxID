@@ -1,0 +1,10 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+group = 'dev.nyxid.pdf'
+version = '1.0.0'
+android {
+  namespace 'dev.nyxid.pdf'
+  defaultConfig { versionCode 1; versionName '1.0.0' }
+}
