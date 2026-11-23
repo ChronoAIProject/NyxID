@@ -61,8 +61,16 @@ actions (Scan QR code and Terminal login code) precede Workspace. Workspace
 contains Notifications with its unread count (only while both the
 `assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
 count turns amber while a decision waits), Automations, Machines, Plugins,
-Activity with its live pending count, and Create new agent. Private chats also
-show the same bell in their header. Thread, crew, channel-bot and Recents rows
+Activity with its live pending count, and Create new agent. Private chats group
+New chat and More in the top bar. More grows that measured capsule into an
+anchored options bubble over the existing chat, with Chat details, Notifications
+when enabled, Settings, and Voice preferences during a call. Crew options grow
+from their single-button capsule and retain the existing Settings destination.
+Both shrink back to their source on outside tap, Android Back or accessibility
+escape; reduced motion changes size immediately. Accessibility focus enters the
+options and returns to the trigger on dismissal. Selected destinations wait for
+the bubble and native modal to dismiss. The Notifications row carries the unread count. Thread, crew,
+channel-bot and Recents rows
 carry the unread counts the one notification summary attributes to them.
 Opening a thread or crew marks its notifications read once it has stayed in
 front for 1.5 seconds. A notification row follows the server's canonical

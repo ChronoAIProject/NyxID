@@ -89,6 +89,18 @@ curl http://localhost:3001/health
 5. **Commit** using [conventional commit messages](#commit-messages)
 6. **Push** your branch and open a pull request against `dev`
 
+### Continuing work in another tab
+
+Git worktrees share commits and fetched branches. Each worktree has its own
+checked-out files, including uncommitted edits. When handing off a change that
+has been tested, commit the files that produced that result, push the branch,
+and include its remote branch and commit in the handoff.
+
+For a follow-up to an open PR, fetch the PR branch and start the new worktree
+at its latest commit. After the PR lands, start follow-ups from the updated
+`origin/dev`. Check the diff against the handoff commit before testing so the
+review covers just the intended addition.
+
 ### Branch Naming
 
 | Prefix      | Use Case                        |

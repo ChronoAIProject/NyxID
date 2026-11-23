@@ -72,9 +72,21 @@ function setup({
     },
   };
   let fontScale = 1;
-  const corner = {value:cornerWindow};
+  let windowWidth = 390;
+  const uploads = {
+    files: [] as any[],
+    picking: false,
+    session: {
+      sending: false,
+      submit: (send: (files?: unknown) => Promise<boolean>) => send(),
+    },
+  };
+  const corner = { value: cornerWindow };
   const h = hookHarness<E>({
-    "../../components/workspace/WorkspaceLayoutContext": {WorkspaceQuickRailContext:corner},
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceQuickRailContext: corner,
+    },
+    "@react-navigation/native": { useIsFocused: () => true },
     "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
@@ -107,7 +119,11 @@ function setup({
         currentState: "active",
         addEventListener: () => ({ remove() {} }),
       },
-      useWindowDimensions: () => ({ width: 390, height: 844, fontScale }),
+      useWindowDimensions: () => ({
+        width: windowWidth,
+        height: 844,
+        fontScale,
+      }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -131,6 +147,9 @@ function setup({
       Plus: "Plus",
       MoreHorizontal: "MoreHorizontal",
       X: "X",
+    },
+    "../assistant/ChatHeaderActions": {
+      CrewHeaderActions: "CrewHeaderActions",
     },
     "../assistant/ChatIdentityHeader": {
       ChatHeaderFrame: "ChatHeaderFrame",
@@ -210,11 +229,7 @@ function setup({
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
         choose: (...actions: unknown[]) => attachmentChoices.push(actions),
-        files: [],
-        session: {
-          sending: false,
-          submit: (send: (files?: unknown) => Promise<boolean>) => send(),
-        },
+        ...uploads,
       }),
     },
     "../assistant/useComposerDictation": {
@@ -335,6 +350,11 @@ function setup({
     chat,
     posted,
     attachmentChoices,
+    uploads,
+    setWidth: (value: number) => {
+      windowWidth = value;
+      h.render();
+    },
     identity,
     headerActions: () => nodes(options.headerRight()),
     columnHeader: () => columnHeader,
@@ -449,7 +469,9 @@ test("on the Duo's full screen the crew's bar controls move to the column: Back,
   // The crew opens the same recipient picker as the identity pill.
   column.identity.onPress();
   h.flush();
-  assert.ok(nodes(h.value()).some((n) => n.type === "Modal" && n.props.visible));
+  assert.ok(
+    nodes(h.value()).some((n) => n.type === "Modal" && n.props.visible),
+  );
   column.more.onPress();
   assert.equal(settingsOpened(), 1);
   h.unmount();
@@ -928,18 +950,11 @@ test("crew voice exposes only speech controls and ending restores the normal com
 test("crew options use the private header overflow affordance and avoid a duplicate composer control", () => {
   const f = setup();
   const actions = f.headerActions();
-  const options = actions.find(
-    (n) => n.props.accessibilityLabel === "Crew options",
-  )!;
-  assert.ok(options);
-  assert.ok(
-    actions.some((n) => n.type === "MoreHorizontal" && n.props.size === 23),
-  );
-  assert.equal(
-    actions.some((n) => n.type === "Settings"),
-    false,
-  );
-  options.props.onPress();
+  const options = actions.find((n) => n.type === "CrewHeaderActions")!;
+  assert.ok(options, "crew uses the shared anchored capsule menu");
+  assert.equal(options.props.scope, "1:crew");
+  assert.equal(options.props.disabled, false);
+  options.props.onSettings();
   assert.equal(f.settingsOpened(), 1);
   const toolbar = nodes(f.input().props.renderActions());
   assert.equal(
@@ -970,7 +985,7 @@ for (const scenario of androidCases) {
 }
 
 test("on the Duo a live text-size change remounts the crew transcript so every row re-measures", () => {
-  const f = setup({cornerWindow:true});
+  const f = setup({ cornerWindow: true });
   const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
   const before = list().key;
   f.h.render();
@@ -988,21 +1003,41 @@ test("scrolling the crew transcript dismisses the keyboard and never swallows a 
   f.h.unmount();
 });
 
-test("only an idle folded Duo crew composer may collapse to one row, like private chats", () => {
+test("ordinary and corner phone crew composers share the idle row and toolbar while wide and busy composers stay expanded", () => {
   const ordinary = setup();
+  assert.equal(ordinary.input().props.compactWhenIdle, true);
+  const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+  assert.ok(
+    nodes(ordinary.input().props.renderActions(undefined, layout)).some(
+      (n) => n.props.overlay === true,
+    ),
+  );
+  ordinary.uploads.files.push({
+    key: "photo",
+    handle: "image-1",
+    kind: "image",
+    file: { name: "photo.png" },
+  });
+  ordinary.h.render();
+  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  ordinary.uploads.files.length = 0;
+  ordinary.dictation.active = true;
+  ordinary.h.render();
+  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  ordinary.dictation.active = false;
+  ordinary.setWidth(1024);
   assert.equal(ordinary.input().props.compactWhenIdle, false);
   ordinary.h.unmount();
-  const f = setup({cornerWindow:true});
+  const f = setup({ cornerWindow: true });
   assert.equal(f.input().props.compactWhenIdle, true);
   f.h.unmount();
 });
 
-
 test("P9 ordinary crew transcript keeps its base identity across text size changes", () => {
-  const f=setup();
-  const list=()=>nodes(f.h.value()).find(n=>n.type === "FlatList")!;
-  const before=list().key;
+  const f = setup();
+  const list = () => nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  const before = list().key;
   f.setFontScale(3.12);
-  assert.equal(list().key,before);
+  assert.equal(list().key, before);
   f.h.unmount();
 });

@@ -17,6 +17,8 @@ export type PendingAssistantUpload = {
   kind: AttachmentKind;
   file: PickedAssistantFile;
   progress: number;
+  /** Local stat passed the size/format checks; independent of the upload queue. */
+  previewReady?: boolean;
   item?: AssistantAttachment;
   error?: string;
   controller: AbortController;
@@ -174,16 +176,38 @@ export class AssistantUploadSession {
       };
       this.entries.set(row.key, row);
       if (row.error) continue;
-      this.queue = this.queue.then(async () => {
-        try {
+      // Validate metadata for every selection immediately. A slow earlier
+      // upload must not hold later local previews behind the network queue.
+      // Only the serialized upload path below reads and retains file bytes.
+      const prepared = Promise.resolve()
+        .then(async () => {
           if (!this.usable(row)) return;
           const size = await this.deps.fileSize(file);
           const statError = attachmentFileError(file, size);
           if (statError) throw new Error(statError);
           if (!this.usable(row)) return;
-          const bytes = await this.deps.readBytes(file, row.controller.signal);
-          const byteError = attachmentFileError(file, bytes.byteLength);
-          if (byteError) throw new Error(byteError);
+          row.previewReady = true;
+          this.notify();
+        })
+        .catch((cause) => {
+          if (this.alive() && this.entries.get(row.key) === row && !row.error) {
+            row.error = attachmentUploadError(cause);
+            this.notify();
+          }
+        });
+      this.queue = this.queue.then(async () => {
+        try {
+          await prepared;
+          if (!this.usable(row) || row.error) return;
+          let bytes: Uint8Array;
+          try {
+            bytes = await this.deps.readBytes(file, row.controller.signal);
+            const byteError = attachmentFileError(file, bytes.byteLength);
+            if (byteError) throw new Error(byteError);
+          } catch (cause) {
+            row.previewReady = false;
+            throw cause;
+          }
           if (!this.usable(row)) return;
           const id = await this.ensureDraft();
           if (!this.usable(row)) return;
@@ -263,7 +287,9 @@ export class AssistantUploadSession {
       throw localizedError("Reconnect and keep this chat open to send.");
     if (this.sending) throw localizedError("A message is already being sent.");
     if (this.blocked)
-      throw localizedError("Wait for uploads to finish or remove failed files.");
+      throw localizedError(
+        "Wait for uploads to finish or remove failed files.",
+      );
     const rows = [...this.entries.values()];
     if (rows.length && !this.id)
       throw localizedError("The upload draft is unavailable.");
