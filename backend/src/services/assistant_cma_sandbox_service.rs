@@ -22,7 +22,10 @@ use super::assistant_cma_gateway::{
     validate_remote_id,
 };
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::assistant_cma_sandbox::{
         AssistantCmaSandbox, COLLECTION_NAME, SandboxAdmissionState, SandboxCapacitySource,
@@ -329,12 +332,9 @@ pub async fn begin_creation(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let field = ["request_ciphertext"];
     let context = RecordContext::new(COLLECTION_NAME, &id, owner_id, &field)?;
-    let ciphertext = super::record_field_service::encrypt_context(
-        encryption_keys,
-        &context,
-        normalized.bytes.as_slice(),
-    )
-    .await?;
+    let ciphertext =
+        record_field::encrypt_context(encryption_keys, &context, normalized.bytes.as_slice())
+            .await?;
     let now = Utc::now();
     let row = AssistantCmaSandbox {
         id,
@@ -450,7 +450,7 @@ pub(super) async fn recover_creation_request(
     };
     let field = ["request_ciphertext"];
     let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &field)?;
-    let bytes = super::record_field_service::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &context,
         version,

@@ -1,7 +1,10 @@
 //! Verified Sandbox files, fenced pending storage and owner-message recovery.
 use super::{api_key_mutation_service as transactions, assistant_upload_service::byte_budget};
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
@@ -297,7 +300,7 @@ pub async fn persist(
         };
         let path = context_path(&row);
         row.data_encrypted = Some(
-            super::record_field_service::encrypt_context(
+            record_field::encrypt_context(
                 keys,
                 &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
                 &file.bytes,
@@ -331,7 +334,7 @@ pub async fn persist(
         delivery_reason: "delivery_pending".into(),
         expires_at,
     };
-    let encrypted = super::record_field_service::encrypt(
+    let encrypted = record_field::encrypt(
         keys,
         WATCHES,
         &w.id,

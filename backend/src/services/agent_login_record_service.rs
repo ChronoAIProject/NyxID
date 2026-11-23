@@ -2,7 +2,10 @@
 //! selected parent and exact issued child. These are NyxID-issued credentials;
 //! they are not external-provider OAuth holder inventory.
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::agent_key_login_request::{AgentKeyLoginRequest, AgentKeyLoginStatus, COLLECTION_NAME},
 };
@@ -26,7 +29,7 @@ pub(crate) async fn encrypt(
     if secret.is_empty() || secret.len() > 4096 {
         return Err(invalid());
     }
-    super::record_field_service::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(COLLECTION_NAME, id, owner, &[FIELD, parent, child])?,
         secret,
@@ -50,7 +53,7 @@ pub(crate) async fn decrypt(
         .as_deref()
         .filter(|bytes| !bytes.is_empty())
         .ok_or_else(invalid)?;
-    let bytes = super::record_field_service::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(COLLECTION_NAME, &row.id, owner, &[FIELD, parent, child])?,
         row.delivery_context_version,

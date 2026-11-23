@@ -526,7 +526,7 @@ async fn result_text(
     let Some(bytes) = w.result_encrypted.as_deref() else {
         return Ok(zeroize::Zeroizing::new(String::new()));
     };
-    let plaintext = super::record_field_service::decrypt(
+    let plaintext = crate::crypto::record_field::decrypt(
         keys,
         WATCHES,
         &w.id,
@@ -554,7 +554,7 @@ pub(crate) async fn verify_current_result_snapshot(
         .map_err(|_| AppError::Internal("Invalid async result storage".into()))?;
     validate_result_storage(&w)?;
     if let Some(bytes) = w.result_encrypted.as_deref() {
-        super::record_field_service::verify_current(
+        crate::crypto::record_field::verify_current(
             keys,
             WATCHES,
             &w.id,
@@ -656,7 +656,7 @@ pub async fn ready(
 ) -> AppResult<()> {
     let encrypted = match (keys, result) {
         (Some(keys), Some(text)) if text.len() <= RESULT_BYTES => Some(
-            super::record_field_service::encrypt(
+            crate::crypto::record_field::encrypt(
                 keys,
                 WATCHES,
                 &w.id,
@@ -1665,7 +1665,7 @@ mod result_storage_tests {
         // migration authenticates that winner without overwriting its payload.
         let mut successor = current_row.clone();
         successor.result_encrypted = Some(
-            super::super::record_field_service::encrypt(
+            crate::crypto::record_field::encrypt(
                 &writer,
                 WATCHES,
                 &w.id,

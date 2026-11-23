@@ -40,7 +40,7 @@ pub(crate) async fn encrypt(
     if plaintext.is_empty() || plaintext.len() > 65_536 {
         return Err(invalid());
     }
-    super::record_field_service::encrypt(keys, COLLECTION_NAME, id, owner, FIELD, plaintext).await
+    crate::crypto::record_field::encrypt(keys, COLLECTION_NAME, id, owner, FIELD, plaintext).await
 }
 pub(crate) fn initial_versions(
     keys: &EncryptionKeys,
@@ -63,7 +63,7 @@ pub(crate) async fn bytes(
     if row.credential_encrypted.is_empty() {
         return Err(invalid());
     }
-    let plaintext = super::record_field_service::decrypt(
+    let plaintext = crate::crypto::record_field::decrypt(
         keys,
         COLLECTION_NAME,
         &row.id,
@@ -99,7 +99,7 @@ pub(crate) async fn verify_current_snapshot(
     if row.credential_encrypted.is_empty() {
         return Ok(());
     }
-    super::record_field_service::verify_current(
+    crate::crypto::record_field::verify_current(
         keys,
         COLLECTION_NAME,
         &row.id,

@@ -1,10 +1,13 @@
 //! Immutable, encrypted, turn-bound snapshots. Reading a part never dispatches a service.
 use super::{
     api_key_mutation_service as transactions, assistant_acknowledgement_service::ChatAuthority,
-    assistant_resource_service as live, record_field_service,
+    assistant_resource_service as live,
 };
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         assistant_conversation::COLLECTION_NAME as CONVERSATIONS,
@@ -183,7 +186,7 @@ pub async fn retain(
         expires_at: Utc::now() + Duration::minutes(30),
     };
     let path = context_path(&row);
-    row.data_encrypted = record_field_service::encrypt_context(
+    row.data_encrypted = record_field::encrypt_context(
         keys,
         &RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &path)?,
         text.as_bytes(),
@@ -241,7 +244,7 @@ pub async fn read(
         return Err(missing());
     }
     let path = context_path(&row);
-    let bytes = record_field_service::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &path)?,
         row.encryption_version,

@@ -146,7 +146,7 @@ pub async fn create(
         let url = webhook_delivery_service::validate_webhook_url(url, "webhook_url").await?;
         let secret = Zeroizing::new(format!("nyx_bwh_{}", generate_random_token()));
         let key_id = webhook_delivery_service::generate_signing_key_id();
-        let encrypted = super::record_field_service::encrypt(
+        let encrypted = crate::crypto::record_field::encrypt(
             keys,
             LINKS,
             &id,
@@ -832,7 +832,7 @@ async fn receiver_secret(keys: &EncryptionKeys, link: &Link) -> AppResult<Zeroiz
     else {
         return Err(invalid_receiver());
     };
-    let secret = super::record_field_service::decrypt(
+    let secret = crate::crypto::record_field::decrypt(
         keys,
         LINKS,
         &link.id,
@@ -860,7 +860,7 @@ pub(crate) async fn verify_current_receiver_snapshot(
     else {
         return Ok(());
     };
-    super::record_field_service::verify_current(
+    crate::crypto::record_field::verify_current(
         keys,
         LINKS,
         &link.id,
@@ -893,7 +893,7 @@ pub(crate) async fn migrate_receiver_snapshot(
         return Ok(false);
     }
     let secret = receiver_secret(keys, &link).await?;
-    let encrypted = super::record_field_service::encrypt(
+    let encrypted = crate::crypto::record_field::encrypt(
         keys,
         LINKS,
         &link.id,
@@ -1441,7 +1441,7 @@ mod tests {
         else {
             unreachable!()
         };
-        *secret_encrypted = super::super::record_field_service::encrypt(
+        *secret_encrypted = crate::crypto::record_field::encrypt(
             &keys,
             LINKS,
             &link.id,
@@ -1490,7 +1490,7 @@ mod tests {
         let mut terminal = cancel(&db, &c.link).await.unwrap();
         terminal.receiver = Some(Receiver::Direct {
             url: server.uri(),
-            secret_encrypted: super::super::record_field_service::encrypt(
+            secret_encrypted: crate::crypto::record_field::encrypt(
                 &keys,
                 LINKS,
                 &terminal.id,

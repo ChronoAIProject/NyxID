@@ -157,7 +157,7 @@ pub(crate) async fn bytes(
     let owned_path = path(&page);
     let path: Vec<&str> = owned_path.iter().map(String::as_str).collect();
     let context = RecordContext::new(COLLECTION_NAME, &page.id, &page.user_id, &path)?;
-    let mut bytes = super::super::record_field_service::decrypt_context(
+    let mut bytes = crate::crypto::record_field::decrypt_context(
         keys,
         &context,
         page.secret_context_versions.get("data_encrypted").copied(),
@@ -226,7 +226,7 @@ async fn pdf_coverage(keys: &EncryptionKeys, parent: &AssistantUpload) -> AppRes
     if let Some(pdf) = &parent.pdf {
         return Ok(pdf.clone());
     }
-    let bytes = super::super::record_field_service::decrypt(
+    let bytes = crate::crypto::record_field::decrypt(
         keys,
         COLLECTION_NAME,
         &parent.id,
@@ -272,7 +272,7 @@ pub(super) async fn store(
     let path: Vec<&str> = owned_path.iter().map(String::as_str).collect();
     let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &path)?;
     row.data_encrypted =
-        super::super::record_field_service::encrypt_context(keys, &context, bytes).await?;
+        crate::crypto::record_field::encrypt_context(keys, &context, bytes).await?;
     super::super::credential_record_service::mark_version(
         &mut row.secret_context_versions,
         keys,

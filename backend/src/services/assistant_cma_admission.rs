@@ -876,7 +876,7 @@ pub async fn admit(
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let context = RecordContext::new(COLLECTION_NAME, &id, owner, &["request_ciphertext"])?;
         let request_ciphertext =
-            super::record_field_service::encrypt_context(keys, &context, body).await?;
+            crate::crypto::record_field::encrypt_context(keys, &context, body).await?;
         let expected_workspace_id = match &operation {
             Operation::CreateAgent { workspace, .. } => workspace.clone(),
             Operation::WorkspaceAgent { id } => Some(id.clone()),

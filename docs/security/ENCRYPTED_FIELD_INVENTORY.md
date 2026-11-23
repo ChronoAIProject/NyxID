@@ -70,9 +70,19 @@ contract.
 
 ## Source and storage boundaries
 
-- `managed_machine_bootstrap_deliveries` and `node_pending_credentials` contain
-  recipient-sealed deliveries, outside server key-encryption-key migration.
-  Their expiry and recipient lifecycle continue separately.
+Services resolve the trusted collection, row, owner and field components before
+calling `crypto::record_field`. For binary fields with historically unbound
+encryption, the writer uses the rollout setting and the reader dispatches on
+the stored marker. Marker 3 requires authenticated v3. An absent marker permits
+the historical decoder only while legacy reads are enabled. BSON decoding,
+version-map validation and exact-source migration stay in services.
+[Crypto API](../../backend/src/crypto/record_field.rs) · [Storage orchestration](../../backend/src/services/record_field_service.rs)
+
+- Managed machine bootstrap seals for the recipient public key. The server
+  stores that envelope in `managed_machine_bootstrap_deliveries` and the node
+  opens it with its private key. For `node_pending_credentials` the server
+  queues and forwards a sender-encrypted delivery. Recipient key lifecycle
+  and expiry govern both protocols independently of server KEK rewrap.
 - `assistant_upload.rs` re-exports the `assistant_attachments` collection name;
   there is no separate `assistant_uploads` collection. Text and binary attachment
   fields have separate contexts.
@@ -99,9 +109,15 @@ contract.
   and issued child. Platform setup facts bind their row and owner; anonymous
   native setup also binds its server-keyed sender scope, and adoption must
   re-encrypt for the new owner in the same fenced transaction.
-- The pending platform entry transport and native reply families must preserve
-  their established digest AAD when their envelope implementations are
-  completed.
+- Platform gateway setup uses the historical unbound envelope, then verifies
+  the decrypted request against its stored SHA-256 before dispatch. Native
+  replies authenticate the binding digest bytes as AES AAD.
+  [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
+- Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
+  Execution proposals use request-specific AAD and a distinct result suffix.
+  The assistant reattach window authenticates the serialized tuple of domain,
+  user, conversation, credential ID and window key. These services own the
+  encoding of their historical AAD.
 
 ## Header authority compatibility boundary
 
@@ -226,7 +242,7 @@ reader, rollback and backup dependencies.
 Closing the unbound encryption API remains follow-up work for
 [secret handling (#1933)](https://github.com/ChronoAIProject/NyxID/issues/1933) and
 [encryption lifecycle (#1934)](https://github.com/ChronoAIProject/NyxID/issues/1934):
-move the record-field API into the crypto module, make raw unbound
+make raw unbound
 `EncryptionKeys` methods private to that module, and convert remaining callers
 to the record-field or dedicated recipient-sealed API. Enforce the boundary with
 compilation and a source scan. The existing rollout switches alone do not close
