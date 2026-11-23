@@ -258,14 +258,16 @@ pub(crate) async fn create_session_with_transaction_and_mfa_authority(
         last_active_at: now,
     };
 
-    let collection = db.collection::<Session>(SESSIONS);
-    let insert = collection.insert_one(&new_session);
     if let Some(transaction) = transaction {
         // The transaction owner aborts definite preparation failures. Helpers
         // must not abort a borrowed transaction behind its owner's back.
-        insert.session(&mut *transaction).await?;
+        super::erasure_admission::fence_in_session(db, user_id, transaction).await?;
+        db.collection::<Session>(SESSIONS)
+            .insert_one(&new_session)
+            .session(transaction)
+            .await?;
     } else {
-        insert.await?;
+        super::erasure_admission::insert_owned(db, SESSIONS, user_id, &new_session).await?;
     }
 
     Ok(IssuedSession {
@@ -379,6 +381,7 @@ impl PreparedSessionRows {
         db: &mongodb::Database,
         transaction: &mut mongodb::ClientSession,
     ) -> AppResult<()> {
+        super::erasure_admission::fence_in_session(db, &self.session.user_id, transaction).await?;
         db.collection::<Session>(SESSIONS)
             .insert_one(&self.session)
             .session(&mut *transaction)
@@ -1567,6 +1570,79 @@ mod tests {
         assert_eq!(row.get_bool("mfa_assured"), Ok(false));
         assert!(!row.contains_key("mfa_exemption"));
         db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_first_party_session_respects_account_erasure_at_persistence() {
+        let db = connect_transaction_test_database("first_party_session_erasure").await;
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        super::super::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let prepare = || {
+            prepare_mobile_social_tokens(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &user_id,
+                None,
+                None,
+                false,
+            )
+        };
+        let active = prepare().await.unwrap();
+        let held = prepare().await.unwrap();
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        insert_prepared_session(&db, &active, &mut tx)
+            .await
+            .unwrap();
+        tx.commit_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {"_id": &active.tokens.session_id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"session_id": &active.tokens.session_id})
+                .await
+                .unwrap(),
+            1
+        );
+        super::super::personal_erasure_service::accept(&db, &user_id, &user_id, None)
+            .await
+            .unwrap();
+
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        assert!(matches!(
+            insert_prepared_session(&db, &held, &mut tx).await,
+            Err(AppError::Conflict(_))
+        ));
+        tx.abort_transaction().await.unwrap();
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {"_id": &held.tokens.session_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"session_id": &held.tokens.session_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            create_session(&db, &user_id, None, None).await,
+            Err(AppError::Conflict(_))
+        ));
     }
 
     #[tokio::test]

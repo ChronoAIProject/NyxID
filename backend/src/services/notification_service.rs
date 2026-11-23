@@ -1010,16 +1010,16 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
     }
 
     let channel = default_channel(user_id);
-    match collection.insert_one(&channel).await {
+    match super::erasure_admission::insert_owned(db, COLLECTION_NAME, user_id, &channel).await {
         Ok(_) => Ok(channel),
-        Err(e) if is_duplicate_key_error(&e) => {
+        Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
             // Another request created it first; fetch the existing channel
             collection
                 .find_one(doc! { "user_id": user_id })
                 .await?
                 .ok_or_else(|| AppError::Internal("Channel creation conflict".to_string()))
         }
-        Err(e) => Err(AppError::DatabaseError(e)),
+        Err(error) => Err(error),
     }
 }
 
