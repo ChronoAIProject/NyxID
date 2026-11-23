@@ -53,6 +53,12 @@ apt_options=(
   -o Acquire::Retries=2
   -o Acquire::http::Timeout=20
   -o Acquire::https::Timeout=20
+  # Build dependencies need package indexes, not translated descriptions,
+  # desktop metadata or command-not-found indexes. Slow translation downloads
+  # exhausted the five-minute setup budget before Clippy could start.
+  -o Acquire::Languages=none
+  -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false
+  -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false
   -o APT::Update::Error-Mode=any
 )
 
