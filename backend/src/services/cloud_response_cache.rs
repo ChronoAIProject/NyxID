@@ -28,6 +28,7 @@
 //!   Expired entries are dropped opportunistically on access.
 //! - In-process, no persistence. Restart drops the cache.
 
+use nyxid_crypto::SecretText;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -62,7 +63,7 @@ struct CachedEntry {
 /// Thread-safe response cache shared across the proxy hot path.
 #[derive(Clone)]
 pub struct CloudResponseCache {
-    inner: Arc<DashMap<String, CachedEntry>>,
+    inner: Arc<DashMap<SecretText, CachedEntry>>,
     ttl: Duration,
     max_entry_bytes: usize,
     max_entries: usize,
@@ -125,19 +126,19 @@ impl CloudResponseCache {
         path_and_query: &str,
         headers: &[(String, String)],
         body: &[u8],
-    ) -> String {
+    ) -> SecretText {
         let mut body_hasher = Sha256::new();
         body_hasher.update(body);
         let body_hash = hex::encode(body_hasher.finalize());
 
         // Canonicalize relevant headers: lowercase name, sort by name,
         // dedupe by name (last-write-wins matches reqwest's behavior).
-        let mut canonical: Vec<(String, String)> = headers
+        let mut canonical: Vec<(String, &str)> = headers
             .iter()
             .filter_map(|(n, v)| {
                 let lower = n.to_ascii_lowercase();
                 if Self::is_response_affecting(&lower) {
-                    Some((lower, v.trim().to_string()))
+                    Some((lower, v.trim()))
                 } else {
                     None
                 }
@@ -154,9 +155,21 @@ impl CloudResponseCache {
         }
         let headers_hash = hex::encode(hh.finalize());
 
-        format!(
-            "{auth_method}|{credential_fingerprint}|{method}|{base_url}|{path_and_query}|{headers_hash}|{body_hash}"
-        )
+        SecretText::concat(&[
+            auth_method,
+            "|",
+            credential_fingerprint,
+            "|",
+            method,
+            "|",
+            base_url,
+            "|",
+            path_and_query,
+            "|",
+            &headers_hash,
+            "|",
+            &body_hash,
+        ])
     }
 
     /// Look up a non-expired entry. Returns a reqwest::Response built
@@ -188,7 +201,7 @@ impl CloudResponseCache {
     /// callers always get a fresh replayed response.
     pub async fn insert_and_replay(
         &self,
-        key: String,
+        key: SecretText,
         response: reqwest::Response,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let status = response.status().as_u16();
@@ -270,7 +283,7 @@ fn synthesize_response(entry: &CachedEntry) -> reqwest::Response {
 mod tests {
     use super::*;
 
-    fn k(creds: &str, headers: &[(&str, &str)], body: &[u8]) -> String {
+    fn k(creds: &str, headers: &[(&str, &str)], body: &[u8]) -> SecretText {
         let owned: Vec<(String, String)> = headers
             .iter()
             .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
@@ -284,6 +297,31 @@ mod tests {
             &owned,
             body,
         )
+    }
+
+    #[test]
+    fn credential_transport_cache_key_preserves_canonical_bytes() {
+        let key = CloudResponseCache::key(
+            "aws_sigv4",
+            "fingerprint",
+            "https://example.test",
+            "POST",
+            "/v1?access=dummy-value",
+            &[
+                ("X-Goog-User-Project".into(), "project".into()),
+                ("Accept".into(), " application/json ".into()),
+            ],
+            b"dummy-body",
+        );
+        assert_eq!(
+            key.as_str(),
+            concat!(
+                "aws_sigv4|fingerprint|POST|https://example.test|/v1?access=dummy-value|",
+                "afff77467ec2ab9289857fe7d9cc4fc38574087ea97eada64f83b304dd7dc82c|",
+                "18fdc5ceceb8ca1e5eb3557f8d93b2db4a3981d7b06a24e5f41adc6b42e39600",
+            )
+        );
+        assert!(!format!("{key:?} {key:#?}").contains("dummy-value"));
     }
 
     #[test]
@@ -402,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn zero_ttl_disables_storage() {
         let cache = CloudResponseCache::new(0);
-        let key = "test-key".to_string();
+        let key = SecretText::from("test-key");
 
         let http_response = http::Response::builder()
             .status(200)
@@ -483,7 +521,7 @@ mod tests {
         let cache = CloudResponseCache::with_bounds(300, DEFAULT_MAX_ENTRY_BYTES, 2);
 
         for i in 0..3 {
-            let key = format!("k-{i}");
+            let key = SecretText::from(format!("k-{i}"));
             let http_response = http::Response::builder()
                 .status(200)
                 .body(Bytes::from(format!("body-{i}")))

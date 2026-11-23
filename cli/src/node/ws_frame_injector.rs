@@ -50,20 +50,27 @@ pub struct InjectorState {
     pub total_injections_fired: usize,
 }
 
-#[derive(Clone, Debug)]
-pub struct IncomingFrame {
+pub struct IncomingFrame<'a> {
     pub direction: WsFrameDirection,
     pub kind: WsFrameKind,
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct WsFrame {
     pub kind: WsFrameKind,
-    pub payload: Vec<u8>,
+    pub payload: zeroize::Zeroizing<Vec<u8>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl std::fmt::Debug for WsFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsFrame")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct InjectionAction {
     pub send_frame: WsFrame,
     pub forward_original: bool,
@@ -74,7 +81,7 @@ pub struct InjectionAction {
 pub fn evaluate(
     rules: &[WsFrameInjection],
     state: &mut InjectorState,
-    frame: &IncomingFrame,
+    frame: &IncomingFrame<'_>,
     credential: &str,
 ) -> Option<InjectionAction> {
     let frame_index_in = match frame.direction {
@@ -107,10 +114,7 @@ pub fn evaluate(
         return Some(InjectionAction {
             send_frame: WsFrame {
                 kind: rule.frame_kind,
-                payload: rule
-                    .template
-                    .replace("${credential}", credential)
-                    .into_bytes(),
+                payload: nyxid_crypto::render_credential_frame(&rule.template, credential),
             },
             forward_original: !rule.consume_trigger,
             trigger_kind,
@@ -123,7 +127,7 @@ pub fn evaluate(
 
 fn trigger_matches(
     trigger: &WsFrameTrigger,
-    frame: &IncomingFrame,
+    frame: &IncomingFrame<'_>,
     frame_index_in: usize,
 ) -> Option<&'static str> {
     match trigger {
@@ -139,9 +143,9 @@ fn trigger_matches(
             if frame.kind != WsFrameKind::Text {
                 return None;
             }
-            let text = std::str::from_utf8(&frame.payload).ok()?;
-            let json: serde_json::Value = serde_json::from_str(text).ok()?;
-            let actual = get_json_path_value(&json, path)?;
+            let json: nyxid_crypto::secret_json::WireJson =
+                serde_json::from_slice(frame.payload).ok()?;
+            let actual = get_json_path_value(&json.0, path)?;
             (actual == value).then_some("json_field_equals")
         }
     }
@@ -193,11 +197,11 @@ mod tests {
         }
     }
 
-    fn make_text_frame(direction: WsFrameDirection, payload: &str) -> IncomingFrame {
+    fn make_text_frame(direction: WsFrameDirection, payload: &str) -> IncomingFrame<'_> {
         IncomingFrame {
             direction,
             kind: WsFrameKind::Text,
-            payload: payload.as_bytes().to_vec(),
+            payload: payload.as_bytes(),
         }
     }
 
@@ -213,10 +217,11 @@ mod tests {
 
         let action = evaluate(&rules, &mut state, &frame, "secret123").unwrap();
         assert_eq!(action.trigger_kind, "first_frame_from_downstream");
+        assert!(!format!("{action:?} {action:#?}").contains("secret123"));
         assert_eq!(action.frame_index_in, 0);
         assert!(!action.forward_original);
         assert_eq!(
-            String::from_utf8(action.send_frame.payload.clone()).unwrap(),
+            std::str::from_utf8(&action.send_frame.payload).unwrap(),
             r#"{"auth":"secret123"}"#
         );
     }
@@ -272,7 +277,7 @@ mod tests {
         let action = evaluate(&rules, &mut state, &frame, "my-key").unwrap();
         assert_eq!(action.trigger_kind, "json_field_equals");
         assert_eq!(
-            String::from_utf8(action.send_frame.payload.clone()).unwrap(),
+            std::str::from_utf8(&action.send_frame.payload).unwrap(),
             r#"{"token":"my-key"}"#
         );
     }

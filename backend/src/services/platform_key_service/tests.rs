@@ -289,7 +289,7 @@ async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() 
                 &[],
             )
             .unwrap();
-            assert_eq!(url, format!("wss://{host}/v1/realtime"));
+            assert_eq!(url.as_str(), format!("wss://{host}/v1/realtime"));
             let request = crate::handlers::proxy::build_downstream_ws_request(
                 &url,
                 &resolution.target,

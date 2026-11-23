@@ -333,9 +333,9 @@ async fn execute_proxy_request_inner(
     };
 
     let normalized_path = if path.starts_with('/') {
-        path.to_string()
+        nyxid_crypto::SecretText::from(path)
     } else {
-        format!("/{path}")
+        nyxid_crypto::SecretText::concat(&["/", path])
     };
 
     if let Some(key) = cred.ifttt_key() {
@@ -366,19 +366,21 @@ async fn execute_proxy_request_inner(
             },
             None => None,
         };
-        let ifttt_headers = request["headers"]
-            .as_object()
-            .map(|headers| {
-                headers
-                    .iter()
-                    .filter_map(|(name, value)| {
-                        value
-                            .as_str()
-                            .map(|value| (name.clone(), value.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let ifttt_headers = zeroize::Zeroizing::new(
+            request["headers"]
+                .as_object()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value
+                                .as_str()
+                                .map(|value| (name.clone(), value.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
         match ifttt_client
             .forward(
                 effective_base_url,
@@ -426,24 +428,12 @@ async fn execute_proxy_request_inner(
         return;
     }
 
-    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
-    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
-        format!("/{prefix}{credential}{normalized_path}")
-    } else {
-        normalized_path
-    };
-
-    let mut url = format!("{}{}", effective_base_url.trim_end_matches('/'), final_path);
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        url = format!("{url}?{q}");
-    }
-
-    // Handle query_param injection by appending to URL
-    if let Some((param_name, param_value)) = cred.query_param() {
-        url = append_query_param(&url, param_name, param_value);
-    }
+    let url = credential_url(
+        effective_base_url.trim_end_matches('/'),
+        &normalized_path,
+        query,
+        cred,
+    );
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let destination_client;
@@ -468,7 +458,7 @@ async fn execute_proxy_request_inner(
     } else {
         http_client
     };
-    let mut req_builder = http_client.request(method.clone(), &url);
+    let mut req_builder = http_client.request(method.clone(), url.as_str());
 
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
     //    as well as applying them to the builder so SigV4 can sign over the
@@ -481,7 +471,7 @@ async fn execute_proxy_request_inner(
     //    keeping caller values would produce duplicate headers on the
     //    wire (Codex review BLOCKER 8).
     let is_aws_sigv4 = cred.aws_sigv4_credential().is_some();
-    let mut forwarded_headers: Vec<(String, String)> = Vec::new();
+    let mut forwarded_headers = zeroize::Zeroizing::new(Vec::new());
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
             if let Some(v) = value.as_str() {
@@ -498,7 +488,9 @@ async fn execute_proxy_request_inner(
                     }
                 }
                 req_builder = with_sensitive_header(req_builder, name, v);
-                forwarded_headers.push((name.clone(), v.to_string()));
+                if is_aws_sigv4 {
+                    forwarded_headers.push((name.clone(), v.to_string()));
+                }
             }
         }
     }
@@ -899,11 +891,37 @@ fn proxy_error_response_with_reason(
     payload.to_string()
 }
 
-pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
-    let separator = if url.contains('?') { "&" } else { "?" };
-    let encoded_name = urlencoding::encode(param_name);
-    let encoded_value = urlencoding::encode(param_value);
-    format!("{url}{separator}{encoded_name}={encoded_value}")
+pub(super) fn credential_url(
+    base: &str,
+    normalized_path: &str,
+    query: Option<&str>,
+    credential: &super::credential_store::ServiceCredential,
+) -> nyxid_crypto::SecretText {
+    let (separator, prefix, secret) = credential
+        .path_prefix()
+        .map_or(("", "", ""), |(prefix, value)| ("/", prefix, value));
+    let query = query.filter(|q| !q.is_empty());
+    let url = nyxid_crypto::SecretText::concat(&[
+        base,
+        separator,
+        prefix,
+        secret,
+        normalized_path,
+        if query.is_some() { "?" } else { "" },
+        query.unwrap_or_default(),
+    ]);
+    match credential.query_param() {
+        Some((name, value)) => append_query_param(&url, name, value),
+        None => url,
+    }
+}
+
+pub fn append_query_param(
+    url: &str,
+    param_name: &str,
+    param_value: &str,
+) -> nyxid_crypto::SecretText {
+    nyxid_crypto::SecretText::with_query_param(url, param_name, param_value)
 }
 
 #[cfg(test)]
@@ -1343,7 +1361,7 @@ mod tests {
         let url = append_query_param("https://example.com/api", "api key", "a=b&c d#fragment");
 
         assert_eq!(
-            url,
+            url.as_str(),
             "https://example.com/api?api%20key=a%3Db%26c%20d%23fragment"
         );
     }
@@ -1351,7 +1369,7 @@ mod tests {
     #[test]
     fn append_query_param_preserves_existing_query_string() {
         let url = append_query_param("https://example.com/api?x=1", "token", "abc");
-        assert_eq!(url, "https://example.com/api?x=1&token=abc");
+        assert_eq!(url.as_str(), "https://example.com/api?x=1&token=abc");
     }
 
     #[test]
@@ -1407,6 +1425,6 @@ mod tests {
     #[test]
     fn append_query_param_handles_empty_url() {
         let url = append_query_param("", "k", "v");
-        assert_eq!(url, "?k=v");
+        assert_eq!(url.as_str(), "?k=v");
     }
 }
