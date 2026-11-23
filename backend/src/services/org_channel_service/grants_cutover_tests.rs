@@ -893,7 +893,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         .update_one(
             doc! {"service_id":workspace.catalog_service_id.as_ref().unwrap(),"name":"sheets_append_values"},
             doc! {"$set":{"description":"Sheet append help. ".repeat(40),
-                "request_body_schema.description":"Detailed body help. ".repeat(600)}},
+                "request_body_schema.properties.values.description":"Detailed row values help. ".repeat(600)}},
         )
         .await
         .unwrap();
@@ -988,6 +988,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                 .contains("insertDataOption=INSERT_ROWS")
         );
         assert!(append["inputSchema"]["properties"]["insertDataOption"].is_object());
+        assert!(append["inputSchema"].to_string().len() > 10_000);
         assert!(
             tools
                 .iter()
