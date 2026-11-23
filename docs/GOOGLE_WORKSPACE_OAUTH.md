@@ -291,7 +291,8 @@ the range's `:` and leaves the `:append` suffix literal. The query is checked
 against the operation's guest access requirement. The organization policy is
 shared by callers whose approvals resolve to that organization's Workspace
 catalog policy. Its scope reaches beyond the specialist and channel, so use
-an exact workbook and range in the rule.
+an exact workbook and range in the rule. A different spelling or range, such as
+`Questions` in place of `Questions!A:H`, needs its own reviewed exact rule.
 
 ## Mixed-version rollout
 
