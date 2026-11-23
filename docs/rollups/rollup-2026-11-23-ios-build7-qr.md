@@ -105,4 +105,3 @@ changes. This rollup takes its implementation from the reviewed PR commits and
 does not include that worktree's newer notification or composer edits. Reconcile
 that branch against this rollup when preparing its eventual PR to avoid
 reintroducing the same attachment restoration.
-
