@@ -402,6 +402,140 @@ fn group_event(text: &str, id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn org_lark_provider_source_alias_resolves_under_the_route_read_authority() {
+    Box::pin(async {
+        use crate::{
+            crypto::jwt,
+            models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
+            services::{channel_platform::InboundMessage, channel_relay_service},
+        };
+        use tower::ServiceExt;
+
+        let (state, calls, server) = setup("org_lark_source_result").await;
+        let _server = tokio_util::task::AbortOnDropHandle::new(server);
+        let (mut channel, key, _, org_id) = org_channel(&state, false).await;
+        assert_eq!(channel.user_id, OWNER);
+        assert_eq!(channel.bot_owner_id.as_deref(), Some(org_id.as_str()));
+        let actor = member(&state, &channel, &org_id).await;
+        channel.platform = "lark".into();
+        let route = channel.route_id.as_deref().unwrap();
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id": &channel.id}, &channel)
+            .await
+            .unwrap();
+        for (collection, id) in [
+            ("channel_bots", channel.channel_bot_id.as_str()),
+            ("channel_conversations", route),
+        ] {
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_one(doc! {"_id": id}, doc! {"$set": {"platform": "lark"}})
+                .await
+                .unwrap();
+        }
+        bind(&state, &key).await;
+        assert_eq!(
+            put_conversation(
+                State(state.clone()),
+                Path(("bnd_turns".into(), GROUP_PARTITION.into())),
+                bearer(&key),
+            )
+            .await
+            .status(),
+            StatusCode::OK,
+        );
+        let event_id = Uuid::new_v4().to_string();
+        let question = "A synthetic organization question";
+        let inbound = InboundMessage {
+            platform_message_id: "om_source_fixture".into(),
+            conversation_id: "org-shared-chat".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "7".into(),
+            sender_display_name: None,
+            content_type: "text".into(),
+            text: Some(question.into()),
+            attachments: vec![],
+            embedded_attachments: vec![],
+            embedded_attachments_omitted: 0,
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: json!({}),
+        };
+        let source = channel_relay_service::inbound_metadata(
+            &channel.channel_bot_id,
+            route,
+            &org_id,
+            "lark",
+            &inbound,
+            &channel.route_api_key_id,
+            &event_id,
+        );
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .insert_one(&source)
+            .await
+            .unwrap();
+        let mut request = group_event(question, &event_id);
+        request["event_context"]["activity"]["source"] =
+            json!({"type": "nyxid_relay", "platform": "lark", "route_id": route});
+        let response = body_text(respond(&state, &key, &request, &event_id).await).await;
+        assert!(response.contains("Here is your answer"), "{response}");
+        let [call] = calls
+            .lock()
+            .await
+            .clone()
+            .try_into()
+            .expect("single provider run");
+        let contexts = turn_context_tests::contexts(&call);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["sender"]["classification"], "org_member");
+        assert_eq!(contexts[0]["identity"]["platform"], "lark");
+        let alias = contexts[0]["source_event_id"].as_str().unwrap();
+        assert_eq!(alias.len(), 64);
+        let token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&actor).unwrap(),
+            "openid account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(state.clone());
+        let result = private
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::get(format!(
+                    "/api/v1/channel-conversations/{route}/messages?source_event_id={alias}"
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = result.status();
+        let output = body_text(result).await;
+        assert_eq!(status, StatusCode::OK, "{output}");
+        let mapping: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(mapping["source_event_id"], alias);
+        assert_eq!(mapping["inbound_message_id"], source.id);
+        assert_eq!(mapping["platform_message_id"], inbound.platform_message_id);
+        assert_eq!(mapping["sender_platform_id"], inbound.sender_platform_id);
+        assert_eq!(mapping["turn_status"], "completed");
+        crate::test_utils::drop_test_database(&state.db).await;
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn identity_2187_org_group_transcript_is_current_and_rendered_once_for_coalesced_sources() {
     let (state, calls, server) = setup("identity_2187_org_group_queue").await;
     let _server = tokio_util::task::AbortOnDropHandle::new(server);

@@ -984,6 +984,12 @@ history. This request uses the existing resource-owner or organization-reader
 authorization. A specialist's execution identity and the source alias carry
 no conversation-read authority.
 
+Before using any returned IDs, require a top-level `source_event_id` that
+exactly equals the requested alias and an `inbound_message_id` that is a
+NyxID message UUID. Older servers can return a normal message page with HTTP
+200 because they ignore the query parameter. Treat any response without the
+exact mapping fields as unresolved during rollout.
+
 The response includes the original `inbound_message_id`, its native
 `platform_message_id` and `sender_platform_id` when recorded, and the provider
 `response_id` when retained. The relay activity's event UUID is the NyxID

@@ -218,4 +218,5 @@ async fn retained_channel_source_joins_exact_inbound_and_reports_turn_and_reply_
             .iter()
             .all(|value| value.get("source_event_id").is_none())
     );
+    crate::test_utils::drop_test_database(&db).await;
 }
