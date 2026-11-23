@@ -339,6 +339,7 @@ pub fn close_notice(reason: Option<&str>, continuing: bool) -> String {
     let reason = match reason {
         Some("time_limit") => "The call reached its time limit.",
         Some("idle") => "The quiet call ended.",
+        Some("start_failed") => "The voice call could not start.",
         Some("client_lost" | "sideband_lost" | "voice_connection_lost" | "provider_closed") => {
             "The voice connection ended."
         }
