@@ -2314,7 +2314,7 @@ async fn handle_initialize(
             }
             Err(error) => {
                 let error = crate::services::api_key_mutation_service::map_transaction_error(error);
-                if matches!(error, AppError::Conflict(_)) {
+                if matches!(error, crate::errors::AppError::Conflict(_)) {
                     return rpc_error(request.id.clone(), -32000, "Account is unavailable");
                 }
                 tracing::error!(%error, "Failed to persist MCP session");
