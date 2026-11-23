@@ -966,7 +966,7 @@ async fn event_reference(state: &AppState, event: &NyxbotEvent) -> AppResult<Zer
         .event_context_ciphertext
         .as_ref()
         .ok_or_else(|| AppError::NotFound("Channel event unavailable".into()))?;
-    let bytes = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
+    let bytes = state.encryption_keys.decrypt(ciphertext).await?;
     let context: Value = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Internal("Channel event unavailable".into()))?;
     context["event_ref"]
@@ -1093,10 +1093,9 @@ pub(super) async fn dispatch_occurrence(
                 if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
                     return Ok(classified(Outcome::Rejected));
                 }
-                let reference = Zeroizing::new(
-                    String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                        .map_err(|_| AppError::Internal("Channel target unavailable".into()))?,
-                );
+                let reference =
+                    crate::crypto::guarded_utf8(state.encryption_keys.decrypt(ciphertext).await?)
+                        .map_err(|_| AppError::Internal("Channel target unavailable".into()))?;
                 (
                     Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
                     Some(event.id.as_str()),

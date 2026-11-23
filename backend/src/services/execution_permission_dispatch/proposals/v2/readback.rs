@@ -158,12 +158,10 @@ pub(crate) async fn decrypt_result(
     let Some(value) = &p.result else {
         return Ok(None);
     };
-    let raw = Zeroizing::new(
-        state
-            .encryption_keys
-            .decrypt_with_aad(&value.bytes, format!("{}:result", aad(&row.id)).as_bytes())
-            .await?,
-    );
+    let raw = state
+        .encryption_keys
+        .decrypt_with_aad(&value.bytes, format!("{}:result", aad(&row.id)).as_bytes())
+        .await?;
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }

@@ -198,16 +198,14 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     let invalid = || AppError::Internal("Guest queue unavailable".into());
     let id = event.get_str("_id").map_err(|_| invalid())?;
     let owner = event.get_str("user_id").map_err(|_| invalid())?;
-    let bytes = Zeroizing::new(
-        state
-            .encryption_keys
-            .decrypt(
-                event
-                    .get_binary_generic("guest_setup_payload")
-                    .map_err(|_| invalid())?,
-            )
-            .await?,
-    );
+    let bytes = state
+        .encryption_keys
+        .decrypt(
+            event
+                .get_binary_generic("guest_setup_payload")
+                .map_err(|_| invalid())?,
+        )
+        .await?;
     let payload: WaitingGuest = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     let channel = load_channel(
         state,

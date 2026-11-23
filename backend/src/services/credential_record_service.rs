@@ -113,9 +113,7 @@ impl<'a> CredentialRecord<'a> {
                     )
                     .await
                 }
-                None if keys.allow_legacy_record_reads() => {
-                    keys.decrypt(ciphertext).await.map(Zeroizing::new)
-                }
+                None if keys.allow_legacy_record_reads() => keys.decrypt(ciphertext).await,
                 _ => Err(invalid()),
             }
         })

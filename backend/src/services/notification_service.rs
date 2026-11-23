@@ -728,6 +728,15 @@ pub async fn send_approval_notification(
                     telegram_chat_id = Some(chat_id);
                 }
             } else {
+                // Each recipient sees the deadline of the same connected request.
+                let expires_in_secs = if super::approval_service::CONNECTED_WAIT_BUDGET
+                    .try_with(|_| ())
+                    .is_ok()
+                {
+                    (request.expires_at - Utc::now()).num_seconds().max(0) as u32
+                } else {
+                    channel.approval_timeout_secs
+                };
                 match telegram_service::send_approval_message(
                     http_client,
                     bot_token,
@@ -740,7 +749,7 @@ pub async fn send_approval_notification(
                         .action_description
                         .as_deref()
                         .unwrap_or(&request.operation_summary),
-                    channel.approval_timeout_secs,
+                    expires_in_secs,
                     effective_org_name,
                 )
                 .await

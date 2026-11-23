@@ -386,7 +386,7 @@ impl EncryptionKeys {
     /// 3. Try v0 (raw `nonce || ciphertext || tag`) with current key
     /// 4. Try v0 with previous key
     /// 5. Return error if all fail
-    pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut unknown_key_id = None;
         let current_key_id = self.provider.current_key_id();
 
@@ -561,7 +561,7 @@ impl EncryptionKeys {
         &self,
         ciphertext: &[u8],
         aad: &[u8],
-    ) -> Result<Vec<u8>, AppError> {
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
         let mut unknown_key_id = None;
         let current_key_id = self.provider.current_key_id();
 
@@ -791,7 +791,7 @@ impl EncryptionKeys {
         // Never count a recognizable header/current key selector as verified
         // data. Authenticate the exact v2 payload, without a legacy fallback,
         // before either the no-op or wrapping a new envelope.
-        let plaintext = Zeroizing::new(decrypt_raw_with_aad(data_portion, &plaintext_dek, aad)?);
+        let plaintext = decrypt_raw_with_aad(data_portion, &plaintext_dek, aad)?;
         drop(plaintext);
         if primary_unwrapped && kek_id == self.provider.current_key_id() {
             return Ok(ciphertext.to_vec());
@@ -836,7 +836,7 @@ fn looks_like_v1(data: &[u8]) -> bool {
 }
 
 /// Low-level AES-256-GCM decryption: expects `nonce(12) || ciphertext || tag`.
-fn decrypt_raw(data: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
+fn decrypt_raw(data: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if data.len() < NONCE_SIZE {
         return Err(AppError::Internal(
             "Ciphertext too short to contain nonce".to_string(),
@@ -851,11 +851,16 @@ fn decrypt_raw(data: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
 
     cipher
         .decrypt(nonce, encrypted)
+        .map(Zeroizing::new)
         .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
 }
 
 /// Low-level AES-256-GCM decryption with AAD: expects `nonce(12) || ciphertext || tag`.
-fn decrypt_raw_with_aad(data: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, AppError> {
+fn decrypt_raw_with_aad(
+    data: &[u8],
+    key: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if data.len() < NONCE_SIZE {
         return Err(AppError::Internal(
             "Ciphertext too short to contain nonce".to_string(),
@@ -876,6 +881,7 @@ fn decrypt_raw_with_aad(data: &[u8], key: &[u8], aad: &[u8]) -> Result<Vec<u8>, 
                 aad,
             },
         )
+        .map(Zeroizing::new)
         .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
 }
 
@@ -916,28 +922,14 @@ pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
 ///
 /// Expects the input to be `nonce (12 bytes) || ciphertext || tag`.
 #[cfg(test)]
-pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
+pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if key.len() != 32 {
         return Err(AppError::Internal(
             "AES key must be exactly 32 bytes".to_string(),
         ));
     }
 
-    if ciphertext.len() < NONCE_SIZE {
-        return Err(AppError::Internal(
-            "Ciphertext too short to contain nonce".to_string(),
-        ));
-    }
-
-    let (nonce_bytes, encrypted) = ciphertext.split_at(NONCE_SIZE);
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| AppError::Internal(format!("Failed to create AES cipher: {e}")))?;
-
-    cipher
-        .decrypt(nonce, encrypted)
-        .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
+    decrypt_raw(ciphertext, key)
 }
 
 /// Encrypt plaintext using AES-256-GCM with the v1 format (kept for tests).
@@ -1246,9 +1238,9 @@ mod tests {
         let plaintext = b"sensitive credential data";
 
         let encrypted = encrypt(plaintext, &key).unwrap();
-        let decrypted = decrypt(&encrypted, &key).unwrap();
+        let decrypted: Zeroizing<Vec<u8>> = decrypt(&encrypted, &key).unwrap();
 
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[test]
@@ -1263,8 +1255,8 @@ mod tests {
         assert_ne!(enc1, enc2);
 
         // Both should decrypt to the same plaintext
-        assert_eq!(decrypt(&enc1, &key).unwrap(), plaintext);
-        assert_eq!(decrypt(&enc2, &key).unwrap(), plaintext);
+        assert_eq!(decrypt(&enc1, &key).unwrap().as_slice(), plaintext);
+        assert_eq!(decrypt(&enc2, &key).unwrap().as_slice(), plaintext);
     }
 
     #[test]
@@ -1315,7 +1307,7 @@ mod tests {
         let plaintext = vec![0x42u8; 10_000];
         let encrypted = encrypt(&plaintext, &key).unwrap();
         let decrypted = decrypt(&encrypted, &key).unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[test]
@@ -1360,8 +1352,8 @@ mod tests {
         assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], keys.provider.current_key_id());
 
-        let decrypted = keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        let decrypted: Zeroizing<Vec<u8>> = keys.decrypt(&encrypted).await.unwrap();
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1374,8 +1366,8 @@ mod tests {
         let enc2 = keys.encrypt(plaintext).await.unwrap();
 
         assert_ne!(enc1, enc2);
-        assert_eq!(keys.decrypt(&enc1).await.unwrap(), plaintext);
-        assert_eq!(keys.decrypt(&enc2).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc1).await.unwrap().as_slice(), plaintext);
+        assert_eq!(keys.decrypt(&enc2).await.unwrap().as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1396,7 +1388,7 @@ mod tests {
         let plaintext = vec![0x42u8; 10_000];
         let encrypted = keys.encrypt(&plaintext).await.unwrap();
         let decrypted = keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1424,7 +1416,7 @@ mod tests {
 
         // EncryptionKeys should be able to decrypt v0 data
         let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1441,7 +1433,7 @@ mod tests {
 
         // Should decrypt using the previous key fallback
         let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1463,7 +1455,7 @@ mod tests {
 
         // Should still decrypt data encrypted under key A
         let decrypted = keys_rotated.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"rotation test");
+        assert_eq!(decrypted.as_slice(), b"rotation test");
     }
 
     #[tokio::test]
@@ -1482,7 +1474,7 @@ mod tests {
         let keys_rollback = EncryptionKeys::from_config(&config_rollback);
 
         let decrypted = keys_rollback.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"rollback test");
+        assert_eq!(decrypted.as_slice(), b"rollback test");
     }
 
     #[tokio::test]
@@ -1495,7 +1487,10 @@ mod tests {
         let encrypted = keys_a.encrypt(b"still on key a").await.unwrap();
 
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        assert_eq!(keys_b.decrypt(&encrypted).await.unwrap(), b"still on key a");
+        assert_eq!(
+            keys_b.decrypt(&encrypted).await.unwrap().as_slice(),
+            b"still on key a"
+        );
 
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
         assert!(keys_c.decrypt(&encrypted).await.is_err());
@@ -1512,7 +1507,10 @@ mod tests {
         encrypted.push(DRAFT_KEY_ID_CURRENT);
         encrypted.extend_from_slice(&encrypt(b"draft v1", &key_bytes).unwrap());
 
-        assert_eq!(keys.decrypt(&encrypted).await.unwrap(), b"draft v1");
+        assert_eq!(
+            keys.decrypt(&encrypted).await.unwrap().as_slice(),
+            b"draft v1"
+        );
     }
 
     #[tokio::test]
@@ -1550,7 +1548,7 @@ mod tests {
 
         let v0_previous = encrypt(b"legacy previous", &previous_bytes).unwrap();
         assert_eq!(
-            keys.decrypt(&v0_previous).await.unwrap(),
+            keys.decrypt(&v0_previous).await.unwrap().as_slice(),
             b"legacy previous"
         );
 
@@ -1596,7 +1594,7 @@ mod tests {
 
         // v0 -> EncryptionKeys decrypt
         let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
 
         // EncryptionKeys encrypt -> verify it's v2
         let v2_encrypted = keys.encrypt(plaintext).await.unwrap();
@@ -1604,7 +1602,7 @@ mod tests {
 
         // v2 -> EncryptionKeys decrypt
         let decrypted2 = keys.decrypt(&v2_encrypted).await.unwrap();
-        assert_eq!(decrypted2, plaintext);
+        assert_eq!(decrypted2.as_slice(), plaintext);
     }
 
     // -- v1 backward compatibility: decrypt v1-formatted ciphertexts --
@@ -1620,7 +1618,7 @@ mod tests {
         assert_eq!(v1_encrypted[0], VERSION_V1);
 
         let decrypted = keys.decrypt(&v1_encrypted).await.unwrap();
-        assert_eq!(decrypted, b"v1 format data");
+        assert_eq!(decrypted.as_slice(), b"v1 format data");
     }
 
     #[tokio::test]
@@ -1632,7 +1630,7 @@ mod tests {
 
         let v1_encrypted = encrypt_v1(b"v1 previous key", &previous_bytes).unwrap();
         let decrypted = keys.decrypt(&v1_encrypted).await.unwrap();
-        assert_eq!(decrypted, b"v1 previous key");
+        assert_eq!(decrypted.as_slice(), b"v1 previous key");
     }
 
     // -- v2 envelope encryption tests --
@@ -1652,7 +1650,7 @@ mod tests {
         assert_eq!(wrapped_dek_len, WRAPPED_DEK_SIZE);
 
         let decrypted = keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1662,9 +1660,9 @@ mod tests {
         let aad = b"binding-hash-A";
 
         let blob = keys.encrypt_with_aad(b"secret-payload", aad).await.unwrap();
-        let plaintext = keys.decrypt_with_aad(&blob, aad).await.unwrap();
+        let plaintext: Zeroizing<Vec<u8>> = keys.decrypt_with_aad(&blob, aad).await.unwrap();
 
-        assert_eq!(plaintext, b"secret-payload");
+        assert_eq!(plaintext.as_slice(), b"secret-payload");
     }
 
     #[tokio::test]
@@ -1704,8 +1702,8 @@ mod tests {
         // Different DEKs and nonces means completely different output
         assert_ne!(enc1, enc2);
 
-        assert_eq!(keys.decrypt(&enc1).await.unwrap(), plaintext);
-        assert_eq!(keys.decrypt(&enc2).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc1).await.unwrap().as_slice(), plaintext);
+        assert_eq!(keys.decrypt(&enc2).await.unwrap().as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1728,7 +1726,7 @@ mod tests {
         let plaintext = vec![0x42u8; 100_000];
         let encrypted = keys.encrypt(&plaintext).await.unwrap();
         let decrypted = keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -1780,7 +1778,7 @@ mod tests {
         // Rotate: KEK-B current, KEK-A previous
         let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
         let decrypted = keys_rotated.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"kek rotation test");
+        assert_eq!(decrypted.as_slice(), b"kek rotation test");
 
         // Verify stats show v2_previous
         let stats = keys_rotated.decrypt_stats();
@@ -1811,7 +1809,7 @@ mod tests {
         // Decrypt rewrapped ciphertext with KEK-B only (no previous)
         let keys_b_only = EncryptionKeys::from_config(&test_config(&key_b_hex, None));
         let decrypted = keys_b_only.decrypt(&rewrapped).await.unwrap();
-        assert_eq!(decrypted, b"rewrap test");
+        assert_eq!(decrypted.as_slice(), b"rewrap test");
     }
 
     #[tokio::test]
@@ -1914,7 +1912,7 @@ mod tests {
         let primary_only = EncryptionKeys::with_provider(primary);
         assert!(primary_only.decrypt(&original).await.is_err());
         assert_eq!(
-            primary_only.decrypt(&rewritten).await.unwrap(),
+            primary_only.decrypt(&rewritten).await.unwrap().as_slice(),
             b"collision fixture"
         );
     }
@@ -1968,7 +1966,7 @@ mod tests {
         // Rollback: KEK-A current, KEK-B previous
         let keys_rollback = EncryptionKeys::from_config(&test_config(&key_a_hex, Some(&key_b_hex)));
         let decrypted = keys_rollback.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"rollback v2 test");
+        assert_eq!(decrypted.as_slice(), b"rollback v2 test");
     }
 
     #[tokio::test]
@@ -2016,15 +2014,15 @@ mod tests {
 
         // v0 decrypt
         let v0 = encrypt(plaintext, &key_bytes).unwrap();
-        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v0).await.unwrap().as_slice(), plaintext);
 
         // v1 decrypt
         let v1 = encrypt_v1(plaintext, &key_bytes).unwrap();
-        assert_eq!(keys.decrypt(&v1).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v1).await.unwrap().as_slice(), plaintext);
 
         // v2 decrypt (via encrypt)
         let v2 = keys.encrypt(plaintext).await.unwrap();
-        assert_eq!(keys.decrypt(&v2).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v2).await.unwrap().as_slice(), plaintext);
 
         // Verify stats
         let stats = keys.decrypt_stats();
@@ -2094,7 +2092,10 @@ mod tests {
 
         // First rotation: B current, A previous -- still decryptable
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        assert_eq!(keys_b.decrypt(&encrypted).await.unwrap(), b"needs rewrap");
+        assert_eq!(
+            keys_b.decrypt(&encrypted).await.unwrap().as_slice(),
+            b"needs rewrap"
+        );
 
         // Second rotation without rewrap: C current, B previous -- KEK-A gone
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
@@ -2111,7 +2112,10 @@ mod tests {
         assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], 0x7A);
         assert_eq!(wrapped_dek_len, 35);
-        assert_eq!(keys.decrypt(&encrypted).await.unwrap(), b"provider only");
+        assert_eq!(
+            keys.decrypt(&encrypted).await.unwrap().as_slice(),
+            b"provider only"
+        );
     }
 
     #[tokio::test]
@@ -2127,7 +2131,7 @@ mod tests {
         )));
 
         let decrypted = rotated_keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"provider rewrap");
+        assert_eq!(decrypted.as_slice(), b"provider rewrap");
 
         let rewrapped = rotated_keys.rewrap(&encrypted).await.unwrap();
         let wrapped_dek_len = u16::from_be_bytes([rewrapped[2], rewrapped[3]]) as usize;
@@ -2138,7 +2142,7 @@ mod tests {
         let current_only =
             EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x9C, 0x77, None)));
         assert_eq!(
-            current_only.decrypt(&rewrapped).await.unwrap(),
+            current_only.decrypt(&rewrapped).await.unwrap().as_slice(),
             b"provider rewrap"
         );
     }
@@ -2160,7 +2164,7 @@ mod tests {
         // Second rotation: C current, B previous -- rewrapped data still works
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
         let decrypted = keys_c.decrypt(&rewrapped).await.unwrap();
-        assert_eq!(decrypted, b"rewrap chain");
+        assert_eq!(decrypted.as_slice(), b"rewrap chain");
     }
 
     #[tokio::test]
@@ -2195,7 +2199,7 @@ mod tests {
         v0.extend_from_slice(&encrypted);
 
         assert!(looks_like_v2(&v0));
-        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v0).await.unwrap().as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -2231,7 +2235,7 @@ mod tests {
         v0.extend_from_slice(&encrypted);
 
         assert!(looks_like_v2(&v0));
-        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v0).await.unwrap().as_slice(), plaintext);
     }
 
     #[tokio::test]
@@ -2277,7 +2281,7 @@ mod tests {
         );
 
         let decrypted = migration_keys.decrypt(&encrypted).await.unwrap();
-        assert_eq!(decrypted, b"fallback test data");
+        assert_eq!(decrypted.as_slice(), b"fallback test data");
 
         let stats = migration_keys.decrypt_stats();
         assert_eq!(stats.v2_fallback, 1);
@@ -2304,7 +2308,7 @@ mod tests {
         // Decrypt rewrapped with KMS only (no fallback)
         let kms_only = EncryptionKeys::with_provider(kms_mock);
         let decrypted = kms_only.decrypt(&rewrapped).await.unwrap();
-        assert_eq!(decrypted, b"rewrap via fallback");
+        assert_eq!(decrypted.as_slice(), b"rewrap via fallback");
     }
 
     #[tokio::test]

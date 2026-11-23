@@ -190,7 +190,7 @@ impl TelegramNewService<'_> {
             .webhook_secret_encrypted
             .as_deref()
             .ok_or_else(|| AppError::Internal("Saved webhook secret is missing".into()))?;
-        let secret = Zeroizing::new(self.keys.decrypt(encrypted).await?);
+        let secret = self.keys.decrypt(encrypted).await?;
         let secret = std::str::from_utf8(&secret)
             .map_err(|_| AppError::Internal("Invalid webhook secret encoding".into()))?;
         let callback = format!(

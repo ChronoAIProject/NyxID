@@ -766,7 +766,10 @@ mod tests {
         )
         .await
         .expect("transient refresh failure should fall back to the existing access token");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -815,7 +818,10 @@ mod tests {
         )
         .await
         .expect("terminal refresh failure should still return the existing access token once");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)

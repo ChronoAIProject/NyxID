@@ -376,6 +376,18 @@ class CacheWarmTests(unittest.TestCase):
             self.assertTrue(any(fnmatch.fnmatchcase(path, glob) for glob in trigger["paths"]), path)
         self.assertTrue(all(job.get("continue-on-error") for job in self.warm["jobs"].values()))
 
+    def test_frontend_selection_covers_real_mobile_test_dependencies(self):
+        filter_step = next(step for step in self.ci["jobs"]["changes"]["steps"]
+                           if step.get("id") == "filter")
+        paths = strict_load_workflow(filter_step["with"]["filters"])["frontend"]
+        # mobile-account-delete.test.tsx executes these real mobile sources.
+        for path in ("mobile/src/features/account/AccountSettingsScreen.tsx",
+                     "mobile/src/components/ScreenContainer.tsx",
+                     "mobile/src/theme/mobileTheme.ts"):
+            with self.subTest(path=path):
+                self.assertTrue(Path(path).is_file())
+                self.assertTrue(any(fnmatch.fnmatchcase(path, glob) for glob in paths))
+
     def test_dev_push_keeps_the_running_warmer(self):
         self.assertEqual(self.warm["concurrency"], {
             "group": "ci-cache-warm-${{ github.ref }}",

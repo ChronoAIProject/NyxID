@@ -159,13 +159,21 @@ pub struct AttachmentResponse {
     image_input_reason: Option<String>,
     origin: String,
     pages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pdf: Option<crate::models::assistant_upload::PdfCoverage>,
     id: String,
     content_type: String,
     size: i64,
     label: String,
 }
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
-    fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+    fn from(mut row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+        if let Some(pdf) = &mut row.pdf {
+            crate::services::assistant_upload_service::pdf_vision::discard_unconfirmed_images(
+                pdf,
+                "image_delivery_unconfirmed",
+            );
+        }
         Self {
             filename: row.artifact.filename,
             source: row.artifact.source,
@@ -177,6 +185,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
             image_input_reason: row.image_input_reason,
             origin: row.origin,
             pages: row.pages,
+            pdf: row.pdf,
             id: row.id,
             content_type: row.content_type,
             size: row.size,
@@ -1345,7 +1354,7 @@ pub async fn history(
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approval_history
             .iter()
-            .filter(|row| row.status == "pending")
+            .filter(|row| row.status == "pending" && row.expires_at > Utc::now())
             .cloned()
             .collect(),
         approval_history,

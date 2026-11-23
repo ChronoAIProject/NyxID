@@ -742,12 +742,17 @@ fn record_node_ssh_metric_error(db: mongodb::Database, node_id: String, error_me
 }
 
 /// Truncate command for audit logging (avoid storing giant payloads).
+/// Cuts at the last UTF-8 character boundary at or below 1024 bytes.
 pub(crate) fn truncate_for_audit(command: &str) -> &str {
-    if command.len() > 1024 {
-        &command[..1024]
-    } else {
-        command
+    const MAX_BYTES: usize = 1024;
+    if command.len() <= MAX_BYTES {
+        return command;
     }
+    let mut end = MAX_BYTES;
+    while !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    &command[..end]
 }
 
 /// Redact command secrets before audit logging, then apply the audit length cap.
@@ -872,6 +877,21 @@ mod tests {
 
         let big: String = "x".repeat(2000);
         assert_eq!(truncate_for_audit(&big).len(), 1024);
+    }
+
+    #[test]
+    fn truncate_for_audit_keeps_multibyte_characters_whole() {
+        // A three-byte character spans bytes 1023..1026, across the cap.
+        let command = format!("{}\u{2081}{}", "x".repeat(1023), "y".repeat(100));
+        assert_eq!(truncate_for_audit(&command), "x".repeat(1023));
+
+        let wide: String = "\u{4e2d}".repeat(500);
+        let truncated = truncate_for_audit(&wide);
+        assert_eq!(truncated.len(), 1023);
+        assert!(wide.starts_with(truncated));
+
+        let redacted = redact_command_for_audit(&command);
+        assert_eq!(redacted, "x".repeat(1023));
     }
 
     #[test]

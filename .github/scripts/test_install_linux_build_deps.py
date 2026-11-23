@@ -86,6 +86,9 @@ sudo() {
         self.assertEqual(arguments.count("APT::Update::Error-Mode=any"), 2)
         self.assertEqual(arguments.count("Acquire::http::Timeout=20"), 2)
         self.assertEqual(arguments.count("Acquire::https::Timeout=20"), 2)
+        self.assertEqual(arguments.count("Acquire::Languages=none"), 2)
+        self.assertEqual(arguments.count("Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"), 2)
+        self.assertEqual(arguments.count("Acquire::IndexTargets::deb::CNF::DefaultEnabled=false"), 2)
         self.assertNotIn("mirror+file:", sources)
 
     def test_ubuntu_ports_use_direct_signed_repositories(self):

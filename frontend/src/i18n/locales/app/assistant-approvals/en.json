@@ -352,6 +352,7 @@
   "Waiting for authorization": "Waiting for authorization",
   "Waiting for the committed approved decision.": "Waiting for the committed approved decision.",
   "Waiting for the committed denied decision.": "Waiting for the committed denied decision.",
+  "Waiting for the server": "Waiting for the server",
   "You allowed": "You allowed",
   "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.": "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
   "You denied": "You denied",

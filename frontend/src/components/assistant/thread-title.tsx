@@ -27,11 +27,12 @@ export function ThreadTitle({
       <button
         type="button"
         aria-label={translateUi("Rename chat")}
+        data-thread-title={heading ? "" : undefined}
         title={title}
         className={cn(
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
           heading
-            ? "type-card-title text-foreground"
+            ? "px-0 py-1 type-card-title text-foreground"
             : "text-14 text-muted-foreground hover:text-foreground",
         )}
         onClick={() => {

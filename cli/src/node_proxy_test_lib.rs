@@ -26,7 +26,7 @@ pub mod proxy_executor;
 #[path = "node/proxy_upload.rs"]
 pub mod proxy_upload;
 #[path = "node/secret_backend.rs"]
-mod secret_backend;
+pub mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
 #[path = "node/storage.rs"]

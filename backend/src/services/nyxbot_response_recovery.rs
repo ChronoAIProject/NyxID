@@ -119,7 +119,7 @@ pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<
 }
 
 pub async fn open_payload(keys: &EncryptionKeys, ciphertext: &[u8]) -> AppResult<Payload> {
-    let bytes = zeroize::Zeroizing::new(keys.decrypt(ciphertext).await?);
+    let bytes = keys.decrypt(ciphertext).await?;
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }

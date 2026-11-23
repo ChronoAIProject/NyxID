@@ -502,6 +502,35 @@ async fn stuck_request_inventory_failure_reasons_are_metadata_only() {
 }
 
 #[tokio::test]
+async fn stuck_request_inventory_can_cancel_pending_cursor_read() {
+    let db = crate::test_utils::connect_transaction_test_database("inventory_cancel").await;
+    let collection = db.collection::<Document>(METERS);
+    collection
+        .insert_one(doc! {"_id":"retained"})
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    // An empty first batch forces the reader into getMore before it can yield
+    // a row. Cancel at that point, as the inventory deadline does under load.
+    let mut cursor = collection
+        .aggregate(vec![doc! {"$limit":1}])
+        .batch_size(0)
+        .session(&mut session)
+        .await
+        .unwrap();
+    {
+        let next = next_document(&mut cursor, &mut session);
+        tokio::pin!(next);
+        assert!(futures::poll!(next.as_mut()).is_pending());
+    }
+    drop(cursor);
+    session.abort_transaction().await.unwrap();
+    assert_eq!(collection.count_documents(doc! {}).await.unwrap(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stuck_request_inventory_timeout_is_explicit_and_bounded() {
     let f = Fixture::new().await;
     let _metered = f.open(true).await;

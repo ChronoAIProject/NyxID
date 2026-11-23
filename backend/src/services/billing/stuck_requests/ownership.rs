@@ -37,7 +37,7 @@ pub(crate) async fn registry(
         .max_time(std::time::Duration::from_secs(2))
         .session(&mut *session)
         .await?;
-    let Some(value) = cursor.stream(&mut *session).try_next().await? else {
+    let Some(value) = next_document(&mut cursor, session).await? else {
         return Err(unavailable());
     };
     let now = *value.get_datetime("now").map_err(|_| unavailable())?;

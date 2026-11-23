@@ -11,6 +11,22 @@ permission to use every listed specialist. The conversation header identifies
 the agent being addressed and offers Working context and Details controls.
 Delegation and specialist replies appear in the conversation's activity cards.
 
+At desktop widths of 1024px and above, the navigation lists agents only.
+Selecting an agent opens its threads in a separate, independently scrollable
+column within the content area. Selecting a conversation keeps that list open;
+selecting another agent replaces it with that agent's threads. Home, the close
+button, or Escape inside that column returns to the landing page. The desktop
+roster has no nested thread preview, Show more, or Show fewer controls.
+Its header identifies the individual agent, offers New chat
+and agent details, and searches thread titles and channel chat names locally.
+Pinned threads precede Today, Yesterday, Previous 7 days, and Earlier sections;
+channel conversations retain their bot and parent-chat grouping. Rows retain
+unread, running, draft, pin, rename, and confirmed-delete behavior. Agents appear
+in one flat roster. Navigation uses the existing sidebar surface, while the
+thread list and conversation share the existing content surface, with
+neutral selection highlights. Smaller screens keep threads
+inside the agent drawer; collapsed desktop navigation retains its chat popovers.
+
 In individual NyxBot and specialist threads, scrolling beyond 160px collapses
 the agent row into a compact pill at the upper right, with icon buttons for
 Working context and Details. Taller thread notices raise that threshold to
