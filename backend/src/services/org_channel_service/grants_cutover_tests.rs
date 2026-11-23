@@ -1062,16 +1062,20 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
 
         let sheet = "/api/v1/proxy/s/api-google-workspace/v4/spreadsheets/event/values";
         let written = json!({"values":[["Guest question"]]});
-        let append_path =
-            format!("{sheet}/Questions:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS");
-        let args = json!({"spreadsheetId":"event","range":"Questions","valueInputOption":"RAW","insertDataOption":"INSERT_ROWS","body":{"values":[["MCP question"]]}});
-        let mcp_appends = || {
+        let append_path = format!(
+            "{sheet}/Questions!A:H:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+        );
+        let args = json!({"spreadsheetId":"event","range":"Questions!A:H","valueInputOption":"RAW","insertDataOption":"INSERT_ROWS","body":{"values":[["MCP question"]]}});
+        let mcp_appends = |arguments: &Value| {
             [
                 rpc(
                     "tools/call",
-                    json!({"name":"nyx__call_tool","arguments":{"tool_name":found["name"],"arguments_json":args.to_string()}}),
+                    json!({"name":"nyx__call_tool","arguments":{"tool_name":found["name"],"arguments_json":arguments.to_string()}}),
                 ),
-                rpc("tools/call", json!({"name":found["name"],"arguments":args})),
+                rpc(
+                    "tools/call",
+                    json!({"name":found["name"],"arguments":arguments}),
+                ),
             ]
         };
         let mcp_result = async |call| {
@@ -1108,7 +1112,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                 .unwrap()
                 .contains("Guest calls cannot request or use owner approvals")
         );
-        for call in mcp_appends() {
+        for call in mcp_appends(&args) {
             let reply = mcp_result(call).await;
             assert_eq!(reply["result"]["isError"], true, "{reply}");
             let refusal: Value =
@@ -1131,6 +1135,8 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             db.collection::<Document>(crate::models::approval_request::COLLECTION_NAME);
         assert_eq!(approval_requests.count_documents(doc! {}).await.unwrap(), 0);
 
+        // The approval descriptor uses the canonical forwarding path on both transports.
+        let append_resource = "/v4/spreadsheets/event/values/Questions%21A%3AH:append";
         let rules = [
             ApprovalRule {
                 mandatory_review: false,
@@ -1143,7 +1149,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             ApprovalRule {
                 mandatory_review: false,
                 methods: vec!["POST".into()],
-                resource_pattern: "/v4/spreadsheets/event/values/Questions:append".into(),
+                resource_pattern: append_resource.into(),
                 verbs: vec![ApprovalVerb::Write],
                 effect: ApprovalEffect::AutoAllow,
                 mode: ApprovalMode::PerRequest,
@@ -1172,20 +1178,22 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             (
                 "POST",
                 format!(
-                    "{sheet}/AnotherTab:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
+                    "{sheet}/QuestionsArchive!A:H:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"
                 ),
                 Some(written.clone()),
                 StatusCode::FORBIDDEN,
             ),
             (
                 "POST",
-                format!("{sheet}/Questions:append?valueInputOption=RAW&insertDataOption=OVERWRITE"),
+                format!(
+                    "{sheet}/Questions!A:H:append?valueInputOption=RAW&insertDataOption=OVERWRITE"
+                ),
                 Some(written.clone()),
                 StatusCode::FORBIDDEN,
             ),
             (
                 "POST",
-                format!("{sheet}/Questions:append?valueInputOption=RAW"),
+                format!("{sheet}/Questions!A:H:append?valueInputOption=RAW"),
                 Some(written.clone()),
                 StatusCode::FORBIDDEN,
             ),
@@ -1209,9 +1217,19 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
             );
         }
 
-        for call in mcp_appends() {
+        for call in mcp_appends(&args) {
             let reply = mcp_result(call).await;
             assert_eq!(reply["result"]["isError"], false, "{reply}");
+        }
+        let mut archived_tab = args.clone();
+        archived_tab["range"] = json!("QuestionsArchive!A:H");
+        for call in mcp_appends(&archived_tab) {
+            let reply = mcp_result(call).await;
+            assert_eq!(reply["result"]["isError"], true, "{reply}");
+            let refusal: Value =
+                serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(refusal["error"], "owner_only", "{refusal}");
         }
         assert_eq!(approval_requests.count_documents(doc! {}).await.unwrap(), 0);
 
@@ -1261,7 +1279,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         {
             let request = call["request"].as_str().unwrap();
             assert!(
-                request.starts_with("POST ") && request.contains(":append?"),
+                request.starts_with(&format!("POST {append_resource}?")),
                 "{request}"
             );
             assert!(

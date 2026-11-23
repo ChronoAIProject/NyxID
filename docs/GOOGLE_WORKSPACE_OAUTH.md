@@ -284,6 +284,15 @@ organization policy that allows that `POST` and path as a write without an
 approval prompt. Keep approval requirements for other writes in place. The
 guest still needs the applicable Grants and Google file access.
 
+The raw proxy and typed MCP evaluate the same canonical resource. For the `event`
+workbook and `Questions!A:H`, an exact rule uses `POST`, the `write` verb, and
+`/v4/spreadsheets/event/values/Questions%21A%3AH:append`. NyxID encodes `!` and
+the range's `:` and leaves the `:append` suffix literal. The query is checked
+against the operation's guest access requirement. The organization policy is
+shared by callers whose approvals resolve to that organization's Workspace
+catalog policy. Its scope reaches beyond the specialist and channel, so use
+an exact workbook and range in the rule.
+
 ## Mixed-version rollout
 
 Complete the backend rollout before exposing the new editor services to clients,
