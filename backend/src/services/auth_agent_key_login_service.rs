@@ -816,6 +816,19 @@ async fn claim_delivery(
     Ok(claim.session(transaction).await?)
 }
 
+pub(super) async fn fence_delivery_owners(
+    db: &Database,
+    actor: &str,
+    key_owner: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, actor, tx).await?;
+    if actor != key_owner {
+        super::erasure_admission::fence_in_session(db, key_owner, tx).await?;
+    }
+    Ok(())
+}
+
 #[tracing::instrument(
     name = "agent_key_login.poll",
     skip_all,
@@ -873,10 +886,7 @@ pub async fn poll(
         let (db, row, owner_id) = c;
         let actor = row.approved_user_id.as_deref().ok_or(AppError::AgentKeyLoginDenied)?;
         super::approved_sign_in_policy::fence(db, actor, row.mfa_policy_revision.as_deref(), tx).await?;
-        super::erasure_admission::fence_in_session(db, actor, tx).await?;
-        if actor != *owner_id {
-            super::erasure_admission::fence_in_session(db, owner_id, tx).await?;
-        }
+        fence_delivery_owners(db, actor, owner_id, tx).await?;
         claim_delivery(db, row, tx).await
     })).await;
     if matches!(delivered, Err(AppError::AuthDeviceCodeDenied)) {
