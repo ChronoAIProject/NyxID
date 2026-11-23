@@ -131,6 +131,7 @@
       "@expo/metro-config>postcss": "^8.5.18"
     },
     "patchedDependencies": {
+      "@react-native/gradle-plugin@0.83.4": "patches/@react-native__gradle-plugin@0.83.4.patch",
       "expo-secure-store@55.0.12": "patches/expo-secure-store@55.0.12.patch",
       "query-string@7.1.3": "patches/query-string@7.1.3.patch"
     }

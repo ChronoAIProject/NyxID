@@ -11,6 +11,9 @@ overrides:
   '@expo/metro-config>postcss': ^8.5.18
 
 patchedDependencies:
+  '@react-native/gradle-plugin@0.83.4':
+    hash: 51c1f3616fb8de553dcaa0cdd5a9c3974c4bff80ef656b5dd4c60f3724121282
+    path: patches/@react-native__gradle-plugin@0.83.4.patch
   expo-secure-store@55.0.12:
     hash: 9a824651f128f49505c2a14504b5e336f2e4cd25f410e7e9b14a35b9b2e5040f
     path: patches/expo-secure-store@55.0.12.patch
@@ -5895,7 +5898,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@react-native/gradle-plugin@0.83.4': {}
+  '@react-native/gradle-plugin@0.83.4(patch_hash=51c1f3616fb8de553dcaa0cdd5a9c3974c4bff80ef656b5dd4c60f3724121282)': {}
 
   '@react-native/js-polyfills@0.83.4': {}
 
@@ -8793,7 +8796,7 @@ snapshots:
       '@react-native/assets-registry': 0.83.4
       '@react-native/codegen': 0.83.4(@babel/core@7.29.0)
       '@react-native/community-cli-plugin': 0.83.4(@react-native/metro-config@0.85.0(@babel/core@7.29.0))
-      '@react-native/gradle-plugin': 0.83.4
+      '@react-native/gradle-plugin': 0.83.4(patch_hash=51c1f3616fb8de553dcaa0cdd5a9c3974c4bff80ef656b5dd4c60f3724121282)
       '@react-native/js-polyfills': 0.83.4
       '@react-native/normalize-colors': 0.83.4
       '@react-native/virtualized-lists': 0.83.4(@types/react@19.2.14)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)

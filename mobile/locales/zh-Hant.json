@@ -1,9 +1,11 @@
 {
-  "NSCameraUsageDescription": "允許 NyxID 掃描登入核准 QR 碼，並拍攝照片以加入聊天。",
-  "NSFaceIDUsageDescription": "允許 NyxID 使用 Face ID 進行身分驗證。",
-  "NSLocalNetworkUsageDescription": "Expo 開發啟動器使用區域網路來尋找並連接此電腦上的開發伺服器。",
-  "NSMicrophoneUsageDescription": "允許 NyxID 使用麥克風進行聽寫和語音對話。",
-  "NSPhotoLibraryAddUsageDescription": "允許 NyxID 將您在聊天中選擇的圖片儲存到照片圖庫。",
-  "NSPhotoLibraryUsageDescription": "允許 NyxID 將您從照片圖庫中選擇的照片加入聊天。",
-  "NSSpeechRecognitionUsageDescription": "允許 NyxID 將語音轉換為訊息文字。裝置支援時，辨識會在 iPhone 上進行。"
+  "ios": {
+    "NSCameraUsageDescription": "允許 NyxID 掃描登入核准 QR 碼，並拍攝照片以加入聊天。",
+    "NSFaceIDUsageDescription": "允許 NyxID 使用 Face ID 進行身分驗證。",
+    "NSLocalNetworkUsageDescription": "Expo 開發啟動器使用區域網路來尋找並連接此電腦上的開發伺服器。",
+    "NSMicrophoneUsageDescription": "允許 NyxID 使用麥克風進行聽寫和語音對話。",
+    "NSPhotoLibraryAddUsageDescription": "允許 NyxID 將您在聊天中選擇的圖片儲存到照片圖庫。",
+    "NSPhotoLibraryUsageDescription": "允許 NyxID 將您從照片圖庫中選擇的照片加入聊天。",
+    "NSSpeechRecognitionUsageDescription": "允許 NyxID 將語音轉換為訊息文字。裝置支援時，辨識會在 iPhone 上進行。"
+  }
 }
