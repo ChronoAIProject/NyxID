@@ -3,6 +3,9 @@ mod context;
 mod envelope;
 mod error;
 mod fingerprint;
+pub mod secret_json;
+mod secret_text;
+pub use secret_text::{SecretText, render_credential_frame};
 
 use std::fmt;
 

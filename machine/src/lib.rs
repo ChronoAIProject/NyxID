@@ -174,7 +174,7 @@ impl Operation {
 
 /// Parameters may contain a login value, commands, or paths; Debug never does.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct Request {
+pub struct Request<P = serde_json::Value> {
     #[serde(default = "legacy_version")]
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,7 +184,7 @@ pub struct Request {
     pub request_id: String,
     pub node_id: String,
     pub operation: Operation,
-    pub parameters: serde_json::Value,
+    pub parameters: P,
     pub timestamp: i64,
     pub nonce: String,
     pub signature: String,
@@ -194,7 +194,23 @@ fn legacy_version() -> u32 {
     1
 }
 
-impl std::fmt::Debug for Request {
+impl Request {
+    pub fn with_parameters_owner<P: From<serde_json::Value>>(self) -> Request<P> {
+        Request {
+            parameters: self.parameters.into(),
+            version: self.version,
+            authority: self.authority,
+            external_authority: self.external_authority,
+            request_id: self.request_id,
+            node_id: self.node_id,
+            operation: self.operation,
+            timestamp: self.timestamp,
+            nonce: self.nonce,
+            signature: self.signature,
+        }
+    }
+}
+impl<P> std::fmt::Debug for Request<P> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MachineRequest")

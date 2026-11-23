@@ -4299,6 +4299,7 @@ dependencies = [
  "mongodb",
  "nyxid-cli",
  "nyxid-cloud-auth",
+ "nyxid-crypto",
  "nyxid-machine",
  "nyxid-machine-updater",
  "nyxid-permissions",
@@ -4457,6 +4458,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "urlencoding",
  "x25519-dalek",
  "zeroize",
 ]
@@ -4566,6 +4568,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "urlencoding",
+ "zeroize",
 ]
 
 [[package]]
