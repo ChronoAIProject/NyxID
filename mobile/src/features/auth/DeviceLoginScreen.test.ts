@@ -14,16 +14,17 @@ function elements(root: Element): Element[] {
   )];
 }
 
-function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true, platform = "ios" }:
+function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true, platform = "ios", stagingScan = false }:
   { inSheet?: boolean; scanner?: boolean; reduced?: boolean; authenticated?: boolean; userCode?: string; canGoBack?: boolean;
     previewRequest?: (code: string) => Promise<unknown>;
-    decisionRequest?: () => Promise<void>; platform?: "ios" | "android" } = {}) {
+    decisionRequest?: () => Promise<void>; platform?: "ios" | "android"; stagingScan?: boolean } = {}) {
   let reducedMotion = reduced;
   let linkedCode = userCode;
   let language: Language = "en";
   const navigationCalls: unknown[] = [];
   const previews: { code: string }[] = [];
   const decisions: string[] = [];
+  const stagingDecisions: { action: string; code: string; binding: unknown }[] = [];
   let keyboardVisible = false;
   let keyboardDismissals = 0;
   let readingModalInsets = false;
@@ -89,6 +90,15 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
         previews.push({ code });
         return previewRequest?.(code) ?? Promise.reject(new Error("No preview configured"));
       },
+      previewStagingDevice: (code: string) => {
+        previews.push({ code });
+        return previewRequest?.(code) ?? Promise.reject(new Error("No staging preview configured"));
+      },
+      decideStagingDevice: async (action: string, code: string, binding: unknown) => {
+        stagingDecisions.push({ action, code, binding });
+        decisions.push("staging-" + action);
+        await decisionRequest?.();
+      },
       approveAuthDevice: async () => { decisions.push("approve"); await decisionRequest?.(); },
       denyAuthDevice: async () => { decisions.push("deny"); },
     } },
@@ -125,7 +135,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
       goBack: () => navigationCalls.push({ back: true }),
       setParams: () => {},
     },
-    route: { params: { start_scanner: scanner, user_code: linkedCode } },
+    route: { params: { start_scanner: scanner, user_code: linkedCode, staging_scan: stagingScan } },
   }));
   function find(type: string) {
     const found = elements(harness.value()).find((item) => item.type === type);
@@ -133,7 +143,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
     return found;
   }
   return {
-    harness, find, previews, decisions, navigationCalls,
+    harness, find, previews, decisions, stagingDecisions, navigationCalls,
     keyboard: (visible: boolean) => { keyboardVisible = visible; },
     keyboardDismissals: () => keyboardDismissals,
     setLanguage(value: Language) { language = value; harness.render(); },
@@ -396,4 +406,39 @@ test("manual code reads full-window safe-area values from its native Modal for b
       env.harness.unmount();
     }
   }
+});
+
+
+test("staging review names the trusted environment and approves only its bound staging request", async (context) => {
+  let now = Date.now();
+  context.mock.method(Date, "now", () => now);
+  const binding = { request_id: "request", production_user: "production", staging_user: "staging" };
+  const env = setup({ stagingScan: true, userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser"), stagingBinding: binding,
+  }) });
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "staging.nyxid.ai"));
+  assert.ok(nodes.some((node) => node.props.children === "Sign-in environment"));
+  assert.deepEqual(env.decisions, []);
+  const approve = nodes.find((node) => node.props.label === "Approve staging account session")!;
+  assert.ok(approve);
+  now += 750;
+  await approve.props.onPress();
+  await env.harness.settle();
+  assert.deepEqual(env.stagingDecisions, [{ action: "approve", code: "ABCDEFGH", binding }]);
+  assert.deepEqual(env.decisions, ["staging-approve"]);
+  env.harness.unmount();
+});
+
+test("a local request cannot claim the trusted staging environment through requester hints", async () => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("staging.nyxid.ai"), client_origin: "https://staging.nyxid.ai",
+  }) });
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  assert.equal(nodes.some((node) => node.props.children === "Sign-in environment"), false);
+  assert.ok(nodes.some((node) => node.props.label === "Approve full account session"));
+  assert.equal(nodes.some((node) => node.props.label === "Approve staging account session"), false);
+  env.harness.unmount();
 });

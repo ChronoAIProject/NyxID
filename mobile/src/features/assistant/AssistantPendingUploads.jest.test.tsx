@@ -13,8 +13,15 @@ jest.mock("../../theme/ThemeContext", () => ({
   useTheme: () => ({ colors: require("../../theme/mobileTheme").lightColors }),
 }));
 jest.mock("../../components/workspace/WorkspaceUI", () => {
-  const { Text } = require("react-native");
-  return { Label: (props: object) => <Text {...props} /> };
+  const { Pressable, Text } = require("react-native");
+  return {
+    Label: (props: object) => <Text {...props} />,
+    ActionButton: ({ label, onPress, disabled }: any) => (
+      <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} disabled={disabled}>
+        <Text>{label}</Text>
+      </Pressable>
+    ),
+  };
 });
 jest.mock("expo-linear-gradient", () => {
   const { View } = require("react-native");
@@ -77,6 +84,57 @@ function descendants(node: Node): Node[] {
 }
 const style = (node: { props: { style?: any } }) =>
   StyleSheet.flatten(node.props.style);
+
+it("reselection and explicit resume remain available alongside the restored preview strip", async () => {
+  const choose = jest.fn();
+  const dismiss = jest.fn();
+  const resume = jest.fn();
+  const row = { ...file(1, "interrupted.png", "image/png"), resumable: true };
+  const view = await render(
+    <AssistantPendingUploads files={[row]} disabled={false} remove={jest.fn()}
+      reselect choose={choose} dismiss={dismiss} resume={resume} canResume />,
+  );
+  await fireEvent.press(screen.getByRole("button", { name: "Choose files" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Dismiss" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Resume attachment uploads" }));
+  expect(choose).toHaveBeenCalledTimes(1);
+  expect(dismiss).toHaveBeenCalledTimes(1);
+  expect(resume).toHaveBeenCalledTimes(1);
+  expect(screen.getByTestId("composer-attachments")).toBeTruthy();
+  await view.rerender(
+    <AssistantPendingUploads files={[row]} disabled={false} remove={jest.fn()}
+      reselect choose={choose} dismiss={dismiss} resume={resume} canResume={false} />,
+  );
+  await fireEvent.press(screen.getByRole("button", { name: "Choose files" }));
+  await fireEvent.press(screen.getByRole("button", { name: "Resume attachment uploads" }));
+  expect(choose).toHaveBeenCalledTimes(1);
+  expect(resume).toHaveBeenCalledTimes(1);
+});
+
+it("an unfinished discard exposes only its explicit retry action", async () => {
+  const retryDiscard = jest.fn();
+  await render(<AssistantPendingUploads files={[file(1, "draft.png", "image/png")]}
+    disabled={false} remove={jest.fn()} retryDiscard={retryDiscard} />);
+  expect(screen.queryByTestId("composer-attachments")).toBeNull();
+  await fireEvent.press(screen.getByRole("button", { name: "Retry discard" }));
+  expect(retryDiscard).toHaveBeenCalledTimes(1);
+});
+
+it("removing one file reports busy state and leaves other remove actions usable", async () => {
+  const remove = jest.fn();
+  await render(<AssistantPendingUploads files={[
+    { ...file(1, "removing.png", "image/png"), removing: true },
+    file(2, "available.txt", "text/plain"),
+  ]} disabled={false} remove={remove} />);
+  const removing = screen.getByRole("button", { name: "Remove removing.png" });
+  expect(removing.props.accessibilityState).toMatchObject({ disabled: true, busy: true });
+  expect(screen.getByText("Removing attachment…")).toBeTruthy();
+  await fireEvent.press(removing);
+  expect(remove).not.toHaveBeenCalled();
+  await fireEvent.press(screen.getByRole("button", { name: "Remove available.txt" }));
+  expect(remove).toHaveBeenCalledWith("2");
+});
+
 async function layout(width: number, height = 180) {
   await fireEvent(screen.getByTestId("composer-attachments"), "layout", {
     nativeEvent: { layout: { width, height } },

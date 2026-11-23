@@ -2558,7 +2558,7 @@ test("removing a delayed linked code or editing it cancels its automatic preview
   }
 });
 
-for (const [button, action] of [["Approve full account session", "approve"], ["Reject", "deny"]]) {
+for (const [button, action] of [["Approve staging account session", "approve"], ["Reject", "deny"]]) {
   test(`a staging device scan keeps the reviewed request bound through ${action}`, async () => {
     const env = setup();
     env.mount("device", { start_scanner: true });

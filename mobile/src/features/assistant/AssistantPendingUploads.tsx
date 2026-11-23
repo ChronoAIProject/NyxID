@@ -111,7 +111,7 @@ export function AssistantPendingUploads({
     return <ActionButton label={t("Retry discard")} onPress={retryDiscard} variant="secondary" />;
   return (
     <>
-      {reselect && (
+      {reselect && choose && dismiss && (
         <View style={styles.content}>
           <Label>
             {t(
@@ -131,7 +131,7 @@ export function AssistantPendingUploads({
           />
         </View>
       )}
-      {files.some((row) => row.resumable) && (
+      {resume && files.some((row) => row.resumable) && (
         <ActionButton
           label={t("Resume attachment uploads")}
           onPress={resume}

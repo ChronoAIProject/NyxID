@@ -1071,6 +1071,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           ) : (
             <View style={styles.previewSection}>
               <View style={styles.detailPanel}>
+                {preview.stagingBinding ? (
+                  <DetailRow
+                    label={translateApp("Sign-in environment")}
+                    value="staging.nyxid.ai"
+                    styles={styles}
+                  />
+                ) : null}
                 {loginCode ? (
                   <DetailRow
                     label={translateApp("Login code")}
@@ -1280,7 +1287,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                       label={
                         decisionPending === "approve"
                           ? translateApp("Approving...")
-                          : translateApp("Approve full account session")
+                          : preview.stagingBinding
+                            ? translateApp("Approve staging account session")
+                            : translateApp("Approve full account session")
                       }
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("approve")}
