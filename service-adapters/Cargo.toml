@@ -9,9 +9,11 @@ description = "Provider-specific HTTP adapters shared by NyxID and credential no
 
 [dependencies]
 reqwest = { version = "0.12.28", features = ["rustls-tls"], default-features = false }
+serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1.4"
 urlencoding = "2.1"
+zeroize = { version = "1", features = ["derive", "serde"] }
 thiserror = "2"
 tokio = { workspace = true }
 tokio-rustls = { version = "0.26", optional = true }

@@ -832,11 +832,12 @@ fn strip_internal_query_params(raw: &str) -> String {
         .join("&")
 }
 
-fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
-    let separator = if url.contains('?') { "&" } else { "?" };
-    let encoded_name = urlencoding::encode(param_name);
-    let encoded_value = urlencoding::encode(param_value);
-    format!("{url}{separator}{encoded_name}={encoded_value}")
+fn append_query_param(
+    url: &str,
+    param_name: &str,
+    param_value: &str,
+) -> nyxid_service_adapters::SecretText {
+    nyxid_service_adapters::SecretText::with_query_param(url, param_name, param_value)
 }
 
 #[utoipa::path(
@@ -6439,18 +6440,19 @@ async fn execute_resolved_proxy_inner<'a>(
                         }
                     }
                     let result = if let Some(upload) = streaming_body.take() {
-                        let mut parameters =
+                        let headers = std::mem::take(&mut attempt_request.headers);
+                        let mut parameters = crate::crypto::secret_json::SecretJson(
                             serde_json::to_value(&attempt_request).map_err(|_| {
                                 AppError::Internal("Upload metadata encoding failed".into())
-                            })?;
-                        parameters["headers"] = serde_json::to_value(
-                            attempt_request
-                                .headers
-                                .iter()
-                                .cloned()
-                                .collect::<std::collections::BTreeMap<_, _>>(),
-                        )
-                        .map_err(|_| AppError::Internal("Upload headers encoding failed".into()))?;
+                            })?,
+                        );
+                        let headers: std::collections::BTreeMap<_, _> = headers
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), value.as_str()))
+                            .collect();
+                        parameters["headers"] = serde_json::to_value(&headers).map_err(|_| {
+                            AppError::Internal("Upload headers encoding failed".into())
+                        })?;
                         parameters["git"] = serde_json::json!(machine_git);
                         parameters["max_bytes"] = serde_json::json!(
                             upload_meter
@@ -6464,7 +6466,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             request_id: attempt_request.request_id,
                             node_id: (*node_id).into(),
                             operation: nyxid_machine::Operation::ProxyUpload,
-                            parameters,
+                            parameters: nyxid_service_adapters::secret_json::WireJson(parameters),
                             timestamp: chrono::Utc::now().timestamp(),
                             nonce: uuid::Uuid::new_v4().to_string(),
                             signature: String::new(),
@@ -8262,7 +8264,7 @@ pub(crate) fn build_downstream_ws_url(
     path: &str,
     query: Option<&str>,
     delegated: &[delegation_service::DelegatedCredential],
-) -> AppResult<String> {
+) -> AppResult<nyxid_service_adapters::SecretText> {
     let mut all_delegated = delegated.to_vec();
     proxy_service::extend_with_path_credential(&mut all_delegated, target);
     let prepared = proxy_service::prepare_delegated_request(path, query, &all_delegated)?;
@@ -8281,23 +8283,24 @@ pub(crate) fn build_downstream_ws_url(
         )));
     };
 
-    let ws_path = if prepared.path.is_empty() {
-        String::new()
-    } else if prepared.path.starts_with('/') {
-        prepared.path
+    let slash = if prepared.path.is_empty() || prepared.path.starts_with('/') {
+        ""
     } else {
-        format!("/{}", prepared.path)
+        "/"
     };
-
-    let mut url = match prepared.query {
-        Some(q) => format!("{ws_base}{ws_path}?{q}"),
-        None => format!("{ws_base}{ws_path}"),
+    let mut url = match prepared.query.as_deref() {
+        Some(query) => nyxid_service_adapters::SecretText::concat(&[
+            &ws_base,
+            slash,
+            &prepared.path,
+            "?",
+            query,
+        ]),
+        None => nyxid_service_adapters::SecretText::concat(&[&ws_base, slash, &prepared.path]),
     };
-
     if target.auth_method == "query" {
         url = append_query_param(&url, &target.auth_key_name, &target.credential);
     }
-
     Ok(url)
 }
 
@@ -8425,7 +8428,7 @@ pub(crate) fn build_downstream_ws_request(
             "bearer" => {
                 let (name, value) = make_header(
                     cred.injection_key.as_bytes(),
-                    &format!("Bearer {}", cred.credential.as_str()),
+                    &nyxid_service_adapters::SecretText::concat(&["Bearer ", &cred.credential]),
                 )?;
                 headers.insert(name, value);
             }
@@ -8443,7 +8446,10 @@ pub(crate) fn build_downstream_ws_request(
     if target.service.forward_access_token
         && let Some(token) = caller_token
     {
-        let (_, value) = make_header(b"authorization", &format!("Bearer {token}"))?;
+        let (_, value) = make_header(
+            b"authorization",
+            &nyxid_service_adapters::SecretText::concat(&["Bearer ", token]),
+        )?;
         headers.insert(reqwest::header::AUTHORIZATION, value);
     }
 
@@ -8458,18 +8464,22 @@ pub(crate) fn build_downstream_ws_request(
         "bearer" => {
             let (_, value) = make_header(
                 b"authorization",
-                &crate::services::catalog_auth_scheme::header_value(
+                &zeroize::Zeroizing::new(crate::services::catalog_auth_scheme::header_value(
                     target.service.auth_scheme.as_deref(),
                     &target.credential,
-                )?,
+                )?),
             )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         "basic" => {
             use base64::Engine;
-            let encoded =
-                base64::engine::general_purpose::STANDARD.encode(target.credential.as_bytes());
-            let (_, value) = make_header(b"authorization", &format!("Basic {encoded}"))?;
+            let encoded = zeroize::Zeroizing::new(
+                base64::engine::general_purpose::STANDARD.encode(target.credential.as_bytes()),
+            );
+            let (_, value) = make_header(
+                b"authorization",
+                &nyxid_service_adapters::SecretText::concat(&["Basic ", &encoded]),
+            )?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
         }
         // "query" and "path" are already handled in URL construction
@@ -8589,15 +8599,15 @@ fn tungstenite_msg_to_axum(
 
 fn axum_msg_payload_for_injection(
     msg: &axum::extract::ws::Message,
-) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, &[u8])> {
     match msg {
         axum::extract::ws::Message::Text(t) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Text,
-            t.to_string().into_bytes(),
+            t.as_bytes(),
         )),
         axum::extract::ws::Message::Binary(b) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Binary,
-            b.to_vec(),
+            b.as_ref(),
         )),
         _ => None,
     }
@@ -8605,15 +8615,15 @@ fn axum_msg_payload_for_injection(
 
 fn tungstenite_msg_payload_for_injection(
     msg: &tokio_tungstenite::tungstenite::Message,
-) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, &[u8])> {
     match msg {
         tokio_tungstenite::tungstenite::Message::Text(t) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Text,
-            t.to_string().into_bytes(),
+            t.as_bytes(),
         )),
         tokio_tungstenite::tungstenite::Message::Binary(b) => Some((
             crate::models::ws_frame_injection::WsFrameKind::Binary,
-            b.to_vec(),
+            b.as_ref(),
         )),
         _ => None,
     }
@@ -8624,11 +8634,13 @@ fn injection_frame_to_tungstenite(
 ) -> tokio_tungstenite::tungstenite::Message {
     match frame.kind {
         crate::models::ws_frame_injection::WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            tokio_tungstenite::tungstenite::Message::Text(text.into())
+            let text = bytes::Bytes::from_owner(frame.payload)
+                .try_into()
+                .unwrap_or_default();
+            tokio_tungstenite::tungstenite::Message::Text(text)
         }
         crate::models::ws_frame_injection::WsFrameKind::Binary => {
-            tokio_tungstenite::tungstenite::Message::Binary(frame.payload.into())
+            tokio_tungstenite::tungstenite::Message::Binary(bytes::Bytes::from_owner(frame.payload))
         }
     }
 }
@@ -8636,11 +8648,13 @@ fn injection_frame_to_tungstenite(
 fn injection_frame_to_axum(frame: ws_frame_injector::WsFrame) -> axum::extract::ws::Message {
     match frame.kind {
         crate::models::ws_frame_injection::WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            axum::extract::ws::Message::Text(text.into())
+            let text = bytes::Bytes::from_owner(frame.payload)
+                .try_into()
+                .unwrap_or_default();
+            axum::extract::ws::Message::Text(text)
         }
         crate::models::ws_frame_injection::WsFrameKind::Binary => {
-            axum::extract::ws::Message::Binary(frame.payload.into())
+            axum::extract::ws::Message::Binary(bytes::Bytes::from_owner(frame.payload))
         }
     }
 }
@@ -9228,7 +9242,7 @@ async fn handle_ws_passthrough_via_node(
     let node_path = if prepared.path.starts_with('/') {
         prepared.path.clone()
     } else {
-        format!("/{}", prepared.path)
+        nyxid_service_adapters::SecretText::concat(&["/", &prepared.path])
     };
     let mut enriched_headers =
         crate::models::default_request_header::SecretHeaders::from(forward_headers.to_vec());
@@ -11278,21 +11292,21 @@ mod tests {
     fn ws_url_converts_http_to_ws() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket");
     }
 
     #[test]
     fn ws_url_converts_https_to_wss() {
         let target = make_target("https://api.example.com");
         let url = build_downstream_ws_url(&target, "ws", None, &[]).unwrap();
-        assert_eq!(url, "wss://api.example.com/ws");
+        assert_eq!(url.as_str(), "wss://api.example.com/ws");
     }
 
     #[test]
     fn ws_url_preserves_query_params() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", Some("token=abc&v=1"), &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket?token=abc&v=1");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket?token=abc&v=1");
     }
 
     #[test]
@@ -11304,7 +11318,7 @@ mod tests {
 
         let url = build_downstream_ws_url(&target, "socket", Some("stream=true"), &[]).unwrap();
         assert_eq!(
-            url,
+            url.as_str(),
             "wss://api.example.com/socket?stream=true&api_key=secret%20value"
         );
     }
@@ -11399,21 +11413,21 @@ mod tests {
     fn ws_url_handles_trailing_slash_on_base() {
         let target = make_target("http://localhost:8080/");
         let url = build_downstream_ws_url(&target, "socket.io", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket.io");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket.io");
     }
 
     #[test]
     fn ws_url_passes_through_ws_scheme() {
         let target = make_target("ws://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
-        assert_eq!(url, "ws://localhost:8080/socket");
+        assert_eq!(url.as_str(), "ws://localhost:8080/socket");
     }
 
     #[test]
     fn ws_url_passes_through_wss_scheme() {
         let target = make_target("wss://secure.example.com");
         let url = build_downstream_ws_url(&target, "ws", None, &[]).unwrap();
-        assert_eq!(url, "wss://secure.example.com/ws");
+        assert_eq!(url.as_str(), "wss://secure.example.com/ws");
     }
 
     #[test]
@@ -11627,13 +11641,16 @@ mod tests {
     #[test]
     fn append_query_param_adds_to_clean_url() {
         let result = super::append_query_param("https://api.example.com/v1", "key", "value");
-        assert_eq!(result, "https://api.example.com/v1?key=value");
+        assert_eq!(result.as_str(), "https://api.example.com/v1?key=value");
     }
 
     #[test]
     fn append_query_param_appends_to_existing_query() {
         let result = super::append_query_param("https://api.example.com/v1?a=1", "key", "val ue");
-        assert_eq!(result, "https://api.example.com/v1?a=1&key=val%20ue");
+        assert_eq!(
+            result.as_str(),
+            "https://api.example.com/v1?a=1&key=val%20ue"
+        );
     }
 
     #[test]
@@ -11984,7 +12001,7 @@ mod tests {
     #[test]
     fn append_query_param_encodes_special_chars_in_name() {
         let result = super::append_query_param("https://example.com", "key name", "val");
-        assert_eq!(result, "https://example.com?key%20name=val");
+        assert_eq!(result.as_str(), "https://example.com?key%20name=val");
     }
 
     // ── shared forward-header policy additional cases ───────────────
@@ -12212,7 +12229,7 @@ mod tests {
         assert!(result.is_some());
         let (kind, bytes) = result.unwrap();
         assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
-        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "payload");
+        assert_eq!(std::str::from_utf8(bytes).unwrap(), "payload");
     }
 
     #[test]
@@ -12253,7 +12270,7 @@ mod tests {
         assert!(result.is_some());
         let (kind, bytes) = result.unwrap();
         assert_eq!(kind, crate::models::ws_frame_injection::WsFrameKind::Text);
-        assert_eq!(std::str::from_utf8(&bytes).unwrap(), "tung-payload");
+        assert_eq!(std::str::from_utf8(bytes).unwrap(), "tung-payload");
     }
 
     #[test]
@@ -12285,7 +12302,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: b"injected text".to_vec(),
+            payload: b"injected text".to_vec().into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -12301,7 +12318,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
-            payload: vec![0xDE, 0xAD],
+            payload: vec![0xDE, 0xAD].into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -12317,7 +12334,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: vec![0xFF, 0xFE],
+            payload: vec![0xFF, 0xFE].into(),
         };
         let msg = super::injection_frame_to_tungstenite(frame);
         match msg {
@@ -12335,7 +12352,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: b"axum text".to_vec(),
+            payload: b"axum text".to_vec().into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {
@@ -12351,7 +12368,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Binary,
-            payload: vec![0xBE, 0xEF],
+            payload: vec![0xBE, 0xEF].into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {
@@ -12367,7 +12384,7 @@ mod tests {
         use crate::services::ws_frame_injector::WsFrame;
         let frame = WsFrame {
             kind: crate::models::ws_frame_injection::WsFrameKind::Text,
-            payload: vec![0xFF, 0xFE],
+            payload: vec![0xFF, 0xFE].into(),
         };
         let msg = super::injection_frame_to_axum(frame);
         match msg {

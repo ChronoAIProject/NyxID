@@ -50,11 +50,17 @@ impl Uploads {
     }
     pub async fn begin(
         self: &Arc<Self>,
-        value: serde_json::Value,
+        value: &serde_json::Value,
         node_id: &str,
         secret: &str,
-    ) -> Result<(serde_json::Value, VerifiedUpload)> {
-        let request: Request = serde_json::from_value(value)?;
+    ) -> Result<(
+        nyxid_service_adapters::secret_json::SecretJson,
+        VerifiedUpload,
+    )> {
+        let request =
+            <Request<nyxid_service_adapters::secret_json::WireJson> as serde::Deserialize>::deserialize(
+                value,
+            )?;
         if !matches!(
             request.operation,
             Operation::ProxyUpload | Operation::SaveAttachment | Operation::ShareFile
@@ -68,7 +74,7 @@ impl Uploads {
             .verify(&request, node_id, &signing, chrono::Utc::now().timestamp())
             .map_err(|_| anyhow::anyhow!("upload signature refused"))?;
         let id = Uuid::parse_str(&request.request_id)?;
-        let mut metadata = request.parameters;
+        let mut metadata = request.parameters.0;
         metadata["_authority"] = serde_json::to_value(&request.authority)?;
         metadata["_authority_version"] = request.version.into();
         metadata["_authority_timestamp"] = request.timestamp.into();
@@ -209,7 +215,7 @@ mod tests {
         let request = opening();
         let (_, body) = uploads
             .begin(
-                serde_json::to_value(&request).unwrap(),
+                &serde_json::to_value(&request).unwrap(),
                 "credential-node",
                 &hex::encode([1; 32]),
             )
@@ -218,7 +224,7 @@ mod tests {
         assert!(
             uploads
                 .begin(
-                    serde_json::to_value(&request).unwrap(),
+                    &serde_json::to_value(&request).unwrap(),
                     "credential-node",
                     &hex::encode([1; 32])
                 )
@@ -240,7 +246,7 @@ mod tests {
             assert!(
                 uploads
                     .begin(
-                        serde_json::to_value(request).unwrap(),
+                        &serde_json::to_value(request).unwrap(),
                         "credential-node",
                         &hex::encode([1; 32])
                     )
@@ -256,7 +262,7 @@ mod tests {
         let id = Uuid::parse_str(&request.request_id).unwrap();
         let (_, upload) = uploads
             .begin(
-                serde_json::to_value(request).unwrap(),
+                &serde_json::to_value(request).unwrap(),
                 "credential-node",
                 &hex::encode([1; 32]),
             )
@@ -298,7 +304,7 @@ mod tests {
         let id = Uuid::parse_str(&request.request_id).unwrap();
         let (_, upload) = uploads
             .begin(
-                serde_json::to_value(request).unwrap(),
+                &serde_json::to_value(request).unwrap(),
                 "credential-node",
                 &hex::encode([1; 32]),
             )

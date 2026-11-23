@@ -90,7 +90,7 @@ pub fn verify_request_signature(
             .get("target_id")
             .is_none_or(serde_json::Value::is_null) =>
         {
-            format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}")
+            zeroize::Zeroizing::new([timestamp, nonce, method, path, query, body].join("\n"))
         }
         Some(version) if version.as_u64() == Some(2) => {
             let fields = [
@@ -115,20 +115,20 @@ pub fn verify_request_signature(
             }) {
                 return false;
             }
-            serde_json::json!([
+            nyxid_service_adapters::secret_json::to_secret_string(&[
                 "nyxid-node-http.v2",
                 timestamp,
                 nonce,
-                request["service_id"],
-                request["service_slug"],
-                request["target_id"],
+                request["service_id"].as_str().unwrap(),
+                request["service_slug"].as_str().unwrap(),
+                request["target_id"].as_str().unwrap(),
                 origin,
                 method,
                 path,
                 query,
                 body,
             ])
-            .to_string()
+            .expect("string fields serialize to JSON")
         }
         _ => return false,
     };
@@ -258,14 +258,24 @@ pub fn verify_ws_proxy_signature(
     let path = request["path"].as_str().unwrap_or("");
     let query = request["query"].as_str().unwrap_or("");
 
-    let message =
-        format!("{timestamp}\n{nonce}\n{session_id}\n{service_slug}\n{base_url}\n{path}\n{query}");
+    let message = zeroize::Zeroizing::new(
+        [
+            timestamp,
+            nonce,
+            session_id,
+            service_slug,
+            base_url,
+            path,
+            query,
+        ]
+        .join("\n"),
+    );
     verify_signature(secret_hex, expected_signature, &message)
 }
 
 fn verify_signature(secret_hex: &str, expected_signature: &str, message: &str) -> bool {
     let secret_bytes = match hex::decode(secret_hex) {
-        Ok(b) => b,
+        Ok(b) => zeroize::Zeroizing::new(b),
         Err(_) => return false,
     };
 
