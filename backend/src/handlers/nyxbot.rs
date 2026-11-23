@@ -2309,11 +2309,10 @@ async fn decrypt_agent_key(
     let Some(ciphertext) = row.agent_key_ciphertext.as_ref() else {
         return Ok(None);
     };
-    let bytes = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
-    Ok(Some(Zeroizing::new(
-        String::from_utf8(bytes.to_vec())
-            .map_err(|_| AppError::Internal("Channel key unavailable".into()))?,
-    )))
+    let bytes = state.encryption_keys.decrypt(ciphertext).await?;
+    Ok(Some(crate::crypto::guarded_utf8(bytes).map_err(|_| {
+        AppError::Internal("Channel key unavailable".into())
+    })?))
 }
 
 /// Stop NyxBot answering a bot: delete the gateway channel (gateway path),
@@ -5499,7 +5498,7 @@ async fn get_event_context_inner(
                         .status(StatusCode::OK)
                         .header("content-type", "application/json")
                         .header("cache-control", "no-store")
-                        .body(Body::from(bytes))
+                        .body(Body::from(bytes::Bytes::from_owner(bytes)))
                         .unwrap_or_else(|_| {
                             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
                         })
@@ -5535,7 +5534,7 @@ async fn get_event_context_inner(
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .header("cache-control", "no-store")
-            .body(Body::from(bytes))
+            .body(Body::from(bytes::Bytes::from_owner(bytes)))
             .unwrap_or_else(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }

@@ -143,79 +143,87 @@ fn proxy_success_event(
     }
 }
 
-/// Response headers that are safe to forward back to the client.
-/// Uses an allowlist to prevent leaking internal headers from downstream services.
-/// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
-/// CorsLayer handles CORS for all responses. Forwarding downstream CORS headers
-/// would cause duplicate headers and browser CORS failures.
-const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location", "content-location"];
-
-#[derive(Clone, Debug)]
-struct AsyncLocationContext {
-    service_base: url::Url,
-    downstream_request: url::Url,
-    caller_proxy_prefix: String,
+/// Rewritten response URLs are built from the caller's request, not the authenticated downstream URL.
+pub(super) struct AsyncLocationContext {
+    service_base: Option<url::Url>,
+    caller: Option<CallerLocation>,
     exact_user_service_id: Option<String>,
+    url_credentials: Vec<zeroize::Zeroizing<String>>,
+}
+
+struct CallerLocation {
+    request: url::Url,
+    proxy_prefix: String,
 }
 
 impl AsyncLocationContext {
-    fn new(
-        target_base_url: &str,
-        downstream_path: &str,
-        downstream_query: Option<&str>,
-        caller_proxy_prefix: Option<String>,
+    pub(super) fn new(
+        target: &proxy_service::ProxyTarget,
+        caller_uri: &axum::http::Uri,
+        requested_path: &str,
+        delegated: &[delegation_service::DelegatedCredential],
     ) -> Option<Self> {
-        let caller_proxy_prefix = caller_proxy_prefix?;
-        let mut service_base = url::Url::parse(target_base_url).ok()?;
-        if !matches!(service_base.scheme(), "http" | "https") {
-            return None;
+        let mut context = Self::for_target(target, delegated)?;
+        if let (Some(service_base), Some(proxy_prefix)) = (
+            context.service_base.as_ref(),
+            caller_proxy_prefix(caller_uri.path(), requested_path),
+        ) {
+            let path = caller_uri.path().strip_prefix(&proxy_prefix).unwrap_or("");
+            // A colon in the first path segment must stay part of the caller's path.
+            if let Ok(mut request) = service_base.join(&format!("./{path}")) {
+                let query = caller_uri.query().map(strip_internal_query_params);
+                request.set_query(query.as_deref().filter(|query| !query.is_empty()));
+                context.caller = Some(CallerLocation {
+                    request,
+                    proxy_prefix,
+                });
+            }
         }
-        if !service_base.path().ends_with('/') {
-            let path = format!("{}/", service_base.path());
-            service_base.set_path(&path);
-        }
-        service_base.set_query(None);
-        service_base.set_fragment(None);
-
-        let mut downstream_request = service_base
-            .join(downstream_path.trim_start_matches('/'))
-            .ok()?;
-        downstream_request.set_query(downstream_query);
-        Some(Self {
-            service_base,
-            downstream_request,
-            caller_proxy_prefix,
-            exact_user_service_id: None,
-        })
+        Some(context)
     }
 
-    fn from_downstream_request(
-        target_base_url: &str,
-        downstream_request: url::Url,
-        caller_proxy_prefix: Option<String>,
+    pub(super) fn for_target(
+        target: &proxy_service::ProxyTarget,
+        delegated: &[delegation_service::DelegatedCredential],
     ) -> Option<Self> {
-        let caller_proxy_prefix = caller_proxy_prefix?;
-        let mut service_base = url::Url::parse(target_base_url).ok()?;
-        if !matches!(service_base.scheme(), "http" | "https") {
-            return None;
-        }
-        if !service_base.path().ends_with('/') {
-            let path = format!("{}/", service_base.path());
-            service_base.set_path(&path);
-        }
-        service_base.set_query(None);
-        service_base.set_fragment(None);
+        let service_base = if target.base_url.is_empty() {
+            // A credential node can hold the only configured service URL.
+            None
+        } else {
+            let mut base = url::Url::parse(&target.base_url).ok()?;
+            if !matches!(base.scheme(), "http" | "https")
+                || !base.username().is_empty()
+                || base.password().is_some()
+            {
+                return None;
+            }
+            base.set_query(None);
+            base.set_fragment(None);
+            base.path_segments_mut().ok()?.pop_if_empty().push("");
+            Some(base)
+        };
+        let url_credentials = delegated
+            .iter()
+            .filter(|cred| matches!(cred.injection_method.as_str(), "query" | "path"))
+            .map(|cred| &cred.credential)
+            .chain(
+                matches!(target.auth_method.as_str(), "query" | "path")
+                    .then_some(&target.credential),
+            )
+            .filter(|credential| !credential.is_empty())
+            .cloned()
+            .collect();
         Some(Self {
             service_base,
-            downstream_request,
-            caller_proxy_prefix,
+            caller: None,
             exact_user_service_id: None,
+            url_credentials,
         })
     }
 
     fn pin_pool_member(mut self, authority: Option<&PoolExecutionAuthority>) -> Self {
-        if let Some(authority) = authority {
-            self.caller_proxy_prefix = format!(
+        if let (Some(caller), Some(authority)) = (&mut self.caller, authority) {
+            caller.proxy_prefix = format!(
                 "/api/v1/proxy/s/{}/",
                 urlencoding::encode(&authority.member_slug)
             );
@@ -224,45 +232,118 @@ impl AsyncLocationContext {
         self
     }
 
-    fn rewrite(&self, value: &str) -> Option<axum::http::HeaderValue> {
-        let resolved = self.downstream_request.join(value).ok()?;
-        if resolved.scheme() != self.service_base.scheme()
-            || resolved.host_str() != self.service_base.host_str()
-            || resolved.port_or_known_default() != self.service_base.port_or_known_default()
+    pub(super) fn after_redirects(mut self, response: &reqwest::Response) -> Self {
+        if let Some(followed) = response
+            .extensions()
+            .get::<proxy_service::FollowedLocations>()
+        {
+            for location in &followed.0 {
+                self.caller = self.caller.take().and_then(|mut caller| {
+                    let resolved = caller.request.join(location.to_str().ok()?).ok()?;
+                    self.rewrite(&caller, &resolved)?;
+                    caller.request = resolved;
+                    caller.request.set_fragment(None);
+                    Some(caller)
+                });
+            }
+        }
+        self
+    }
+
+    pub(super) fn header_value(
+        &self,
+        status: StatusCode,
+        name: &str,
+        value: &str,
+    ) -> Option<axum::http::HeaderValue> {
+        let resolved = if let Some(base) = &self.service_base {
+            let resolved = self
+                .caller
+                .as_ref()
+                .map_or(base, |caller| &caller.request)
+                .join(value)
+                .ok()?;
+            if resolved.origin() == base.origin() {
+                return self.rewrite(self.caller.as_ref()?, &resolved);
+            }
+            resolved
+        } else {
+            // Without a server-configured origin, only an absolute redirect can be forwarded.
+            if value.starts_with("//") {
+                // Parse the authority of a network-path reference without changing the header bytes.
+                url::Url::parse(&format!("https:{value}")).ok()?
+            } else {
+                url::Url::parse(value).ok()?
+            }
+        };
+        // Use the original bytes for signed download URLs. The parser is only
+        // used to classify the reference, and never to reserialize its query.
+        let authority = value
+            .strip_prefix("//")
+            .or_else(|| value.split_once("://").map(|(_, rest)| rest))?;
+        if status.is_redirection()
+            && name == "location"
+            && matches!(resolved.scheme(), "http" | "https")
+            && !authority.split(['/', '?', '#']).next()?.contains('@')
+            && resolved.username().is_empty()
+            && resolved.password().is_none()
+            && !self.carries_credential(value)
+        {
+            axum::http::HeaderValue::from_str(value).ok()
+        } else {
+            None
+        }
+    }
+
+    fn carries_credential(&self, value: &str) -> bool {
+        self.url_credentials.iter().any(|credential| {
+            nyxid_service_adapters::response_location::carries_credential(value, credential)
+        })
+    }
+
+    fn rewrite(
+        &self,
+        caller: &CallerLocation,
+        resolved: &url::Url,
+    ) -> Option<axum::http::HeaderValue> {
+        let base = self.service_base.as_ref()?;
+        if resolved.origin() != base.origin()
+            || !resolved.username().is_empty()
+            || resolved.password().is_some()
         {
             return None;
         }
-
-        let base_path = self.service_base.path();
+        let base_path = base.path();
         let relative_path = if resolved.path() == base_path.trim_end_matches('/') {
             ""
         } else {
             resolved.path().strip_prefix(base_path)?
         };
+        proxy_service::validate_requested_proxy_path(relative_path).ok()?;
         let mut caller_location = format!(
             "{}{}",
-            self.caller_proxy_prefix,
+            caller.proxy_prefix,
             relative_path.trim_start_matches('/')
         );
-        if let Some(member_id) = &self.exact_user_service_id {
-            let query = resolved
-                .query()
-                .map(strip_internal_query_params)
-                .unwrap_or_default();
+        let query = resolved
+            .query()
+            .map(strip_internal_query_params)
+            .unwrap_or_default();
+        if !query.is_empty() {
             caller_location.push('?');
-            if !query.is_empty() {
-                caller_location.push_str(&query);
-                caller_location.push('&');
-            }
+            caller_location.push_str(&query);
+        }
+        if let Some(member_id) = &self.exact_user_service_id {
+            caller_location.push(if query.is_empty() { '?' } else { '&' });
             caller_location.push_str("_nyxid_via=");
             caller_location.push_str(&urlencoding::encode(member_id));
-        } else if let Some(query) = resolved.query() {
-            caller_location.push('?');
-            caller_location.push_str(query);
         }
         if let Some(fragment) = resolved.fragment() {
             caller_location.push('#');
             caller_location.push_str(fragment);
+        }
+        if self.carries_credential(&caller_location) {
+            return None;
         }
         axum::http::HeaderValue::from_str(&caller_location).ok()
     }
@@ -270,12 +351,17 @@ impl AsyncLocationContext {
 
 fn caller_proxy_prefix(request_path: &str, downstream_path: &str) -> Option<String> {
     let normalized = downstream_path.trim_matches('/');
+    let raw = request_path.trim_end_matches('/');
     if normalized.is_empty() {
-        return Some(format!("{}/", request_path.trim_end_matches('/')));
+        return Some(format!("{raw}/"));
     }
-    let suffix = format!("/{normalized}");
-    let prefix = request_path.strip_suffix(&suffix)?;
-    Some(format!("{}/", prefix.trim_end_matches('/')))
+    // Axum decodes wildcard path parameters. Retain the caller's original escaping.
+    let (end, _) = raw
+        .rmatch_indices('/')
+        .nth(normalized.matches('/').count())?;
+    let suffix = &raw[end + 1..];
+    (suffix == normalized || urlencoding::decode(suffix).ok()? == normalized)
+        .then(|| raw[..=end].to_string())
 }
 
 fn ensure_proxy_request_id(headers: &mut axum::http::HeaderMap) -> String {
@@ -304,20 +390,8 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 #[derive(Clone, Copy)]
 pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
 
-fn direct_response_header_value(
-    status: StatusCode,
-    name_lower: &str,
-    value: &[u8],
-    is_sse: bool,
-    context: Option<&AsyncLocationContext>,
-) -> Option<axum::http::HeaderValue> {
-    if name_lower == "location" && status.is_redirection() {
-        return axum::http::HeaderValue::from_bytes(value).ok();
-    }
-    forwarded_response_header_value(name_lower, value, is_sse, context)
-}
-
 fn forwarded_response_header_value(
+    status: StatusCode,
     name_lower: &str,
     value: &[u8],
     is_sse: bool,
@@ -326,9 +400,9 @@ fn forwarded_response_header_value(
     if !forwardable_response_header(name_lower, is_sse) {
         return None;
     }
-    if ASYNC_LOCATION_HEADERS.contains(&name_lower) {
+    if nyxid_service_adapters::response_location::HEADERS.contains(&name_lower) {
         let raw = std::str::from_utf8(value).ok()?;
-        return location_context?.rewrite(raw);
+        return location_context?.header_value(status, name_lower, raw);
     }
     axum::http::HeaderValue::from_bytes(value).ok()
 }
@@ -4590,7 +4664,7 @@ async fn execute_resolved_proxy_inner<'a>(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
-    let caller_proxy_prefix = caller_proxy_prefix(request.uri().path(), path);
+    let caller_uri = request.uri().clone();
     // Strip NyxID-only routing params (e.g. `_nyxid_via`) from the
     // query string before forwarding. Downstream services should never
     // see NyxID-internal parameters.
@@ -5941,6 +6015,9 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Own local projections needed after preparation returns. All live audit,
     // admission, lease and cancellation guards move into this continuation.
+    let location_context =
+        AsyncLocationContext::new(&target, &caller_uri, requested_path, &delegated)
+            .map(|context| context.pin_pool_member(pool_authority.as_ref()));
     let forwarding_path = path.to_owned();
     let forwarding_owner = service_owner_for_approval.to_owned();
     Ok(ProxyExecutionPhase::Forward(box_proxy_future(
@@ -6117,14 +6194,6 @@ async fn execute_resolved_proxy_inner<'a>(
                     caller_bearer.as_deref(),
                     &extra_outbound_headers,
                 )?;
-                let node_location_context = AsyncLocationContext::new(
-                    &target.base_url,
-                    &prepared.path,
-                    prepared.query.as_deref(),
-                    caller_proxy_prefix.clone(),
-                )
-                .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
                 // Build base node request (will be cloned for failover retries)
                 let node_request = NodeProxyRequest {
                     target_id: target.target_id.clone(),
@@ -6539,7 +6608,7 @@ async fn execute_resolved_proxy_inner<'a>(
                                         request_body_len,
                                         path,
                                         downstream_cancellation.clone(),
-                                        node_location_context.as_ref(),
+                                        location_context.as_ref(),
                                         pool_attempt::Observability {
                                             usage,
                                             diagnostics: None,
@@ -6607,10 +6676,11 @@ async fn execute_resolved_proxy_inner<'a>(
                                     if let Ok(hn) =
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes())
                                         && let Some(hv) = forwarded_response_header_value(
+                                            status,
                                             &name_lower,
                                             value.as_bytes(),
                                             false,
-                                            node_location_context.as_ref(),
+                                            location_context.as_ref(),
                                         )
                                     {
                                         response_builder = response_builder.header(hn, hv);
@@ -6679,10 +6749,11 @@ async fn execute_resolved_proxy_inner<'a>(
                                     if let Ok(hn) =
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes())
                                         && let Some(hv) = forwarded_response_header_value(
+                                            http_status,
                                             &name_lower,
                                             value.as_bytes(),
                                             node_is_sse,
-                                            node_location_context.as_ref(),
+                                            location_context.as_ref(),
                                         )
                                     {
                                         response_builder = response_builder.header(hn, hv);
@@ -7744,16 +7815,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 .await;
             }
 
+            let location_context =
+                location_context.map(|ctx| ctx.after_redirects(&downstream_response));
             // Convert reqwest Response back to axum Response
             let status = StatusCode::from_u16(downstream_response.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
-            let direct_location_context = AsyncLocationContext::from_downstream_request(
-                &target.base_url,
-                downstream_response.url().clone(),
-                caller_proxy_prefix,
-            )
-            .map(|context| context.pin_pool_member(pool_authority.as_ref()));
-
             if let Some(reservation) = durable_reservation.as_ref() {
                 box_proxy_future(|| {
                     finish_durable_operation(
@@ -7822,7 +7888,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         request_body_len,
                         path,
                         downstream_cancellation,
-                        direct_location_context.as_ref(),
+                        location_context.as_ref(),
                         pool_attempt::Observability {
                             usage: usage_context,
                             diagnostics: Some(exchange_diagnostics),
@@ -7858,12 +7924,12 @@ async fn execute_resolved_proxy_inner<'a>(
                 let name_lower = name.as_str().to_lowercase();
                 if let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                    && let Some(header_value) = direct_response_header_value(
+                    && let Some(header_value) = forwarded_response_header_value(
                         status,
                         &name_lower,
                         value.as_bytes(),
                         is_sse,
-                        direct_location_context.as_ref(),
+                        location_context.as_ref(),
                     )
                 {
                     response_builder = response_builder.header(header_name, header_value);
@@ -10028,23 +10094,22 @@ mod tests {
 
     #[test]
     fn proxy_destination_download_location_is_returned_verbatim() {
-        let value = b"https://download.example/archive?signature=fixture";
-        for status in [
-            axum::http::StatusCode::MULTIPLE_CHOICES,
-            axum::http::StatusCode::FOUND,
-        ] {
+        let target = make_target("https://service.example/");
+        let context = AsyncLocationContext::for_target(&target, &[]).unwrap();
+        let value = b"https://download.example/archive?signature=fixture%2f%FF&part=1&part=2";
+        for status in [StatusCode::MULTIPLE_CHOICES, StatusCode::FOUND] {
             let header =
-                super::direct_response_header_value(status, "location", value, false, None)
-                    .expect("redirect Location");
+                forwarded_response_header_value(status, "location", value, false, Some(&context))
+                    .unwrap();
             assert_eq!(header.as_bytes(), value);
         }
         assert!(
-            super::direct_response_header_value(
-                axum::http::StatusCode::ACCEPTED,
+            forwarded_response_header_value(
+                StatusCode::ACCEPTED,
                 "location",
                 value,
                 false,
-                None
+                Some(&context)
             )
             .is_none()
         );
@@ -10052,26 +10117,44 @@ mod tests {
 
     #[test]
     fn async_locations_are_rewritten_to_the_caller_visible_proxy_route() {
-        let context = AsyncLocationContext::new(
-            "https://private.example/api/",
-            "/executions",
-            None,
-            Some("/api/v1/proxy/s/sandbox/".to_string()),
-        )
-        .unwrap();
+        let target = make_target("https://private.example/api/");
+        let uri = "/api/v1/proxy/s/sandbox/executions".parse().unwrap();
+        let context = AsyncLocationContext::new(&target, &uri, "executions", &[]).unwrap();
 
         assert_eq!(
-            context.rewrite("executions/op-1?view=status").unwrap(),
+            context
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "executions/op-1?view=status"
+                )
+                .unwrap(),
             "/api/v1/proxy/s/sandbox/executions/op-1?view=status"
         );
         assert_eq!(
             context
-                .rewrite("https://private.example/api/executions/op-2")
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "https://private.example/api/executions/op-2"
+                )
                 .unwrap(),
             "/api/v1/proxy/s/sandbox/executions/op-2"
         );
-        assert!(context.rewrite("https://attacker.example/op-3").is_none());
-        assert!(context.rewrite("/outside-service/op-4").is_none());
+        assert!(
+            context
+                .header_value(
+                    StatusCode::ACCEPTED,
+                    "location",
+                    "https://attacker.example/op-3"
+                )
+                .is_none()
+        );
+        assert!(
+            context
+                .header_value(StatusCode::ACCEPTED, "location", "/outside-service/op-4")
+                .is_none()
+        );
     }
 
     #[test]
@@ -10085,7 +10168,16 @@ mod tests {
         ] {
             assert!(ALLOWED_RESPONSE_HEADERS.contains(&name));
         }
-        assert!(forwarded_response_header_value("location", b"/private", false, None).is_none());
+        assert!(
+            forwarded_response_header_value(
+                StatusCode::ACCEPTED,
+                "location",
+                b"/private",
+                false,
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -12583,6 +12675,10 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    mod location_tests {
+        use super::*;
+        include!("proxy_location_tests.rs");
+    }
     include!("proxy_shutdown_tests.rs");
     include!("proxy_concurrency_tests.rs");
     include!("proxy_precondition_tests.rs");
@@ -12907,6 +13003,20 @@ mod proxy_resolution_integration_tests {
         service_slug: &str,
         target_url: &str,
     ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let credentials =
+            nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url).unwrap();
+        start_node_executor_with_credentials(state, node, credentials, 1).await
+    }
+
+    async fn connect_test_node_socket(
+        state: AppState,
+        node: &Node,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio::task::JoinHandle<()>,
+    ) {
         let app = Router::new()
             .route(
                 "/api/v1/nodes/ws",
@@ -12958,8 +13068,16 @@ mod proxy_resolution_integration_tests {
         // auth_ok is sent only after the connection has been registered.
         assert!(state.node_ws_manager.is_connected(&node.id));
 
-        let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
-            .expect("build node executor credentials");
+        (socket, ws_server)
+    }
+
+    async fn start_node_executor_with_credentials(
+        state: AppState,
+        node: &Node,
+        credentials: nyxid_node_proxy_test::CredentialStore,
+        request_count: usize,
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let (socket, ws_server) = connect_test_node_socket(state, node).await;
         let signing_secret = "11".repeat(32);
         let executor = tokio::spawn(async move {
             let (mut ws_sink, mut ws_stream) = socket.split();
@@ -12968,6 +13086,7 @@ mod proxy_resolution_integration_tests {
             let http_client = nyxid_node_proxy_test::proxy_executor::build_http_client()
                 .expect("build node executor HTTP client");
 
+            let mut served = 0;
             while let Some(message) = ws_stream.next().await {
                 let message = message.expect("read proxy request from backend WebSocket");
                 let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
@@ -13007,7 +13126,10 @@ mod proxy_resolution_integration_tests {
                         .await
                         .expect("send node executor response over WebSocket");
                 }
-                break;
+                served += 1;
+                if served == request_count {
+                    break;
+                }
             }
         });
 
@@ -13815,6 +13937,8 @@ mod proxy_resolution_integration_tests {
         Disconnect,
         Deadline,
         Approve,
+        ExternalBudget,
+        InvalidBudget,
         NyxbotAt70,
         NyxbotAt85,
     }
@@ -13890,7 +14014,11 @@ mod proxy_resolution_integration_tests {
             .insert_one(approval_config(&owner, &service.id))
             .await
             .unwrap();
-        let ingress = Utc::now();
+        let ingress = if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            Utc::now() - chrono::Duration::seconds(78)
+        } else {
+            Utc::now()
+        };
         let (clock, at) = tokio::sync::watch::channel(ingress + chrono::Duration::seconds(68));
         let proxy = Router::new()
             .route("/proxy/s/{slug}/{*path}", post(ws_proxy_test_route))
@@ -13924,8 +14052,34 @@ mod proxy_resolution_integration_tests {
             .unwrap();
         });
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-        client.write_all(b"POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        let budget_header = match case {
+            ApprovalWaitCase::ExternalBudget => {
+                "X-NyxID-Approval-Wait-Seconds: 80\r\nX-NyxID-Approval-Mode: async\r\n"
+            }
+            ApprovalWaitCase::InvalidBudget => "X-NyxID-Approval-Wait-Seconds: 9\r\n",
+            _ => "",
+        };
+        client.write_all(format!("POST /proxy/s/wait/items HTTP/1.1\r\nHost: localhost\r\n{budget_header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
         let requests = db.collection::<ApprovalRequest>(APPROVAL_REQUESTS);
+        if matches!(case, ApprovalWaitCase::InvalidBudget) {
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            assert_eq!(
+                requests
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            origin.abort();
+            upstream.abort();
+            return;
+        }
         let card = loop {
             if let Some(row) = requests.find_one(doc! {"user_id": &owner}).await.unwrap() {
                 break row;
@@ -13943,6 +14097,11 @@ mod proxy_resolution_integration_tests {
                 85
             };
             clock.send_replace(ingress + chrono::Duration::seconds(decision_second));
+        } else if matches!(case, ApprovalWaitCase::ExternalBudget) {
+            assert_eq!(
+                card.expires_at.timestamp_millis(),
+                (ingress + chrono::Duration::seconds(80)).timestamp_millis()
+            );
         } else {
             assert_eq!(
                 (card.expires_at - card.created_at).num_seconds(),
@@ -13970,6 +14129,26 @@ mod proxy_resolution_integration_tests {
             }
         };
         match case {
+            ApprovalWaitCase::InvalidBudget => unreachable!("invalid ingress returned above"),
+            ApprovalWaitCase::ExternalBudget => {
+                let mut response = String::new();
+                tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(response.contains("approval_wait_timed_out"), "{response}");
+                assert!(decide().await.is_err());
+                assert_eq!(
+                    requests
+                        .find_one(doc! {"_id":&card.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "expired"
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
             ApprovalWaitCase::Disconnect => {
                 drop(client);
                 // Allow the origin to observe EOF, then decide within the original TTL.
@@ -14104,6 +14283,16 @@ mod proxy_resolution_integration_tests {
     #[tokio::test]
     async fn approval_wait_2705_nyxbot_approval_at_85_seconds_expires_in_chat_and_approvals() {
         exercise_connected_approval(ApprovalWaitCase::NyxbotAt85).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_external_budget_caps_card_and_connected_wait() {
+        exercise_connected_approval(ApprovalWaitCase::ExternalBudget).await;
+    }
+
+    #[tokio::test]
+    async fn approval_wait_2874_invalid_budget_is_rejected_before_creation() {
+        exercise_connected_approval(ApprovalWaitCase::InvalidBudget).await;
     }
 
     #[tokio::test]

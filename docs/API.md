@@ -4317,6 +4317,16 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts explicitly opted-in credential-free catalog services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
+**Approval controls** apply to authenticated proxy requests.
+
+| Header | Behavior |
+| --- | --- |
+| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. |
+| `X-NyxID-Approval-Wait-Seconds` | Supply one decimal integer from 10 through 300 to cap the connected wait and approval expiry from request receipt. The configured approval timeout and any shorter route deadline also apply. Omit the header to use the usual server wait. |
+
+An invalid or repeated budget returns HTTP 400 before approval creation. When
+both controls are supplied, an eligible async proposal uses its async deadline.
+
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
 **Errors:**

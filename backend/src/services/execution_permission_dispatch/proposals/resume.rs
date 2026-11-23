@@ -211,12 +211,10 @@ pub(crate) async fn resume_turn(
             continue;
         }
         let payload = p.payload.as_ref().ok_or_else(conflict)?;
-        let raw = Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&payload.bytes, aad(id).as_bytes())
-                .await?,
-        );
+        let raw = state
+            .encryption_keys
+            .decrypt_with_aad(&payload.bytes, aad(id).as_bytes())
+            .await?;
         if raw.len() > MAX_PAYLOAD {
             return Err(conflict());
         }
@@ -379,12 +377,10 @@ pub(crate) async fn result_for_human(
     let Some(result) = p.result.as_ref() else {
         return Ok(None);
     };
-    let raw = Zeroizing::new(
-        state
-            .encryption_keys
-            .decrypt_with_aad(&result.bytes, format!("{}:result", aad(&row.id)).as_bytes())
-            .await?,
-    );
+    let raw = state
+        .encryption_keys
+        .decrypt_with_aad(&result.bytes, format!("{}:result", aad(&row.id)).as_bytes())
+        .await?;
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }

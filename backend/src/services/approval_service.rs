@@ -686,6 +686,15 @@ impl ApprovalRequestOperation {
         }
     }
 
+    pub(crate) fn apply_connected_budget(&mut self, timeout_secs: u32) {
+        if let Some(deadline) = connected_budget_deadline(timeout_secs) {
+            self.connected_deadline = Some(
+                self.connected_deadline
+                    .map_or(deadline, |existing| existing.min(deadline)),
+            );
+        }
+    }
+
     pub fn with_exact_service(mut self, binding: ExactServiceApprovalBinding) -> Self {
         self.exact_service = Some(binding);
         self
@@ -736,6 +745,13 @@ pub async fn create_approval_request(
                 from_org_policy,
             )
         });
+    // An explicit wait budget must not shorten another caller's grant prompt.
+    if approval_mode == ApprovalMode::Grant
+        && CONNECTED_WAIT_BUDGET.try_with(|_| ()).is_ok()
+        && let Some(deadline) = operation.connected_deadline
+    {
+        idempotency_key = format!("{idempotency_key}:until:{}", deadline.timestamp_millis());
+    }
     if let Some(group) = &operation.assistant_group {
         // A card from another chain or private thread can never be coalesced.
         idempotency_key = format!(
@@ -1924,7 +1940,21 @@ fn retain_requests_with_ids(
         .collect()
 }
 
+pub(crate) struct WaitBudget {
+    pub received_at: chrono::DateTime<Utc>,
+    pub seconds: u32,
+}
+
+pub(crate) fn connected_budget_deadline(timeout_secs: u32) -> Option<chrono::DateTime<Utc>> {
+    CONNECTED_WAIT_BUDGET
+        .try_with(|budget| {
+            budget.received_at + Duration::seconds(i64::from(budget.seconds.min(timeout_secs)))
+        })
+        .ok()
+}
+
 tokio::task_local! {
+    pub(crate) static CONNECTED_WAIT_BUDGET: WaitBudget;
     pub(crate) static CALLBACK_INGRESS: chrono::DateTime<Utc>;
 }
 
@@ -2029,6 +2059,7 @@ impl ConnectedWait {
                 );
             }
         }
+        operation.apply_connected_budget(timeout_secs);
         Ok(Self::new(db, mode, operation))
     }
 
@@ -2041,8 +2072,10 @@ impl ConnectedWait {
         let result = tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(AppError::ClientDisconnected),
-            () = wait_until_expiry(request.expires_at) => Err(AppError::Forbidden("Approval request expired".into())),
-            result = wait_for_decision(&self.db, &request.id, timeout_secs) => result,
+            () = wait_until_expiry(request.expires_at) => Err(AppError::Forbidden(
+                if connected_budget_deadline(timeout_secs).is_some() { "Approval request timed out" } else { "Approval request expired" }.into()
+            )),
+            result = poll_for_decision(&self.db, &request.id, timeout_secs) => result,
         };
         if result.is_err()
             && let Some(id) = self.occurrence.as_deref()
@@ -2097,6 +2130,19 @@ pub async fn wait_for_decision(
     request_id: &str,
     timeout_secs: u32,
 ) -> AppResult<()> {
+    let poll = poll_for_decision(db, request_id, timeout_secs);
+    if let Some(deadline) = connected_budget_deadline(timeout_secs) {
+        tokio::select! {
+            biased;
+            () = wait_until_expiry(deadline) => Err(AppError::Forbidden("Approval request timed out".into())),
+            result = poll => result,
+        }
+    } else {
+        poll.await
+    }
+}
+
+async fn poll_for_decision(db: &Database, request_id: &str, timeout_secs: u32) -> AppResult<()> {
     let poll_interval = std::time::Duration::from_millis(1000);
     let deadline = approval_now() + Duration::seconds(i64::from(timeout_secs));
 
@@ -3525,6 +3571,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_wait_2874_grant_requests_share_a_prompt_unless_the_caller_sets_a_budget() {
+        let db = crate::test_utils::connect_test_database("approval_grant_wait_budget")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let create = |deadline| {
+            let mut operation = ApprovalRequestOperation::from_descriptor(&test_operation(), None);
+            operation.connected_deadline = Some(deadline);
+            create_approval_request(
+                &db,
+                &state.config,
+                &state.http_client,
+                None,
+                None,
+                &owner,
+                "test-service",
+                "Test service",
+                "test-service",
+                "api_key",
+                "agent",
+                None,
+                operation,
+                ApprovalMode::Grant,
+                300,
+                vec![],
+                false,
+            )
+        };
+
+        let ingress = Utc::now();
+        let deadline = ingress + Duration::seconds(i64::from(NYXBOT_CONNECTED_WRITE_SECS));
+        let shared = create(deadline).await.unwrap();
+        let later = create(deadline + Duration::seconds(1)).await.unwrap();
+        assert_eq!(later.id, shared.id);
+        assert_eq!(later.status, "pending");
+        assert_eq!(
+            shared.idempotency_key,
+            compute_idempotency_key(&owner, "test-service", "api_key", "agent")
+        );
+
+        let budget = WaitBudget {
+            received_at: ingress,
+            seconds: NYXBOT_CONNECTED_WRITE_SECS,
+        };
+        let budgeted = CONNECTED_WAIT_BUDGET
+            .scope(budget, create(deadline))
+            .await
+            .unwrap();
+        assert_ne!(budgeted.id, shared.id);
+        assert_eq!(budgeted.status, "pending");
+    }
+
+    #[tokio::test]
     async fn noninteractive_callers_refuse_new_service_and_tool_requests_before_side_effects() {
         let db = crate::test_utils::connect_test_database("approval_no_request_writers")
             .await
@@ -4783,7 +4883,8 @@ mod tests {
             ("pending", "pending", false),
             ("lazy-expired", "pending", true),
             ("denied", "rejected", false),
-            ("allowed", "approved", false),
+            ("allowed", "approved", true),
+            ("expired", "expired", true),
         ] {
             let mut row = make_request(id, status);
             row.user_id = f.owner.clone();
@@ -4811,15 +4912,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(history.len(), 4);
-        assert_eq!(
-            history
-                .iter()
-                .find(|r| r.id == "lazy-expired")
-                .unwrap()
-                .status,
-            "expired"
-        );
+        assert_eq!(history.len(), 5);
+        for (id, status) in [
+            ("lazy-expired", "pending"),
+            ("allowed", "approved"),
+            ("expired", "expired"),
+        ] {
+            assert_eq!(history.iter().find(|r| r.id == id).unwrap().status, status);
+        }
         assert!(
             history
                 .iter()

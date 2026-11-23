@@ -107,10 +107,9 @@ pub(crate) async fn verify_current_snapshot(
     if current != row.ciphertext {
         return Err(invalid());
     }
-    let sealed = zeroize::Zeroizing::new(
-        keys.decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-            .await?,
-    );
+    let sealed = keys
+        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
+        .await?;
     if sealed.len() as u64 != row.size {
         return Err(invalid());
     }
@@ -126,10 +125,9 @@ pub(crate) async fn decrypt(
     if row.ciphertext.is_empty() {
         return Err(invalid());
     }
-    let sealed = zeroize::Zeroizing::new(
-        keys.decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-            .await?,
-    );
+    let sealed = keys
+        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
+        .await?;
     if sealed.len() as u64 != row.size {
         return Err(invalid());
     }
@@ -146,10 +144,9 @@ pub(crate) async fn migrate_snapshot(
     if row.ciphertext.is_empty() {
         return Ok(false);
     }
-    let sealed = zeroize::Zeroizing::new(
-        keys.decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-            .await?,
-    );
+    let sealed = keys
+        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
+        .await?;
     if sealed.len() as u64 != row.size {
         return Err(invalid());
     }

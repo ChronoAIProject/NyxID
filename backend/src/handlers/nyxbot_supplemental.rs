@@ -175,7 +175,7 @@ pub async fn relay(
             .event_ref_ciphertext
             .as_deref()
             .ok_or_else(|| AppError::Internal("Event reference unavailable".into()))?;
-        let reference = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
+        let reference = state.encryption_keys.decrypt(ciphertext).await?;
         std::str::from_utf8(&reference)
             .map_err(|_| AppError::Internal("Event reference unavailable".into()))?;
     }
@@ -402,10 +402,9 @@ pub async fn followed(
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());
         };
-        let context: Value = serde_json::from_slice(&Zeroizing::new(
-            state.encryption_keys.decrypt(ciphertext).await?,
-        ))
-        .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
+        let context: Value =
+            serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
+                .map_err(|_| AppError::Internal("Channel source unavailable".into()))?;
         if context["event_ref"].as_str().is_none() {
             decision.skip(Reason::ReferenceUnavailable);
             return Ok(());

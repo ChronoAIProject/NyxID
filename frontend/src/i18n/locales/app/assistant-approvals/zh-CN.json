@@ -445,6 +445,7 @@
   "Waiting for authorization": "等待授权",
   "Waiting for the committed approved decision.": "正在等待批准决定提交完成。",
   "Waiting for the committed denied decision.": "正在等待拒绝决定提交完成。",
+  "Waiting for the server": "正在等待服务器确认",
   "Where should we ask you?": "通过何种方式向你请求批准？",
   "Where you are asked": "询问渠道",
   "Which keys?": "选择哪些密钥？",

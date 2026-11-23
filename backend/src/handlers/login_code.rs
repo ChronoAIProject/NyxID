@@ -167,8 +167,8 @@ pub async fn redeem(
     .await?;
     Ok(Json(match delivery {
         codes::Delivery::Account(tokens) => AuthDevicePollResponse::AccountSession {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
+            access_token: tokens.access_token.into(),
+            refresh_token: tokens.refresh_token.into(),
             token_type: "Bearer",
             expires_in: tokens.access_expires_in,
         },

@@ -80,7 +80,7 @@ pub(crate) async fn text(
             .await?
         }
         None if keys.allow_legacy_record_reads() => {
-            Zeroizing::new(keys.decrypt_with_aad(ciphertext, row.id.as_bytes()).await?)
+            keys.decrypt_with_aad(ciphertext, row.id.as_bytes()).await?
         }
         _ => return Err(invalid()),
     };

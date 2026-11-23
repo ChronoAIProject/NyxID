@@ -86,7 +86,7 @@ async fn resolve(
     let destination = if channel.transport == "gateway" {
         let context = match event.event_context_ciphertext.as_ref() {
             Some(bytes) => {
-                let plaintext = Zeroizing::new(state.encryption_keys.decrypt(bytes).await?);
+                let plaintext = state.encryption_keys.decrypt(bytes).await?;
                 serde_json::from_slice::<Value>(&plaintext)
                     .map_err(|_| AppError::OAuthAuthorityUnavailable)?
             }

@@ -59,6 +59,8 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             method,
             data,
             headers,
+            approval_wait,
+            no_approval_wait,
             stream,
             envelope,
             by_id,
@@ -95,7 +97,7 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             }
 
             // Parse headers
-            let parsed_headers: Vec<(String, String)> = headers
+            let mut parsed_headers: Vec<(String, String)> = headers
                 .iter()
                 .filter_map(|h| {
                     let mut parts = h.splitn(2, ':');
@@ -104,6 +106,40 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                     Some((key, value))
                 })
                 .collect();
+
+            if !parsed_headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("x-nyxid-approval-mode"))
+            {
+                parsed_headers.push(("X-NyxID-Approval-Mode".into(), "async".into()));
+            }
+
+            const WAIT_HEADER: &str = "X-NyxID-Approval-Wait-Seconds";
+            let mut supplied = parsed_headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(WAIT_HEADER));
+            let budget = if let Some((_, value)) = supplied.next() {
+                if supplied.next().is_some() || approval_wait.is_some() || no_approval_wait {
+                    bail!("Specify the approval wait budget only once");
+                }
+                Some(
+                    value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|n| {
+                            (10..=300).contains(n) && value.bytes().all(|b| b.is_ascii_digit())
+                        })
+                        .context(
+                            "The approval wait header must be an integer between 10 and 300",
+                        )?,
+                )
+            } else if no_approval_wait {
+                None
+            } else {
+                let seconds = approval_wait.unwrap_or(80);
+                parsed_headers.push((WAIT_HEADER.into(), seconds.to_string()));
+                Some(seconds)
+            };
 
             // Resolve request body (supports binary via @file or stdin)
             let body: Option<Vec<u8>> = match data.as_deref() {
@@ -124,9 +160,22 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                 None => None,
             };
 
-            let resp = api
-                .proxy_request(&method, &proxy_path, &parsed_headers, body.as_deref())
-                .await?;
+            let request = api.proxy_request(&method, &proxy_path, &parsed_headers, body.as_deref());
+            tokio::pin!(request);
+            let resp = tokio::select! {
+                biased;
+                response = &mut request => response,
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)), if matches!(auth.output, OutputFormat::Table) => {
+                    let wait = budget.map_or_else(
+                        || "the server's configured timeout".into(),
+                        |n| format!("up to {n} seconds"),
+                    );
+                    eprintln!(
+                        "This request may need approval. The connected wait uses {wait}. Review it in web Approvals or run `nyxid approval list`."
+                    );
+                    request.await
+                }
+            }?;
 
             let status = resp.status();
             let execution_id = resp
@@ -136,14 +185,28 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
                 .map(str::to_owned);
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                if status == reqwest::StatusCode::CONFLICT
-                    && let Ok(value) = serde_json::from_str::<Value>(&body)
-                    && value["error_code"] == 12800
-                    && let Some(id) = value["message"]
-                        .as_str()
-                        .and_then(super::billing_support::pending_id)
-                {
-                    return super::billing_support::pending(id, auth.output);
+                if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                    if status == reqwest::StatusCode::FORBIDDEN
+                        && value["error"] == "approval_required"
+                        && value["error_code"] == 7000
+                        && let Some(id) = value["request_id"].as_str().filter(|id| !id.is_empty())
+                    {
+                        let report = serde_json::json!({"status":"pending","request_id":id});
+                        super::billing_support::print(&report, auth.output, || {
+                            format!(
+                                "Approval pending. Request ID: {id}\nRead the result with `nyxid approval status {id}` using the same credentials."
+                            )
+                        })?;
+                        return Err(super::admin_tools::PendingReadiness { exit_code: 2 }.into());
+                    }
+                    if status == reqwest::StatusCode::CONFLICT
+                        && value["error_code"] == 12800
+                        && let Some(id) = value["message"]
+                            .as_str()
+                            .and_then(super::billing_support::pending_id)
+                    {
+                        return super::billing_support::pending(id, auth.output);
+                    }
                 }
                 return Err(crate::api::ApiError::new(
                     format!("Proxy request {proxy_path}"),
@@ -218,6 +281,8 @@ mod tests {
             method: m.to_string(),
             data: data.map(str::to_string),
             headers: vec![],
+            approval_wait: None,
+            no_approval_wait: false,
             stream: false,
             envelope: false,
             by_id,
@@ -468,6 +533,8 @@ mod tests {
             method: "GET".to_string(),
             data: None,
             headers: vec!["X-Custom: value".to_string()],
+            approval_wait: None,
+            no_approval_wait: false,
             stream: false,
             envelope: false,
             by_id: false,
@@ -496,6 +563,8 @@ mod tests {
             method: "POST".to_string(),
             data: Some(format!("@{}", tmp.display())),
             headers: vec![],
+            approval_wait: None,
+            no_approval_wait: false,
             stream: false,
             envelope: false,
             by_id: false,

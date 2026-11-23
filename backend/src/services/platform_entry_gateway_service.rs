@@ -1262,13 +1262,11 @@ async fn dispatch_setup(
         .to_std()
         .map_err(|_| refused())?;
     tokio::time::timeout(remaining, async {
-        let bytes = Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt(&row.request_ciphertext)
-                .await
-                .map_err(|_| refused())?,
-        );
+        let bytes = state
+            .encryption_keys
+            .decrypt(&row.request_ciphertext)
+            .await
+            .map_err(|_| refused())?;
         if sha256(&bytes) != row.request_hash {
             return Err(refused());
         }

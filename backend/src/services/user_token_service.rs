@@ -24,8 +24,8 @@ use crate::services::user_credentials_service;
 /// Decrypted token ready for injection.
 pub struct DecryptedProviderToken {
     pub token_type: String,
-    pub access_token: Option<String>,
-    pub api_key: Option<String>,
+    pub access_token: Option<zeroize::Zeroizing<String>>,
+    pub api_key: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Outcome of an OAuth/device-code callback, regardless of write path.
@@ -3456,7 +3456,7 @@ async fn load_provider_token(
 async fn decrypt_provider_access_token(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     if !matches!(token.status.as_str(), "active" | "expired") {
         return Err(AppError::Internal(
             "OAuth credential is no longer active".to_string(),
@@ -3465,12 +3465,9 @@ async fn decrypt_provider_access_token(
     let encrypted = token.access_token_encrypted.as_ref().ok_or_else(|| {
         AppError::Internal("OAuth token missing encrypted access_token".to_string())
     })?;
-    Ok(
-        super::credential_record_service::CredentialRecord::token(token)
-            .text(encryption_keys, "access_token_encrypted", encrypted)
-            .await?
-            .to_string(),
-    )
+    super::credential_record_service::CredentialRecord::token(token)
+        .text(encryption_keys, "access_token_encrypted", encrypted)
+        .await
 }
 
 async fn refresh_provider_token_with_runtime(
@@ -3478,7 +3475,7 @@ async fn refresh_provider_token_with_runtime(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
     runtime: &ClusterLeaseRuntime,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     let lease_name = provider_token_refresh_lease_name(&token.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
         let current = wait_for_concurrent_refresh(
@@ -3618,8 +3615,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "api_key_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "api_key".to_string(),
@@ -3678,8 +3674,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "access_token_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "oauth2".to_string(),
@@ -5130,7 +5125,8 @@ mod tests {
             assert_eq!(
                 oauth_flow::refresh_oauth_token(&db, &enc, &legacy)
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .as_str(),
                 "rotated-access"
             );
             let saved = db
@@ -5293,7 +5289,8 @@ mod tests {
                 assert_eq!(
                     oauth_flow::refresh_oauth_token(&db, &enc, &token)
                         .await
-                        .unwrap(),
+                        .unwrap()
+                        .as_str(),
                     "rotated-access"
                 );
                 let requests = server.received_requests().await.unwrap();
@@ -8104,8 +8101,8 @@ mod tests {
             .expect("contender task")
             .expect("second replica refresh");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(first, "fresh-legacy-access");
-        assert_eq!(second, "fresh-legacy-access");
+        assert_eq!(first.as_str(), "fresh-legacy-access");
+        assert_eq!(second.as_str(), "fresh-legacy-access");
     }
 
     #[tokio::test]
@@ -8224,8 +8221,13 @@ mod tests {
             .await
             .expect("should return decrypted token");
 
+        let _: &zeroize::Zeroizing<String> = result.api_key.as_ref().unwrap();
+        assert!(!format!("{result:?} {result:#?}").contains("sk-secret-123"));
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("sk-secret-123"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("sk-secret-123")
+        );
         assert!(result.access_token.is_none());
     }
 
@@ -8257,7 +8259,10 @@ mod tests {
             .expect("should return decrypted token");
 
         assert_eq!(result.token_type, "oauth2");
-        assert_eq!(result.access_token.as_deref(), Some("access-token-xyz"));
+        assert_eq!(
+            result.access_token.as_ref().map(|s| s.as_str()),
+            Some("access-token-xyz")
+        );
         assert!(result.api_key.is_none());
     }
 
@@ -8311,7 +8316,10 @@ mod tests {
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should find expired-status token");
-        assert_eq!(result.api_key.as_deref(), Some("key-expired"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("key-expired")
+        );
     }
 
     #[tokio::test]
@@ -8663,7 +8671,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("roundtrip-key"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("roundtrip-key")
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,8 @@ pub(super) struct FollowUp {
     notes_with_memory: String,
     #[serde(default)]
     user_image_ids: Vec<String>,
+    #[serde(default)]
+    pdf: Option<crate::services::assistant_upload_service::pdf_vision::Delivery>,
 }
 
 impl FollowUp {
@@ -32,6 +34,7 @@ impl FollowUp {
         context: &super::super::assistant_instruction_context::Prepared,
         listing: &str,
         user_image_ids: Vec<String>,
+        pdf: crate::services::assistant_upload_service::pdf_vision::Delivery,
     ) -> Self {
         Self {
             continuations: continuations.clone(),
@@ -40,8 +43,35 @@ impl FollowUp {
             notes: context.input_with_memory(listing, "", false),
             notes_with_memory: context.input_with_memory(listing, "", true),
             user_image_ids,
+            pdf: Some(pdf),
         }
     }
+}
+
+fn continuation_notes(notes: &str, pdf_notice: &str, binding: &InstructionBinding) -> String {
+    let close = binding.marker.as_ref().map_or_else(
+        || "[/UNTRUSTED_LEGACY_CONTEXT]".to_owned(),
+        |marker| format!("[/NYXID_CONTEXT:{marker}]"),
+    );
+    let mut notes = notes.to_owned();
+    // Legacy checkpoints used a static line claiming their initial PDF parts
+    // would accompany all requests. Their replay body stays byte-for-byte
+    // intact, but any new continuation must not repeat that line.
+    if let Some(start) = notes.find("\nPDF page coverage (text_pages are available")
+        && let Some(end) = notes[start + 1..].find('\n')
+    {
+        notes.replace_range(start..start + 1 + end, "");
+    }
+    if !pdf_notice.is_empty() {
+        if let Some(index) = notes.rfind(&close) {
+            notes.insert_str(index, &format!("{pdf_notice}\n"));
+        } else {
+            notes = super::super::assistant_instruction_context::wrap_turn_notes(
+                binding, pdf_notice, "",
+            );
+        }
+    }
+    notes
 }
 
 impl Input {
@@ -51,13 +81,11 @@ impl Input {
         window: &ReattachWindow,
     ) -> Result<Self, TurnError> {
         let encrypted = window.input.as_ref().ok_or_else(unknown)?;
-        let bytes = zeroize::Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt_with_aad(&encrypted.bytes, &aad(row, &window.key)?)
-                .await
-                .map_err(|_| unknown())?,
-        );
+        let bytes = state
+            .encryption_keys
+            .decrypt_with_aad(&encrypted.bytes, &aad(row, &window.key)?)
+            .await
+            .map_err(|_| unknown())?;
         serde_json::from_slice(&bytes).map_err(|_| unknown())
     }
 
@@ -653,8 +681,27 @@ pub(super) async fn recover(
         let Some(mut plan) = input.follow_up else {
             return result;
         };
+        // Only metadata from the persisted request window can confirm or
+        // reject page input. In-flight windows written by older workers did
+        // not persist page sources.
+        let completed = result.as_ref().is_ok_and(|result| result.error.is_none());
+        if let Some(pdf) = &mut plan.pdf {
+            images::settle_pdf_request(
+                state,
+                &saved,
+                pdf,
+                image_unsupported.then_some("image_input_unsupported"),
+                completed,
+            )
+            .await?;
+        }
         if image_unsupported {
-            for id in &plan.user_image_ids {
+            for id in plan.user_image_ids.iter().filter(|id| {
+                crate::services::assistant_upload_service::pdf_vision::includes_image(
+                    &input.body,
+                    id,
+                )
+            }) {
                 let _ = images::record_upload_outcome(
                     state,
                     &saved,
@@ -667,6 +714,7 @@ pub(super) async fn recover(
             plan.images.unsupported(state, &saved).await;
             events.emit("turn.notice",json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
         }
+        plan.user_image_ids.clear();
         let failed = match &result {
             Err(error) => Some(error),
             Ok(result) => result.error.as_ref(),
@@ -744,10 +792,7 @@ pub(super) async fn recover(
             plan.base_text = Some(result.text.clone());
             (
                 format!("{}:images:{}", turn.turn_id, plan.images.rounds),
-                format!(
-                    "Continue after viewing the tool images.\n\n{}",
-                    plan.images.note
-                ),
+                format!("Continue answering the user.\n\n{}", plan.images.note),
             )
         };
         let notes = if plan.continuations.count == 0 {
@@ -760,6 +805,11 @@ pub(super) async fn recover(
             || text.clone(),
             |marker| text.replace(marker, "[redacted context marker]"),
         );
+        let pdf_notice = plan
+            .pdf
+            .as_ref()
+            .map_or_else(String::new, |pdf| pdf.notice());
+        let notes = continuation_notes(notes, &pdf_notice, &input.binding);
         let text = format!("{notes}{text}");
         let mut body = input.body;
         body["conversation"] = json!(session_id);
@@ -910,6 +960,7 @@ async fn recover_window(
             return Err(unknown());
         }
         if let Some(saved) = refusal.take() {
+            *image_unsupported = saved.code == "image_input_unsupported";
             let error = post_refusal(saved.status, &saved.code, None);
             if let Some(at) = saved.retry_at {
                 tokio::time::sleep(
@@ -1182,7 +1233,8 @@ async fn recover_window(
                 "running" => {}
                 "completed" | "failed" | "cancelled" | "lost" => {
                     let mut result = terminal_snapshot(&value, &binding)?;
-                    *image_unsupported = engine::unsupported_images(&value["response"]);
+                    *image_unsupported = engine::unsupported_images(&value["response"])
+                        || value["response"]["error"]["code"] == "image_input_unsupported";
                     result.text = input.full_text(&redact(&result.text))?;
                     if status == "lost" {
                         result.error = Some(TurnError::new("executor_lost"));
@@ -1276,7 +1328,8 @@ async fn recover_window(
                     expected = Some(created.response_id);
                 }
                 if let Some(mut result) = decoder.terminal.take() {
-                    *image_unsupported = decoder.image_input_unsupported;
+                    *image_unsupported = decoder.image_input_unsupported
+                        || result.error.as_ref().is_some_and(images::image_rejected);
                     if expected.as_deref() != result.response_id.as_deref() {
                         return Err(unknown());
                     }

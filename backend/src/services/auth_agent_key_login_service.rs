@@ -939,16 +939,11 @@ pub async fn prepare_credential_delivery(
     encrypted: Option<&[u8]>,
     key_was_created: bool,
 ) -> AppResult<Delivery> {
-    let plaintext = Zeroizing::new(
-        encryption
-            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
-            .await?,
-    );
-    let credential = Zeroizing::new(
-        std::str::from_utf8(&plaintext)
-            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?
-            .to_owned(),
-    );
+    let plaintext = encryption
+        .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
+        .await?;
+    let credential = crate::crypto::guarded_utf8(plaintext)
+        .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?;
     prepare_decoded_credential_delivery(
         db,
         credential_id,

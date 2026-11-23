@@ -55,7 +55,7 @@ async fn in_session(
         .limit(129)
         .session(&mut *tx)
         .await?;
-    let mut raw: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+    let mut raw = read_documents(&mut cursor, tx).await?;
     if raw.is_empty() || raw.len() > 128 {
         return Ok(Outcome::Deferred("request_rows_unavailable"));
     }

@@ -596,7 +596,8 @@ mod tests {
             stage
                 .decrypt(staged.credential_encrypted.as_deref().unwrap())
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             b"staged-secret"
         );
         let mut migration = test_encryption_keys();

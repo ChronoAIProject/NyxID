@@ -182,11 +182,12 @@ class CheckTests(unittest.TestCase):
         self.assertEqual((row["rollback"], row["notification"]), ("blocked_evidence_unavailable", "failed"))
         self.restore.assert_not_called()
 
-    def test_missing_secrets_skip_with_notice_and_no_io(self):
+    def test_missing_secrets_skip_with_warning_and_no_io(self):
         for values in ({"NYXID_CHECK_ACCOUNT": ""}, {"NYXID_CHECK_ALERT_URL": ""}, {"NYXID_CHECK_ACCOUNT": "{}"}):
             with self.subTest(values=values), patch.dict(os.environ, values):
                 self.assertEqual(check.run("staging")["outcome"], "skipped")
-        self.assertIn("::notice::", self.output.getvalue())
+        self.assertIn("::warning::", self.output.getvalue())
+        self.assertIn("NyxBot is unverified", self.output.getvalue())
         self.assertEqual(self.calls, [])
         self.restore.assert_not_called()
         self.alert.assert_not_called()

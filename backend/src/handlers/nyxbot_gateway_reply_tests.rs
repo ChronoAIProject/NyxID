@@ -1158,14 +1158,13 @@ async fn gateway_reply_target_mint_race_uses_only_committed_target() {
         .unwrap()
         .unwrap();
     let d = event.delivery.unwrap();
-    let target = String::from_utf8(
-        f.state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let target_bytes = f
+        .state
+        .encryption_keys
+        .decrypt(d.target_ciphertext.as_ref().unwrap())
+        .await
+        .unwrap();
+    let target = std::str::from_utf8(&target_bytes).unwrap();
     assert_eq!(status(&f).await, "unknown");
     let first = sends(&f).await;
     assert_eq!(first.len(), 1);

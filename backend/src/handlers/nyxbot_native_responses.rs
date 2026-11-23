@@ -921,9 +921,7 @@ async fn send_update_impl(
             .event_context_ciphertext
             .as_ref()
             .ok_or_else(unavailable)?;
-        let context: Value = serde_json::from_slice(&Zeroizing::new(
-            state.encryption_keys.decrypt(ciphertext).await?,
-        ))
+        let context: Value = serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
         .map_err(|_| unavailable())?;
         if !source::provider_context(row, &context) {
             return Err(unavailable());

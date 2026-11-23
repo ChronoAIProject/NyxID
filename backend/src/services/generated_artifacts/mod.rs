@@ -849,6 +849,7 @@ async fn materialize(
             label: "Sandbox result".into(),
             chat_delivery: Some(false),
             image_input: None,
+            pdf: None,
             image_inspection: Some(false),
             pages: None,
         };
