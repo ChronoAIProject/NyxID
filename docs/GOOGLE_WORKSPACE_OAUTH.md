@@ -270,6 +270,20 @@ and, when needed, `range` with exact or `one_of` input rules. Author those rules
 through the specialist's **operations** API when `assistant:operation-scopes`
 is enabled for the acting administrator. See [Operation scopes](AGENT_OPERATION_SCOPES.md).
 
+The effective approval policy also applies. For an organization channel guest
+using the organization's Workspace connection, NyxID checks the organization's
+approval policy for the Workspace catalog service first. Without a matching
+service policy, the organization's global preference applies. The default
+**Writes only** allows reads and requires approval for writes. A guest cannot
+request an owner approval or use an existing one, so a write that still requires
+approval is refused before reaching Google.
+
+A Sheets append with `insertDataOption=INSERT_ROWS` meets the guest `use`
+restriction for an append. If guests should append questions, use an effective
+organization policy that allows that `POST` and path as a write without an
+approval prompt. Keep approval requirements for other writes in place. The
+guest still needs the applicable Grants and Google file access.
+
 ## Mixed-version rollout
 
 Complete the backend rollout before exposing the new editor services to clients,

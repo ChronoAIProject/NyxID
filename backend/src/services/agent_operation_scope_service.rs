@@ -2057,6 +2057,7 @@ pub async fn filter_guest_catalog(
                         "Guest access requires the query argument {name}={value}. Supply it once per request. "
                     ));
                 }
+                description.push_str("The effective approval policy must also allow the write. ");
                 description.push_str(endpoint.description.as_deref().unwrap_or(&endpoint.name));
                 endpoint.description = Some(description);
             }
