@@ -13,7 +13,6 @@ use crate::{
 };
 use bson::{Document, doc};
 use chrono::Utc;
-use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 
 pub const MAX_REFERENCES: usize = 16;
@@ -419,7 +418,7 @@ async fn references(
         .filter(|w| w.role == "direct")
     {
         let mut cursor = db.collection::<AssistantMessage>(MESSAGES).find(doc! {"user_id": &edge.actor, "conversation_id": &edge.source_conversation, "role": "assistant", "automation_work.work_id": &work.work_id, "automation_work.run_id": &work.run_id, "delegated_images.assignment.id": &edge.id, "status": "completed"}).sort(doc! {"seq": -1}).limit(32).session(&mut *tx).await?;
-        cursor.stream(&mut *tx).try_collect::<Vec<_>>().await?
+        crate::db::read_documents(&mut cursor, tx).await?
     } else {
         vec![message]
     };
