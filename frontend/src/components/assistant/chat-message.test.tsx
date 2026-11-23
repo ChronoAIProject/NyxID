@@ -1743,6 +1743,13 @@ it("shows only the committed parts of a linked memory retry in the settled activ
 
   rerender(<ChatMessageBubble message={{ ...BASE, toolCalls: [original, part("retry", 1, true, 1)] }} />);
   expect(screen.getByText("Memory saved after retry.")).toBeVisible();
+
+  rerender(<ChatMessageBubble message={{
+    ...BASE, activityTotal: 43, toolCalls: [first, pending, unrelated],
+  }} />);
+  expect(screen.getByText("Recent activity confirms 1 of 2 memory recovery parts.")).toBeVisible();
+  expect(screen.queryByText("Memory recovery saved all 2 parts.")).toBeNull();
+  expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
 });
 
 describe("approval-gated step outcomes", () => {

@@ -160,6 +160,7 @@
   "Queued until another reply finishes": "Queued until another reply finishes",
   "Reasoning": "Reasoning",
   "Reasoning effort": "Reasoning effort",
+  "Recent activity confirms {{saved}} of {{total}} memory recovery parts.": "Recent activity confirms {{saved}} of {{total}} memory recovery parts.",
   "Remove connection for this message": "Remove connection for this message",
   "Replies in {{value1}}": "Replies in {{value1}}",
   "Request copied.": "Request copied.",

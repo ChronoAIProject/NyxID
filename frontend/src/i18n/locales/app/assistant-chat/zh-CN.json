@@ -160,6 +160,7 @@
   "Queued until another reply finishes": "排队中，等待另一条回复完成",
   "Reasoning": "推理",
   "Reasoning effort": "推理强度",
+  "Recent activity confirms {{saved}} of {{total}} memory recovery parts.": "近期活动确认已保存 {{saved}} / {{total}} 部分记忆恢复内容。",
   "Remove connection for this message": "移除此消息的连接",
   "Replies in {{value1}}": "{{value1}} 中的回复",
   "Request copied.": "请求已复制。",

@@ -328,12 +328,19 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
   if (!count && !decisions.length && !waited && !delivery) return null;
   const settled = message.status === "complete" || message.status === "error" || message.status === "stopped";
-  const memoryRecoveries = new Map<string, { total: number; saved: Set<number> }>();
+  const memoryRecoveries = new Map<string, { total: number; saved: Set<number>; firstRetainedId: string }>();
+  const retainedMemoryFailures = new Set<string>();
   if (settled) {
     for (const tool of tools) {
+      if (tool.name !== "nyxid__remember") continue;
+      if (tool.status === "error") retainedMemoryFailures.add(tool.id);
       const part = tool.memoryRecovery;
-      if (tool.name !== "nyxid__remember" || !part) continue;
-      const recovery = memoryRecoveries.get(part.failed_activity_id) ?? { total: part.total, saved: new Set<number>() };
+      if (!part) continue;
+      const recovery = memoryRecoveries.get(part.failed_activity_id) ?? {
+        total: part.total,
+        saved: new Set<number>(),
+        firstRetainedId: tool.id,
+      };
       if (part.committed && part.total === recovery.total) recovery.saved.add(part.part);
       memoryRecoveries.set(part.failed_activity_id, recovery);
     }
@@ -425,6 +432,9 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
             const memoryUnconfirmed = part?.committed === false && (outcome === "done" || outcome === "running");
             const status = part?.committed ? "done" : memoryUnconfirmed ? "unknown" : outcome;
             const recovery = tool.name === "nyxid__remember" && status === "error" ? memoryRecoveries.get(tool.id) : undefined;
+            const retainedRecovery = part && !retainedMemoryFailures.has(part.failed_activity_id)
+              ? memoryRecoveries.get(part.failed_activity_id)
+              : undefined;
             let label = decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status);
             if (part?.committed) label = describeToolActivity(tool.name, "done");
             else if (memoryUnconfirmed) label = translateUi("Memory save unconfirmed");
@@ -467,6 +477,14 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                       : recovery.total === 1
                         ? translateUi("Memory saved after retry.")
                         : translateUi("Memory recovery saved all {{total}} parts.", { total: recovery.total })}
+                  </span>
+                ) : null}
+                {retainedRecovery?.firstRetainedId === tool.id ? (
+                  <span className="break-words pl-5">
+                    {translateUi("Recent activity confirms {{saved}} of {{total}} memory recovery parts.", {
+                      saved: retainedRecovery.saved.size,
+                      total: retainedRecovery.total,
+                    })}
                   </span>
                 ) : null}
               </summary>
