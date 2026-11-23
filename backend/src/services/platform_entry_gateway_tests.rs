@@ -115,7 +115,7 @@ impl Fixture {
         // This fixture starts at an already activated transport. Setup/recovery
         // has separate authority tests; here both real keys and receipt fences apply.
         for key in [&provider, &route_key] {
-            crate::services::api_key_mutation_service::insert_one(&state.db, key, None, None)
+            crate::services::api_key_mutation_service::insert_one(&state.db, key, None)
                 .await
                 .unwrap();
         }
@@ -528,7 +528,7 @@ async fn retired_native_primary_acknowledges_only_exact_delete_without_restoring
     ensure_indexes(&state.db).await.unwrap();
     let (mut provider, raw) = transport_key(&bot.user_id);
     provider.is_active = false;
-    crate::services::api_key_mutation_service::insert_one(&state.db, &provider, None, None)
+    crate::services::api_key_mutation_service::insert_one(&state.db, &provider, None)
         .await
         .unwrap();
     let id = uuid::Uuid::new_v4().to_string();

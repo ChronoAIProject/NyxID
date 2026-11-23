@@ -423,6 +423,14 @@ pub async fn approve_machine_grant_source_in_session(
 pub async fn insert_one(
     db: &Database,
     key: &ApiKey,
+    session: Option<&mut ClientSession>,
+) -> AppResult<InsertOneResult> {
+    insert_one_for_actor(db, key, None, session).await
+}
+
+pub(crate) async fn insert_one_for_actor(
+    db: &Database,
+    key: &ApiKey,
     actor: Option<&str>,
     session: Option<&mut ClientSession>,
 ) -> AppResult<InsertOneResult> {
